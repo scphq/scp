@@ -47,7 +47,7 @@ swarm up --token "$SCP_TOKEN" --machine runner-1
 swarm spawn --as runner --name triage -- claude -p "Triage the new issues"
 ```
 
-`swarm up` saves the token, links the broker to the hub and installs the hooks and MCP server in every harness on the runner. Workers spawned there are addressable from any linked machine as `runner-1/triage`.
+`swarm up` saves the token, links the broker to the hub and installs the hooks and MCP server in every harness on the runner. Workers spawned there are addressable from any linked machine as `runner-1/triage`. `swarm codex --headless --name triage` instead runs a Codex worker that stays up and takes each new message as a turn.
 
 ## A cron job
 
