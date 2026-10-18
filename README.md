@@ -98,6 +98,8 @@ flowchart LR
 
 Addresses follow the same layers: `parser` or `me/parser` on this machine, `<machine>/<handle>` in the same account, `<account>/<machine>/<handle>` through a contact.
 
+Mesh mode (hubless, peer to peer, for example over a tailnet) is on the roadmap.
+
 ## CLI
 
 The reference binding of SCP version 1 is the `swarm` CLI, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it. A session with it looks like this:

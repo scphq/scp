@@ -58,7 +58,7 @@
     },
     "packages/cli": {
       "name": "@scp-dev/cli",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "bin": {
         "swarm": "./dist/cli.js",
       },
