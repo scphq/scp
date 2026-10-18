@@ -2,7 +2,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Envelope, LIMITS, PROTOCOL, RelayError, wrapMessage } from "@scp-dev/core"
+import { type EndpointView, type Envelope, LIMITS, PROTOCOL, RelayError, type SendResult, wrapMessage } from "@scp-dev/core"
 import { HUB_LIMITS } from "@scp-dev/hub"
 import { relaySocketUrl } from "./bridge"
 import { RelayClient } from "./client"
@@ -741,6 +741,21 @@ describe("bridge", () => {
     await review.request("send", { to: "a/lead", body: "admitted" })
     const got = await lead.request<Inbox>("inbox", { wait_s: 5 })
     expect(got.messages.map((m) => m.body.text)).toEqual(["admitted"])
+  })
+
+  test("an endpoint's wake reaches the other machines, and a send from there names it", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a")
+    const b = await machine(fake, "b")
+    const lead = await agent(a, "lead")
+    await lead.request("wake", { via: "channels" })
+    const review = await agent(b, "review")
+    const seen = await waitFor(async () => {
+      const view = (await review.request<{ endpoints: EndpointView[] }>("list")).endpoints.find((e) => e.address === "me/a/lead")
+      return view?.wake === "channels" ? view : null
+    }, "a/lead's wake on b")
+    expect(seen.wake).toBe("channels")
+    expect((await review.request<SendResult>("send", { to: "a/lead", body: "hi" })).deliveries[0]).toMatchObject({ wake: "channels" })
   })
 
   test("a policy cap loosened on reload reaches the other machines, so a send the machine now admits passes there", async () => {

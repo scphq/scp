@@ -1200,7 +1200,7 @@ describe("graph", () => {
   test("listed endpoints, spawn edges and message counts per sender and recipient in the window, never a body", async () => {
     const { hub, clock, bridge, ok } = setup()
     const laptop = await bridge("laptop", [
-      { address: "me/lead", parent_ep: null, depth: 0 },
+      { address: "me/lead", parent_ep: null, depth: 0, wake: "channels" },
       { address: "me/kid", tree: "lead", parent_ep: "lead", depth: 1 },
       { address: "me/", kind: "human" },
     ])
@@ -1215,6 +1215,8 @@ describe("graph", () => {
     expect(graph.machines.map((m) => m.name)).toEqual(["desk", "laptop"])
     expect(graph.nodes.find((n) => n.address === "ada/laptop/")?.kind).toBe("human")
     expect(graph.nodes.find((n) => n.address === "ada/laptop/kid")).toMatchObject({ kind: "agent", parent: "ada/laptop/lead", presence: "online" })
+    expect(graph.nodes.find((n) => n.address === "ada/laptop/lead")?.wake).toBe("channels")
+    expect(graph.nodes.find((n) => n.address === "ada/laptop/kid")?.wake).toBeNull()
     expect(graph.edges).toEqual([
       { kind: "spawn", from: "ada/laptop/lead", to: "ada/laptop/kid" },
       { kind: "message", from: "ada/laptop/kid", to: "ada/laptop/lead", count: 1, last_at: new Date(START + 1000).toISOString() },

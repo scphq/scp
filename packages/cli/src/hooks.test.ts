@@ -373,7 +373,7 @@ describe("swarm hook", () => {
       ["stop", null, null, null],
       ["stop", null, null, "Explore 9b1c2d"],
     ])
-    expect(endpoint(`${address}-explore-9b1c2d`)).toBeUndefined()
+    expect(endpoint(`${address}-explore-9b1c`)).toBeUndefined()
     const stored = JSON.stringify(broker.core.activity({ limit: 1000 }))
     expect(stored).not.toContain(SECRET)
     expect(stored).not.toContain("RESPONSE-MARKER")
@@ -923,9 +923,9 @@ describe("swarm hook", () => {
     expect(main).toMatchObject({ stdout: "", stderr: "", code: 0 })
     expect(json((await both(sub)).stdout).hookSpecificOutput!).toEqual({
       hookEventName: "PostToolUse",
-      additionalContext: subagentIntro("me/inject-sub-general-purpose-aceb55"),
+      additionalContext: subagentIntro("me/inject-sub-gp-aceb"),
     })
-    const forSub = sendTo("inject-sub-general-purpose-aceb55", "SUB-MARKER")
+    const forSub = sendTo("inject-sub-gp-aceb", "SUB-MARKER")
     const forRoot = sendTo("inject-sub", "ROOT-MARKER")
     const root = await hook(["claude"], { ...base, hook_event_name: "PostToolUse", tool_name: "Read", tool_input: {} }, env)
     expect(root.stdout).toContain(forRoot)
@@ -940,12 +940,12 @@ describe("swarm hook", () => {
       stdout: "",
       code: 0,
     })
-    expect(endpoint("me/inject-sub-general-purpose-aceb55")).toMatchObject({ parent: "me/inject-sub", status: { state: "done" } })
+    expect(endpoint("me/inject-sub-gp-aceb")).toMatchObject({ parent: "me/inject-sub", status: { state: "done" } })
     expect(await both({ ...base, hook_event_name: "SubagentStop", agent_id: "0123456789abcdef0", agent_type: "Explore" })).toMatchObject({
       stdout: "",
       code: 0,
     })
-    expect(endpoint("me/inject-sub-explore-012345")).toBeUndefined()
+    expect(endpoint("me/inject-sub-explore-0123")).toBeUndefined()
     expect(rows("me/inject-sub").map((r) => [r.kind, r.agent])).toEqual([
       ["session_start", null],
       ["tool", "general-purpose aceb55"],
@@ -955,9 +955,40 @@ describe("swarm hook", () => {
       ["stop", "general-purpose aceb55"],
       ["stop", "Explore 012345"],
     ])
-    expect(rows("me/inject-sub-general-purpose-aceb55")).toEqual([])
+    expect(rows("me/inject-sub-gp-aceb")).toEqual([])
     expect(await both(sub)).toMatchObject({ stdout: "", code: 0 })
-    expect(endpoint("me/inject-sub-general-purpose-aceb55")).toMatchObject({ status: { state: "working" } })
+    expect(endpoint("me/inject-sub-gp-aceb")).toMatchObject({ status: { state: "working" } })
+  })
+
+  test("a session's Agent call titles the subagent it names in its response, before or after the subagent's first tool; other shapes title nothing", async () => {
+    const env = { SCP_DIR: dir, SCP_SESSION: "title-sub", CLAUDECODE: "1", SCP_NAME: "title-sub" }
+    const base = { session_id: "s", cwd: project }
+    const launch = (agentId: string, description: string, response?: unknown) => ({
+      ...base,
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_input: { description, prompt: "long instructions", subagent_type: "Explore", run_in_background: true },
+      tool_response: response ?? { status: "async_launched", agentId, description },
+    })
+    const tool = (agentId: string) =>
+      Promise.all(
+        [["claude"], ["claude", SUBAGENT]].map((args) =>
+          hook(args, { ...base, hook_event_name: "PostToolUse", tool_name: "Read", tool_input: {}, agent_id: agentId, agent_type: "Explore" }, env),
+        ),
+      )
+    await hook(["claude"], { ...base, hook_event_name: "SessionStart", source: "startup" }, env)
+    expect(await hook(["claude"], launch("d00dfeed01", "Map the broker"), env)).toMatchObject({ stdout: "", stderr: "", code: 0 })
+    await tool("d00dfeed01")
+    expect(endpoint("me/title-sub-explore-d00d")).toMatchObject({ parent: "me/title-sub", title: "Map the broker" })
+    await tool("beadfeed02")
+    expect(endpoint("me/title-sub-explore-bead")?.title).toBeNull()
+    await hook(["claude"], { ...launch("beadfeed02", "Review the parser"), tool_name: "Task" }, env)
+    expect(endpoint("me/title-sub-explore-bead")?.title).toBe("Review the parser")
+    await hook(["claude"], launch("cafe03", "as a string", "agentId: cafe03"), env)
+    await hook(["claude"], launch("cafe03", "as an array", [{ type: "text", text: "agentId: cafe03" }]), env)
+    await tool("cafe03")
+    expect(endpoint("me/title-sub-explore-cafe")?.title).toBeNull()
+    expect(endpoint("me/title-sub")?.title).toBeNull()
   })
 
   test("the CLI entry ends a --subagent hook without an agent_id before it loads anything else", async () => {

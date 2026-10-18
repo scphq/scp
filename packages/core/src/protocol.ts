@@ -111,6 +111,9 @@ export type MessageKind = "message" | "request" | "reply" | "status"
 export type DataClass = "public" | "private"
 export type Presence = "online" | "idle" | "offline"
 export type StatusState = "working" | "waiting" | "blocked" | "done"
+/** how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter or codex app-server; `none` reads at its next turn */
+export type Wake = "channels" | "pi" | "opencode-plugin" | "codex-app-server" | "none"
+export const WAKES: readonly Wake[] = ["channels", "pi", "opencode-plugin", "codex-app-server", "none"]
 
 export type ActivityKind = "session_start" | "tool" | "stop" | "note" | "session_end"
 export const ACTIVITY_KINDS: readonly ActivityKind[] = ["session_start", "tool", "stop", "note", "session_end"]
@@ -160,8 +163,9 @@ export interface Claim {
   exact?: boolean
   /**
    * a hook's claim for an in-process subagent of the harness holding the claim's lineage endpoint: the broker places it under that endpoint,
-   * as `<its handle>-<type>-<first 6 of id>` with a session of its own, and only for a hook of that endpoint's own harness process. A stop's
-   * claim (`stop`) takes only an endpoint the subagent already has, else is refused not_found; any other claim of a done one resumes it working
+   * as `<its current handle>-<short type>-<first 4 of id>` (`gp` for general-purpose, else the type's first word) with a session of its own, and
+   * only for a hook of that endpoint's own harness process. A stop's claim (`stop`) takes only an endpoint the subagent already has, else is
+   * refused not_found; any other claim of a done one resumes it working
    */
   subagent?: { id: string; type?: string; stop?: boolean }
   scope?: ScopePreset
@@ -257,6 +261,8 @@ export interface EndpointView {
   scope?: ScopePreset | "custom"
   /** set only in a viewer's list, when that viewer may peek this endpoint */
   peekable?: PeekLevel
+  /** an agent's: how an idle agent is woken by a message; null or `none`: it reads at its next turn */
+  wake?: Wake | null
 }
 
 export type PeekLevel = "local"
@@ -431,9 +437,20 @@ export interface SendResult {
   hop: number
   /**
    * `queued`: the recipient is not connected now; `offline`: it has been gone past a short grace, so a client polling between waits is not
-   * offline; `state`: an agent recipient's {@link Reach} on this machine (an older broker leaves it out)
+   * offline; `state`: an agent recipient's {@link Reach} on this machine (an older broker leaves it out); `wake`: how it is woken, only when
+   * it can be; `idle`: its presence is idle
    */
-  deliveries: { endpoint: string; address: string; seq: number; offline: boolean; queued?: boolean; last_seen: string | null; state?: Reach }[]
+  deliveries: {
+    endpoint: string
+    address: string
+    seq: number
+    offline: boolean
+    queued?: boolean
+    last_seen: string | null
+    state?: Reach
+    wake?: Wake
+    idle?: true
+  }[]
   /** one line per agent recipient no live session holds: `queued: no live session holds <address>` */
   warnings?: string[]
   duplicate?: boolean

@@ -40,6 +40,8 @@ import {
   type ThreadMessage,
   validHandle,
   validHarness,
+  type Wake,
+  WAKES,
   type WhyResult,
 } from "./protocol"
 import { digestText, PEEK, peekLevel, readText } from "./peek"
@@ -258,6 +260,8 @@ export interface EndpointRow {
   named: number | null
   /** when the session itself or the human linked it under a parent by hand: a later root claim of it takes it back where it sits */
   linked: number | null
+  /** how the session that holds the endpoint wakes it: a {@link Wake} other than none, or null */
+  wake: string | null
 }
 
 export interface MessageRow {
@@ -462,6 +466,8 @@ export class RelayCore {
   private scopeDepth = 0
   /** while a scope world derives a node: what it already derived of ancestor lists and limits */
   private scopeMemo: { ancestors: Map<string, string[]>; limited: Map<string, boolean> } | null = null
+  /** subagent titles from their parents' hooks, by `<parent id> <subagent id>`, until the subagent's first claim */
+  private readonly subagentTitles = new Map<string, string>()
   private readonly deferred = new WeakMap<RelayError, { endpoint: string | null; detail: Record<string, unknown> }>()
 
   constructor(
@@ -523,6 +529,7 @@ export class RelayCore {
       ["tldr_turn", "INTEGER"],
       ["named", "INTEGER"],
       ["linked", "INTEGER"],
+      ["wake", "TEXT"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -721,12 +728,11 @@ export class RelayCore {
         )
         if (subagent.stop && !had) throw new RelayError("not_found", "that subagent has no endpoint: it never ran a tool")
         const claimed = this.claimRow(scope.handle, harness, fields, true, scope)
-        if (
-          subagent.stop ||
-          !one(this.sql, `UPDATE endpoints SET status_state = 'working' WHERE id = ? AND status_state = 'done' RETURNING id`, claimed.endpoint.id)
-        ) {
-          return { ...claimed, subagent: true as const }
-        }
+        const titled = this.takeSubagentTitle(root.id, subagent.id, claimed.endpoint.id)
+        const resumed =
+          !subagent.stop &&
+          one(this.sql, `UPDATE endpoints SET status_state = 'working' WHERE id = ? AND status_state = 'done' RETURNING id`, claimed.endpoint.id)
+        if (!titled && !resumed) return { ...claimed, subagent: true as const }
         return { ...claimed, endpoint: this.view(this.byId(claimed.endpoint.id)!), subagent: true as const }
       }
       const bound = scope.grant === null && !scope.exact ? this.boundGrant(scope, fields.process) : undefined
@@ -876,7 +882,8 @@ export class RelayCore {
         held.connections === 0 &&
         presenceOf(held, now) === "offline" &&
         held.harness === harness &&
-        held.id !== scope.subagent?.root
+        held.id !== scope.subagent?.root &&
+        !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
       ) {
         own = transient && held.process !== null && fields.process !== null && sameHarness(held.process, fields.process)
         const ended = held.hook_ended !== null || (held.last_seen ?? held.created_at) < now - LIMITS.restartGraceS * 1000
@@ -1004,10 +1011,10 @@ export class RelayCore {
       .caps.filter((cap) => kind === "process" || cap.by === "human")
       .map((cap) => ({ ...cap, sels: cap.sels.filter((entry) => entry.via === undefined || entry.via === cap.by) }))
     const stored = caps.length ? JSON.stringify({ caps, allow: {} }) : null
-    if (kind === "process") this.sql.all(`UPDATE endpoints SET caps = ?, reset_at = ?, peek = NULL WHERE id = ?`, stored, now, row.id)
+    if (kind === "process") this.sql.all(`UPDATE endpoints SET caps = ?, reset_at = ?, peek = NULL, wake = NULL WHERE id = ?`, stored, now, row.id)
     else
       this.sql.all(
-        `UPDATE endpoints SET rules = NULL, caps = ?, status_state = NULL, status_note = NULL, title = NULL, reset_at = ?, spawned_at = ?, peek = NULL, harness_session = NULL WHERE id = ?`,
+        `UPDATE endpoints SET rules = NULL, caps = ?, status_state = NULL, status_note = NULL, title = NULL, reset_at = ?, spawned_at = ?, peek = NULL, harness_session = NULL, wake = NULL WHERE id = ?`,
         stored,
         now,
         now,
@@ -1431,16 +1438,80 @@ export class RelayCore {
     if (typeof params.text !== "string") throw new RelayError("invalid_params", "text must be a string")
     const row = this.mustEndpoint(endpoint)
     if (row.kind !== "agent" || !this.holds(row, options)) return false
-    const title = stripControl(redactSecrets(params.text.slice(0, 4096).replace(/\s+/g, " ").trim()))
-      .slice(0, TITLE_CHARS)
-      .trim()
-    if (!title || findSecret(title) || title === row.title) return false
+    const title = hookTitle(params.text)
+    if (!title || title === row.title) return false
     if (row.title !== null && row.title !== row.title_auto) return false
     const turn = row.prompts ?? 0
     if (params.from === "prompt" && row.title !== null) return false
     if (params.from === "summary" && row.title !== null && row.title_turn !== null && turn - row.title_turn < LIMITS.titleRefreshTurns) return false
     this.sql.all(`UPDATE endpoints SET title = ?, title_auto = ?, title_turn = ? WHERE id = ?`, title, title, params.from === "summary" ? turn : null, endpoint)
     return true
+  }
+
+  /**
+   * how the session holding an agent endpoint wakes it when idle, one of {@link WAKES}; `none` clears it. Only the process holding the
+   * endpoint sets it through a hook; whether it changed
+   */
+  setWake(endpoint: string, value: unknown, options: { transient?: boolean; process?: string } = {}): boolean {
+    if (typeof value !== "string" || !WAKES.includes(value as Wake)) throw new RelayError("invalid_params", `via must be one of ${WAKES.join(", ")}`)
+    const row = this.mustEndpoint(endpoint)
+    if (row.kind !== "agent") throw new RelayError("invalid_params", "only an agent endpoint wakes")
+    if (!this.holds(row, options)) return false
+    const wake = value === "none" ? null : value
+    if (row.wake === wake) return false
+    this.sql.all(`UPDATE endpoints SET wake = ? WHERE id = ?`, wake, endpoint)
+    return true
+  }
+
+  /**
+   * a title for the caller's in-process subagent `id` from the description its parent gave it; the subagent's endpoint id when it changed one.
+   * It fills only a title nobody set, as an inferred one, and waits for the subagent's claim when it has no endpoint yet
+   */
+  subagentTitle(endpoint: string, params: { id?: unknown; title?: unknown }, options: { transient?: boolean; process?: string } = {}): string | null {
+    if (typeof params.id !== "string" || !SUBAGENT_ID.test(params.id)) throw new RelayError("invalid_params", "id is the subagent's id")
+    if (typeof params.title !== "string") throw new RelayError("invalid_params", "title must be a string")
+    const row = this.mustEndpoint(endpoint)
+    const title = hookTitle(params.title)
+    if (row.kind !== "agent" || !this.holds(row, options) || !title) return null
+    const prefix = `sub:${params.id}:`
+    const sub = one<{ id: string }>(
+      this.sql,
+      `SELECT id FROM endpoints WHERE kind = 'agent' AND parent_ep = ? AND substr(session, 1, ?) = ? ORDER BY COALESCE(last_seen, created_at) DESC LIMIT 1`,
+      row.id,
+      prefix.length,
+      prefix,
+    )
+    if (sub) return this.fillTitle(sub.id, title) ? sub.id : null
+    const key = `${row.id} ${params.id}`
+    this.subagentTitles.delete(key)
+    this.subagentTitles.set(key, title)
+    for (const old of this.subagentTitles.keys()) {
+      if (this.subagentTitles.size <= SUBAGENT_TITLES_KEPT) break
+      this.subagentTitles.delete(old)
+    }
+    return null
+  }
+
+  /** the title a parent named subagent `id` with before it had an endpoint, given to `endpoint`; whether it changed its title */
+  private takeSubagentTitle(root: string, id: string, endpoint: string): boolean {
+    const title = this.subagentTitles.get(`${root} ${id}`)
+    if (title === undefined) return false
+    this.subagentTitles.delete(`${root} ${id}`)
+    return this.fillTitle(endpoint, title)
+  }
+
+  /** an inferred title for an endpoint whose title nobody set */
+  private fillTitle(endpoint: string, title: string): boolean {
+    return (
+      one(
+        this.sql,
+        `UPDATE endpoints SET title = ?, title_auto = ?, title_turn = NULL WHERE id = ? AND (title IS NULL OR title = title_auto) AND title IS NOT ? RETURNING id`,
+        title,
+        title,
+        endpoint,
+        title,
+      ) !== undefined
+    )
   }
 
   /**
@@ -1636,7 +1707,7 @@ export class RelayCore {
         const parent = this.byId(target.parent_ep)
         throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; a spawned worker stays joined while it runs`)
       }
-      this.sql.all(`UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ? WHERE id = ?`, this.now(), target.id)
+      this.sql.all(`UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ?, wake = NULL WHERE id = ?`, this.now(), target.id)
       this.audit("leave", target.id, null, { handle: target.handle })
       return { endpoint: this.whoami(target.id), session: target.session }
     })
@@ -1939,6 +2010,8 @@ export class RelayCore {
           ...(queued ? { queued } : {}),
           last_seen: view.last_seen,
           ...(state ? { state } : {}),
+          ...(view.wake ? { wake: view.wake } : {}),
+          ...(view.presence === "idle" ? { idle: true as const } : {}),
         })
       }
       for (const { key, address } of pending) {
@@ -5014,7 +5087,7 @@ export class RelayCore {
       presence,
       status: row.status_state ? { state: row.status_state, note: row.status_note ?? "" } : null,
       last_seen: iso(row.last_seen),
-      ...(row.kind === "agent" ? this.placeView(row, shown) : {}),
+      ...(row.kind === "agent" ? { ...this.placeView(row, shown), wake: wakeOf(row) } : {}),
     }
   }
 
@@ -5242,37 +5315,55 @@ function sameProcess(row: EndpointRow, key: string | null): boolean {
   return row.token_hash === null ? sameHarness(row.process, key) : row.process === key && PROCESS_KEY.test(key)
 }
 
+const SUBAGENT_ID = /^(?=.*[A-Za-z0-9])[A-Za-z0-9_-]{1,64}$/
+const SUBAGENT_TITLES_KEPT = 256
+
+/** a title a hook offers: one line of at most the cap, credentials redacted; null when nothing is left or it still looks like a credential */
+function hookTitle(text: string): string | null {
+  const title = stripControl(redactSecrets(text.slice(0, 4096).replace(/\s+/g, " ").trim()))
+    .slice(0, TITLE_CHARS)
+    .trim()
+  return title && !findSecret(title) ? title : null
+}
+
 /** a claim's subagent: an id of letters, digits, `_` and `-` (Claude Code's are hex), an optional type, and `stop` for its stop's claim */
 function subagentOf(value: unknown): { id: string; type?: string; stop?: true } | undefined {
   if (value === undefined || value === null) return undefined
   const { id, type, stop } = (typeof value === "object" ? value : {}) as { id?: unknown; type?: unknown; stop?: unknown }
-  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(id) || !/[A-Za-z0-9]/.test(id))
-    throw new RelayError("invalid_params", "subagent is {id, type}: id letters, digits, _ and -")
+  if (typeof id !== "string" || !SUBAGENT_ID.test(id)) throw new RelayError("invalid_params", "subagent is {id, type}: id letters, digits, _ and -")
   if (type !== undefined && (typeof type !== "string" || type.length > 64))
     throw new RelayError("invalid_params", "subagent type is a name of at most 64 characters")
   if (stop !== undefined && typeof stop !== "boolean") throw new RelayError("invalid_params", "subagent stop is true or false")
   return { id, ...(type ? { type } : {}), ...(stop ? { stop: true as const } : {}) }
 }
 
-/** `<root handle>-<type>-<first 6 of id>`, the root's part clipped so the whole leaves room for a `-<n>` suffix */
+/** a subagent type's short name: `gp` for general-purpose, else its first word (split at non-alphanumerics and camelCase humps) lowercased, `agent` for none */
+function subagentKind(type: string | undefined): string {
+  if (type?.toLowerCase() === "general-purpose") return "gp"
+  const word = (type ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .find(Boolean)
+  return word ? word.toLowerCase().slice(0, 16) : "agent"
+}
+
+/** `<root handle>-<short type>-<first 4 alphanumerics of id>`, the root's part clipped so the whole leaves room for a `-<n>` suffix */
 export function subagentHandle(root: string, subagent: { id: string; type?: string }): string {
-  const kind =
-    (subagent.type ?? "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+/, "")
-      .slice(0, 16)
-      .replace(/-+$/, "") || "agent"
-  const tail = `-${kind}-${subagent.id
+  const tail = `-${subagentKind(subagent.type)}-${subagent.id
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "")
-    .slice(0, 6)}`
+    .slice(0, 4)}`
   return `${root.slice(0, 58 - tail.length).replace(/[-.]+$/, "")}${tail}`
 }
 
 /** two keys of one harness process: equal, or a bare `pid:<pid>` and a full key of that pid */
 function sameHarness(a: string, b: string): boolean {
   return a === b || (BARE_PID_KEY.test(a) && b.startsWith(`${a}:`)) || (BARE_PID_KEY.test(b) && a.startsWith(`${b}:`))
+}
+
+/** a row's stored wake when it is a known one other than `none` */
+function wakeOf(row: EndpointRow): Wake | null {
+  return row.wake && row.wake !== "none" && WAKES.includes(row.wake as Wake) ? (row.wake as Wake) : null
 }
 
 /** a connection's presence by its last request; without one, a hook's by the last time a hook reported */

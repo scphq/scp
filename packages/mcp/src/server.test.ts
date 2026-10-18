@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Claim, LIMITS, PREAMBLE } from "@scp-dev/core"
+import { type Claim, LIMITS, PREAMBLE, type Wake } from "@scp-dev/core"
 import { type Broker, readSessionMarker, RelayClient, startBroker } from "@scp-dev/broker"
 import { MCP_PROTOCOLS, runRelayMcp, type SpawnRequest, TOOLS } from "./server"
 
@@ -23,6 +23,8 @@ function shim(
     handle: string
     channels?: boolean
     launched?: boolean
+    wake?: Wake
+    connect?: () => Promise<RelayClient>
     session?: string
     initialize?: false
     claim?: Partial<Claim>
@@ -47,7 +49,7 @@ function shim(
     }
   }
   const done = runRelayMcp({
-    connect: () => RelayClient.connect(broker.socket),
+    connect: options.connect ?? (() => RelayClient.connect(broker.socket)),
     claim: {
       handle: options.handle,
       harness: "claude-code",
@@ -60,6 +62,7 @@ function shim(
     env: { HOME: "/work" },
     ...(options.launched === undefined ? {} : { launchedWithChannels: options.launched }),
     ...(options.channels === undefined ? {} : { channels: options.channels }),
+    ...(options.wake === undefined ? {} : { wake: options.wake }),
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     ...(options.membership === undefined ? {} : { membership: options.membership }),
   })
@@ -647,6 +650,56 @@ describe("relay MCP shim, in process", () => {
     } finally {
       a.close()
       await a.done
+    }
+  })
+
+  test("--channels advertises how a message wakes the session: channels, pi for a pi client, the option over both, nothing to a deaf client", async () => {
+    const wakeOf = (handle: string) => broker.core.list({ all: true }).find((e) => e.address === `me/${handle}`)?.wake
+    const until = async (handle: string, want: Wake | null) => {
+      for (let i = 0; i < 200 && wakeOf(handle) !== want; i++) await Bun.sleep(10)
+      return wakeOf(handle)
+    }
+    const channel = { protocolVersion: "2025-06-18", capabilities: { experimental: { "claude/channel": {} } } }
+    const launched = shim(broker, { handle: "wake-launched", channels: true, launched: true })
+    const pi = shim(broker, { handle: "wake-pi", channels: true, initialize: false })
+    const codex = shim(broker, { handle: "wake-codex", channels: true, initialize: false, wake: "codex-app-server" })
+    const deaf = shim(broker, { handle: "wake-deaf", channels: true })
+    try {
+      await pi.request("initialize", { ...channel, clientInfo: { name: "pi", version: "1" } })
+      await codex.request("initialize", channel)
+      await deaf.call("relay_whoami")
+      expect(await until("wake-launched", "channels")).toBe("channels")
+      expect(await until("wake-pi", "pi")).toBe("pi")
+      expect(await until("wake-codex", "codex-app-server")).toBe("codex-app-server")
+      expect(wakeOf("wake-deaf")).toBeNull()
+    } finally {
+      for (const s of [launched, pi, codex, deaf]) s.close()
+      await Promise.all([launched.done, pi.done, codex.done, deaf.done])
+    }
+  })
+
+  test("--channels advertises the wake again on a reconnect", async () => {
+    const clients: RelayClient[] = []
+    const connect = async () => {
+      const client = await RelayClient.connect(broker.socket)
+      clients.push(client)
+      return client
+    }
+    const s = shim(broker, { handle: "wake-again", channels: true, launched: true, connect })
+    const wakeOf = () => broker.core.list({ all: true }).find((e) => e.address === "me/wake-again")?.wake
+    try {
+      await s.call("relay_whoami")
+      for (let i = 0; i < 200 && wakeOf() !== "channels"; i++) await Bun.sleep(10)
+      const id = broker.core.list({ all: true }).find((e) => e.address === "me/wake-again")!.id
+      broker.core.setWake(id, "none")
+      clients[0]!.close()
+      await s.call("relay_whoami")
+      for (let i = 0; i < 200 && wakeOf() !== "channels"; i++) await Bun.sleep(10)
+      expect(clients.length).toBeGreaterThan(1)
+      expect(wakeOf()).toBe("channels")
+    } finally {
+      s.close()
+      await s.done
     }
   })
 

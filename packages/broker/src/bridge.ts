@@ -316,6 +316,7 @@ export function startBridge(options: BridgeOptions): Bridge {
       status: view.status ? { state: view.status.state, note: options.redact ? "" : view.status.note } : null,
       presence: view.presence,
       last_seen: view.last_seen,
+      ...(view.kind === "agent" ? { wake: view.wake ?? null } : {}),
     }
   }
 

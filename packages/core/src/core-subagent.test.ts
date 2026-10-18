@@ -45,7 +45,7 @@ describe("subagent endpoints", () => {
     const root = hook(9).endpoint
     const sub = hook(9, { subagent: { id: AGENT, type: "general-purpose" } })
     expect(sub).toMatchObject({ subagent: true, created: true })
-    expect(sub.endpoint.address).toBe("me/claude-app-general-purpose-aceb55")
+    expect(sub.endpoint.address).toBe("me/claude-app-gp-aceb")
     expect(sub.endpoint).toMatchObject({ parent: root.address, depth: 1, harness: "claude-code" })
     const again = hook(9, { subagent: { id: AGENT, type: "general-purpose" } })
     expect(again.endpoint.id).toBe(sub.endpoint.id)
@@ -53,7 +53,7 @@ describe("subagent endpoints", () => {
     expect(hook(9).endpoint.id).toBe(root.id)
     expect(core.placeLineage([key(30), key(9)])).toBe(root.id)
     expect(core.placeLineage([key(30), key(9)], sub.endpoint.address.slice(3))).toBe(sub.endpoint.id)
-    const audit = core.log({}).find((row) => row.event === "claim" && row.detail.handle === "claude-app-general-purpose-aceb55")
+    const audit = core.log({}).find((row) => row.event === "claim" && row.detail.handle === "claude-app-gp-aceb")
     expect(audit?.detail).toMatchObject({ subagent: "general-purpose", parent: root.address, transient: true })
   })
 
@@ -99,7 +99,7 @@ describe("subagent endpoints", () => {
       { handle: "claude-x", harness: "claude-code", process: key(9), session: key(9), lineage, subagent: { id: AGENT } },
       { transient: true },
     ).endpoint
-    expect(sub).toMatchObject({ address: "me/w1-agent-aceb55", parent: "me/w1", depth: 2 })
+    expect(sub).toMatchObject({ address: "me/w1-agent-aceb", parent: "me/w1", depth: 2 })
   })
 
   test("a stop's claim takes only an endpoint the subagent already has; a tool claim after done resumes it working", () => {
@@ -120,8 +120,80 @@ describe("subagent endpoints", () => {
   test("the derived handle stays valid and leaves room for a suffix", () => {
     const long = subagentHandle("a".repeat(63), { id: AGENT, type: "Some Plugin:Very-Long-Agent-Type-Name" })
     expect(long.length).toBeLessThanOrEqual(58)
-    expect(long).toEndWith("-some-plugin-very-aceb55")
-    expect(subagentHandle("app", { id: "ABC_def12" })).toBe("app-agent-abcdef")
+    expect(long).toEndWith("a-some-aceb")
+    expect(subagentHandle("app", { id: "ABC_def12" })).toBe("app-agent-abcd")
+    const kinds = ["general-purpose", "Explore", "Plan", "statusline-setup", "claude-code-guide", "codeReviewer", "x".repeat(40)]
+    expect(kinds.map((type) => subagentHandle("app", { id: AGENT, type }))).toEqual([
+      "app-gp-aceb",
+      "app-explore-aceb",
+      "app-plan-aceb",
+      "app-statusline-aceb",
+      "app-claude-aceb",
+      "app-code-aceb",
+      `app-${"x".repeat(16)}-aceb`,
+    ])
+  })
+
+  test("a new subagent is named for its parent's current handle, after a rename or a join that names the session", () => {
+    const { core, hook } = setup()
+    const root = hook(9).endpoint
+    const before = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
+    core.rename({ kind: "endpoint", id: root.id, auth: "session" }, { handle: "lead" })
+    expect(hook(9, { subagent: { id: "b107cb", type: "Explore" } }).endpoint).toMatchObject({ address: "me/lead-explore-b107", parent: "me/lead" })
+    core.joinSession({ handle: "claude-app", harness: "claude-code", process: key(9), session: key(9), lineage: [key(9), key(1)] }, "chief")
+    expect(hook(9, { subagent: { id: "c107cb", type: "Plan" } }).endpoint.address).toBe("me/chief-plan-c107")
+    expect(core.whoami(before.id).address).toBe("me/claude-app-explore-aceb")
+  })
+
+  test("a subagent whose short handle another's offline endpoint holds gets a suffix instead of taking it over", () => {
+    const { core, hook, clock } = setup()
+    hook(9)
+    const first = hook(9, { subagent: { id: "aceb01", type: "Explore" } }).endpoint
+    core.send(core.claim({ handle: "peer", harness: "codex" }).endpoint.id, { to: first.address, body: "for the first" })
+    clock.now += 3600_000
+    hook(9)
+    const second = hook(9, { subagent: { id: "aceb02", type: "Explore" } }).endpoint
+    expect(second).toMatchObject({ address: "me/claude-app-explore-aceb-2" })
+    expect(second.id).not.toBe(first.id)
+    expect(hook(9, { subagent: { id: "aceb01", type: "Explore" } }).endpoint.id).toBe(first.id)
+  })
+})
+
+describe("subagent titles", () => {
+  const HOOK = { transient: true, process: key(9) }
+
+  test("the parent's description titles the subagent: at once when its endpoint exists, else at its first claim", () => {
+    const { core, hook } = setup()
+    const root = hook(9).endpoint
+    const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
+    expect(core.subagentTitle(root.id, { id: AGENT, title: "Map the\nbroker" }, HOOK)).toBe(sub.id)
+    expect(core.whoami(sub.id).title).toBe("Map the broker")
+    expect(core.subagentTitle(root.id, { id: "f00d42", title: "Review the parser" }, HOOK)).toBeNull()
+    const later = hook(9, { subagent: { id: "f00d42", type: "general-purpose" } }).endpoint
+    expect(later).toMatchObject({ address: "me/claude-app-gp-f00d", title: "Review the parser" })
+    expect(hook(9).endpoint.title).toBeNull()
+  })
+
+  test("it never replaces a title set explicitly, which still replaces it; a secret, another process or another parent's subagent sets nothing", () => {
+    const { core, hook } = setup()
+    const root = hook(9).endpoint
+    const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
+    core.subagentTitle(root.id, { id: AGENT, title: "inferred" }, HOOK)
+    core.title(sub.id, "mine")
+    expect(core.subagentTitle(root.id, { id: AGENT, title: "inferred again" }, HOOK)).toBeNull()
+    expect(core.whoami(sub.id).title).toBe("mine")
+    core.title(sub.id, "")
+    expect(core.subagentTitle(root.id, { id: AGENT, title: `deploy with ghp_${"A1b2C3d4".repeat(5)}` }, HOOK)).toBe(sub.id)
+    expect(core.whoami(sub.id).title).not.toContain("ghp_")
+    core.subagentTitle(root.id, { id: "beef01", title: "early" }, HOOK)
+    const early = hook(9, { subagent: { id: "beef01" } }).endpoint
+    core.title(early.id, "explicit")
+    expect(core.whoami(early.id).title).toBe("explicit")
+    expect(core.subagentTitle(root.id, { id: AGENT, title: "from elsewhere" }, { transient: true, process: key(8) })).toBeNull()
+    const other = core.claim({ handle: "other", harness: "claude-code", process: key(7), session: key(7), lineage: [key(7)] }, { transient: true }).endpoint
+    expect(core.subagentTitle(other.id, { id: AGENT, title: "not mine" }, { transient: true, process: key(7) })).toBeNull()
+    expect(core.whoami(sub.id).title).not.toBe("not mine")
+    expect(failure(() => core.subagentTitle(root.id, { id: "../x", title: "x" }, HOOK)).code).toBe("invalid_params")
   })
 })
 

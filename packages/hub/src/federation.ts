@@ -43,6 +43,8 @@ import {
   validHandle,
   validHarness,
   validSelector,
+  type Wake,
+  WAKES,
 } from "@scp-dev/core"
 
 export type RelayAuth = Envelope["from"]["auth"]
@@ -121,6 +123,8 @@ export interface MirrorView extends MirrorScope {
   presence?: Presence
   last_seen?: string | null
   title?: string | null
+  /** an agent's {@link Wake}; a value this hub does not know is kept as none */
+  wake?: string | null
   /** the handle the endpoint had before a rename: its mirror is renamed in place */
   was?: string
 }
@@ -142,6 +146,7 @@ interface ParsedScope {
   rules?: MirrorRules | null
   caps?: ScopeCaps | null
   title?: string | null
+  wake?: Wake | null
   incarnation?: string | null
 }
 
@@ -1609,7 +1614,7 @@ export class FederatedCore extends RelayCore {
     const was = this.view(before)
     const presence = was.presence !== view.presence
     const status = before.status_state !== after.status_state || before.status_note !== after.status_note
-    const other = (["kind", "harness", "model", "cwd", "labels", "title", "tree", "parent_ep", "depth", "rules", "caps", "incarnation"] as const).some(
+    const other = (["kind", "harness", "model", "cwd", "labels", "title", "wake", "tree", "parent_ep", "depth", "rules", "caps", "incarnation"] as const).some(
       (field) => before[field] !== (after as FederatedRow)[field],
     )
     return presence || status || other ? { view, added: false, presence, status } : null
@@ -1682,6 +1687,7 @@ export class FederatedCore extends RelayCore {
       rules: rules === undefined ? row.rules : rules && (rules.in || rules.out) ? JSON.stringify(rules) : null,
       caps,
       title: scope.title !== undefined ? scope.title : fresh ? null : row.title,
+      wake: scope.wake !== undefined ? scope.wake : fresh ? null : row.wake,
       incarnation: scope.incarnation ?? row.incarnation,
     }
   }
@@ -1860,6 +1866,7 @@ function parseScope(view: Partial<MirrorView>): ParsedScope {
     throw new RelayError("too_large", `an endpoint's rules and caps are more than ${SCOPE_BYTES} bytes`)
   if (given("title"))
     out.title = view.title === null ? null : cleanText(typeof view.title === "string" ? view.title.replace(/\s+/g, " ") : view.title, "title", 64) || null
+  if (given("wake")) out.wake = typeof view.wake === "string" && view.wake !== "none" && WAKES.includes(view.wake as Wake) ? (view.wake as Wake) : null
   if (given("incarnation")) {
     if (view.incarnation !== null && (typeof view.incarnation !== "string" || !INCARNATION.test(view.incarnation))) throw bad("incarnation")
     out.incarnation = view.incarnation ?? null

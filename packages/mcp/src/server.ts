@@ -18,6 +18,7 @@ import {
   type SendResult,
   type PeerView,
   PREAMBLE,
+  presenceText,
   reachLines,
   receiptLines,
   RelayError,
@@ -26,6 +27,7 @@ import {
   shortId,
   STATUS_STATES,
   type ThreadMessage,
+  type Wake,
   type WhyResult,
   widenText,
   wrapMessage,
@@ -65,6 +67,8 @@ export interface RelayMcpOptions {
   channels?: boolean
   /** the client was started with channels loaded (Claude Code does not declare the capability itself) */
   launchedWithChannels?: boolean
+  /** the wake the endpoint advertises while this shim pushes by channel, over `pi` for a pi client and `channels` for any other */
+  wake?: Wake
   version?: string
   /** starts a worker for relay_spawn, resolving with its name and its runner's pid once its harness started; without it there is no relay_spawn */
   spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
@@ -366,7 +370,11 @@ function heldText(held: JudgeHeld): string {
 
 /** a send's id, thread and recipients with their states, for a result's structuredContent */
 function sentContent(result: SendResult): Record<string, unknown> {
-  return { id: result.id, thread: result.thread, recipients: result.deliveries.map((d) => ({ address: d.address, ...(d.state ? { state: d.state } : {}) })) }
+  return {
+    id: result.id,
+    thread: result.thread,
+    recipients: result.deliveries.map((d) => ({ address: d.address, ...(d.state ? { state: d.state } : {}), ...(d.wake ? { wake: d.wake } : {}) })),
+  }
 }
 
 function redactedText(redacted: JudgeRedacted | undefined): string {
@@ -530,6 +538,9 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   /** seqs this shim pushed, so a push whose confirm was lost is not pushed again */
   const channelPushed = new Set<number>()
   let channelLoop: Promise<void> | undefined
+  /** what the endpoint advertises once initialize said whether the client takes channel pushes; null advertises nothing */
+  let wake: Wake | null | undefined
+  let advertised: { client: RelayClient; via: Wake } | undefined
 
   const write = (message: Json) => {
     if (!stopped) options.output(`${JSON.stringify(message)}\n`)
@@ -576,7 +587,17 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       throw new Error("the relay MCP shim is stopping")
     }
     client = next
+    advertise()
     return next
+  }
+
+  /** tells the broker how a message wakes this session, once per connection and value, when both it and the client's capabilities are known */
+  function advertise() {
+    if (!client || wake === undefined) return
+    const via = wake ?? "none"
+    if ((advertised?.client === client && advertised.via === via) || (via === "none" && !advertised)) return
+    advertised = { client, via }
+    client.request("wake", { via }).catch(() => {})
   }
 
   function ensure(): Promise<RelayClient> {
@@ -608,7 +629,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     return [
       `${e.address}${me && e.id === me.id ? " (you)" : ""}`,
       e.harness ?? e.kind,
-      e.presence,
+      presenceText(e),
       e.title ? `title ${quote(e.title)}` : "",
       status,
       cwd ? quote(cwd) : "",
@@ -960,6 +981,9 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         const capabilities = params.capabilities as { experimental?: Record<string, unknown> } | undefined
         const channel = capabilities?.experimental?.["claude/channel"]
         channelClient = (typeof channel === "object" && channel !== null) || options.launchedWithChannels === true
+        const clientInfo = params.clientInfo as { name?: unknown } | undefined
+        wake = options.channels && channelClient ? (options.wake ?? (clientInfo?.name === "pi" ? "pi" : "channels")) : null
+        advertise()
         return respond({
           protocolVersion,
           capabilities: { tools: {}, ...(options.channels ? { experimental: { "claude/channel": {} } } : {}) },

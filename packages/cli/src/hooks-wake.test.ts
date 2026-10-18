@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, test } from "bun:test"
 import { RelayClient, startBroker } from "@scp-dev/broker"
 import { LIMITS } from "@scp-dev/core"
-import { type HookOptions, runHook, WAKE } from "./hooks"
+import { type HookOptions, OPENCODE_WAKE, runHook, WAKE } from "./hooks"
 
 const cleanups: (() => Promise<void> | void)[] = []
 afterEach(async () => {
@@ -56,6 +56,14 @@ describe("OpenCode wake hooks", () => {
     expect(broker.core.inbox(endpoint.id)[0]!.shown_at).toEqual(expect.any(String))
     expect(await run(false)).toBeUndefined()
     expect(printed).toHaveLength(1)
+  })
+
+  test("the waiter advertises that the OpenCode plugin wakes the session", async () => {
+    const { broker, run } = await setup()
+    const wake = () => broker.core.list().find((e) => e.address === "me/idle")!.wake
+    expect(wake()).toBeNull()
+    expect(await run(true)).toBeUndefined()
+    expect(wake()).toBe(OPENCODE_WAKE)
   })
 
   test("stopping before printing leaves the offer unconfirmed for a later tool hook", async () => {
