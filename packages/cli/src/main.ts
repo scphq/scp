@@ -199,6 +199,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   other process under an agent they may only narrow. An ancestor always reaches its descendants, and a recipient
   may always reply in the thread to a message it got; a reply to another message of the thread is checked as a send.
   ${CLI_NAME} daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground (it otherwise starts on demand)
+  ${CLI_NAME} daemon stop|restart                stop the running broker, or replace it with a fresh one
 
 agent sessions:
   ${CLI_NAME} mcp [--as NAME] [--harness H] [--channels]   the MCP shim a harness mounts: relay tools for one agent, never me/
@@ -525,7 +526,10 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   }
   for (const key of Object.keys(values) as Option[]) if (!allowed.includes(key)) throw new RelayUsage(`${CLI_NAME} ${verb} does not take --${key}`)
 
-  if (verb === "daemon") return daemon(values.idle as string | undefined, values.policy as string | undefined)
+  if (verb === "daemon") {
+    if (positionals.length) return daemonControl(positionals, values)
+    return daemon(values.idle as string | undefined, values.policy as string | undefined)
+  }
   if (verb === "mcp")
     return (await import("./mcp")).relayMcpCommand(values as { as?: string; harness?: string; human?: boolean; channels?: boolean }, positionals)
   if (verb === "hooks") {
@@ -544,11 +548,18 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   }
 
   if (verb === "relay") return (await import("./relay")).relayVerb(positionals, values.json === true)
-  if (verb === "up") return (await import("./up")).up(positionals, values as UpValues, cwd, cloudStatus)
-  if (verb === "login")
-    return (await import("./relay")).loginMain(positionals, values as { token?: string; label?: string; "no-browser"?: boolean; json?: boolean })
+  if (verb === "up") return (await import("./up")).up(positionals, values as UpValues, cwd, relinkBroker)
+  if (verb === "login") {
+    const code = await (await import("./relay")).loginMain(positionals, values as { token?: string; label?: string; "no-browser"?: boolean; json?: boolean })
+    if (code === 0) await relinkRunning()
+    return code
+  }
   if (verb === "logout") return (await import("./relay")).logoutMain(positionals, values.json === true)
-  if (verb === "cloud") return (await import("./remote")).cloudMain(positionals, values as { machine?: string; json?: boolean }, cloudStatus)
+  if (verb === "cloud") {
+    const code = await (await import("./remote")).cloudMain(positionals, values as { machine?: string; json?: boolean }, cloudStatus)
+    if (code === 0 && positionals[0] === "enable") await relinkRunning()
+    return code
+  }
   if (verb === "holds") holdsArgs(values, positionals)
   const bodyFromStdin = (verb === "send" || verb === "ask" || verb === "reply") && (positionals[1] === undefined || positionals[1] === "-")
   const opened = await open(verb, values as Identity, cwd, bodyFromStdin)
@@ -570,6 +581,60 @@ async function cloudStatus() {
   } finally {
     client.close()
   }
+}
+
+/** asks the broker to link again with the cloud config and credential on disk, starting one when none runs; a broker that cannot take the config restarts */
+async function relinkBroker() {
+  const dir = relayDir()
+  const client = await connectBroker(dir, () => startDaemon(dir))
+  let result: { enabled: boolean; restarting?: boolean }
+  let pid: number
+  try {
+    pid = (await client.hello({ observe: true })).broker.pid
+    result = await client.request<{ enabled: boolean; restarting?: boolean }>("bridge_relink")
+  } catch (error) {
+    if (error instanceof RelayError && error.code === "method_not_found") return cloudStatus()
+    throw error
+  } finally {
+    client.close()
+  }
+  if (!result.restarting) return result
+  await (await import("./daemon")).exited(pid)
+  return cloudStatus()
+}
+
+/** relinkBroker for a broker that already runs; a failure only warns, the login or config it follows stands */
+async function relinkRunning() {
+  try {
+    await connectBroker(relayDir()).then((client) => client.close())
+  } catch {
+    return
+  }
+  try {
+    await relinkBroker()
+  } catch (error) {
+    note(`the running broker did not link again (${error instanceof Error ? error.message : String(error)}); run \`${CLI_NAME} daemon restart\``)
+  }
+}
+
+async function daemonControl(positionals: string[], values: Partial<Record<Option, string | boolean | string[]>>): Promise<number> {
+  const [action] = positionals
+  if (positionals.length !== 1 || (action !== "stop" && action !== "restart") || values.idle !== undefined || values.policy !== undefined)
+    throw new RelayUsage(`${CLI_NAME} daemon takes stop or restart, or --idle and --policy to run in the foreground`)
+  const dir = relayDir()
+  const pid = await (await import("./daemon")).stopBroker(dir)
+  if (action === "stop") {
+    out(pid === null ? "no relay broker runs" : `stopped the relay broker (pid ${pid}); the next command starts a fresh one`)
+    return 0
+  }
+  const client = await connectBroker(dir, () => startDaemon(dir))
+  try {
+    const { broker } = await client.hello({ observe: true })
+    out(`${pid === null ? "started" : `replaced the relay broker (pid ${pid}) with`} a fresh one (pid ${broker.pid})`)
+  } finally {
+    client.close()
+  }
+  return 0
 }
 
 async function runVerb(
@@ -1326,6 +1391,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
     broker = await startBroker({
       dir: relayDir(),
       ...(bridge ? { bridge } : {}),
+      bridgeConfig: () => daemonBridge(),
       ...(idleMs !== undefined ? { idleMs } : {}),
       ...(policyFile ? { policyPath: resolve(policyFile) } : {}),
     })

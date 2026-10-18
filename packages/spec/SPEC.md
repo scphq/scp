@@ -351,7 +351,7 @@ Auth levels and their powers:
 | human, tty | The human at a terminal. | Sees everything, is exempt from scopes, may review judge holds, may grant admins, may lift inherited caps. Its sends are hop 0 and exempt from the daily cap. |
 | human, no tty | The human without a terminal. | Sends as an unverified human (section 10.4); may only narrow; may not set caps, grants, groups or admins (`scope_refused` "no terminal"). |
 | hook | A transient hook connection. | Only `event`, `status`, `whoami`, `inject`, `injected`, `peek_turn`, `stop_wait`, `prompted`. Scope methods are `scope_refused`; anything else is `unauthorized`. Never counted as connected. |
-| observer | An unbound observer. | Only `list`, `snapshot`, `watch`, `log`, `policy`, `policy_check`, `cloud_status`, `why`; scope methods only with a `lineage`. Anything else is `unauthorized` ("this connection only observes"). |
+| observer | An unbound observer. | Only `list`, `snapshot`, `watch`, `log`, `policy`, `policy_check`, `cloud_status`, `bridge_relink`, `why`; scope methods only with a `lineage`. Anything else is `unauthorized` ("this connection only observes"). |
 
 - Lineage-bound connections are brief (they never count as connected).
 - A hook connection whose claim comes from a process other than the endpoint's holding harness process receives empty results and its budgets do not count. Once the holder process is dead, the endpoint is taken over.
@@ -1128,7 +1128,7 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 
 - The broker keeps no outbound queue. With the bridge down, a forward is refused `unavailable` with `retry_after` 5. A link that drops mid-call is awaited up to 30 s; `unavailable` from the hub is retried with backoff within that deadline.
 - Deliveries for a disconnected machine stay at the hub until they expire and are replayed on `subscribe`, in pages of 200, from the bridge's cursor (the lowest unacknowledged seq minus one, else the highest acknowledged).
-- The bridge reconnects with jittered exponential backoff from 1 s to 60 s and re-reads its credential each time. It stops permanently on close 1008 or 4000 or a handshake refused `unauthorized` or `invalid_params`.
+- The bridge reconnects with jittered exponential backoff from 1 s to 60 s and re-reads its credential each time. It stops on close 1008 or 4000 or a handshake refused `unauthorized` or `invalid_params`, until `bridge_relink`, which re-reads the credential and reconnects at once. `bridge_relink` re-reads the bridge configuration too; when one appeared, or it names another hub or machine, the broker answers `{enabled: false, restarting: true}` and stops, so the next client starts a broker with it. The CLI sends `bridge_relink` after `login`, `cloud enable` and `up`.
 
 ### 14.3 Contacts
 
@@ -1409,6 +1409,7 @@ An integration with push capability additionally:
 | `policy` | | `{file, state, error?, policy}` (policy text for the human only) | | obs, ep |
 | `policy_check` | `from`, `to` | `{allowed, reason, file}` | as `why` | obs, ep |
 | `cloud_status` | | bridge status or `{enabled: false}` | | obs, ep |
+| `bridge_relink` | | bridge status, `{enabled: false}`, or `{enabled: false, restarting: true}` | | obs, ep |
 | `rules` | `endpoint?` | ScopeView | `invalid_params`, `not_found` | ep, lineage obs |
 | `rules_set` | `endpoint?`, `in?`, `out?`, `scope?`, `allow?` | ScopeView | `invalid_params`, `scope_refused`, `not_found` | ep, lineage obs |
 | `rules_widen` | `endpoint`, `in?`, `out?` | ScopeChange | as `rules_set` | ep, lineage obs |
@@ -1583,7 +1584,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `holds ls or show or release or refuse [--redacted] [--reason]` | `holds`, `hold_*` |
 | `policy show or path or check <from> <to>` | `policy`, `policy_check` |
 | `cloud enable or disable or status [--machine]`, `machines [rm <name>]`, `contacts ...` | bridge configuration, hub |
-| `daemon [--idle] [--policy]` | runs the broker |
+| `daemon [--idle] [--policy]`, `daemon stop or restart` | runs the broker; stops it (SIGTERM to the lock's pid, checked against its command line) or replaces it |
 | `mcp [--channels]`, `hooks install`, `setup`, `hook <harness> [event]` | integration (Appendices F, G) |
 
 ## Appendix F. Reference binding: MCP tools

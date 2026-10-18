@@ -40,6 +40,29 @@ describe("swarm, on demand", () => {
     await waitFor(() => !alive(pid), 10_000, "the idle broker to exit")
   })
 
+  test("daemon restart replaces the running broker with a fresh one, and daemon stop stops it", async () => {
+    const env = { SCP_DIR: join(process.env.HOME!, "restart-relay"), SCP_IDLE: "30s" }
+    const before = JSON.parse((await command(["status", "--json"], env)).stdout) as { broker: { pid: number } }
+    const restarted = await command(["daemon", "restart"], env)
+    expect(restarted.stdout).toContain(`replaced the relay broker (pid ${before.broker.pid})`)
+    expect(alive(before.broker.pid)).toBe(false)
+    const after = JSON.parse((await command(["status", "--json"], env)).stdout) as { broker: { pid: number } }
+    expect(after.broker.pid).not.toBe(before.broker.pid)
+    expect((await command(["daemon", "stop"], env)).stdout).toContain(`stopped the relay broker (pid ${after.broker.pid})`)
+    expect(alive(after.broker.pid)).toBe(false)
+    expect((await command(["daemon", "stop"], env)).stdout).toBe("no relay broker runs\n")
+  })
+
+  test("a broker started before cloud enable links once the config is written, without a restart by hand", async () => {
+    const env = { SCP_DIR: join(process.env.HOME!, "late-cloud-relay"), SCP_IDLE: "30s", XDG_CONFIG_HOME: join(process.env.HOME!, "late-cloud-config") }
+    const before = JSON.parse((await command(["cloud", "status", "--json"], env)).stdout) as { broker: { enabled: boolean } }
+    expect(before.broker.enabled).toBe(false)
+    expect((await command(["cloud", "enable", "--machine", "late"], env)).code).toBe(0)
+    const after = JSON.parse((await command(["cloud", "status", "--json"], env)).stdout) as { broker: { enabled: boolean; machine: string } }
+    expect(after.broker).toMatchObject({ enabled: true, machine: "late" })
+    await command(["daemon", "stop"], env)
+  })
+
   test("the broker it starts enforces the account's policy file whatever the caller's environment, logs to the relay dir, and survives a null line", async () => {
     const dir = join(process.env.HOME!, "env-relay")
     const env = {

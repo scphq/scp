@@ -30,7 +30,7 @@ export async function up(positionals: string[], values: UpValues, cwd: string, b
   const setup = (await import("./setup")).relaySetupCommand(["--write"], cwd, out)
   if (setup !== 0) return setup
   const broker = await brokerStatus()
-  if (!broker.enabled) out(`the broker that was already running stays local-only until it exits (it stops when idle); the next one links to ${url}`)
+  if (!broker.enabled) out(`the broker is still local-only; run \`${CLI_NAME} daemon restart\` to link it to ${url}`)
   else out(`broker linked to ${broker.url ?? url}${broker.connected ? "" : " (connecting)"}`)
   return 0
 }

@@ -357,6 +357,48 @@ describe("bridge", () => {
     expect(a.bridge!.status().connected).toBe(false)
   })
 
+  test("a bridge replaced with 4000 stays down until bridge_relink, which reads the credential again and links it", async () => {
+    const fake = hubServer()
+    let reads = 0
+    const a = await machine(fake, "a", {
+      credentials: async () => {
+        reads++
+        return TOKEN
+      },
+    })
+    const newer = await machine(fake, "a")
+    const replaced = await waitFor(() => (a.bridge!.status().connected ? null : a.bridge!.status()), "the replace")
+    expect(replaced.last_error).toContain("replaced")
+    await Bun.sleep(300)
+    expect(a.bridge!.status().connected).toBe(false)
+    const client = await RelayClient.connect(a.socket)
+    cleanups.push(() => client.close())
+    await client.hello({ observe: true })
+    await client.request("bridge_relink")
+    await waitFor(() => a.bridge!.status().connected, "a to link again")
+    expect(reads).toBeGreaterThan(0)
+    await waitFor(() => !newer.bridge!.status().connected, "the newer bridge to be replaced in turn")
+  })
+
+  test("bridge_relink on a broker that started before its cloud config existed stops it, so a fresh one links", async () => {
+    const fake = hubServer()
+    const root = mkdtempSync(join(tmpdir(), "relay-bridge-late-"))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const broker = await startBroker({
+      dir: join(root, "state"),
+      policyPath: join(root, "policy.json"),
+      idleMs: 0,
+      log: () => {},
+      bridgeConfig: async () => ({ url: fake.url, token: TOKEN, machine: "a" }),
+    })
+    cleanups.push(() => broker.stop())
+    const client = await RelayClient.connect(broker.socket)
+    cleanups.push(() => client.close())
+    await client.hello({ observe: true })
+    expect(await client.request("bridge_relink")).toEqual({ enabled: false, restarting: true })
+    await broker.stopped
+  })
+
   test("an expired grant closes the bridge with 4001 and it reconnects with its token read again", async () => {
     let now = Date.now()
     const fake = hubServer(() => now)
