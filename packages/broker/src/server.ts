@@ -292,15 +292,22 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     judge.sweep()
   }, SWEEP_MS)
   const known = new Map<string, Presence>()
-  for (const view of localViews()) known.set(view.id, view.presence)
+  const wakes = new Map<string, string | null | undefined>()
+  for (const view of localViews()) {
+    known.set(view.id, view.presence)
+    wakes.set(view.id, view.wake)
+  }
   const presenceTimer = setInterval(() => {
     core.endExited()
     const live = new Set<string>()
     for (const view of localViews()) {
       live.add(view.id)
       if ((known.get(view.id) ?? "offline") !== view.presence) presenceChanged(view)
+      else if (wakes.has(view.id) && wakes.get(view.id) !== view.wake) bridge?.changed(view.id)
+      wakes.set(view.id, view.wake)
     }
     for (const id of known.keys()) if (!live.has(id)) known.delete(id)
+    for (const id of wakes.keys()) if (!live.has(id)) wakes.delete(id)
   }, options.presenceEveryMs ?? PRESENCE_MS)
   const ownership = setInterval(() => {
     if (closing || ownsState()) return
@@ -432,9 +439,15 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     const was = s.data.waker
     if (was === endpoint) return
     s.data.waker = endpoint
-    if (was) core.waker(was, false, { grace: s.data.transient === true })
-    if (endpoint) core.waker(endpoint, true)
-    for (const id of [was, endpoint]) if (id) presenceMoved(id)
+    if (was) {
+      const wake = core.whoami(was).wake
+      core.waker(was, false, { grace: s.data.transient === true })
+      if (!presenceMoved(was) && core.whoami(was).wake !== wake) bridge?.changed(was)
+    }
+    if (endpoint) {
+      core.waker(endpoint, true)
+      presenceMoved(endpoint)
+    }
   }
 
   /** reports an endpoint's presence when it is not the one last reported; whether it was not */
@@ -976,11 +989,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         return view
       }
       case "event": {
+        const wake = core.whoami(me).wake
         const row = core.event(me, params, hookOf(s))
         notifyFleet({ type: "activity", ...row })
         bridge?.activity(me, row)
         const after = core.whoami(me)
         if ((known.get(me) ?? "offline") !== after.presence) presenceChanged(after)
+        else if (after.wake !== wake) bridge?.changed(me)
         return row
       }
       case "inject": {

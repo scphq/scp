@@ -7,12 +7,12 @@ import type { Sql, SqlValue } from "./sql"
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`
 const self = (id: string): ScopeActor => ({ kind: "endpoint", id, auth: "session" })
 
-function setup() {
+function setup(alive: (pid: number) => boolean = () => true) {
   const clock = { now: 1_800_000_000_000 }
   const db = new Database(":memory:")
   const sql: Sql = { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
   const core = new RelayCore(sql, {
-    alive: () => true,
+    alive,
     now: () => clock.now,
     hash: (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
     transaction: <T>(fn: () => T): T => db.transaction(fn)(),
@@ -113,5 +113,53 @@ describe("wake", () => {
     expect(core.whoami(id).presence).toBe("idle")
     core.setWake(id, "none")
     expect(core.whoami(id).presence).toBe("offline")
+  })
+
+  describe("an ended session clears it", () => {
+    const hooked = (core: RelayCore) => {
+      const id = core.claim({ handle: "oc", harness: "opencode", process: key(9), session: key(9) }, { transient: true }).endpoint.id
+      core.setWake(id, "opencode-plugin", { transient: true, process: key(9) })
+      return id
+    }
+
+    test("by its hook's session_end, but not while a live waker holds it", () => {
+      const { core } = setup()
+      const id = hooked(core)
+      core.waker(id, true)
+      core.event(id, { kind: "session_end" }, { transient: true, process: key(9) })
+      expect(core.whoami(id).wake).toBe("opencode-plugin")
+      core.waker(id, false)
+      expect(core.whoami(id).wake).toBeNull()
+      core.setWake(id, "opencode-plugin", { transient: true, process: key(9) })
+      core.event(id, { kind: "session_end" }, { transient: true, process: key(9) })
+      expect(core.whoami(id).wake).toBeNull()
+    })
+
+    test("when its harness process exited", () => {
+      const dead = new Set<number>()
+      const { core } = setup((pid) => !dead.has(pid))
+      const id = hooked(core)
+      dead.add(9)
+      core.endExited()
+      expect(core.whoami(id).wake).toBeNull()
+    })
+
+    test("when its hook waker left and the grace ran out", () => {
+      const { core, clock } = setup()
+      const id = hooked(core)
+      core.waker(id, true)
+      core.waker(id, false, { grace: true })
+      clock.now += (LIMITS.restartGraceS - 1) * 1000
+      expect(core.list().find((e) => e.id === id)!.wake).toBe("opencode-plugin")
+      clock.now += 2000
+      expect(core.list({ all: true }).find((e) => e.id === id)!.wake).toBeNull()
+    })
+
+    test("when another process takes the endpoint over", () => {
+      const { core, clock } = setup()
+      const id = hooked(core)
+      clock.now += (LIMITS.hookIdleS + 1) * 1000
+      expect(core.claim({ handle: "oc", harness: "opencode", process: key(8), session: key(8) }).endpoint).toMatchObject({ id, wake: null })
+    })
   })
 })
