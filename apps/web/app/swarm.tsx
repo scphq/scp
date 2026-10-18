@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 
-type Pt = { x: number; y: number };
+export type Pt = { x: number; y: number };
 type Kind = "hub" | "broker" | "root" | "sub" | "worker" | "peer" | "gate";
 
 interface N extends Pt {
@@ -22,7 +22,7 @@ interface Box {
   label: string;
 }
 
-interface Pulse {
+export interface Pulse {
   pts: Pt[];
   cum: number[];
   d: number;
@@ -62,7 +62,7 @@ interface Scene {
   band: { x: number; y: number; w: number; h: number };
 }
 
-function rng(seed: number) {
+export function rng(seed: number) {
   return () => {
     seed |= 0;
     seed = (seed + 0x6d2b79f5) | 0;
@@ -186,7 +186,7 @@ function build(w: number, h: number): Scene {
   return { w, h, wide, rail: w * 0.025, nodes, boxes, hub, gate, peer, motes, clusters, peerMotes, band };
 }
 
-function elbow(a: Pt, b: Pt): Pt[] {
+export function elbow(a: Pt, b: Pt): Pt[] {
   if (Math.abs(a.y - b.y) < 0.5) return [a, b];
   const mid = (a.y + b.y) / 2;
   return [a, { x: a.x, y: mid }, { x: b.x, y: mid }, b];
@@ -224,13 +224,13 @@ function route(scene: Scene, from: number, to: number): Pt[] {
   return pts;
 }
 
-function pulse(pts: Pt[], color: Pulse["color"], speed: number, extra: Partial<Pulse> = {}): Pulse {
+export function pulse(pts: Pt[], color: Pulse["color"], speed: number, extra: Partial<Pulse> = {}): Pulse {
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
   return { pts, cum, d: 0, speed, color, ...extra };
 }
 
-function at(p: Pulse, d: number): Pt {
+export function at(p: Pulse, d: number): Pt {
   const { pts, cum } = p;
   if (d <= 0) return pts[0];
   for (let i = 1; i < pts.length; i++) {
@@ -247,7 +247,7 @@ function motePos(m: Mote, t: number): Pt {
   return { x: m.bx + drift + Math.sin(t * m.w1 + m.p1) * m.r1, y: m.by + Math.cos(t * m.w2 + m.p2) * m.r2 };
 }
 
-interface Palette {
+export interface Palette {
   fg: string;
   dim: string;
   faint: string;
@@ -257,7 +257,7 @@ interface Palette {
   mono: string;
 }
 
-function palette(el: HTMLElement): Palette {
+export function palette(el: HTMLElement): Palette {
   const s = getComputedStyle(el);
   const v = (name: string) => s.getPropertyValue(name).trim();
   return { fg: v("--fg"), dim: v("--dim"), faint: v("--faint"), line: v("--line"), acc: v("--acc"), bg: v("--surface"), mono: s.fontFamily };
