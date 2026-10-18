@@ -1,5 +1,14 @@
 # @scp-dev/mcp
 
+## 0.1.7
+
+### Patch Changes
+
+- Updated dependencies [868ec53]
+- Updated dependencies [0a511fc]
+  - @scp-dev/broker@0.2.0
+  - @scp-dev/core@0.1.5
+
 ## 0.1.6
 
 ### Patch Changes
