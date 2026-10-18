@@ -795,7 +795,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (typeof key === "string") s.data.process = key
         const was = before.get(endpoint.id)?.address
         if (join !== undefined) membership(endpoint, core.sessionOf(endpoint.id), true, was?.slice(was.lastIndexOf("/") + 1))
-        if (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent) bridge?.resync()
+        const tookOver = join !== undefined && [...before.values()].some((view) => view.id !== endpoint.id && view.address === endpoint.address)
+        if (tookOver || (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent)) bridge?.resync()
         else if ((before.get(endpoint.id)?.presence ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
         return {
           endpoint,
@@ -956,8 +957,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         return { changed }
       }
       case "rename": {
-        const renamed = core.rename(actorOf(s), { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), handle: params.handle })
+        const renamed = core.rename(actorOf(s), {
+          ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}),
+          handle: params.handle,
+          ...(params.take_over !== undefined ? { take_over: params.take_over } : {}),
+        })
         membership(renamed.endpoint, renamed.session, true, renamed.from)
+        if (renamed.retired) bridge?.resync()
         return renamed.endpoint
       }
       case "adopt": {

@@ -633,6 +633,28 @@ describe("links across machines", () => {
   const HUMAN = { kind: "human" as const, tty: true }
   const byAddress = (core: FederatedCore, address: string) => core.list({ all: true }).find((v) => v.address === address)!
 
+  test("a session renaming onto its own offline endpoint keeps that one's children on other machines and its link under one", () => {
+    const { broker, clock } = pair()
+    const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`
+    const session = "0b8c6a52-5d2e-4c4f-9a3e-1f2d3c4b5a69"
+    const hook = (pid: number, handle: string) =>
+      broker.claim({ handle, harness: "claude-code", process: key(pid), session: key(pid) }, { transient: true }).endpoint
+    broker.mirror("desk", [view("ada/desk/lead", { parent_ep: null, depth: 0 })])
+    const old = hook(9, "orch")
+    broker.event(old.id, { kind: "tool", tool: "Bash", session_id: session }, { transient: true, process: key(9) })
+    broker.adopt(HUMAN, { endpoint: "orch", parent: "desk/lead" })
+    broker.mirror("desk", [view("ada/desk/kid", { parent_addr: "laptop/orch" })])
+    broker.event(old.id, { kind: "session_end" }, { transient: true, process: key(9) })
+    clock.now += (LIMITS.hookEndedGraceS + 1) * 1000
+    const fresh = hook(10, "claude-other")
+    broker.event(fresh.id, { kind: "tool", tool: "Bash", session_id: session }, { transient: true, process: key(10) })
+    expect(broker.rename({ kind: "endpoint", id: fresh.id, auth: "session" }, { handle: "orch" }).retired).toBe(old.id)
+    expect(byAddress(broker, "me/orch").id).toBe(fresh.id)
+    expect(byAddress(broker, "me/desk/kid").parent).toBe("me/orch")
+    expect(broker.mirrorScope(fresh.id)).toMatchObject({ parent_addr: "desk/lead" })
+    expect(broker.send(fresh.id, { to: "desk/lead", body: "up" }).deliveries.length).toBe(1)
+  })
+
   test("a mirrored parent_addr shows as the parent's address, and parent and child reach each other though both are scoped", () => {
     const { hub } = pair()
     const none = { in: [], out: [] }

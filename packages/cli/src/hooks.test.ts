@@ -235,6 +235,16 @@ describe("relay identity", () => {
     })
     expect(explicit).toMatchObject({ session: "env:lane-7", process: "pid:31:Wed-Oct-15-10:00:00-2026" })
   })
+
+  test("a Claude Code claim carries the harness session: the hook payload's id, else $CLAUDE_CODE_SESSION_ID; other harnesses none", () => {
+    const base = { fallbackHarness: "claude", cwd: "/tmp", harnessPid: () => 31, startOf: () => "Wed-Oct-15-10:00:00-2026" }
+    const env = { CLAUDE_CODE_SESSION_ID: "env-session" }
+    expect(relayIdentity({ ...base, env }).harness_session).toBe("env-session")
+    expect(relayIdentity({ ...base, env, harnessSession: "payload-session" }).harness_session).toBe("payload-session")
+    expect(relayIdentity({ ...base, env, harnessSession: "not a session id" }).harness_session).toBe("env-session")
+    expect(relayIdentity({ ...base, env: {} }).harness_session).toBeUndefined()
+    expect(relayIdentity({ ...base, env, harness: "codex" }).harness_session).toBeUndefined()
+  })
 })
 
 describe("hook stdin", () => {

@@ -728,9 +728,14 @@ export class RelayCore {
       labels: JSON.stringify(this.machineLabel(cleanLabels(claim.labels))),
       session: cleanText(claim.session, "session", 128),
       process: cleanText(claim.process, "process", 128),
+      harness_session: cleanText(claim.harness_session, "harness_session", 128),
     }
     if (fields.process !== null && !ANY_PROCESS_KEY.test(fields.process)) throw new RelayError("invalid_params", "process is a key pid:<pid>[:<start time>]")
-    const leaked = [wanted, fields.model, fields.cwd, fields.parent, fields.labels, fields.session].map((v) => (v ? findSecret(v) : null)).find(Boolean)
+    if (fields.harness_session !== null && !HARNESS_SESSION.test(fields.harness_session))
+      throw new RelayError("invalid_params", "harness_session is a harness's session id: letters, digits, . _ : -")
+    const leaked = [wanted, fields.model, fields.cwd, fields.parent, fields.labels, fields.session, fields.harness_session]
+      .map((v) => (v ? findSecret(v) : null))
+      .find(Boolean)
     if (leaked) throw new RelayError("secret_refused", `the claim looks like it carries a credential (${leaked})`)
     if (claim.grant !== undefined && (typeof claim.grant !== "string" || !GRANT_TOKEN.test(claim.grant)))
       throw new RelayError("invalid_params", "grant is a krt_ token")
@@ -834,7 +839,15 @@ export class RelayCore {
   private claimRow(
     wanted: string,
     harness: string,
-    fields: { model: string | null; cwd: string | null; parent: string | null; labels: string; session: string | null; process: string | null },
+    fields: {
+      model: string | null
+      cwd: string | null
+      parent: string | null
+      labels: string
+      session: string | null
+      process: string | null
+      harness_session?: string | null
+    },
     transient: boolean,
     scope: ClaimScope = { handle: wanted, lineage: [], grant: null, rules: {}, groups: [], cwd: fields.cwd },
   ): { endpoint: EndpointView; token?: string; created?: true } {
@@ -859,6 +872,7 @@ export class RelayCore {
     let stopBlocks: number | null = null
     let moved: number[] = []
     let exactFrom: EndpointRow | undefined
+    const open = !row || presenceOf(row, now) === "offline"
     if (row && presenceOf(row, now) === "offline") {
       this.sql.all(`UPDATE endpoints SET session = NULL WHERE id = ?`, row.id)
       row = undefined
@@ -898,7 +912,12 @@ export class RelayCore {
         exactFrom = hooks
       }
     } else if (row && transient) session = row.session
-    let joined = row !== undefined
+    const resumed =
+      !row && open && !scope.exact && !scope.subagent && fields.harness_session
+        ? this.resumable(harness, fields.harness_session, scope, fields, now)
+        : undefined
+    if (resumed) row = resumed
+    let joined = row !== undefined && !resumed
     let own = false
     let live = false
     let created = false
@@ -944,7 +963,7 @@ export class RelayCore {
     if (!row)
       throw scope.exact ? this.exactRefusal(this.byHandle(wanted)!, wanted, harness, now) : new RelayError("invalid_params", `no free handle for ${wanted}`)
     if (exactFrom && exactFrom.id !== row.id) ({ moved, stopBlocks } = this.leaveHooks(exactFrom, row.id))
-    const fresh = created || joined ? null : this.incarnates(row, scope, fields.process, now)
+    const fresh = created || joined || resumed ? null : this.incarnates(row, scope, fields.process, now)
     const token = transient || live ? undefined : `kre_${randomHex(32)}`
     const field = (column: string) => (transient ? `COALESCE(?, ${column})` : "?")
     if (session) this.sql.all(`UPDATE endpoints SET session = NULL WHERE session = ? AND harness = ? AND id != ?`, session, harness, row.id)
@@ -984,13 +1003,49 @@ export class RelayCore {
     if (!transient && fields.cwd !== null) this.sql.all(`UPDATE grants SET spent_cwd = ? WHERE used_by = ?`, fields.cwd, row.id)
     if (!(transient && joined)) {
       const sub = scope.subagent ? { subagent: scope.subagent.type ?? "agent", parent: this.addressOf(scope.subagent.root) } : {}
-      this.audit("claim", row.id, null, { handle: row.handle, harness, ...(joined ? { joined: true } : {}), ...(transient ? { transient: true } : {}), ...sub })
+      this.audit("claim", row.id, null, {
+        handle: row.handle,
+        harness,
+        ...(joined ? { joined: true } : {}),
+        ...(resumed ? { resumed: true } : {}),
+        ...(transient ? { transient: true } : {}),
+        ...sub,
+      })
     }
     if (fresh) this.reset(row, scope, fresh, moved, now)
     if (created || fresh === "grant") this.place(this.byId(row.id)!, scope, now)
     else if (scope.grant !== null) this.redeem(this.byId(row.id)!, scope, now)
     if (scope.grant !== null) this.takePending(row.id)
     return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
+  }
+
+  /**
+   * the offline local row a claim of harness session `harnessSession` from a new harness process takes back, as a restart of that session:
+   * of a fitting harness, no subagent's, and restarted where it sits or redeemed with its grant. A claim with a grant that row did not spend
+   * is a new spawn and takes none. A named row first, then the latest seen
+   */
+  private resumable(
+    harness: string,
+    harnessSession: string,
+    scope: ClaimScope,
+    fields: { cwd: string | null; process: string | null },
+    now: number,
+  ): EndpointRow | undefined {
+    const rows = this.sql.all<EndpointRow>(
+      `SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session, 1, 4) != 'sub:')
+       AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY named IS NULL, COALESCE(last_seen, created_at) DESC`,
+      harnessSession,
+    )
+    const parent = rows.length ? this.placement(scope, now).parent : null
+    const spender = scope.grant === null ? null : (this.spentGrant(scope)?.used_by ?? "")
+    return rows.find(
+      (row) =>
+        (spender === null || spender === row.id) &&
+        this.localRow(row) &&
+        harnessFits(row.harness, harness) &&
+        presenceOf(row, now) === "offline" &&
+        (this.restarts(row, parent, fields.process) || this.redeems(row, scope, { harness, ...fields })),
+    )
   }
 
   /** a session's hook endpoint left for `to`: its unread mail moves there and it lets go of the session; the moved seqs and its stop budget */
@@ -1778,9 +1833,14 @@ export class RelayCore {
 
   /**
    * renames an agent in place: its id, mail, threads, status, title and relations stay. An agent renames only itself, and only a root unless
-   * the policy's `defaults.rename` is `self`; the human at a terminal renames any local agent. The new handle is valid and held by no other endpoint
+   * the policy's `defaults.rename` is `self`; the human at a terminal renames any local agent. The new handle is valid and held by no other endpoint,
+   * except an offline one {@link renameRow} takes over
    */
-  rename(actor: ScopeActor, params: { endpoint?: unknown; handle: unknown }): { endpoint: EndpointView; from: string; session: string | null } {
+  rename(
+    actor: ScopeActor,
+    params: { endpoint?: unknown; handle: unknown; take_over?: unknown },
+  ): { endpoint: EndpointView; from: string; session: string | null; retired?: string } {
+    if (params.take_over !== undefined && typeof params.take_over !== "boolean") throw new RelayError("invalid_params", "take_over is true or false")
     return this.scopeTx(() => {
       const me = this.actorRow(actor)
       if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
@@ -1788,13 +1848,16 @@ export class RelayCore {
       const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
       if (actor.kind !== "human" && target.id !== me.id) throw new RelayError("scope_refused", "an agent renames only itself")
       if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be renamed")
-      this.renameRow(target, params.handle, actor.kind === "human")
-      return { endpoint: this.whoami(target.id), from: target.handle, session: target.session }
+      const retired = this.renameRow(target, params.handle, actor.kind === "human", params.take_over === true)
+      return { endpoint: this.whoami(target.id), from: target.handle, session: target.session, ...(retired ? { retired } : {}) }
     })
   }
 
-  /** the endpoint's handle set to `value`, with the stored `ep:` and `fleet:` selectors that named it */
-  private renameRow(row: EndpointRow, value: unknown, byHuman: boolean): void {
+  /**
+   * the endpoint's handle set to `value`, with the stored `ep:` and `fleet:` selectors that named it. A local offline agent holding the handle
+   * is taken over when it held the same harness session, or with `takeOver` by the human at a terminal: the id of the row retired
+   */
+  private renameRow(row: EndpointRow, value: unknown, byHuman: boolean, takeOver = false): string | undefined {
     const handle = typeof value === "string" ? value.trim().replace(/^me\//, "") : ""
     if (!validHandle(handle)) throw new RelayError("invalid_params", `handle ${JSON.stringify(handle)} is not valid: lowercase letters, digits, . _ -`)
     if (findSecret(handle)) throw new RelayError("secret_refused", "the handle looks like it carries a credential")
@@ -1807,14 +1870,23 @@ export class RelayCore {
       throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; its name is set by the spawner`)
     }
     const held = this.byHandle(handle)
+    let retired: string | undefined
     if (held) {
-      const how = held.kind !== "agent" ? "reserved" : presenceOf(held, this.now()) === "offline" ? "held by an offline endpoint" : "held by a live endpoint"
-      throw new RelayError("invalid_params", `${handle} is ${how}: pick another name`)
+      const offline = held.kind === "agent" && held.connections === 0 && presenceOf(held, this.now()) === "offline" && this.localRow(held)
+      const same = held.harness_session !== null && held.harness_session === row.harness_session
+      if (takeOver && !byHuman && !same) throw new RelayError("scope_refused", "only the human at a terminal takes over another endpoint")
+      if (takeOver && offline && !same && !harnessFits(held.harness, row.harness ?? "cli"))
+        throw new RelayError("invalid_params", `${handle} is a ${held.harness} endpoint: only an endpoint of the same harness is taken over`)
+      if (!offline || held.session?.startsWith("sub:") || !(same || (takeOver && harnessFits(held.harness, row.harness ?? "cli")))) {
+        const how = held.kind !== "agent" ? "reserved" : presenceOf(held, this.now()) === "offline" ? "held by an offline endpoint" : "held by a live endpoint"
+        throw new RelayError("invalid_params", `${handle} is ${how}: pick another name${offline ? ", or take it over with --take-over from a terminal" : ""}`)
+      }
+      retired = this.takeOver(row, held, same ? "session" : "human")
     }
     const from = row.handle
     this.sql.all(`UPDATE endpoints SET handle = ?, named = ? WHERE id = ?`, handle, this.now(), row.id)
     this.sql.all(`UPDATE grants SET name = ? WHERE used_by = ? AND name = ?`, handle, row.id, from)
-    for (const prefix of row.parent_ep === null ? ["ep:", "fleet:"] : ["ep:"]) {
+    for (const prefix of this.byId(row.id)!.parent_ep === null ? ["ep:", "fleet:"] : ["ep:"]) {
       const [a, b] = [JSON.stringify(`${prefix}${from}`), JSON.stringify(`${prefix}${handle}`)]
       for (const [table, column] of [
         ["endpoints", "rules"],
@@ -1826,6 +1898,52 @@ export class RelayCore {
     }
     this.renamedHandle(from, handle)
     this.audit("rename", row.id, null, { from, to: handle })
+    return retired
+  }
+
+  /**
+   * `row` takes over `held`, an offline local agent, and retires it: `held`'s subtree, unread mail, grants, groups and harness session move to
+   * `row`, which takes `held`'s hand-made link when it is an unlinked root itself. Its handle is then free for `row`
+   */
+  private takeOver(row: EndpointRow, held: EndpointRow, by: "human" | "session"): string {
+    if (this.ancestorsOf(row).includes(held.id))
+      throw new RelayError("scope_refused", `${this.address(row)} sits under ${this.address(held)}: it cannot take over its own ancestor`)
+    if (row.parent_ep === null && row.parent_addr === null && held.linked !== null && held.parent_addr !== null)
+      this.sql.all(`UPDATE endpoints SET parent_addr = ?, linked = ? WHERE id = ?`, held.parent_addr, held.linked, row.id)
+    else if (row.parent_ep === null && row.parent_addr === null && held.linked !== null && held.parent_ep !== null) {
+      const parent = this.byId(held.parent_ep)
+      if (parent) this.link(row, parent, { by: this.address(row), auth: by })
+    }
+    const place = this.byId(row.id)!
+    const shift = (place.depth ?? 0) - (held.depth ?? 0)
+    const below = `WITH RECURSIVE below(id) AS (SELECT id FROM endpoints WHERE parent_ep = ? UNION SELECT e.id FROM endpoints e JOIN below b ON e.parent_ep = b.id)`
+    const deepest = one<{ d: number | null }>(this.sql, `${below} SELECT MAX(depth) AS d FROM endpoints WHERE id IN (SELECT id FROM below)`, held.id)?.d
+    if (deepest != null && deepest + shift > LIMITS.depthMax)
+      throw new RelayError("scope_refused", `${this.address(held)}'s children would sit deeper than ${LIMITS.depthMax} under ${this.address(place)}`)
+    this.sql.all(`${below} UPDATE endpoints SET tree = ?, depth = depth + ? WHERE id IN (SELECT id FROM below)`, held.id, place.tree ?? place.id, shift)
+    const children = this.sql.all<{ id: string }>(`UPDATE endpoints SET parent_ep = ? WHERE parent_ep = ? RETURNING id`, row.id, held.id).length
+    this.sql.all(`UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL`, row.id, held.id)
+    this.sql.all(`UPDATE grants SET issuer = ? WHERE issuer = ?`, row.id, held.id)
+    this.sql.all(`UPDATE grants SET under = ? WHERE under = ?`, row.id, held.id)
+    this.sql.all(`UPDATE groups SET owner = ? WHERE owner = ?`, row.id, held.id)
+    this.sql.all(
+      `INSERT OR IGNORE INTO group_members (name, endpoint, added_by, at) SELECT name, ?, added_by, at FROM group_members WHERE endpoint = ?`,
+      row.id,
+      held.id,
+    )
+    this.sql.all(`DELETE FROM group_members WHERE endpoint = ?`, held.id)
+    this.sql.all(
+      `UPDATE endpoints SET harness_session = ?, harness_transcript = ? WHERE id = ? AND harness_session IS NULL`,
+      held.harness_session,
+      held.harness_transcript,
+      row.id,
+    )
+    this.sql.all(`UPDATE endpoints SET handle = ?, session = NULL, token_hash = NULL WHERE id = ?`, `${GONE_PREFIX}${held.id}`, held.id)
+    this.dropPeek(held.id)
+    this.scopeMemo?.ancestors.clear()
+    this.scopeMemo?.limited.clear()
+    this.audit("take_over", row.id, null, { from: row.handle, to: held.handle, retired: held.id, children, by })
+    return held.id
   }
 
   /** a local agent's handle moved from `from` to `to`: a subclass updates what names it on another machine's rows */

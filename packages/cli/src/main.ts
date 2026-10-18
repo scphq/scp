@@ -256,6 +256,9 @@ agent sessions:
                                                  and title stay; a handle another endpoint holds, live or offline, is refused;
                                                  a spawned worker is named by its spawner (policy defaults.rename: self lets it);
                                                  --endpoint renames another agent, for the human at a terminal
+  ${CLI_NAME} name <handle> --take-over [--endpoint EP]   take the handle from an offline endpoint: it is retired and its
+                                                 children, links and unread mail move over (the same harness session, such as
+                                                 a resumed one, needs no flag); for the human at a terminal
   ${CLI_NAME} join [<handle>] --under <parent>   link the session under the agent <parent> (one it may message), as if
                                                  <parent> had spawned it: it shows under <parent> in list --tree, the dashboard
                                                  and the graph, and takes on a worker's scope (the policy's child_default: by
@@ -373,7 +376,7 @@ const VERBS: Record<string, Option[]> = {
   link: IDENTITY,
   unlink: IDENTITY,
   leave: [...IDENTITY, "endpoint"],
-  name: [...IDENTITY, "endpoint"],
+  name: [...IDENTITY, "endpoint", "take-over"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
   reply: IDENTITY,
   ack: [...IDENTITY, "all"],
@@ -1092,7 +1095,11 @@ async function runVerb(
         return 0
       }
       const before = endpoint ?? me?.address
-      const view = await client.request<EndpointView>("rename", { handle: positionals[0], ...(endpoint !== undefined ? { endpoint } : {}) })
+      const view = await client.request<EndpointView>("rename", {
+        handle: positionals[0],
+        ...(endpoint !== undefined ? { endpoint } : {}),
+        ...(values["take-over"] === true ? { take_over: true } : {}),
+      })
       if (asJson) json(view)
       else out(before && before !== view.address ? `${before} is now ${view.address}` : `${view.address}`)
       return 0

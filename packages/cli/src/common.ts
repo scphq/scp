@@ -81,6 +81,7 @@ export const OPTIONS = {
   who: { type: "boolean" },
   peek: { type: "string" },
   endpoint: { type: "string" },
+  "take-over": { type: "boolean" },
   live: { type: "boolean" },
   parent: { type: "string" },
 } as const
