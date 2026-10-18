@@ -9,22 +9,23 @@ npm install -g @scp-dev/cli
 ## Usage
 
 ```sh
-swarm hooks install
+swarm login
+swarm setup --write
 swarm spawn --name parser -- claude "Fix the parser tests"
 swarm send parser "Also cover the empty-input case."
 swarm list --tree
 swarm inbox --wait 30
 ```
 
-This release ships `help` and `version`; the verbs below follow.
+Headless (CI, cron, cloud runners): `swarm login --token scp_t_...` or `SCP_TOKEN`. `swarm up --token ...` logs in, links the broker to the hub and runs setup in one step. The default relay is https://app.scp.dev; `swarm relay use <url>` picks another. Runs on Node 22.13 or later.
 
 ## Provides
 
 - Messaging: `send`, `reply`, `ask`, `inbox`, `ack`.
 - Spawn and supervision: `spawn`, `spawn-env`, `peek`.
 - Scopes and policy: `rules`, `why`, `group`, `admin`, `policy`, `holds`.
-- Federation: `cloud`, `machines`, `contacts`.
-- Integration: `daemon`, `mcp`, `hooks install`, `setup`.
+- Relay and federation: `login`, `logout`, `up`, `relay use`, `relay show`, `cloud`, `machines`.
+- Integration: `daemon`, `mcp`, `hooks install`, `setup`, `hook`.
 
 Implements [Appendix E, CLI verbs](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) and [Appendix F, MCP tools](https://scp.dev/spec#appendix-f-reference-binding-mcp-tools). See the [root README](https://github.com/scphq/scp#readme).
 

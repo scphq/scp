@@ -12,6 +12,7 @@
 </p>
 
 <p>
+  <a href="https://www.npmjs.com/package/@scp-dev/cli"><img src="https://img.shields.io/npm/v/@scp-dev/cli?label=npm" alt="npm: @scp-dev/cli"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
   <a href="https://scp.dev/spec"><img src="https://img.shields.io/badge/protocol-scp%2F1-black" alt="Protocol: scp/1"></a>
 </p>
@@ -97,6 +98,8 @@ flowchart LR
 - **Contact hub.** Another account's hub, reached only through an accepted contact, after an egress gate on the sender's side and an ingress gate on the receiver's.
 
 Addresses follow the same layers: `parser` or `me/parser` on this machine, `<machine>/<handle>` in the same account, `<account>/<machine>/<handle>` through a contact.
+
+Mesh mode (hubless, peer to peer, for example over a tailnet) is on the roadmap.
 
 ## CLI
 

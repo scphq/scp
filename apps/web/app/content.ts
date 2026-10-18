@@ -53,7 +53,7 @@ export const RULES = [
   },
   {
     name: "Federation by consent",
-    desc: "Machines in one account link through its hub. Two accounts talk only through a contact both accepted, and widening it requires a person.",
+    desc: "Machines in one account link through its hub. Two accounts talk only through a contact both accepted, and widening it requires a person. Mesh mode (hubless, peer to peer, for example over a tailnet) is on the roadmap.",
     sample: "<account>/<machine>/<handle>",
     ref: "14-federation-and-cross-account",
   },
