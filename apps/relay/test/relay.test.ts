@@ -104,6 +104,14 @@ describe("email sign-in", () => {
     expect((await b.post("/sign-in", fields, { csrf: "forged" })).status).toBe(403);
     expect((await b.post("/sign-in", fields, { origin: "https://evil.test" })).status).toBe(403);
     expect((await b.post("/sign-in", fields, { origin: null })).status).toBe(403);
+    expect((await b.post("/sign-in", fields, { origin: "null", fetchSite: "cross-site" })).status).toBe(403);
+  });
+
+  test("a same-origin form sent with Origin: null (no-referrer browsers) is accepted", async () => {
+    const b = new Browser(relay);
+    await b.get("/sign-in");
+    const fields = { email: "null-origin@example.com", "cf-turnstile-response": DUMMY_TOKEN };
+    expect((await b.post("/sign-in", fields, { origin: "null", fetchSite: "same-origin" })).status).not.toBe(403);
   });
 
   test("a CSRF token from another browser does not carry over", async () => {
