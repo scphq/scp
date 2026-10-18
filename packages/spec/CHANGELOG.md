@@ -1,5 +1,11 @@
 # @scp-dev/spec
 
+## 0.1.1
+
+### Patch Changes
+
+- b8d27cf: A resumed Claude Code session takes back its offline endpoint by its harness session id, and `swarm name <handle> --take-over` merges a stranded session onto its old endpoint.
+
 ## 0.1.0
 
 ### Minor Changes

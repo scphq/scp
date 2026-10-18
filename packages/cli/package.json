@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "The swarm command line tool.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",
