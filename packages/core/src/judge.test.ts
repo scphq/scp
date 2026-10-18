@@ -144,6 +144,11 @@ describe("parseVerdict", () => {
   test("a reason that quotes the body is withheld", () => {
     expect(parseVerdict(answer({ verdict: "hold", reason: "it says ada@example.com about the plan" }), body).reason).toBe("reason withheld: it quoted the message")
   })
+
+  test("personal data and credentials in a reason are redacted or withheld whatever their length", () => {
+    expect(parseVerdict(answer({ verdict: "hold", reason: "names (ada@example.com)" }), body).reason).toBe("names ([redacted email])")
+    expect(parseVerdict(answer({ verdict: "hold", reason: `carries scp_${"x9".repeat(10)}` }), body).reason).toBe("reason withheld: it quoted the message")
+  })
 })
 
 describe("applyRedactions", () => {
@@ -153,6 +158,17 @@ describe("applyRedactions", () => {
       { quote: "AB12CD", kind: "secret" },
     ])
     expect(result).toEqual({ text: "key [redacted name] and [redacted secret], ab12 stays", n: 2, kinds: ["name", "secret"] })
+  })
+
+  test("overlapping and adjacent spans merge into one redaction", () => {
+    expect(applyRedactions("mail ada@example.com now", [
+      { quote: "mail ada", kind: "name" },
+      { quote: "ada@example.com", kind: "email" },
+    ])).toEqual({ text: "[redacted email] now", n: 1, kinds: ["email"] })
+    expect(applyRedactions("abcdef", [
+      { quote: "abc", kind: "name" },
+      { quote: "def", kind: "path" },
+    ])).toEqual({ text: "[redacted name]", n: 1, kinds: ["name"] })
   })
 
   test("a quote absent from the body changes nothing", () => {

@@ -1,6 +1,7 @@
 import { type JudgePolicy, parseJudgePolicy } from "./judge-policy"
 import type { JudgeProvider } from "./judge-provider"
 import { RelayError, type ScopePreset, SCOPE_PRESETS } from "./protocol"
+import { PRESET_LISTS } from "./scopes"
 
 /**
  * `*`, `ep:<handle>` (that one agent), `handle:<glob>`, `harness:<name>`, `kind:<agent|human>` or `label:<key>=<value>`, plus the scope selectors: `tree:self|root|parent|siblings|children`,
@@ -16,7 +17,7 @@ export interface PolicyRule {
   accept_from?: Selector[]
   /** when present, they may message only recipients matching one of these */
   send_to?: Selector[]
-  /** a cap by the policy on every matching endpoint, both directions under symmetric presets, else out only */
+  /** a cap by the policy on every matching endpoint, both directions under symmetric presets, else out only; a preset is stored as its list, `open` as no cap */
   scope?: Selector[]
 }
 
@@ -121,9 +122,15 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
       if (Object.keys(extra).length) throw new RelayError("invalid_params", `rule ${index} has unknown fields: ${Object.keys(extra).join(", ")}`)
       if (!validSelector(match, { absolute: true })) throw new RelayError("invalid_params", `rule ${index} match: ${JSON.stringify(match)} is not a selector`)
       const parsed: PolicyRule = { match }
-      for (const [key, sels] of [["accept_from", accept_from], ["send_to", send_to], ["scope", scope]] as const) {
+      for (const [key, sels] of [["accept_from", accept_from], ["send_to", send_to]] as const) {
         const parsedList = list(sels, `rule ${index} ${key}`)
         if (parsedList) parsed[key] = parsedList
+      }
+      if (typeof scope === "string" && SCOPE_PRESETS.includes(scope as ScopePreset)) {
+        if (scope !== "open") parsed.scope = [...PRESET_LISTS[scope as Exclude<ScopePreset, "open">]]
+      } else {
+        const parsedList = list(scope, `rule ${index} scope`)
+        if (parsedList) parsed.scope = parsedList
       }
       return parsed
     }),

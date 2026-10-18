@@ -1,7 +1,7 @@
 import type { BreakerAdmission, JudgeBreaker } from "./judge-breaker"
 import { JudgeProviderError } from "./judge-provider"
 import { stripControl } from "./render"
-import { findPii, findSecret } from "./scrub"
+import { findPii, findSecret, redactPii } from "./scrub"
 import { sha256Hex } from "./sha256"
 
 /** a change to the prompt's wording or the answer's shape is a new version, which every verdict records */
@@ -144,6 +144,13 @@ function quotesBody(reason: string, body: string): boolean {
   return false
 }
 
+/** a reason that quotes the body or carries a credential is withheld; personal data in it is redacted, however short */
+function cleanReason(reason: string, body: string): string {
+  if (quotesBody(reason, body) || findSecret(reason)) return WITHHELD
+  const redacted = redactPii(reason)
+  return redacted.length > 200 ? WITHHELD : redacted
+}
+
 /** the model's answer checked field by field: one JSON object, known values, verbatim quotes; anything else throws, which is a judge error */
 export function parseVerdict(text: string, body: string): Pick<Verdict, "verdict" | "categories" | "reason" | "redactions"> {
   if (text.length > MAX_ANSWER_CHARS) throw new Error("the judge's answer is over 32 KiB")
@@ -175,24 +182,37 @@ export function parseVerdict(text: string, body: string): Pick<Verdict, "verdict
     return { quote, kind: redactionKind(kind) }
   })
   if (verdict === "redact" && !spans.length) throw new Error("redact lists at least one redaction")
-  return { verdict: verdict as JudgeVerdict, categories: sortCategories(categories as JudgeCategory[]), reason: quotesBody(reason, body) ? WITHHELD : reason, redactions: spans }
+  return { verdict: verdict as JudgeVerdict, categories: sortCategories(categories as JudgeCategory[]), reason: cleanReason(reason, body), redactions: spans }
 }
 
-/** every verbatim occurrence of each quote replaced by `[redacted <kind>]` with kind from REDACTION_KINDS, longest quote first, in one pass */
+/**
+ * every verbatim occurrence of each quote, found on the original body, with overlapping or adjacent spans merged into one `[redacted <kind>]`
+ * whose kind, from REDACTION_KINDS, is that of the longest span in it
+ */
 export function applyRedactions(body: string, redactions: readonly Redaction[]): { text: string; n: number; kinds: string[] } {
-  const byQuote = new Map<string, string>()
+  const byQuote = new Map<string, RedactionKind>()
   for (const r of redactions) if (r.quote && !byQuote.has(r.quote)) byQuote.set(r.quote, redactionKind(r.kind))
-  if (!byQuote.size) return { text: body, n: 0, kinds: [] }
-  const pattern = new RegExp([...byQuote.keys()].sort((a, b) => b.length - a.length).map((q) => q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g")
-  let n = 0
-  const kinds = new Set<string>()
-  const text = body.replace(pattern, (quote) => {
-    const kind = byQuote.get(quote)!
-    n++
-    kinds.add(kind)
-    return `[redacted ${kind}]`
-  })
-  return { text, n, kinds: [...kinds].sort() }
+  const spans: { start: number; end: number; kind: RedactionKind }[] = []
+  for (const [quote, kind] of byQuote) for (let i = body.indexOf(quote); i !== -1; i = body.indexOf(quote, i + 1)) spans.push({ start: i, end: i + quote.length, kind })
+  if (!spans.length) return { text: body, n: 0, kinds: [] }
+  spans.sort((a, b) => a.start - b.start || b.end - a.end)
+  const merged: { start: number; end: number; kind: RedactionKind; longest: number }[] = []
+  for (const span of spans) {
+    const last = merged.at(-1)
+    if (!last || span.start > last.end) {
+      merged.push({ ...span, longest: span.end - span.start })
+      continue
+    }
+    if (span.end - span.start > last.longest) Object.assign(last, { kind: span.kind, longest: span.end - span.start })
+    last.end = Math.max(last.end, span.end)
+  }
+  let text = ""
+  let at = 0
+  for (const span of merged) {
+    text += `${body.slice(at, span.start)}[redacted ${span.kind}]`
+    at = span.end
+  }
+  return { text: text + body.slice(at), n: merged.length, kinds: [...new Set(merged.map((span) => span.kind))].sort() }
 }
 
 export interface CacheParts {

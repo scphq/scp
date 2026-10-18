@@ -101,6 +101,16 @@ describe("judgeBoundary", () => {
 })
 
 describe("policy", () => {
+  test("a rule's scope takes a preset as its selector list, open as no cap", () => {
+    const scope = (value: unknown) => parsePolicy({ rules: [{ match: "*", scope: value }] }).rules[0]!.scope
+    expect(scope("tree")).toEqual(["tree:parent", "tree:descendants"])
+    expect(scope("parent")).toEqual(["tree:parent"])
+    expect(scope("none")).toEqual([])
+    expect(scope("open")).toBeUndefined()
+    expect(scope(["fleet:*"])).toEqual(["fleet:*"])
+    expect(() => scope("wide")).toThrow()
+  })
+
   test("parsePolicy takes a judge section and canonicalPolicy covers it", () => {
     const policy = parsePolicy({ rules: [], judge: { mode: "enforce", boundaries: [{ to: "ep:main" }] } })
     expect(policy.judge?.mode).toBe("enforce")
