@@ -50,11 +50,10 @@ export function Footer() {
           <p>Swarm Communication Protocol, version 1</p>
         </div>
         <nav className="foot-nav" aria-label="Footer">
+          <Link href={SPEC}>Spec</Link>
           <Link href={DOCS}>Docs</Link>
-          <Link href={SPEC}>Specification</Link>
-          <Link href="/architecture">Architecture</Link>
-          <Link href={`${SPEC}#18-conformance`}>Conformance</Link>
-          <Link href="/#quickstart">Quickstart</Link>
+          <Link href={`${DOCS}/self-host`}>Self-host</Link>
+          <a href={DEMO}>Dashboard</a>
           <a href={REPO}>GitHub</a>
         </nav>
       </div>

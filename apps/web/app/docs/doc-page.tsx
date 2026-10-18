@@ -30,6 +30,9 @@ export function DocPage({ slug }: { slug: string }) {
           </Link>
         </li>
       ))}
+      <li>
+        <Link href="/architecture">Architecture</Link>
+      </li>
     </ol>
   );
   return (

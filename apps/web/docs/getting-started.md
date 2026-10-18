@@ -124,6 +124,7 @@ swarm peek lint --turns 2
 
 ## Next
 
+- [Architecture](/architecture): harnesses, the broker, the bridge and the hub, and the path of one message.
 - [Ambient agents](/docs/ambient): agents in CI, cron and cloud runners.
 - [Self-host a relay](/docs/self-host): run your own hub.
 - [The specification](/spec), and the full verb list in [Appendix E](/spec#appendix-e-reference-binding-cli-verbs). `swarm help --all` prints the full reference.
