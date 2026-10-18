@@ -309,7 +309,7 @@ describe("relay setup", () => {
     expect(Object.keys(claude)).toEqual(["numStartups", "mcpServers", "projects"])
     expect(claude.mcpServers).toEqual({
       other: { type: "stdio", command: "x", args: [] },
-      [SERVER]: { type: "stdio", command: f.swarm, args: ["mcp", "--harness", "claude"], env: {} },
+      [SERVER]: { type: "stdio", command: f.swarm, args: ["mcp", "--harness", "claude", "--channels"], env: {} },
     })
     const codex = readFileSync(f.files.codex, "utf8")
     expect(codex).toStartWith('# keep me\nmodel = "o3"\n\n[mcp_servers.other]\ncommand = "foo"\n')
@@ -573,7 +573,7 @@ describe("relay setup on a lived-in HOME", () => {
     const dry = setup(f).text
     expect(dry).not.toContain("secret-name")
     expect(dry).toContain(
-      `$ claude mcp add-json --scope user scp '${JSON.stringify({ type: "stdio", command: f.swarm, args: ["mcp", "--harness", "claude"], env: { SCP_NAME: "<kept>" } })}'`,
+      `$ claude mcp add-json --scope user scp '${JSON.stringify({ type: "stdio", command: f.swarm, args: ["mcp", "--harness", "claude", "--channels"], env: { SCP_NAME: "<kept>" } })}'`,
     )
     expect(dry).toContain(`$ codex mcp add --env SCP_NAME=<kept> scp -- ${f.swarm} mcp --harness codex`)
     expect(dry).toContain("mcp: codex mcp add writes the entry anew and drops startup_timeout_sec from it; the backup keeps them")
@@ -586,7 +586,7 @@ describe("relay setup on a lived-in HOME", () => {
     expect(readJson(f.files.claude).mcpServers[SERVER]).toEqual({
       type: "stdio",
       command: f.swarm,
-      args: ["mcp", "--harness", "claude"],
+      args: ["mcp", "--harness", "claude", "--channels"],
       env: { SCP_NAME: "cc-secret-name" },
     })
     expect((Bun.TOML.parse(readFileSync(f.files.codex, "utf8")) as FixtureConfig).mcp_servers[SERVER]).toEqual({
@@ -627,7 +627,7 @@ describe("relay setup on a lived-in HOME", () => {
     expect(dry).not.toContain("secret")
     expect(dry).toContain("(its other keys kept, and url, headers dropped)")
     expect(setup(f, { write: true }).code).toBe(0)
-    expect(readJson(f.files.claude).mcpServers[SERVER]).toEqual({ type: "stdio", command: f.swarm, args: ["mcp", "--harness", "claude"] })
+    expect(readJson(f.files.claude).mcpServers[SERVER]).toEqual({ type: "stdio", command: f.swarm, args: ["mcp", "--harness", "claude", "--channels"] })
     expect(readJson(f.files.opencode).mcp[SERVER]).toEqual({ type: "local", command: argvOf(f, "opencode"), enabled: true, timeout: 9000 })
     expect(readJson(f.files.muse).mcpServers[SERVER]).toEqual({ type: "stdio", command: f.swarm, args: ["mcp", "--harness", "muse"], mode: "required" })
   })
@@ -1003,7 +1003,7 @@ describe("relay setup verify", () => {
     const bin = join(g.home, "fakebin")
     put(
       join(bin, "claude"),
-      `#!/bin/sh\npwd >> "${g.home}/claude-cwd"\nprintf '%s\\n' "$HOME" "$PATH" "$XDG_CONFIG_HOME" "$CODEX_HOME" > "${g.home}/claude-env"\nif [ "$2" = get ]; then printf '${SERVER}:\\n  Status: \\342\\234\\224 Connected\\n  Command: ${g.swarm}\\n  Args: mcp --harness claude\\n'; exit 0; fi\nexit 0\n`,
+      `#!/bin/sh\npwd >> "${g.home}/claude-cwd"\nprintf '%s\\n' "$HOME" "$PATH" "$XDG_CONFIG_HOME" "$CODEX_HOME" > "${g.home}/claude-env"\nif [ "$2" = get ]; then printf '${SERVER}:\\n  Status: \\342\\234\\224 Connected\\n  Command: ${g.swarm}\\n  Args: mcp --harness claude --channels\\n'; exit 0; fi\nexit 0\n`,
       0o755,
     )
     put(g.swarm, `#!/bin/sh\nprintf '${HELP.replaceAll("\n", "\\n")}'\n`, 0o755)

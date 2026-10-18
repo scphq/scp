@@ -224,7 +224,9 @@ agent sessions:
   A Claude Code subagent's hooks give it a child endpoint, <session handle>-<type>-<first 6 of its id>, whose messages
   reach it after its tools; its shell is the session's, so it acts as that child with --as.
   Grok runs the Claude Code hooks, labelled grok; Muse takes them as a plugin; Codex runs new hooks after /hooks review.
-  --channels pushes messages into Claude Code started with --dangerously-load-development-channels server:scp.
+  ${CLI_NAME} claude [--name N] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake
+                                                 it while idle (claude --dangerously-load-development-channels server:scp; SCP_NAME=N)
+  --channels pushes messages into a Claude Code that ${CLI_NAME} claude started; setup mounts claude's shim with it.
 
 relay:
   ${CLI_NAME} relay use <url> | show            select a relay, or show its source and credential status
@@ -502,6 +504,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   }
   if (verb === "hook") return (await import("./hooks")).relayHookCommand(rest, startDaemon)
   if (verb === "setup") return (await import("./setup")).relaySetupCommand(rest, cwd, out)
+  if (verb === "claude") return (await import("./claude")).claudeCommand(rest)
   if (verb === "spawn") {
     const { splitSpawn, spawnCommand } = await import("./spawn")
     const { flags } = splitSpawn(rest)
@@ -839,9 +842,10 @@ async function runVerb(
     }
     case "inbox": {
       if (values.ack && values.keep) throw new RelayUsage("--ack and --keep: pick one")
-      const { messages } = await client.request<{ messages: Envelope[] }>("inbox", { wait_s: waitArg(values.wait as string | undefined, 0) })
+      const waited = waitArg(values.wait as string | undefined, 0)
+      const { messages } = await client.request<{ messages: Envelope[] }>("inbox", { wait_s: waited })
       if (asJson) json({ preamble: PREAMBLE, messages })
-      else if (!messages.length) note("no unread messages")
+      else if (!messages.length) note(`no unread messages${waited > LIMITS.waitMaxS ? `; waited ${LIMITS.waitMaxS} s (cap)` : ""}`)
       else {
         out(PREAMBLE)
         out()

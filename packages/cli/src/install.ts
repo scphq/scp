@@ -214,7 +214,7 @@ export function mcpInstall(harness: string | undefined, as: string | undefined, 
   const line = (cli: string[], extra: string[] = []) => out([...cli, CLI_NAME, ...args(extra)].map(shellWord).join(" "))
   switch (harness) {
     case "claude":
-      line(["claude", "mcp", "add", "scp", "--"])
+      line(["claude", "mcp", "add", "scp", "--"], ["--harness", "claude", "--channels"])
       return 0
     case "codex":
       line(["codex", "mcp", "add", "scp", "--"], ["--harness", "codex"])

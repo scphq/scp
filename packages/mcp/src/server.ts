@@ -59,8 +59,10 @@ export interface RelayMcpOptions {
   output: (line: string) => void
   /** HOME shortens cwds in relay_list */
   env?: Record<string, string | undefined>
-  /** push deliveries as `notifications/claude/channel` */
+  /** push deliveries as `notifications/claude/channel` to a client that declares `claude/channel` or was launched with channels */
   channels?: boolean
+  /** the client was started with channels loaded (Claude Code does not declare the capability itself) */
+  launchedWithChannels?: boolean
   version?: string
   /** starts a worker for relay_spawn, resolving with its name and its runner's pid once its harness started; without it there is no relay_spawn */
   spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
@@ -443,6 +445,8 @@ function isDirectory(path: string): boolean {
   }
 }
 
+const capped = (wait: unknown): boolean => typeof wait === "number" && wait > LIMITS.waitMaxS
+
 function seconds(args: Json, fallback: number): number {
   const value = args.wait_s
   if (value === undefined) return fallback
@@ -502,7 +506,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   let me: EndpointView | null = null
   let announced = false
   let initialized = false
-  /** whether the client takes channel notifications: it says so, or it is Claude Code, which takes them without saying so when started with channels */
+  /** whether the client takes channel notifications: it says so, or it was launched with channels (Claude Code does not say so itself) */
   let channelClient = false
   let stopped = false
   /** seqs this shim pushed, so a push whose confirm was lost is not pushed again */
@@ -717,7 +721,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       case "relay_inbox": {
         const ack = bool(args, "ack") ?? true
         const { messages } = await call<{ messages: Envelope[] }>("inbox", { wait_s: seconds(args, 0) })
-        if (!messages.length) return text("no unread messages")
+        if (!messages.length) return text(`no unread messages${capped(args.wait_s) ? `; waited ${LIMITS.waitMaxS} s (cap)` : ""}`)
         for (const message of messages) remember(message)
         if (ack) await call("ack", { seqs: messages.map((m) => m.seq) })
         return text(delivered(messages))
@@ -903,9 +907,8 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         const protocolVersion = typeof asked === "string" && (MCP_PROTOCOLS as readonly string[]).includes(asked) ? asked : MCP_PROTOCOLS[0]
         initialized = true
         const capabilities = params.capabilities as { experimental?: Record<string, unknown> } | undefined
-        const client = params.clientInfo as { name?: unknown } | undefined
         const channel = capabilities?.experimental?.["claude/channel"]
-        channelClient = (typeof channel === "object" && channel !== null) || client?.name === "claude-code"
+        channelClient = (typeof channel === "object" && channel !== null) || options.launchedWithChannels === true
         return respond({
           protocolVersion,
           capabilities: { tools: {}, ...(options.channels ? { experimental: { "claude/channel": {} } } : {}) },

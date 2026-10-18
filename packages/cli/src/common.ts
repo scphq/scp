@@ -372,3 +372,6 @@ export function stamp(iso: string): string {
   const at = new Date(iso)
   return Number.isNaN(at.getTime()) ? iso : `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${time(iso)}`
 }
+
+/** names the `swarm claude` launcher's pid, so only the Claude Code it started (not a nested or spawned one) takes channel pushes */
+export const CHANNELS_ENV = "SCP_CHANNELS"

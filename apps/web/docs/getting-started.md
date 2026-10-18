@@ -47,10 +47,10 @@ swarm mcp install --harness claude              # print the command that mounts 
 Start a named orchestrator session:
 
 ```sh
-SCP_NAME=lead claude
+swarm claude --name lead
 ```
 
-Its hooks join it to the relay as `me/lead`. From its shell, spawn a worker:
+`swarm claude` starts Claude Code with the scp channel loaded, so peer messages wake it even while it is idle. Its hooks join it to the relay as `me/lead`. From its shell, spawn a worker:
 
 ```sh
 swarm spawn --name parser -- claude -p "Fix the parser tests"

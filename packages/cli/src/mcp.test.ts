@@ -277,8 +277,8 @@ describe("swarm mcp", () => {
       })
       return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() }
     }
-    expect(run(["--harness", "claude"]).stdout).toBe("claude mcp add scp -- swarm mcp\n")
-    expect(run(["--harness", "claude", "--as", "lane-impl"]).stdout).toBe("claude mcp add scp -- swarm mcp --as lane-impl\n")
+    expect(run(["--harness", "claude"]).stdout).toBe("claude mcp add scp -- swarm mcp --harness claude --channels\n")
+    expect(run(["--harness", "claude", "--as", "lane-impl"]).stdout).toBe("claude mcp add scp -- swarm mcp --harness claude --channels --as lane-impl\n")
     expect(run(["--harness", "codex"]).stdout).toBe("codex mcp add scp -- swarm mcp --harness codex\n")
     expect(run(["--harness", "grok"]).stdout).toBe("grok mcp add scp -- swarm mcp --harness grok\n")
     const opencode = run(["--harness", "opencode"]).stdout

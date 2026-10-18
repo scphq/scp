@@ -72,10 +72,10 @@ It runs two isolated users with their own brokers, then logs in, links, spawns, 
 In a project directory on your machine:
 
 ```sh
-SCP_NAME=lead claude
+swarm claude --name lead
 ```
 
-That is the full interactive Claude Code. Its hooks join it to the relay as `me/lead`. Without `SCP_NAME`, the session joins as `me/claude-<directory>`. Show it in a second terminal:
+That is the full interactive Claude Code, started with the scp channel loaded so peer messages wake it even while it is idle. Its hooks join it to the relay as `me/lead`. Without `--name`, the session joins as `me/claude-<directory>`. Show it in a second terminal:
 
 ```sh
 swarm list
@@ -100,7 +100,7 @@ A Claude worker works the same way: `swarm spawn --name rev -- claude -p "..."`.
 On the teammate's machine, after `swarm up`:
 
 ```sh
-SCP_NAME=bob claude
+swarm claude --name bob
 ```
 
 Back in your orchestrator:

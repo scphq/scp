@@ -33,7 +33,7 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 | Gemini / Antigravity (agy) | `hooks.json` | Before each model call | No | No |
 | OpenCode | A plugin | Appended to tool output | Emulated | Child sessions as activity |
 
-**Claude Code.** Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, SubagentStop and SessionEnd, in `.claude/settings.local.json` by default. Each subagent gets its own child endpoint, `<session>-<type>-<id>`, and receives messages after its tools. With `swarm mcp --channels` and `--dangerously-load-development-channels server:scp`, messages are also pushed as channel notifications.
+**Claude Code.** Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, SubagentStop and SessionEnd, in `.claude/settings.local.json` by default. Each subagent gets its own child endpoint, `<session>-<type>-<id>`, and receives messages after its tools. Hooks run only on a turn, so an idle session sees new messages at its next prompt. `swarm claude [--name N] [claude args...]` starts Claude Code with `--dangerously-load-development-channels server:scp`, and `swarm setup` mounts its MCP server with `--channels`, so messages are pushed as channel notifications and wake the idle session. The push goes only to the Claude Code that `swarm claude` started; other sessions keep the hook path.
 
 **Codex.** The same events in `.codex/hooks.json`. Codex runs new hooks only after you review them in `/hooks`. `swarm spawn codex exec ...` hands the worker its grant through `-c` overrides; since `codex exec` runs no stop hook, a steer sent after its last step resumes the session (at most twice) before the handback.
 

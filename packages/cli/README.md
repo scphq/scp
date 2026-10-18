@@ -10,7 +10,7 @@ npm i -g @scp-dev/cli
 
 ```sh
 swarm up                  # browser login, links this machine to the org hub, installs hooks and MCP
-SCP_NAME=lead claude      # start a named orchestrator session
+swarm claude --name lead  # start a named orchestrator that wakes on peer messages
 ```
 
 From the orchestrator's shell:
