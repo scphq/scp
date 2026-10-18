@@ -9,10 +9,11 @@ Spec: https://scp.dev/spec
 
 ```
 packages/
-  spec/   the protocol identifier
+  spec/   the protocol specification (SPEC.md) and identifier
   core/   protocol types: message envelope and endpoint address
   cli/    the scp command line tool
-apps/     applications (empty for now)
+apps/
+  web/    the scp.dev site (Next.js on Cloudflare via OpenNext)
 ```
 
 ## Development
