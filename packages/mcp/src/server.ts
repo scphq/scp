@@ -57,6 +57,8 @@ export interface RelayMcpOptions {
   input: AsyncIterable<Uint8Array | string> | ReadableStream<Uint8Array>
   /** one JSON-RPC line, newline included */
   output: (line: string) => void
+  /** whether the session is on the relay now: `dark` (why not) keeps the shim from claiming, `handle` is the name it joined under */
+  membership?: () => { dark: string } | { handle?: string }
   /** HOME shortens cwds in relay_list */
   env?: Record<string, string | undefined>
   /** push deliveries as `notifications/claude/channel` to a client that declares `claude/channel` or was launched with channels */
@@ -137,6 +139,7 @@ export const TOOLS = [
         body: { type: "string" },
         thread: { type: "string", description: "continue this thread: its id, or the id or short id of a message in it" },
         private: { type: "boolean", description: "only for recipients allowed private data" },
+        live: { type: "boolean", description: "refuse (not_live) instead of queueing when a recipient has no live session" },
       },
       required: ["to", "body"],
       additionalProperties: false,
@@ -225,6 +228,17 @@ export const TOOLS = [
     description:
       "Set your now, a one-line note on what you are doing right now, shown with your title in relay_list and relay_peers; your status state stays (working when unset).",
     inputSchema: { type: "object", properties: { now: { type: "string", maxLength: LIMITS.noteChars } }, required: ["now"], additionalProperties: false },
+  },
+  {
+    name: "relay_join",
+    description:
+      "Put this session on the relay, so peers can message it and new messages reach you after your tool calls; name sets your handle once (renaming you in place when you already joined).",
+    inputSchema: { type: "object", properties: { name: { type: "string", maxLength: 63 } }, additionalProperties: false },
+  },
+  {
+    name: "relay_leave",
+    description: "Take this session off the relay: it goes offline and gets no new messages pushed; its mail is kept until relay_join.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "relay_set_title",
@@ -523,7 +537,15 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     while (sent.size > DELIVERED_KEEP) sent.delete(sent.keys().next().value!)
   }
 
+  /** the claim for the session as it stands; a session off the relay is refused `unavailable` */
+  function sessionClaim(): Claim {
+    const joined = options.membership?.() ?? {}
+    if ("dark" in joined) throw new RelayError("unavailable", joined.dark)
+    return joined.handle ? { ...options.claim, handle: joined.handle } : options.claim
+  }
+
   async function open(): Promise<RelayClient> {
+    const claim = sessionClaim()
     const next = await options.connect()
     try {
       let hello: HelloResult | undefined
@@ -534,7 +556,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
           if (!(error instanceof RelayError)) throw error
         }
       }
-      hello ??= await next.hello({ claim: options.claim, ...(options.claim.cwd === undefined ? {} : { cwd: options.claim.cwd }) })
+      hello ??= await next.hello({ claim, ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }) })
       if (hello.token) token = hello.token
       me = hello.endpoint
       if (!announced) {
@@ -653,10 +675,11 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
           body: str(args, "body", true),
           ...(args.thread !== undefined ? { thread: str(args, "thread") } : {}),
           ...(bool(args, "private") ? { data_class: "private" } : {}),
+          ...(bool(args, "live") ? { live: true } : {}),
           client_id: clientId(),
         })
         if (result.held) return text(heldText(result.held))
-        const lines = reachLines(result.deliveries)
+        const lines = [...reachLines(result.deliveries), ...(result.warnings ?? [])]
         const to = result.deliveries.map((d) => (lines.length ? d.address : deliveryText(d))).join(", ")
         const receipt = result.deliveries.some((d) => d.state === "running" || d.state === "starting")
           ? [`relay_status with id ${shortId(result.id)} shows when it is read`]
@@ -751,6 +774,27 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         if (typeof args.now !== "string") throw new ToolInputError("now must be a string")
         const view = await call<EndpointView>("status", { note: args.now })
         return text(`${view.address}: ${view.status?.state}${view.status?.note ? `: ${quote(view.status.note)}` : ""}`)
+      }
+      case "relay_join": {
+        const name = str(args, "name")
+        const joined = options.membership?.() ?? {}
+        const claim = "handle" in joined && joined.handle ? { ...options.claim, handle: joined.handle } : options.claim
+        const next = await options.connect()
+        try {
+          const hello = await next.hello({ transient: true, claim, join: name ? { handle: name } : {} })
+          me = hello.endpoint
+        } finally {
+          next.close()
+        }
+        await ensure()
+        return text(`joined the relay as ${me?.address}: peers can message you, and new messages reach you after your tool calls`)
+      }
+      case "relay_leave": {
+        const view = await call<EndpointView>("leave")
+        client?.close()
+        client = undefined
+        token = undefined
+        return text(`${view.address} left the relay: it shows offline and gets no new messages pushed; its mail is kept until relay_join`)
       }
       case "relay_set_title": {
         if (typeof args.title !== "string") throw new ToolInputError("title must be a string")
@@ -949,7 +993,16 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     void running.finally(() => inFlight.delete(running))
   }
 
-  ensure().catch((error: unknown) => log(`${CLI_NAME} mcp: could not reach the relay broker yet: ${error instanceof Error ? error.message : String(error)}`))
+  const dark = (() => {
+    try {
+      sessionClaim()
+      return false
+    } catch {
+      return true
+    }
+  })()
+  if (!dark)
+    ensure().catch((error: unknown) => log(`${CLI_NAME} mcp: could not reach the relay broker yet: ${error instanceof Error ? error.message : String(error)}`))
   const heartbeat = setInterval(() => {
     call("whoami").catch(() => {})
   }, options.heartbeatMs ?? 30_000)

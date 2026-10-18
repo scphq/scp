@@ -254,6 +254,8 @@ export interface EndpointRow {
   spawned_at: number | null
   /** who may peek: null is off */
   peek: PeekLevel | null
+  /** when the session last set its handle itself (join or rename): a later claim with another handle does not rename it back */
+  named: number | null
 }
 
 export interface MessageRow {
@@ -517,6 +519,7 @@ export class RelayCore {
       ["title_auto", "TEXT"],
       ["title_turn", "INTEGER"],
       ["tldr_turn", "INTEGER"],
+      ["named", "INTEGER"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -820,7 +823,14 @@ export class RelayCore {
     } else if (row && !transient && !sameProcess(row, fields.process)) {
       row = undefined
       session = null
-    } else if (row && !transient && row.token_hash === null && row.handle !== wanted && !row.handle.startsWith(`${wanted.slice(0, 58)}-`)) {
+    } else if (
+      row &&
+      !transient &&
+      row.token_hash === null &&
+      row.named === null &&
+      row.handle !== wanted &&
+      !row.handle.startsWith(`${wanted.slice(0, 58)}-`)
+    ) {
       const hooks = row
       let settled = false
       for (let n = 1; n < (scope.exact ? 2 : 1000) && !settled; n++) {
@@ -1430,6 +1440,99 @@ export class RelayCore {
     return true
   }
 
+  /**
+   * a session joins on demand: its hook claim registers or takes back its endpoint, marked seen now even right after a leave, and `handle`,
+   * when given, renames it in place ({@link rename}'s rules). Nothing is kept when the rename is refused
+   */
+  joinSession(claim: Claim, handle?: unknown): EndpointView {
+    return this.scopeTx(() => {
+      const { endpoint } = this.claim(claim, { transient: true })
+      const row = this.mustEndpoint(endpoint.id)
+      if (handle !== undefined && handle !== null && handle !== "") this.renameRow(row, handle, false)
+      this.sql.all(`UPDATE endpoints SET hook_seen = ?, hook_ended = NULL WHERE id = ?`, this.now(), row.id)
+      this.audit("join", row.id, null, { handle: this.byId(row.id)!.handle })
+      return this.whoami(row.id)
+    })
+  }
+
+  /**
+   * renames an agent in place: its id, mail, threads, status, title and relations stay. An agent renames only itself, and only a root unless
+   * the policy's `defaults.rename` is `self`; the human at a terminal renames any local agent. The new handle is valid and held by no other endpoint
+   */
+  rename(actor: ScopeActor, params: { endpoint?: unknown; handle: unknown }): { endpoint: EndpointView; from: string; session: string | null } {
+    return this.scopeTx(() => {
+      const me = this.actorRow(actor)
+      if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
+      else if (actor.auth === "lineage") throw new RelayError("scope_refused", "only the session itself renames it: run this from the session's own shell")
+      const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
+      if (actor.kind !== "human" && target.id !== me.id) throw new RelayError("scope_refused", "an agent renames only itself")
+      if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be renamed")
+      this.renameRow(target, params.handle, actor.kind === "human")
+      return { endpoint: this.whoami(target.id), from: target.handle, session: target.session }
+    })
+  }
+
+  /** the endpoint's handle set to `value`, with the stored `ep:` and `fleet:` selectors that named it */
+  private renameRow(row: EndpointRow, value: unknown, byHuman: boolean): void {
+    const handle = typeof value === "string" ? value.trim().replace(/^me\//, "") : ""
+    if (!validHandle(handle)) throw new RelayError("invalid_params", `handle ${JSON.stringify(handle)} is not valid: lowercase letters, digits, . _ -`)
+    if (findSecret(handle)) throw new RelayError("secret_refused", "the handle looks like it carries a credential")
+    if (handle === row.handle) {
+      this.sql.all(`UPDATE endpoints SET named = COALESCE(named, ?) WHERE id = ?`, this.now(), row.id)
+      return
+    }
+    if (!byHuman && row.parent_ep !== null && this.policy?.defaults?.rename !== "self") {
+      const parent = this.byId(row.parent_ep)
+      throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; its name is set by the spawner`)
+    }
+    const held = this.byHandle(handle)
+    if (held) {
+      const how = held.kind !== "agent" ? "reserved" : presenceOf(held, this.now()) === "offline" ? "held by an offline endpoint" : "held by a live endpoint"
+      throw new RelayError("invalid_params", `${handle} is ${how}: pick another name`)
+    }
+    const from = row.handle
+    this.sql.all(`UPDATE endpoints SET handle = ?, named = ? WHERE id = ?`, handle, this.now(), row.id)
+    this.sql.all(`UPDATE grants SET name = ? WHERE used_by = ? AND name = ?`, handle, row.id, from)
+    for (const prefix of row.parent_ep === null ? ["ep:", "fleet:"] : ["ep:"]) {
+      const [a, b] = [JSON.stringify(`${prefix}${from}`), JSON.stringify(`${prefix}${handle}`)]
+      for (const [table, column] of [
+        ["endpoints", "rules"],
+        ["endpoints", "caps"],
+        ["groups", "rules"],
+        ["grants", "caps"],
+      ] as const)
+        this.sql.all(`UPDATE ${table} SET ${column} = REPLACE(${column}, ?, ?) WHERE instr(${column}, ?) > 0`, a, b, a)
+    }
+    this.audit("rename", row.id, null, { from, to: handle })
+  }
+
+  /**
+   * a session leaves: it lets go of its session and token and shows offline, its mail kept; a later join takes it back. An agent leaves only
+   * itself, the human at a terminal any local root. A spawned worker stays joined while it runs
+   */
+  leaveSession(actor: ScopeActor, params: { endpoint?: unknown } = {}): { endpoint: EndpointView; session: string | null } {
+    return this.scopeTx(() => {
+      const me = this.actorRow(actor)
+      if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
+      else if (actor.auth === "lineage") throw new RelayError("scope_refused", "only the session itself leaves: run this from the session's own shell")
+      const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
+      if (actor.kind !== "human" && target.id !== me.id) throw new RelayError("scope_refused", "an agent leaves only for itself")
+      if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can leave")
+      if (target.parent_ep !== null) {
+        const parent = this.byId(target.parent_ep)
+        throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; a spawned worker stays joined while it runs`)
+      }
+      this.sql.all(`UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ? WHERE id = ?`, this.now(), target.id)
+      this.audit("leave", target.id, null, { handle: target.handle })
+      return { endpoint: this.whoami(target.id), session: target.session }
+    })
+  }
+
+  /** the harness session key an endpoint holds, if any */
+  sessionOf(endpoint: string): string | null {
+    return this.byId(endpoint)?.session ?? null
+  }
+
   // messages
 
   /**
@@ -1490,6 +1593,17 @@ export class RelayCore {
       resolved.push(row)
     }
     const recipients = [...new Map(resolved.map((row) => [row.id, row])).values()]
+    if (params.live !== undefined && typeof params.live !== "boolean") throw new RelayError("invalid_params", "live must be true or false")
+    const dark = recipients.filter(
+      (r) =>
+        r.kind === "agent" &&
+        presenceOf(r, now) === "offline" &&
+        now - Math.max(r.last_seen ?? 0, r.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS &&
+        !this.unjoinedSpawn(sender, r.handle, now),
+    )
+    if (params.live === true && dark.length)
+      throw new RelayError("not_live", `no live session holds ${dark.map((r) => this.address(r)).join(", ")}: nothing was queued`)
+    const warnings = dark.map((r) => `queued: no live session holds ${this.address(r)}`)
     const pending = [...unjoined.values()].map((grant) => ({ key: pendingKey(grant.token_hash), address: `${this.user}/${grant.name}` }))
     const reached = recipients.length + pending.length
     if (reached > LIMITS.fanOutTotal) throw new RelayError("too_large", `the send reaches ${reached} endpoints, more than ${LIMITS.fanOutTotal}`)
@@ -1719,7 +1833,7 @@ export class RelayCore {
         deliveries.push({ endpoint: key, address, seq, offline: false, queued: true, last_seen: null, state: "starting" })
       }
       for (const name of fanOut) this.sql.all(`INSERT INTO tree_events (tree, at) VALUES (?, ?)`, `group:${name}`, now)
-      const sent: SendResult = { id, thread, hop, deliveries }
+      const sent: SendResult = { id, thread, hop, deliveries, ...(warnings.length ? { warnings } : {}) }
       if (clientId) {
         this.sql.all(
           `INSERT OR REPLACE INTO idempotency (from_ep, client_id, payload_hash, result, created_at) VALUES (?, ?, ?, ?, ?)`,

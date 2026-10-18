@@ -22,7 +22,8 @@ import {
 } from "@scp-dev/core"
 import { connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
 import { prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
-import { hookHarness, hookHarnessPid, relayIdentity } from "./identity"
+import { hookHarness, hookHarnessPid, normalizeHarness, processKey, psStart, relayIdentity, sessionKey } from "./identity"
+import { membership } from "./session"
 
 export { SUBAGENT }
 
@@ -547,12 +548,25 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   if (subagents && !sub) return
   if (event.kind === "session_end") options.deadline?.(1000)
   if (event.kind === "session_start") options.deadline?.(1500)
+  const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
+  const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
+  const started = psStart(pid)
+  const joined = membership(
+    options.env,
+    sessionKey(
+      options.env,
+      processKey(pid, () => started),
+    ),
+  )
+  if ("dark" in joined) return
   const claim = relayIdentity({
-    harness: hookHarness(harnessArg, options.env),
+    ...(joined.handle ? { as: joined.handle } : {}),
+    harness,
     fallbackHarness: "hook",
     cwd: event.cwd ?? options.cwd,
     env: options.env,
-    harnessPid: options.harnessPid ?? ((harness) => hookHarnessPid(options.env, harness)),
+    harnessPid: () => pid,
+    startOf: () => started,
   })
   if (!validHandle(claim.handle)) return
   const named = eventName(asString(field(payload, "hook_event_name", "hookEventName")) ?? eventArg)

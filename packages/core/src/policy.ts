@@ -36,6 +36,8 @@ export interface PolicyDefaults {
   /** `inherit`: a child of a capped parent reaches only what the parent reaches; a preset caps every placed child without grant caps */
   child_default?: ScopePreset | "inherit"
   verify_lineage?: "spike" | boolean
+  /** who may rename an agent besides the human at a terminal: `root` (default) only a root session itself, `self` any agent itself, spawned ones too */
+  rename?: "root" | "self"
 }
 
 export interface Policy {
@@ -164,7 +166,7 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
   }
   if (defaults !== undefined) {
     if (!isObject(defaults)) throw new RelayError("invalid_params", "defaults is an object")
-    const { human_always, symmetric_presets, child_default, verify_lineage, ...extra } = defaults
+    const { human_always, symmetric_presets, child_default, verify_lineage, rename, ...extra } = defaults
     if (Object.keys(extra).length) throw new RelayError("invalid_params", `unknown defaults: ${Object.keys(extra).join(", ")}`)
     const parsed: PolicyDefaults = {}
     for (const [key, flag] of [
@@ -187,6 +189,10 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
       if (verify_lineage === true)
         throw new RelayError("invalid_params", "defaults.verify_lineage true needs the peer-pid check, which this relay does not have yet: use spike or false")
       parsed.verify_lineage = verify_lineage
+    }
+    if (rename !== undefined) {
+      if (rename !== "root" && rename !== "self") throw new RelayError("invalid_params", "defaults.rename is root or self")
+      parsed.rename = rename
     }
     policy.defaults = parsed
   }

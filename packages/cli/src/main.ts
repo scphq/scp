@@ -303,7 +303,10 @@ const VERB_OPTIONS: Record<string, Record<string, { type: "string" | "boolean" }
 const IDENTITY: Option[] = ["as", "harness", "human", "json", "cloud", "machine"]
 const VERBS: Record<string, Option[]> = {
   list: [...IDENTITY, "all", "tree", "roots", "contacts"],
-  send: [...IDENTITY, "reply-to", "thread", "private", "attach"],
+  send: [...IDENTITY, "reply-to", "thread", "private", "attach", "live"],
+  join: ["harness", "json"],
+  leave: [...IDENTITY, "endpoint"],
+  name: [...IDENTITY, "endpoint"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
   reply: IDENTITY,
   ack: [...IDENTITY, "all"],
@@ -569,6 +572,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     if (code === 0 && positionals[0] === "enable") await relinkRunning()
     return code
   }
+  if (verb === "join") return (await import("./join")).joinCommand(values, positionals, cwd, out)
   if (verb === "holds") holdsArgs(values, positionals)
   const bodyFromStdin = (verb === "send" || verb === "ask" || verb === "reply") && (positionals[1] === undefined || positionals[1] === "-")
   const opened = await open(verb, values as Identity, cwd, bodyFromStdin)
@@ -801,13 +805,13 @@ async function runVerb(
         ...(attachments.length ? { attachments } : {}),
       }
       if (verb === "send") {
-        const result = await client.request<SendResult>("send", params)
+        const result = await client.request<SendResult>("send", { ...params, ...(values.live ? { live: true } : {}) })
         if (asJson) json(result)
         else if (result.held) out(heldText(result.held))
         else {
           const lines = reachLines(result.deliveries)
           out(`sent ${result.id} to ${result.deliveries.map((d) => (lines.length ? d.address : deliveryText(d))).join(", ")}${redactedText(result.redacted)}`)
-          for (const line of lines) out(`  ${line}`)
+          for (const line of [...lines, ...(result.warnings ?? [])]) out(`  ${line}`)
           if (result.deliveries.some((d) => d.state === "running" || d.state === "starting"))
             out(`  ${CLI_NAME} status ${shortId(result.id)} shows when it is read`)
         }
@@ -974,6 +978,30 @@ async function runVerb(
       const view = await client.request<EndpointView>("status", { note: positionals.join(" ") })
       if (asJson) json(view)
       else out(`${view.address}: ${view.status ? statusText(view.status) : "-"}`)
+      return 0
+    }
+    case "name": {
+      if (positionals.length > 1) throw new RelayUsage(`${CLI_NAME} name takes one handle, or none to print your address`)
+      const endpoint = values.endpoint as string | undefined
+      if (!positionals.length) {
+        if (endpoint !== undefined) throw new RelayUsage(`${CLI_NAME} name --endpoint EP takes the new handle`)
+        if (me?.kind !== "agent") throw new RelayUsage(`${CLI_NAME} name: this shell is no joined session; ${CLI_NAME} join <name> joins it`)
+        if (asJson) json({ address: me.address })
+        else out(me.address)
+        return 0
+      }
+      const before = endpoint ?? me?.address
+      const view = await client.request<EndpointView>("rename", { handle: positionals[0], ...(endpoint !== undefined ? { endpoint } : {}) })
+      if (asJson) json(view)
+      else out(before && before !== view.address ? `${before} is now ${view.address}` : `${view.address}`)
+      return 0
+    }
+    case "leave": {
+      if (positionals.length) throw new RelayUsage(`${CLI_NAME} leave takes no arguments (--endpoint EP for the human at a terminal)`)
+      const endpoint = values.endpoint as string | undefined
+      const view = await client.request<EndpointView>("leave", endpoint !== undefined ? { endpoint } : {})
+      if (asJson) json(view)
+      else out(`${view.address} left the relay: offline, no messages pushed; its mail is kept until ${CLI_NAME} join`)
       return 0
     }
     case "set-title": {

@@ -3,7 +3,8 @@ import { closeSync, openSync, statSync, truncateSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
 import { type BrokerInfo, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
-import { harnessLineage, hiddenHarness, labelsFor, lineage, readPsTable } from "./identity"
+import { harnessLineage, hiddenHarness, labelsFor, lineage, readPsTable, sessionKey } from "./identity"
+import { membership } from "./session"
 import { parseSeconds, SELF } from "./term"
 import type { RelayTransport } from "./remote"
 
@@ -66,6 +67,8 @@ export const OPTIONS = {
   full: { type: "boolean" },
   who: { type: "boolean" },
   peek: { type: "string" },
+  endpoint: { type: "string" },
+  live: { type: "boolean" },
 } as const
 
 export type Option = keyof typeof OPTIONS
@@ -240,8 +243,9 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
     }
   }
   if (values.machine !== undefined) throw new RelayUsage("--machine names the machine of the cloud transport: add --cloud")
-  const handle = named ? localHandle(named) : undefined
   const { keys, self } = walk ?? walkNow()
+  const joined = !values.as && named && self.length ? membership(process.env, sessionKey(process.env, self.at(-1)!)) : {}
+  const handle = "handle" in joined && joined.handle ? joined.handle : named ? localHandle(named) : undefined
   const harnessPid = self.length ? Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]) : undefined
   const lineageClaim = keys.length ? { lineage: keys } : {}
   const dir = relayDir()
@@ -279,7 +283,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
         if (hiddenHarness(process.ppid, readPsTable()))
           throw new RelayUsage(`${CLI_NAME} ${verb}: sandbox pid namespace: this shell cannot see its harness; use the scp MCP tools`)
         throw new RelayUsage(
-          `${CLI_NAME} ${verb}: no relay agent runs this shell's harness process (${harnessPid ? `pid ${harnessPid}` : "none found"}); pass --as HANDLE or --human (no terminal is attached, so me/ is not assumed)`,
+          `${CLI_NAME} ${verb}: no relay agent runs this shell's harness process (${harnessPid ? `pid ${harnessPid}` : "none found"}); ${CLI_NAME} join <name> puts this session on the relay, or pass --as HANDLE or --human (no terminal is attached, so me/ is not assumed)`,
         )
       }
     }

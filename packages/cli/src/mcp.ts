@@ -5,6 +5,7 @@ import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
 import { harnessPid, psParent, relayIdentity } from "./identity"
+import { membership } from "./session"
 
 type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean }
 
@@ -29,6 +30,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
   await runRelayMcp({
     connect: () => connectBroker(dir, () => startDaemon(dir)),
     claim,
+    membership: () => membership(process.env, claim.session),
     input: process.stdin,
     output: (line) => void process.stdout.write(line),
     env: process.env,

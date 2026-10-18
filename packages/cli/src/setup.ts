@@ -38,6 +38,7 @@ import {
 } from "./hooks"
 import { hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
+import { type JoinMode, setJoinMode } from "./relay"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -50,7 +51,7 @@ const SERVER = "scp"
 const HOOKED = new Set<SetupHarness>(["claude", "codex", "opencode", "agy", "muse"])
 const VERIFY_TIMEOUT_MS = 60_000
 
-export const SETUP_HELP = `${CLI_NAME} setup [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH] [--harness H]
+export const SETUP_HELP = `${CLI_NAME} setup [--write] [--no-hooks] [--block-stop-on-unread] [--join auto|manual] [--undo] [--bin PATH] [--harness H]
   mounts the relay MCP shim in every installed harness (claude, codex, opencode, grok, muse, agy) at user scope, running
   the ${CLI_NAME} PATH finds (by that path) or --bin, and installs the relay hooks at user scope (Muse's as a plugin). Prints
   the plan; --write applies it (each file backed up next to itself as <file>.bak-<time>, its mode kept), then checks
@@ -60,6 +61,8 @@ export const SETUP_HELP = `${CLI_NAME} setup [--write] [--no-hooks] [--block-sto
   messages are unread; without it a hooks file keeps the stop hook it has. ${CLI_NAME} spawn returns at once from an
   agent's shell; while the workers it started run, a stop waits up to 600 s for their next message or handback (hooks
   install --push-wait), so results arrive by themselves. --no-hooks mounts the MCP shim only.
+  --join auto (the default) puts every hooked session on the relay when it starts; --join manual keeps a session off it
+  until it runs ${CLI_NAME} join <name> (or calls relay_join); saved in ~/.config/scp/config.json with --write.
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.`
 
 /** where a harness's binary was found, from PATH or its usual install location */
@@ -87,6 +90,8 @@ export interface SetupOptions {
   blockStop?: boolean
   bin?: string
   harness?: string
+  /** how hooked sessions join the relay, saved in the config */
+  join?: JoinMode
 }
 
 export interface SetupDeps {
@@ -1167,6 +1172,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
     throw new RelayUsage(`--harness is one of ${SETUP_HARNESSES.join(", ")}`)
   }
   if (options.blockStop && (options.hooks === false || options.undo)) throw new RelayUsage(`${BLOCK_STOP} goes with the hooks: not with --no-hooks or --undo`)
+  if (options.join !== undefined && options.undo) throw new RelayUsage("--join sets how sessions join: not with --undo")
   let added: Added[]
   try {
     added = readManifest(env)
@@ -1189,6 +1195,12 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
   out(`${CLI_NAME} setup${options.undo ? " --undo" : ""}: ${options.write ? "applying" : "dry run, nothing is written (add --write to apply)"}`)
   let hooks = options.hooks !== false
   let unresolved = 0
+  if (options.join !== undefined) {
+    if (options.write) setJoinMode(env, options.join)
+    out(
+      `join: ${options.join}${options.join === "manual" ? ` (a session stays off the relay until it runs ${CLI_NAME} join <name>)` : " (every hooked session joins when it starts)"}${options.write ? "" : ", saved with --write"}`,
+    )
+  }
   if (options.hooks === false) out(`hooks: ${options.undo ? "kept (--no-hooks)" : "not installed (--no-hooks); only the MCP shim is mounted"}`)
   if (!options.undo) {
     if (options.bin !== undefined) out(`mounts run: ${bin} (from --bin; they break if that file moves)`)
@@ -1351,6 +1363,7 @@ export function parseSetupArgs(args: string[]): SetupOptions | "help" {
     "block-stop-on-unread": { type: "boolean" },
     bin: { type: "string" },
     harness: { type: "string" },
+    join: { type: "string" },
     help: { type: "boolean", short: "h" },
   } as const
   let parsed: ReturnType<typeof parseArgs<{ options: typeof options }>>
@@ -1364,10 +1377,11 @@ export function parseSetupArgs(args: string[]): SetupOptions | "help" {
   } catch (error) {
     throw new RelayUsage(message(error))
   }
-  const { help, hooks, "no-hooks": noHooks, "block-stop-on-unread": blockStop, ...rest } = parsed.values
+  const { help, hooks, "no-hooks": noHooks, "block-stop-on-unread": blockStop, join: joins, ...rest } = parsed.values
   if (help) return "help"
+  if (joins !== undefined && joins !== "auto" && joins !== "manual") throw new RelayUsage("--join takes auto or manual")
   if (hooks && noHooks) throw new RelayUsage("--hooks and --no-hooks contradict each other; the hooks are installed unless --no-hooks")
-  return { ...rest, ...(noHooks ? { hooks: false } : {}), ...(blockStop ? { blockStop } : {}) }
+  return { ...rest, ...(noHooks ? { hooks: false } : {}), ...(blockStop ? { blockStop } : {}), ...(joins !== undefined ? { join: joins as JoinMode } : {}) }
 }
 
 /** parses setup flags before the shared command parser */

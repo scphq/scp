@@ -691,7 +691,7 @@ describe("swarm", () => {
         125,
         expect.stringMatching(
           new RegExp(
-            `^swarm ${verb}: no relay agent runs this shell's harness process \\(.*\\); pass --as HANDLE or --human \\(no terminal is attached, so me/ is not assumed\\)$`,
+            `^swarm ${verb}: no relay agent runs this shell's harness process \\(.*\\); swarm join <name> puts this session on the relay, or pass --as HANDLE or --human \\(no terminal is attached, so me/ is not assumed\\)$`,
           ),
         ),
       ])

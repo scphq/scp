@@ -102,7 +102,7 @@ describe("relay MCP shim, in process", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("initialize negotiates the protocol and lists the sixteen tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
+  test("initialize negotiates the protocol and lists the eighteen tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
     const s = shim(broker, { handle: "init-a" })
     const init = await s.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } })
     expect(init.result).toMatchObject({ protocolVersion: "2025-06-18", serverInfo: { name: "scp" }, capabilities: { tools: {} } })
@@ -115,6 +115,8 @@ describe("relay MCP shim, in process", () => {
       "relay_ask_wait",
       "relay_group",
       "relay_inbox",
+      "relay_join",
+      "relay_leave",
       "relay_list",
       "relay_peek",
       "relay_peers",

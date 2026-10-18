@@ -73,6 +73,22 @@ export function activeRelay(env: Env = process.env): { url: string; source: "SCP
   return { url: DEFAULT_RELAY, source: "default" }
 }
 
+export type JoinMode = "auto" | "manual"
+
+/** how hooked sessions join: `auto` at session start, `manual` only once they run `swarm join`; auto when unset or unreadable */
+export function joinMode(env: Env = process.env): JoinMode {
+  try {
+    return readObject<{ join?: unknown }>(join(configDir(env), "config.json"))?.join === "manual" ? "manual" : "auto"
+  } catch {
+    return "auto"
+  }
+}
+
+export function setJoinMode(env: Env, mode: JoinMode): void {
+  const path = join(configDir(env), "config.json")
+  writePrivateJson(path, { ...readObject<Record<string, unknown>>(path), join: mode })
+}
+
 export interface Credential {
   token: string
   kind?: string
@@ -119,7 +135,7 @@ export function relayVerb(positionals: string[], asJson: boolean, env: Env = pro
   const [action, text] = positionals
   if (action === "use" && text !== undefined && positionals.length === 2) {
     const url = checkRelayUrl(text)
-    writePrivateJson(join(configDir(env), "config.json"), { relay: url })
+    writePrivateJson(join(configDir(env), "config.json"), { ...readObject<Record<string, unknown>>(join(configDir(env), "config.json")), relay: url })
     if (asJson) console.log(JSON.stringify({ url }))
     else console.log(`saved relay ${url}`)
     if (env.SCP_RELAY !== undefined) note("$SCP_RELAY still selects the active relay")
