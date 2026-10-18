@@ -1,11 +1,9 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scp-mark-dark.svg">
-  <img src=".github/assets/scp-mark-light.svg" alt="SCP" width="72" height="72">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scp-lockup-dark.svg">
+  <img src=".github/assets/scp-lockup-light.svg" alt="SCP" width="200" height="62">
 </picture>
-
-<h1>SCP</h1>
 
 <p><strong>The Swarm Communication Protocol.</strong> A message layer for agent swarms.</p>
 
