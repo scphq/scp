@@ -66,6 +66,7 @@ results back, as with native subagents.
   ${CLI_NAME} inbox [--wait S]            your unread messages, then marked read: ${CLI_NAME} inbox
   ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, status; --all adds offline ones
   ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
+  ${CLI_NAME} join --under <parent>       link this session under an orchestrator, as a spawned worker sits: ${CLI_NAME} join --under lead
   ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
   ${CLI_NAME} peek <ep>                   a short, redacted view of a peekable agent's last turns: ${CLI_NAME} peek rev
   ${CLI_NAME} set-status <state> [note]   working, waiting, blocked or done: ${CLI_NAME} set-status done "PR open"
@@ -243,6 +244,17 @@ agent sessions:
                                                  and title stay; a handle another endpoint holds, live or offline, is refused;
                                                  a spawned worker is named by its spawner (policy defaults.rename: self lets it);
                                                  --endpoint renames another agent, for the human at a terminal
+  ${CLI_NAME} join [<handle>] --under <parent>   link the session under the agent <parent> (local, one it may message), as if
+                                                 <parent> had spawned it: it shows under <parent> in list --tree, the dashboard
+                                                 and the graph, and takes on a worker's scope (the policy's child_default: by
+                                                 default it reaches only what <parent> reaches). Narrowing, so always allowed
+  ${CLI_NAME} adopt <child> [--parent <p>]      link a local root agent and its subtree under <p>, for the human at a terminal;
+                                                 from an agent's shell with a terminal attached <p> defaults to that agent.
+                                                 An agent without a terminal is refused: the session joins with --under itself
+  ${CLI_NAME} unlink [<child>]                  put a linked agent back at the root, its subtree along and the child scope off;
+                                                 widening, so the human at a terminal only (policy defaults.unlink: self lets
+                                                 an agent unlink itself). A link that would put a parent under its own child
+                                                 (a cycle) is refused; both are audited, as adopt and unlink
   ${CLI_NAME} leave [--endpoint EP]              take this session off the relay: offline, no messages pushed, mail kept until
                                                  ${CLI_NAME} join; a spawned worker stays joined while it runs
   With setup --join manual a session stays off the relay until it runs ${CLI_NAME} join; the default, auto, joins every
@@ -321,7 +333,9 @@ const IDENTITY: Option[] = ["as", "harness", "human", "json", "cloud", "machine"
 const VERBS: Record<string, Option[]> = {
   list: [...IDENTITY, "all", "tree", "roots", "contacts"],
   send: [...IDENTITY, "reply-to", "thread", "private", "attach", "live"],
-  join: ["harness", "json"],
+  join: ["harness", "json", "under"],
+  adopt: [...IDENTITY, "parent"],
+  unlink: IDENTITY,
   leave: [...IDENTITY, "endpoint"],
   name: [...IDENTITY, "endpoint"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
@@ -1012,6 +1026,26 @@ async function runVerb(
       const view = await client.request<EndpointView>("rename", { handle: positionals[0], ...(endpoint !== undefined ? { endpoint } : {}) })
       if (asJson) json(view)
       else out(before && before !== view.address ? `${before} is now ${view.address}` : `${view.address}`)
+      return 0
+    }
+    case "adopt": {
+      if (positionals.length !== 1) throw new RelayUsage(`${CLI_NAME} adopt takes the child to link: ${CLI_NAME} adopt <child> [--parent <p>]`)
+      const parent = values.parent as string | undefined
+      if (parent === undefined && me?.kind !== "agent")
+        throw new RelayUsage(`${CLI_NAME} adopt: name the parent with --parent <p> (run from an agent's shell, it defaults to that agent)`)
+      const result = await client.request<{ endpoint: EndpointView; parent: string }>("adopt", {
+        endpoint: positionals[0],
+        ...(parent !== undefined ? { parent } : {}),
+      })
+      if (asJson) json(result)
+      else out(`${result.endpoint.address} now sits under ${result.parent}`)
+      return 0
+    }
+    case "unlink": {
+      if (positionals.length > 1) throw new RelayUsage(`${CLI_NAME} unlink takes one child, or none for this session`)
+      const result = await client.request<{ endpoint: EndpointView; parent: string }>("unlink", positionals.length ? { endpoint: positionals[0] } : {})
+      if (asJson) json(result)
+      else out(`${result.endpoint.address} is a root again (was under ${result.parent})`)
       return 0
     }
     case "leave": {

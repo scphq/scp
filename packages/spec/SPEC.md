@@ -318,7 +318,7 @@ A client that wants an endpoint sends a claim in `hello`:
 Processing rules:
 
 1. **Session join.** A claim whose `session` names an endpoint that is not offline joins that endpoint. A connecting (non-hook) claim joins only when the row has no connection and is held by the same harness process. When the connecting claim names a different handle than the hooks registered, the hooks' endpoint is renamed to it, or an eligible offline row of that handle is taken and the hooks' unread messages move to it, unless the session named its endpoint itself (section 6.12): such a row keeps its handle and the claim joins it.
-2. **Handle search.** The broker tries the wanted handle, then `<wanted, at most 58 characters>-<n>` for n from 2 to 999. A free handle creates a new row. An existing row is taken over only when it is an agent with no connections, offline, of the same harness, not a subagent root, and the claim either restarts it in place (same `parent_ep`, or both roots) or redeems its grant. A hook's takeover additionally requires the same harness process, an ended hook session, or `last_seen` older than `LIMITS.restartGraceS`.
+2. **Handle search.** The broker tries the wanted handle, then `<wanted, at most 58 characters>-<n>` for n from 2 to 999. A free handle creates a new row. An existing row is taken over only when it is an agent with no connections, offline, of the same harness, not a subagent root, and the claim either restarts it in place (same `parent_ep`, both roots, or a root claim of a linked row, section 6.12) or redeems its grant. A hook's takeover additionally requires the same harness process, an ended hook session, or `last_seen` older than `LIMITS.restartGraceS`.
 3. **Handle reuse.** A connectionless row idle longer than `LIMITS.handleBoundS` (30 days) is renamed out of the way (`_gone_<id>`) and its handle becomes free. The sweep deletes such rows once nothing references them.
 4. **Placement.** The endpoint is placed under the shallowest, then oldest, agent whose `process` equals the first lineage key that any agent holds. With no match it is a root. `depth` is the parent's depth plus one. A depth above `LIMITS.depthMax` (32) is refused `scope_refused`. A grant overrides lineage placement (section 9.1).
 5. **Token.** A new non-hook session receives a resume token `kre_<64 hex>`; the broker stores only its hash. `hello {resume}` with that token rebinds the session; an unknown token is `unauthorized`.
@@ -404,14 +404,18 @@ A takeover of an existing row by a different process is an incarnation, unless i
 
 Endpoints have no short form. Messages do: a message's short id is the last 6 characters of its id (section 7.3).
 
-### 6.12 Joining, renaming and leaving
+### 6.12 Joining, renaming, linking and leaving
 
 A session can work off the relay and join on demand.
 
 - **Join modes.** In `auto` mode (the reference default) every hooked session joins at session start. In `manual` mode (reference: `swarm setup --join manual`, stored as `join` in `~/.config/scp/config.json`) a session's hooks and MCP server claim nothing until the session joins.
-- **Join.** `hello {transient, claim, join: {handle?}}` from the session's own shell processes the claim as a hook (registering the endpoint when it has none, or taking back its own offline row), marks it seen now, and with `handle` renames it as below. A refused rename keeps nothing.
+- **Join.** `hello {transient, claim, join: {handle?, under?}}` from the session's own shell processes the claim as a hook (registering the endpoint when it has none, or taking back its own offline row), marks it seen now, with `handle` renames it as below, and with `under` links it under that agent as below. A refused rename or link keeps nothing.
+- **Link (join under).** `join.under` names a local agent the session may message (else `not_found`). The session, a root, and its subtree move under it as if it had spawned the session: the session takes the parent's tree, sits one level below it (its descendants shift along, within `LIMITS.depthMax`), and takes on a placed child's scope: the inherited caps under `child_default: inherit`, or the policy cap of the `child_default` preset (section 8). Linking narrows, so it needs no authority beyond the session's own. Joining under its current parent is a no-op; a session that already sits under another agent is refused `scope_refused` (unlink it first). The link is audited `adopt {by, auth, target, parent}`. A linked endpoint is marked as linked: a later root claim of it (a restart, or a join after a leave) takes it back where it sits instead of registering a new row (rule 2 of section 6.4).
+- **Adopt.** `adopt {endpoint, parent?}` links another local root agent the same way. The human at a terminal MUST name `parent`. An agent may adopt only when its connection is a human hello bound to it through its lineage with a terminal attached (the human at that agent's shell), and `parent` defaults to that agent; any other agent is refused `scope_refused`, audited, so an agent never adopts another root on its own. The human without a terminal is refused `scope_refused`.
+- **Unlink.** `unlink {endpoint?}` puts a linked or placed agent back at the root: its subtree moves along, the policy caps of the child scope come off, and the linked mark is cleared; other caps stay. Unlinking widens the agent's scope, so only the human at a terminal unlinks (any local agent, with `endpoint`), unless the policy sets `defaults.unlink: "self"`, which lets an agent unlink itself. A root is `invalid_params`. Audited `unlink {by, auth, target, parent}`, `parent` being the address it left.
+- **Cycles.** A link or adopt whose parent is the child itself or one of its descendants is refused `scope_refused`. The parent MUST be a local agent; a link to another machine's agent is `invalid_params`.
 - **Rename.** `rename {handle, endpoint?}` sets a new handle in place: the id, mail, threads, status, title, grants spent and tree relations stay, and stored `ep:<handle>` selectors (and `fleet:<handle>` for a root) that named it are rewritten. An agent renames only itself, and only a root unless the policy sets `defaults.rename: "self"`; a placed child is refused `scope_refused` "spawned by `<parent address>`; its name is set by the spawner". The human at a terminal renames any local agent with `endpoint`. The handle MUST be valid (section 6.2) and held by no other endpoint, live or offline; a conflict is `invalid_params`, never a suffixed handle. The rename is audited `rename {from, to}`, and the endpoint is marked as named by its session (rule 1 of section 6.4). Messages keep the address they were sent to.
-- **Leave.** `leave {endpoint?}` takes a root agent off the relay: it lets go of its session and token, its connections are closed, and it shows offline; its mail is kept. A placed child is refused `scope_refused` (a spawned worker stays joined while it runs). A later join takes the row back by its handle.
+- **Leave.** `leave {endpoint?}` takes a root or linked agent off the relay: it lets go of its session and token, its connections are closed, and it shows offline; its mail is kept. A spawned child is refused `scope_refused` (a spawned worker stays joined while it runs). A later join takes the row back by its handle.
 - **Session markers.** After a join, rename or leave the broker records, per session key, whether the session is joined and its handle (reference: a file under `<state dir>/sessions/`). Hooks and the MCP server read it before claiming: a session that left, or that never joined in manual mode, makes no claim and no broker round trip, and a renamed session claims its own handle, over `SCP_NAME` and the derived default, so its claims never rename it back or fork a row of the old handle. The endpoint rows stay the source of truth.
 
 ---
@@ -1014,7 +1018,7 @@ The broker reads an optional policy file (reference: `~/.config/scp/policy.json`
   "groups":   [ { "name": <name>, "members": [absolute sel], "rules"?: ..., "in"?: ..., "out"?: ... } ],               // at most 64
   "defaults": { "human_always": true, "symmetric_presets": true,
                 "child_default": "inherit" | "open" | "tree" | "parent" | "none",
-                "verify_lineage": "spike" | false, "rename": "root" | "self" },
+                "verify_lineage": "spike" | false, "rename": "root" | "self", "unlink": "human" | "self" },
   "judge":    { ... }                                                                                                  // section 15.6
 }
 ```
@@ -1024,6 +1028,7 @@ The broker reads an optional policy file (reference: `~/.config/scp/policy.json`
 - `scope` installs a policy cap on every matching endpoint (both directions when symmetric). A preset is read as its list (`tree` as `tree:parent`, `tree:descendants`; `parent` as `tree:parent`; `none` as the empty list) and `open` as no cap. Nobody can loosen a policy cap.
 - `verify_lineage` accepts `"spike"` (default) or `false`; both leave lineage placement in effect.
 - `rename` is `"root"` (default: only a root agent renames itself) or `"self"` (any agent, spawned ones too, renames itself); section 6.12.
+- `unlink` is `"human"` (default: only the human at a terminal unlinks an agent from its parent) or `"self"` (an agent also unlinks itself); section 6.12.
 - Group bindings of policy `group:` selectors are resolved at load and kept for the last `LIMITS.policyLoadsKept` (8) distinct policies.
 
 ### 10.10 `why`
@@ -1140,7 +1145,7 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 
 **Sync parts.** A full mirror larger than one frame is split into frames of at most 261120 bytes sharing `sync {id, part, parts}` (`parts` at most 4096, `id` at most 64 characters). The hub marks offline what the sync left out only after the last part arrives intact; out-of-order parts discard the sync. A single view larger than a frame is `too_large`.
 
-**Presence.** The bridge sends `mirror {endpoints, full: false}` deltas on claim, release and status change, and a full resync on rules, caps, groups or title changes. The hub relays endpoint changes to the other bridges and presence to watchers. When a bridge closes, its rows go offline unless a newer bridge is live. Presence across machines converges at the next delta or full sync. After a rename (section 6.12) the delta carries `was`, the previous handle: the hub, and each bridge it relays the change to, renames that machine's row in place, keeping its id and queued messages, so the old handle does not stay behind as a live row.
+**Presence.** The bridge sends `mirror {endpoints, full: false}` deltas on claim, release and status change, and a full resync on rules, caps, groups or title changes. The hub relays endpoint changes to the other bridges and presence to watchers. When a bridge closes, its rows go offline unless a newer bridge is live. Presence across machines converges at the next delta or full sync. After a rename (section 6.12) the delta carries `was`, the previous handle: the hub, and each bridge it relays the change to, renames that machine's row in place, keeping its id and queued messages, so the old handle does not stay behind as a live row. After a join under, an adopt or an unlink the bridge sends a full resync, so the hub and the other machines place the endpoint and its subtree under the new parent (or at the root) from the mirrored `parent_ep` and `depth`.
 
 **Forwarding.** A send whose recipients are all on other machines goes to the bridge; mixing local and remote recipients is `invalid_params`. Before forwarding the broker checks local scope and policy, refuses `private` data unless the bridge is configured to allow it (`data_class_refused`), re-scans for credentials, applies idempotency and requires the sender to be mirrored (`policy_refused`). It sends `forward {from: <handle>, params, hop_floor, tty?}` with attachments removed. The hub resolves the sender on the bridge's own machine, caps the hop floor at `LIMITS.hopMax + 1`, checks scope against mirrored rules and caps, and stores the delivery.
 
@@ -1339,7 +1344,8 @@ Each broker and hub keeps an audit table `{id, at, event, endpoint, ref, detail}
 | `ack` | `count`, `via?` |
 | `refuse` | `code`, `message`, structured fields (`to`, `limit`, `window_s`, `hop`, `thread`, `until`), `retry_after_s` |
 | `loop_guard` | pause details |
-| `claim`, `resume`, `title`, `spawn_exit` | identity events |
+| `claim`, `resume`, `title`, `spawn_exit`, `join`, `leave`, `rename` | identity events |
+| `adopt`, `unlink` | `by`, `auth`, `target`, `parent` (section 6.12) |
 | `peek`, `peek_set` | peeker, auth, turns, bytes, source, level |
 | `scope_refused`, `scope_reset`, `scope_place`, `scope_grant`, `scope_grant_ignored`, `scope_narrow`, `scope_widen`, `scope_lift`, `scope_group`, `scope_admin` | scope changes and refusals |
 | `inject`, `forward`, `reject`, `mirror_reset` | federation |
@@ -1471,6 +1477,8 @@ An integration with push capability additionally:
 | `title_infer` | `from` (`prompt` or `summary`), `text` | `{changed}` | `invalid_params` | hook |
 | `rename` | `handle`, `endpoint?` (tty only) | EndpointView | `invalid_params`, `secret_refused`, `scope_refused`, `not_found` | ep (agent, session or self), tty |
 | `leave` | `endpoint?` (tty only) | EndpointView | `invalid_params`, `scope_refused`, `not_found` | ep (agent, session or self), tty |
+| `adopt` | `endpoint`, `parent?` (default: the agent, for an agent's shell at a terminal) | `{endpoint: EndpointView, parent}` | `invalid_params`, `scope_refused`, `not_found` | tty, or ep bound by lineage with a terminal |
+| `unlink` | `endpoint?` (tty only) | `{endpoint: EndpointView, parent}` | `invalid_params`, `scope_refused`, `not_found` | tty; ep (agent, session or self) with `defaults.unlink: "self"` |
 | `status` | `state?`, `note?` | EndpointView | `invalid_params`, `secret_refused` | ep, hook |
 | `event` | `kind`, `tool?`, `summary?`, `agent?` | ActivityRow | `invalid_params`, `too_large` | ep, hook |
 | `inject` | `stop?`, `count?`, `hold_unread?`, `directives?`, `wait_s?` | sections 8.3, 8.5 | | ep, hook |
@@ -1645,7 +1653,8 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `list [--all] [--tree] [--roots] [--contacts]` | `list` |
 | `peers [--all] [--roots]` | `peers` |
 | `send <to> [text or -] [--reply-to <ref>] [--thread <t>] [--private] [--attach <path>] [--live]` | `message`, `send` |
-| `join [<handle>]`, `leave [--endpoint <ep>]`, `name [<handle>] [--endpoint <ep>]` | `hello {transient, claim, join}`, `leave`, `rename` (section 6.12); `name` alone prints the session's address |
+| `join [<handle>] [--under <parent>]`, `leave [--endpoint <ep>]`, `name [<handle>] [--endpoint <ep>]` | `hello {transient, claim, join}`, `leave`, `rename` (section 6.12); `name` alone prints the session's address |
+| `adopt <child> [--parent <p>]`, `unlink [<child>]` | `adopt`, `unlink` (section 6.12) |
 | `reply <ref> [text or -]` | `message {member}`, `send {kind: reply}` |
 | `ask <to> [text] [--wait <s>] [--require-reply] [--thread] [--private] [--attach]` | `ask` |
 | `ask-wait <id> [--wait <s>]` | `ask_wait` |
@@ -1675,7 +1684,7 @@ The MCP server speaks JSON-RPC 2.0 over stdio (lines up to 4 MiB; protocol versi
 | `relay_list` | `all?`, `contacts?` | `list` |
 | `relay_peers` | `all?` | `peers` |
 | `relay_send` | `to` (1 to 16), `body`, `thread?`, `private?`, `live?` | `send` with a `client_id` |
-| `relay_join` | `name?` | `hello {transient, claim, join}` on a fresh connection, then the shim's own claim |
+| `relay_join` | `name?`, `under?` | `hello {transient, claim, join}` on a fresh connection, then the shim's own claim |
 | `relay_leave` | | `leave`; the shim then claims nothing until a join |
 | `relay_status` | `id` (id, short id or `last`) | `receipts` |
 | `relay_spawn` | `command` (argv, at least one word) or `harness` (`claude`, `codex`) with `task` and `model?`; `name?`, `title?` (at most 64), `no_push?`, `handback_bytes?` (1 to `LIMITS.handbackBytes`), `cwd?` (absolute, an existing directory) | `whoami`, then the spawn operation (section 9.2) in the background, as the caller |

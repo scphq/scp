@@ -38,6 +38,8 @@ export interface PolicyDefaults {
   verify_lineage?: "spike" | boolean
   /** who may rename an agent besides the human at a terminal: `root` (default) only a root session itself, `self` any agent itself, spawned ones too */
   rename?: "root" | "self"
+  /** who may unlink an agent from its parent besides the human at a terminal: `human` (default) nobody, `self` the agent itself */
+  unlink?: "human" | "self"
 }
 
 export interface Policy {
@@ -166,7 +168,7 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
   }
   if (defaults !== undefined) {
     if (!isObject(defaults)) throw new RelayError("invalid_params", "defaults is an object")
-    const { human_always, symmetric_presets, child_default, verify_lineage, rename, ...extra } = defaults
+    const { human_always, symmetric_presets, child_default, verify_lineage, rename, unlink, ...extra } = defaults
     if (Object.keys(extra).length) throw new RelayError("invalid_params", `unknown defaults: ${Object.keys(extra).join(", ")}`)
     const parsed: PolicyDefaults = {}
     for (const [key, flag] of [
@@ -193,6 +195,10 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
     if (rename !== undefined) {
       if (rename !== "root" && rename !== "self") throw new RelayError("invalid_params", "defaults.rename is root or self")
       parsed.rename = rename
+    }
+    if (unlink !== undefined) {
+      if (unlink !== "human" && unlink !== "self") throw new RelayError("invalid_params", "defaults.unlink is human or self")
+      parsed.unlink = unlink
     }
     policy.defaults = parsed
   }
