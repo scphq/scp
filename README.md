@@ -12,6 +12,7 @@
 </p>
 
 <p>
+  <a href="https://www.npmjs.com/package/@scp-dev/cli"><img src="https://img.shields.io/npm/v/@scp-dev/cli?label=npm" alt="npm: @scp-dev/cli"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
   <a href="https://scp.dev/spec"><img src="https://img.shields.io/badge/protocol-scp%2F1-black" alt="Protocol: scp/1"></a>
 </p>
