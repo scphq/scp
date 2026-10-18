@@ -21,16 +21,25 @@ export function placeOf(address: string): { machine: string; handle: string } {
   return parts.length >= 3 ? { machine: parts[1]!, handle: parts.slice(2).join("/") } : { machine: "", handle: "" };
 }
 
+/** a child's handle without its parent's handle and the separator after it, so siblings show what tells them apart */
+export function shortLabel(handle: string, parent: string): string {
+  if (!parent || handle.length <= parent.length + 1 || !handle.startsWith(parent)) return handle;
+  return "-_./:".includes(handle[parent.length]!) ? handle.slice(parent.length + 1) : handle;
+}
+
 /** the graph as the page script draws it, in a JSON block inside the live region so each refresh carries it */
 export function graphData(g: IdentifiedGraph | null): Html {
   if (!g) return html``;
   const nodes = g.nodes.map((n) => {
     const { machine, handle } = placeOf(n.address);
+    const name = n.kind === "human" ? "human" : shown(handle);
+    const up = n.parent ? placeOf(n.parent) : null;
     return {
       address: n.address,
       kind: n.kind,
       machine,
-      label: n.kind === "human" ? "human" : shown(handle),
+      name,
+      label: name === handle && up && up.machine === machine ? shortLabel(handle, up.handle) : name,
       icon: n.kind === "human" ? "human" : harnessIcon(n.harness),
       harness: n.harness,
       title: n.title,
@@ -260,9 +269,111 @@ export const BANDS_JS = `function bands(items, o) {
   return { places, bands: rects, hub, width, height: Math.max(y - o.groupGap, 1) };
 }`;
 
+/** the cluster layout's spacing: node gap, first ring radius, widest single arc, root fan span, how much wider than deep a fan is, child fan span, cluster gap, row aspect */
+export const LAYOUT = { gap: 14, ring: 84, reach: 160, span: 2.4, wide: 1.4, sub: 1.6, apart: 64, aspect: 1.8 };
+
 /**
- * draws the live graph: each machine a soft region with its own small force layout, run to rest on a change so nothing drifts;
- * a new node starts by its parent while settled ones barely move, and a message pulses along its edge as the hub streams it
+ * one machine's nodes as subtree clusters, plain JS so the page script and the tests share it. `ns` are `{ address, parent }`,
+ * `B` their `{ hw, up, down }` boxes. Each root fans its children out on arcs below it (one arc while it stays within
+ * `o.reach`, then more rings), each child fans its own; childless roots share one grid. Overlaps inside a cluster are pushed
+ * apart, and the clusters, largest first, pack into rows `o.apart` apart (rows half as much again) near `o.aspect`. Deterministic, so the same graph
+ * lays out the same
+ */
+export const CLUSTER_JS = `function cluster(ns, B, o) {
+  const at = new Map(ns.map((n, i) => [n.address, i]));
+  const by = (a, b) => (ns[a].address < ns[b].address ? -1 : ns[a].address > ns[b].address ? 1 : 0);
+  const kids = ns.map(() => []);
+  const up = ns.map((n, i) => { const p = n.parent ? at.get(n.parent) : undefined; return p === undefined || p === i ? -1 : p; });
+  up.forEach((p, i) => { if (p >= 0) kids[p].push(i); });
+  for (const k of kids) k.sort(by);
+  const P = ns.map(() => ({ x: 0, y: 0 }));
+  const seen = new Set();
+  const foot = (i) => Math.max(2 * B[i].hw, B[i].up + B[i].down) + o.gap;
+  const step = (a, b) => (foot(a) + foot(b)) / 2;
+  const fan = (i, dir, span, out) => {
+    const c = kids[i].filter((k) => !seen.has(k));
+    if (!c.length) return;
+    for (const k of c) { seen.add(k); out.push(k); }
+    const rise = Math.max(...c.map((k) => B[k].up + B[k].down)) + o.gap;
+    let all = 0;
+    for (let k = 1; k < c.length; k++) all += step(c[k - 1], c[k]);
+    const per = Math.ceil(c.length / Math.max(1, Math.ceil(all / (span * o.reach))));
+    let r = Math.max(o.ring, B[i].down + rise - B[i].up);
+    for (let j = 0; j < c.length; j += per) {
+      const ring = c.slice(j, j + per);
+      let arc = 0;
+      for (let k = 1; k < ring.length; k++) arc += step(ring[k - 1], ring[k]);
+      r = Math.max(r, arc / span / o.wide);
+      const rx = r * o.wide;
+      let t = dir + arc / rx / 2;
+      ring.forEach((k, n) => {
+        let dx = Math.cos(t) * rx, dy = Math.sin(t) * r;
+        if (Math.sin(dir) > 0.5) dy = Math.max(dy, B[i].down + B[k].up + o.gap);
+        P[k] = { x: P[i].x + dx, y: P[i].y + dy, t };
+        if (n + 1 < ring.length) t -= step(k, ring[n + 1]) / rx;
+      });
+      r += rise;
+    }
+    for (const k of c) fan(k, (P[k].t + Math.PI / 2) / 2, o.sub, out);
+  };
+  const grow = (i) => { seen.add(i); const out = [i]; P[i] = { x: 0, y: 0 }; fan(i, Math.PI / 2, o.span, out); return out; };
+  const roots = ns.map((_, i) => i).filter((i) => up[i] < 0).sort(by);
+  const groups = roots.filter((i) => kids[i].length).map(grow).sort((a, b) => b.length - a.length);
+  for (const i of ns.map((_, i) => i).sort(by)) if (!seen.has(i) && up[i] >= 0) groups.push(grow(i));
+  const solo = roots.filter((i) => !kids[i].length);
+  if (solo.length) {
+    const cols = Math.ceil(Math.sqrt(solo.length));
+    const cw = Math.max(...solo.map(foot)), ch = Math.max(...solo.map((i) => B[i].up + B[i].down)) + o.gap;
+    solo.forEach((i, k) => { P[i] = { x: (k % cols) * cw, y: Math.floor(k / cols) * ch }; });
+    groups.push(solo);
+  }
+  const ext = groups.map((m) => {
+    const Q = m.map((i) => P[i]), C = m.map((i) => B[i]), one = m.map(() => 1);
+    for (let k = 0; k < 120; k++) if (!collide(Q, C, one)) break;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const i of m) { x0 = Math.min(x0, P[i].x - B[i].hw); x1 = Math.max(x1, P[i].x + B[i].hw); y0 = Math.min(y0, P[i].y - B[i].up); y1 = Math.max(y1, P[i].y + B[i].down); }
+    return { m, x0, y0, w: x1 - x0, h: y1 - y0 };
+  });
+  const area = ext.reduce((a, e) => a + (e.w + o.apart) * (e.h + o.apart), 0);
+  const target = Math.max(Math.sqrt(area * o.aspect), ...ext.map((e) => e.w));
+  const rows = [];
+  for (const e of ext) {
+    const row = rows[rows.length - 1];
+    if (row && row.w + o.apart + e.w <= target) { row.items.push(e); row.w += o.apart + e.w; }
+    else rows.push({ items: [e], w: e.w });
+  }
+  const width = Math.max(0, ...rows.map((r) => r.w));
+  let y = 0;
+  for (const row of rows) {
+    let x = (width - row.w) / 2;
+    for (const e of row.items) {
+      for (const i of e.m) { P[i].x += x - e.x0; P[i].y += y - e.y0; }
+      x += e.w + o.apart;
+    }
+    y += Math.max(...row.items.map((e) => e.h)) + o.apart * 1.5;
+  }
+  return P.map((p) => ({ x: p.x, y: p.y }));
+}
+
+/** pushes overlapping node and label boxes apart along their shallower axis; true while any overlapped */
+function collide(P, B, mob) {
+  let hit = false;
+  for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+    const dx = P[j].x - P[i].x, dy = P[j].y - P[i].y;
+    const ox = B[i].hw + B[j].hw - Math.abs(dx);
+    const oy = (dy >= 0 ? B[i].down + B[j].up : B[i].up + B[j].down) - Math.abs(dy);
+    if (ox <= 0 || oy <= 0) continue;
+    hit = true;
+    const mi = mob[i], mj = mob[j], sum = mi + mj || 1;
+    if (ox < oy) { const s = (dx >= 0 ? 1 : -1) * (ox + 0.5); P[i].x -= s * mi / sum; P[j].x += s * mj / sum; }
+    else { const s = (dy >= 0 ? 1 : -1) * (oy + 0.5); P[i].y -= s * mi / sum; P[j].y += s * mj / sum; }
+  }
+  return hit;
+}`;
+
+/**
+ * draws the live graph: each machine a soft region with its subtrees clustered apart, laid out again only when its shape changes;
+ * a new node eases out from its parent, and a message pulses along its edge as the hub streams it
  */
 export const graphScript = (): string => `(() => {
 const root = document.querySelector("[data-graph]");
@@ -275,9 +386,11 @@ const ICONS = ${JSON.stringify({ ...ICON_PATHS, human: HUMAN_ICON })};
 const MARK = ${JSON.stringify(MARK)};
 const COLORED = new Set(${JSON.stringify(COLORED)});
 const BOLT = "M9.5 1 3 9h4.5L6.5 15 13 7H8.5z";
-const R = 16, PAD = 20, HEAD = 26, ID_LINE = 14, GAP = 26, BAND_GAP = 44, LABEL_MAX = 132, NAME_MAX = 220, ID_MAX = 200, MIN_W = 96, CAP = 1.6;
+const R = 16, PAD = 20, HEAD = 26, ID_LINE = 14, GAP = 26, BAND_GAP = 44, LABEL_MAX = 176, NAME_MAX = 220, ID_MAX = 200, MIN_W = 96, CAP = 1.6;
 const TRAILS = [1, 0.5, 0.25];
+const LAYOUT = ${JSON.stringify(LAYOUT)};
 ${SLOT_JS}
+${CLUSTER_JS}
 ${BANDS_JS}
 ${DRAWN_JS}
 const svg = root.querySelector(".graph-svg");
@@ -288,7 +401,6 @@ const nextTurn = document.querySelector("[data-graph-nextturn]");
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const load = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
-const hash = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
 const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
 const ease = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 const lerp = (a, b, k) => a + (b - a) * k;
@@ -371,15 +483,7 @@ function box(n) {
   return { hw: Math.max(R + 4, textWidth(fit(n.label), 400) / 2 + 6), up: R + 6, down: R + 22 };
 }
 
-function seed(n, local) {
-  const h = hash(n.address);
-  const p = n.parent && local.get(n.parent);
-  if (p) { const a = (25 + (h % 130)) * Math.PI / 180; return { x: p.x + Math.cos(a) * 78, y: p.y + Math.sin(a) * 70 }; }
-  const a = (h % 360) * Math.PI / 180, r = 30 + (h % 90);
-  return { x: Math.cos(a) * r, y: Math.sin(a) * r * 0.7 };
-}
-
-/** one machine's layout, run to rest; settled nodes take an eighth of the force, so a new one finds room without a reshuffle */
+/** one machine's layout, recomputed only when its nodes, labels or spawn links change, so a refresh never moves anything */
 function settle(g, edges) {
   const ns = g.nodes;
   const ids = new Set(ns.map((n) => n.address));
@@ -387,61 +491,9 @@ function settle(g, edges) {
   const sig = ns.map((n) => n.address + ":" + fit(n.label)).sort().join(" ") + "|" + spawn.map((e) => e.from + ">" + e.to).sort().join(" ");
   if (shapes.get(g.name) === sig) return;
   shapes.set(g.name, sig);
-  const local = new Map();
-  for (const n of ns) if (sim.has(n.address)) local.set(n.address, sim.get(n.address));
-  const fresh = ns.filter((n) => !local.has(n.address));
-  const all = fresh.length === ns.length;
-  const depth = (n) => { let d = 0, p = n.parent; while (p && ids.has(p) && d < 8) { d++; p = ns.find((x) => x.address === p)?.parent; } return d; };
-  for (const n of [...fresh].sort((a, b) => depth(a) - depth(b) || a.address.localeCompare(b.address))) local.set(n.address, seed(n, local));
-  const P = ns.map((n) => ({ ...local.get(n.address), vx: 0, vy: 0 }));
-  const B = ns.map(box);
-  const idx = new Map(ns.map((n, i) => [n.address, i]));
-  const links = spawn.map((e) => [idx.get(e.from), idx.get(e.to)]);
-  const mob = ns.map((n) => all || !sim.has(n.address) ? 1 : 0.12);
-  const iters = all ? 420 : 240;
-  for (let t = 0; t < iters; t++) {
-    const alpha = 1 - t / iters;
-    const F = P.map(() => ({ x: 0, y: 0 }));
-    for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
-      let dx = P[i].x - P[j].x, dy = P[i].y - P[j].y;
-      if (!dx && !dy) { dx = (i - j) * 0.5; dy = 0.3; }
-      const d2 = Math.max(dx * dx + dy * dy, 64), d = Math.sqrt(d2), f = 5200 / d2;
-      F[i].x += dx / d * f; F[i].y += dy / d * f; F[j].x -= dx / d * f; F[j].y -= dy / d * f;
-    }
-    for (const [a, b] of links) {
-      const dx = P[b].x - P[a].x, dy = P[b].y - P[a].y, d = Math.max(Math.hypot(dx, dy), 1), f = (d - 84) * 0.09;
-      F[a].x += dx / d * f; F[a].y += dy / d * f; F[b].x -= dx / d * f; F[b].y -= dy / d * f;
-      const lift = (P[a].y + 64 - P[b].y) * 0.05;
-      F[b].y += lift; F[a].y -= lift * 0.5;
-    }
-    for (let i = 0; i < P.length; i++) {
-      F[i].x -= P[i].x * 0.018; F[i].y -= P[i].y * 0.03;
-      const cap = 14 * alpha + 0.4;
-      P[i].vx = (P[i].vx + F[i].x) * 0.55; P[i].vy = (P[i].vy + F[i].y) * 0.55;
-      const s = Math.hypot(P[i].vx, P[i].vy), c = s > cap ? cap / s : 1;
-      P[i].x += P[i].vx * c * mob[i]; P[i].y += P[i].vy * c * mob[i];
-    }
-    if (t > iters * 0.4) collide(P, B, mob);
-  }
-  const loose = mob.map((m) => Math.max(m, 0.5));
-  for (let k = 0; k < 80; k++) if (!collide(P, B, loose)) break;
-  ns.forEach((n, i) => sim.set(n.address, { x: P[i].x, y: P[i].y }));
-}
-
-/** pushes overlapping node and label boxes apart along their shallower axis; true while any overlapped */
-function collide(P, B, mob) {
-  let hit = false;
-  for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
-    const dx = P[j].x - P[i].x, dy = P[j].y - P[i].y;
-    const ox = B[i].hw + B[j].hw - Math.abs(dx);
-    const oy = (dy >= 0 ? B[i].down + B[j].up : B[i].up + B[j].down) - Math.abs(dy);
-    if (ox <= 0 || oy <= 0) continue;
-    hit = true;
-    const mi = mob[i], mj = mob[j], sum = mi + mj || 1;
-    if (ox < oy) { const s = (dx >= 0 ? 1 : -1) * (ox + 0.5); P[i].x -= s * mi / sum; P[j].x += s * mj / sum; }
-    else { const s = (dy >= 0 ? 1 : -1) * (oy + 0.5); P[i].y -= s * mi / sum; P[j].y += s * mj / sum; }
-  }
-  return hit;
+  const up = new Map(spawn.map((e) => [e.to, e.from]));
+  const P = cluster(ns.map((n) => ({ address: n.address, parent: up.get(n.address) || null })), ns.map(box), LAYOUT);
+  ns.forEach((n, i) => sim.set(n.address, P[i]));
 }
 
 /** a region's header: the machine name and agent count, the identity on a second line, each cut to a sane width */
@@ -627,7 +679,7 @@ function paintNode(e) {
   const n = e.n, c = e.g.classList;
   for (const p of ["online", "idle", "offline"]) c.toggle(p, n.presence === p);
   c.toggle("human", n.kind === "human");
-  e.g.setAttribute("aria-label", n.label + ", " + n.presence + (n.wake ? ", wakes via " + n.wake : ""));
+  e.g.setAttribute("aria-label", n.name + ", " + n.presence + (n.wake ? ", wakes via " + n.wake : ""));
   if (e.icon !== n.icon) {
     e.icon = n.icon;
     e.glyph.innerHTML = ICONS[n.icon] || ICONS.generic;
@@ -809,7 +861,7 @@ function showTip(g) {
   icon.setAttribute("viewBox", "0 0 24 24");
   icon.innerHTML = ICONS[n.icon] || ICONS.generic;
   if (COLORED.has(n.icon)) icon.style.color = "var(--h-" + n.icon + ")";
-  head.append(icon, document.createTextNode(n.label));
+  head.append(icon, document.createTextNode(n.name));
   const sum = (side) => data.edges.filter((e) => e.kind === "message" && e[side] === n.address).reduce((s, e) => s + e.count, 0);
   const out = sum("from"), inn = sum("to");
   const wake = n.wake ? "wakes via " + n.wake : n.kind === "agent" && n.presence === "idle" ? "reads at its next turn" : "";
