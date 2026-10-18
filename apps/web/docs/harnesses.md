@@ -28,9 +28,9 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | Settings hooks | After tools and on prompts | Yes | Yes | Under `swarm claude`, and in background sessions |
 | Codex | `hooks.json` | After tools and on prompts | Yes | No | Under `swarm codex` |
-| Grok | Claude Code's hooks | After tools only | Yes | No | No |
+| Grok | Claude Code's hooks | After tools only | Yes | No | Headless, under `swarm grok` |
 | Muse | A plugin | After tools and on prompts | Yes | No | No |
-| Gemini / Antigravity (agy) | `hooks.json` | Before each model call | No | No | No |
+| Gemini / Antigravity (agy) | `hooks.json` | Before each model call | No | No | Headless, under `swarm agy` |
 | OpenCode | A plugin | Appended to tool output | Emulated | Child sessions as activity | Yes, by the plugin |
 | Pi | An extension, no hooks | Each message as it arrives | No | No | Yes, under `swarm pi` |
 
@@ -38,17 +38,17 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Codex.** The same events in `~/.codex/hooks.json` from `swarm setup`, or `.codex/hooks.json` from `swarm hooks install`. Codex runs new hooks only after you review them in `/hooks`. `swarm spawn codex exec ...` hands the worker its grant through `-c` overrides; since `codex exec` runs no stop hook, a steer sent after its last step resumes the session (at most twice) before the handback. `swarm codex [--name N] [codex args...]` runs codex app-server with the TUI attached and pushes each message into the session: it starts a turn on an idle thread and steers a running one. `--headless` runs an ambient worker with no TUI that declines approval requests; `--resume <threadId>` reopens a thread.
 
-**Grok.** Runs Claude Code's hooks (install with `--harness claude`), labelled `grok`. It drops prompt-hook context, so messages reach it after tools.
+**Grok.** Runs Claude Code's hooks (install with `--harness claude`), labelled `grok`. It drops prompt-hook context, so messages reach it after tools. `swarm grok [--name N] [grok args...]` runs grok headless and wakes it: see [Headless wake](#headless-wake).
 
 **Muse.** Loads hooks only from plugins. `hooks install --harness muse` writes the plugin; install it with `muse plugins install`, then approve its hooks with `muse plugins approve scp` (`swarm setup --write` runs both). A headless `muse exec`, which is what `swarm spawn -- muse exec ...` runs, has no review prompt and runs no hook Muse holds for review. Muse passes hooks only a fixed set of environment variables, so the hooks find the broker at its default path, not through `SCP_DIR` or `XDG_STATE_HOME`.
 
-**Gemini / Antigravity (agy).** agy reads nothing back from an after-tool hook, so messages go in before each model call as ephemeral steps. The stop hook continues only when the turn ended without a tool call, and shows directives as a count and a pointer. Shown messages are marked injected, not acknowledged.
+**Gemini / Antigravity (agy).** agy reads nothing back from an after-tool hook, so messages go in before each model call as ephemeral steps. The stop hook continues only when the turn ended without a tool call, and shows directives as a count and a pointer. Shown messages are marked injected, not acknowledged. `swarm agy [--name N] [agy args...]` runs agy headless and wakes it: see [Headless wake](#headless-wake).
 
 **OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt. While the session is idle, the plugin keeps one `swarm hook opencode --wake 50` waiting and submits the messages it returns as a new prompt, so a message wakes the session; a message to an OpenCode with no session open yet opens one and runs a turn in it. `SCP_WAKE=0` turns that off. `swarm opencode [--name N] [opencode args...]` starts OpenCode with your own config and arguments, wake on, and refuses to start without the current plugin.
 
 **Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session. `SCP_PI=0` turns the extension off.
 
-A session that a message can wake advertises how: `channels` (`swarm claude`), `claude-inbox` (a Claude Code session without channels, such as `claude --bg`, through its own inbox socket), `codex-app-server` (`swarm codex`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
+A session that a message can wake advertises how: `channels` (`swarm claude`), `claude-inbox` (a Claude Code session without channels, such as `claude --bg`, through its own inbox socket), `codex-app-server` (`swarm codex`), `agy-resume` (`swarm agy`), `grok-resume` (`swarm grok`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
 
 ## Headless workers
 
@@ -57,7 +57,24 @@ A session that a message can wake advertises how: `channels` (`swarm claude`), `
 | Muse | `swarm spawn -- muse exec --approval-mode never "<task>"`; spawn adds `--contributor-mode off` unless you pass `on` |
 | Gemini / Antigravity (agy) | `swarm spawn -- agy -p "<task>"`; needs the `mcp(scp/...)` allow rules `swarm setup` writes |
 
-Neither has a wake binding yet: a Muse worker takes late messages through its stop hook, an agy worker through its stop hook's continue, and an idle interactive session sees them at its next turn.
+A spawned Muse or agy worker takes late messages through its stop hook (agy: its stop hook's continue), and an idle interactive session sees them at its next turn.
+
+## Headless wake
+
+agy and grok have no local way to start a turn in an interactive session, so they wake headless: `swarm agy` and `swarm grok` hold the endpoint and run one headless turn per batch of new messages, each resuming the same conversation.
+
+```sh
+swarm agy --name docs -- -p "read the open issues"   # this prompt is the first turn
+swarm grok --name review                             # waits; the first message starts the session
+```
+
+- A prompt flag in your arguments (`-p`) is the first turn, run with your arguments as given. Without one the launcher prints `waiting for messages`, and the first message opens the conversation.
+- Each new message becomes a turn: your arguments without the prompt, plus `--conversation <id> -p <message>` for agy or `--resume <id> -p <message>` for grok. Messages that arrive during a turn wait for the next one and go in together.
+- grok's session id is yours (`-s`, `-r`) or a new one the first turn passes as `-s`. agy cannot be given an id for a new conversation, so its `scp` hooks report the one it opened: `swarm agy` refuses to start without them (`swarm setup --write` installs them) and stops if a turn ends without the report.
+- Each message is delivered once. The launcher's channel confirms it, so agy's hook does not show it again before a model call, and a message the hook already showed never reaches the channel. A failed turn ends the launcher with its exit code; its messages stay unread in `relay_inbox`.
+- Interactive flags are refused (agy `-i`, `-c`, `--input-format`, `--remote-control`; grok `-c`, `--fork-session`). Run plain `agy` or `grok` for an interactive session: it reads new messages through its hooks, not woken.
+- grok gets `--allow` rules for the relay messaging tools unless you pass your own permission flags. A headless agy needs the `mcp(scp/...)` allow rules `swarm setup` writes; `swarm agy` warns without them.
+- `$SCP_AGY_BIN` and `$SCP_GROK_BIN` pick the binaries. Under `env $(swarm spawn-env --name N)` the endpoint takes the spawner's grant.
 
 ## Any other harness
 

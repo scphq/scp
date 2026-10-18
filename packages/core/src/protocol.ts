@@ -111,9 +111,9 @@ export type MessageKind = "message" | "request" | "reply" | "status"
 export type DataClass = "public" | "private"
 export type Presence = "online" | "idle" | "offline"
 export type StatusState = "working" | "waiting" | "blocked" | "done"
-/** how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter or codex app-server; `none` reads at its next turn */
-export type Wake = "channels" | "pi" | "opencode-plugin" | "codex-app-server" | "claude-inbox" | "none"
-export const WAKES: readonly Wake[] = ["channels", "pi", "opencode-plugin", "codex-app-server", "claude-inbox", "none"]
+/** how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter, codex app-server or a headless resume; `none` reads at its next turn */
+export type Wake = "channels" | "pi" | "opencode-plugin" | "codex-app-server" | "claude-inbox" | "agy-resume" | "grok-resume" | "none"
+export const WAKES: readonly Wake[] = ["channels", "pi", "opencode-plugin", "codex-app-server", "claude-inbox", "agy-resume", "grok-resume", "none"]
 
 export type ActivityKind = "session_start" | "tool" | "stop" | "note" | "session_end"
 export const ACTIVITY_KINDS: readonly ActivityKind[] = ["session_start", "tool", "stop", "note", "session_end"]

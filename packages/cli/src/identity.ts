@@ -481,6 +481,13 @@ export function hookHarnessPid(env: Env, harness: string, ppid = process.ppid, p
   return harnessPid(ppid, parentOf)
 }
 
+/** $SCP_HARNESS_PID when it is the parent of the harness process: `swarm agy` and `swarm grok` hold the endpoint across their per-turn harness processes */
+export function launcherPid(env: Env, harness: () => number = harnessPid, parentOf = psParent): number | undefined {
+  const pid = Number(env.SCP_HARNESS_PID)
+  if (!Number.isInteger(pid) || pid <= 1) return undefined
+  return parentOf(harness())?.ppid === pid ? pid : undefined
+}
+
 export interface IdentityInput {
   as?: string
   harness?: string

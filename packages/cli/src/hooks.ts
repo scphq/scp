@@ -1,5 +1,5 @@
 import { Readable } from "node:stream"
-import { closeSync, fstatSync, openSync, readFileSync, readSync, writeSync } from "node:fs"
+import { closeSync, fstatSync, openSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
 import {
@@ -577,6 +577,20 @@ export function tldrEvery(env: Env): number {
 
 const NUDGE = `${CLI_NAME} (optional): a title and a one-line now (relay_set_title / relay_set_now) help peers find you; skip it when you only run workers.`
 
+/** the conversation ids `swarm agy` resumes: no leading dash, so one never reads as a flag */
+export const AGY_CONVERSATION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** under `swarm agy`: records the first root conversation a hook reports, which the launcher resumes; a subagent's never counts */
+export function recordAgyConversation(payload: Json, env: Env): void {
+  const file = env.SCP_AGY_CONVERSATION_FILE
+  if (!file || field(payload, "parentConversationId", "parent_conversation_id") !== undefined) return
+  const id = asString(field(payload, "conversationId", "conversation_id")) ?? env.ANTIGRAVITY_CONVERSATION_ID
+  if (!id || !AGY_CONVERSATION.test(id)) return
+  try {
+    writeFileSync(file, id, { flag: "wx", mode: 0o600 })
+  } catch {}
+}
+
 /** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
 export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
   const began = Date.now()
@@ -597,6 +611,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   } catch {
     payload = {}
   }
+  if (harnessArg === "agy") recordAgyConversation(payload, options.env)
   if (Number.isFinite(wakeS) && wakeS > 0) return wakeHook(harnessArg, payload, wakeS, options)
   const event = mapHookPayload(payload, eventArg)
   if (!event || options.env.SCP_TRANSPORT === "cloud") return
