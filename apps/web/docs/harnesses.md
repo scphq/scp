@@ -48,7 +48,7 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session. `SCP_PI=0` turns the extension off.
 
-A session that a message can wake advertises how: `channels` (`swarm claude`), `codex-app-server` (`swarm codex`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
+A session that a message can wake advertises how: `channels` (`swarm claude`), `claude-inbox` (a Claude Code session without channels, such as `claude --bg`, through its own inbox socket), `codex-app-server` (`swarm codex`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
 
 ## Headless workers
 
