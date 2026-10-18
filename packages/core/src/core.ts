@@ -269,7 +269,7 @@ export interface CoreOptions {
   now?: () => number
   /** a synchronous hash for resume tokens (sha256 hex) */
   hash: (value: string) => string
-  /** runs `fn` atomically: bun:sqlite's db.transaction, a Durable Object's transactionSync */
+  /** runs `fn` atomically: a local SQLite transaction, a Durable Object's transactionSync */
   transaction?: <T>(fn: () => T) => T
   /** count every sender but the relay itself, humans included, against LIMITS.userPerDay, and trust no client's terminal claim for a hop reset (default: agents and non-terminal humans count) */
   capEverySender?: boolean
