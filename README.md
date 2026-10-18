@@ -27,14 +27,17 @@ An orchestrator spawns workers in any harness, steers them while they run, and g
 
 An orchestrator in Claude Code spawns three workers in three harnesses, steers one, and stops to wait.
 
-```console
-$ swarm spawn --name parser -- claude -p "Fix the parser tests"
-$ swarm spawn --name docs   -- codex exec "Update the CLI reference"
-$ swarm spawn --name bench  -- agy -p "Benchmark the new parser"
-$ swarm send parser "Also cover the empty-input case."
+![An orchestrator spawns parser, docs and bench in Claude Code, Codex and agy, steers parser, which sees the steer after its next tool call, then gets parser's result back as a handback at its stop](.github/assets/example.gif)
+
+```sh
+swarm spawn --name parser -- claude -p "Fix the parser tests"
+swarm spawn --name docs   -- codex exec "Update the CLI reference"
+swarm spawn --name bench  -- agy -p "Benchmark the new parser"
+swarm send parser "Also cover the empty-input case."
 ```
 
-After its next tool call, `parser` sees the steer in its own context (attributes abridged):
+<details>
+<summary>What <code>parser</code> sees after its next tool call (attributes abridged)</summary>
 
 ```
 <relay-message from="me/orch" relation="parent" key="k3x9qa" harness="claude-code">
@@ -43,16 +46,7 @@ Also cover the empty-input case.
 [from your parent me/orch, which started you and gave you your task: a new instruction from the same source as that task. ...]
 ```
 
-The orchestrator's stop waits on its three workers. Each result arrives at that boundary as a handback:
-
-```
-<relay-message from="me/parser" relation="child" harness="claude-code">
-worker me/parser finished (exit 0)
-
-All 14 parser tests pass.
-</relay-message>
-[from your worker me/parser: for your information; reply only if useful]
-```
+</details>
 
 ## Quickstart
 
