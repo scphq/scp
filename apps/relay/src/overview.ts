@@ -47,15 +47,12 @@ export function groupByMachine(o: Overview): MachineGroup[] {
   return [...groups.values()];
 }
 
-/** how an idle agent gets woken by a message, from `wake`; absent or `none` means it reads at its next turn */
-export type Wake = "channels" | "pi" | "opencode-serve" | "codex-app-server" | "none";
-type Listed = EndpointView & { wake?: Wake | null };
-
-const wakeOf = (e: Listed): string | null => (e.wake && e.wake !== "none" ? e.wake : null);
+/** how an idle agent gets woken by a message; absent or `none` means it reads at its next turn */
+const wakeOf = (e: EndpointView): string | null => (e.wake && e.wake !== "none" ? e.wake : null);
 
 const BOLT = html`<svg class="bolt" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1 3 9h4.5L6.5 15 13 7H8.5z" fill="currentColor"/></svg>`;
 
-function presence(e: Listed): { cell: Html; tip: string } {
+function presence(e: EndpointView): { cell: Html; tip: string } {
   const wake = wakeOf(e);
   const tip =
     e.presence === "idle"
@@ -160,7 +157,7 @@ export function orderRows(endpoints: EndpointView[]): Row[] {
   return out;
 }
 
-function endpointRow({ e, depth, anc, kids }: Row & { e: Listed }, shut: Set<string>, now: number): Html {
+function endpointRow({ e, depth, anc, kids }: Row, shut: Set<string>, now: number): Html {
   const handle = handleOf(e.address);
   const parent = e.parent ? handleOf(e.parent) : null;
   const tags = chips(e.labels);

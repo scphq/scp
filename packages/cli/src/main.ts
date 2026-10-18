@@ -15,6 +15,7 @@ import {
   LIMITS,
   type MessageReceipts,
   PREAMBLE,
+  presenceText,
   reachLines,
   receiptLines,
   RelayError,
@@ -24,6 +25,7 @@ import {
   shortId,
   stripControl,
   type ThreadMessage,
+  wakeText,
   widenText,
   wrapMessage,
   type XListed,
@@ -64,7 +66,7 @@ results back, as with native subagents.
   ${CLI_NAME} reply <id> [text|-]         answer a message in its thread: ${CLI_NAME} reply 5af1f2 "done"
   ${CLI_NAME} ask <to> [text|-] [--wait S]   send a request and wait for its reply: ${CLI_NAME} ask lead "which branch?"
   ${CLI_NAME} inbox [--wait S]            your unread messages, then marked read: ${CLI_NAME} inbox
-  ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, status; --all adds offline ones
+  ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, wake, status; --all adds offline ones
   ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
   ${CLI_NAME} join --under <parent>       link this session under an orchestrator, as a spawned worker sits: ${CLI_NAME} join --under lead
   ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
@@ -88,7 +90,7 @@ More: ${CLI_NAME} help --all (the full reference), ${CLI_NAME} <verb> --help (on
 export const RELAY_HELP = `${CLI_NAME}: messages between the agent sessions on this machine, and a live view of the fleet
 
 usage:
-  ${CLI_NAME} list [--all] [--roots] [--tree]    agents on the relay: address, title, presence, status, cwd; offline ones only with --all;
+  ${CLI_NAME} list [--all] [--roots] [--tree]    agents on the relay: address, title, presence, wake, status, cwd; offline only with --all;
                                                  sessions nobody spawned that spawned nobody fold into one line, --roots (or --all) lists
                                                  them; --tree nests them by parent; (you) marks your own
   ${CLI_NAME} list --contacts                    the endpoints of other accounts your contacts let you reach: address, harness, presence
@@ -229,7 +231,7 @@ agent sessions:
   ${CLI_NAME} hook <harness> [event]             what those hooks run: one event from the hook JSON on stdin; prints only the reply
   A session's shim and hooks share one endpoint, keyed by $SCP_SESSION, else the harness process's pid and start time.
   Without --as or $SCP_NAME the handle is <harness>-<worktree>; labels gain machine=<short hostname>.
-  A Claude Code subagent's hooks give it a child endpoint, <session handle>-<type>-<first 6 of its id>, whose messages
+  A Claude Code subagent's hooks give it a child endpoint, <session handle>-<short type>-<first 4 of its id>, whose messages
   reach it after its tools; its shell is the session's, so it acts as that child with --as.
   Grok runs the Claude Code hooks, labelled grok; Muse takes them as a plugin; Codex runs new hooks after /hooks review.
   ${CLI_NAME} claude [--name N] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake
@@ -461,7 +463,8 @@ export function printEndpoints(endpoints: EndpointView[], me?: EndpointView | nu
   const row = (e: EndpointView, indent: string) => [
     `${indent}${addressCell(e, me)}`,
     e.title ?? "",
-    e.presence,
+    presenceText(e),
+    wakeText(e),
     e.status ? statusText(e.status) : e.kind === "human" ? "" : "-",
     Object.entries(e.labels)
       .filter(([k]) => k !== "machine")
@@ -470,9 +473,9 @@ export function printEndpoints(endpoints: EndpointView[], me?: EndpointView | nu
     shortCwd(e.cwd),
     ...(peek ? [e.peekable ?? ""] : []),
   ]
-  const blank = (first: string) => [first, "", "", "", "", "", ...(peek ? [""] : [])]
+  const blank = (first: string) => [first, "", "", "", "", "", "", ...(peek ? [""] : [])]
   const rows = [
-    ["ADDRESS", "TITLE", "PRESENCE", "STATUS", "LABELS", "CWD", ...(peek ? ["PEEK"] : [])],
+    ["ADDRESS", "TITLE", "PRESENCE", "WAKE", "STATUS", "LABELS", "CWD", ...(peek ? ["PEEK"] : [])],
     ...endpoints.filter((e) => e.kind === "human").map((e) => row(e, "")),
   ]
   const machines = new Map<string, Map<string, EndpointView[]>>()
@@ -699,7 +702,7 @@ async function runVerb(
         out(`${me.address} (${me.kind}${me.harness ? `, ${me.harness}` : ""})`)
         const how = bound === "as" ? "--as" : bound === "lineage" ? "this shell's harness process" : bound === "human" ? "human inbox" : "-"
         const fields: [string, string][] = [
-          ["presence", me.presence],
+          ["presence", presenceText(me)],
           ["title", me.title ?? "-"],
           ...(me.kind === "human"
             ? []
@@ -1280,7 +1283,7 @@ export function printTree(endpoints: EndpointView[], me?: EndpointView | null): 
     if (e.parent && byAddress.has(e.parent) && e.parent !== e.address) children.set(e.parent, [...(children.get(e.parent) ?? []), e])
     else roots.push(e)
   }
-  const rows = [["ADDRESS", "SCOPE", "TITLE", "PRESENCE", "STATUS", "LABELS", "CWD"]]
+  const rows = [["ADDRESS", "SCOPE", "TITLE", "PRESENCE", "WAKE", "STATUS", "LABELS", "CWD"]]
   const seen = new Set<string>()
   const walk = (e: EndpointView, depth: number) => {
     if (seen.has(e.address)) return
@@ -1293,7 +1296,8 @@ export function printTree(endpoints: EndpointView[], me?: EndpointView | null): 
       `${"  ".repeat(depth)}${addressCell(e, me)}`,
       e.kind === "human" ? "" : (e.scope ?? "open"),
       e.title ?? "",
-      e.presence,
+      presenceText(e),
+      wakeText(e),
       e.status ? statusText(e.status) : e.kind === "human" ? "" : "-",
       labels,
       shortCwd(e.cwd),
@@ -1315,7 +1319,7 @@ const STATES = ["working", "waiting", "blocked", "done"] as const
 function printSummary(snapshot: Snapshot, me: EndpointView | null, all: boolean): boolean {
   if (me)
     out(
-      `you: ${me.address} (${me.kind}${me.harness ? `, ${me.harness}` : ""}) ${me.presence}${me.title ? ` ${quoted(me.title)}` : ""}${me.kind === "human" ? "" : `, status ${me.status ? statusText(me.status) : "-"}`}`,
+      `you: ${me.address} (${me.kind}${me.harness ? `, ${me.harness}` : ""}) ${presenceText(me)}${me.title ? ` ${quoted(me.title)}` : ""}${me.kind === "human" ? "" : `, status ${me.status ? statusText(me.status) : "-"}`}`,
     )
   const agents = snapshot.endpoints.filter((e) => e.kind !== "human")
   const count = (presence: string) => agents.filter((e) => e.presence === presence).length

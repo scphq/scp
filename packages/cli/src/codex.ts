@@ -488,6 +488,7 @@ export async function codexCommand(args: string[]): Promise<number> {
       },
       claim,
       channels: true,
+      wake: "codex-app-server",
       input,
       env: launch.env,
       output: (chunk) => {

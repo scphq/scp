@@ -38,6 +38,7 @@ import {
   SYSTEM_HANDLE,
   sameSecret,
   untilTomorrow,
+  type Wake,
   type XContact,
   XCounters,
   type XDelivered,
@@ -104,7 +105,7 @@ export interface GraphNode {
   status: EndpointView["status"]
   last_seen: string | null
   parent: string | null
-  wake?: string | null
+  wake?: Wake | null
 }
 
 /** `spawn`: parent to child; `message`: sender to recipient, with the count and newest send in the graph's window */
@@ -1593,7 +1594,7 @@ export class RelayHub {
   /** a read-only graph for a dashboard: listed endpoints, spawn edges among them, and message counts per sender and recipient; never a body */
   graph(minutes = GRAPH_MINUTES): HubGraph {
     const window = Math.min(Math.max(1, Math.floor(Number.isFinite(minutes) ? minutes : GRAPH_MINUTES)), GRAPH_MINUTES_MAX)
-    const endpoints = this.relay.list() as (EndpointView & { wake?: string | null })[]
+    const endpoints = this.relay.list()
     const byId = new Map(endpoints.map((e) => [e.id, e.address]))
     const listed = new Set(byId.values())
     const nodes: GraphNode[] = endpoints.map((e) => ({

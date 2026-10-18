@@ -33,19 +33,19 @@ describe("broker, subagent endpoints", () => {
   test("a hook's subagent hello lands on a child of the root, said so once it is made; a --as of it from the root's shell binds it as itself", async () => {
     const { broker, main, claim } = await setup()
     const first = await (await open(broker)).hello({ transient: true, claim: { ...claim, subagent: { id: "aceb553c19f223c70", type: "Explore" } } })
-    expect(first).toMatchObject({ subagent: true, created: true, endpoint: { address: "me/claude-app-explore-aceb55", parent: "me/claude-app", depth: 1 } })
+    expect(first).toMatchObject({ subagent: true, created: true, endpoint: { address: "me/claude-app-explore-aceb", parent: "me/claude-app", depth: 1 } })
     const again = await (await open(broker)).hello({ transient: true, claim: { ...claim, subagent: { id: "aceb553c19f223c70", type: "Explore" } } })
     expect(again.subagent).toBe(true)
     expect(again.created).toBeUndefined()
     const shell = await open(broker)
     const bound = await shell.hello({
-      claim: { handle: "claude-app-explore-aceb55", exact: true, harness: "cli", lineage: [key(40), key(1)] },
+      claim: { handle: "claude-app-explore-aceb", exact: true, harness: "cli", lineage: [key(40), key(1)] },
       self: [key(40), key(1)],
       brief: true,
     })
-    expect(bound.endpoint?.address).toBe("me/claude-app-explore-aceb55")
+    expect(bound.endpoint?.address).toBe("me/claude-app-explore-aceb")
     expect(bound.token).toBeUndefined()
-    await main.request("send", { to: "claude-app-explore-aceb55", body: "for you" })
+    await main.request("send", { to: "claude-app-explore-aceb", body: "for you" })
     const { messages } = await shell.request<{ messages: { body: { text: string } }[] }>("inbox", {})
     expect(messages.map((m) => m.body.text)).toEqual(["for you"])
   })
@@ -85,14 +85,14 @@ describe("broker, subagent endpoints", () => {
     const first = await (await open(broker)).hello({ transient: true, claim: sub })
     const shell = await open(broker)
     const bound = await shell.hello({
-      claim: { handle: "claude-app-explore-aceb55", exact: true, harness: "cli", lineage: [key(40), key(1)] },
+      claim: { handle: "claude-app-explore-aceb", exact: true, harness: "cli", lineage: [key(40), key(1)] },
       self: [key(40), key(1)],
       brief: true,
     })
     expect(bound.endpoint?.id).toBe(first.endpoint!.id)
     await shell.request("status", { state: "waiting", note: "from the shell" })
     shell.close()
-    await main.request("send", { to: "claude-app-explore-aceb55", body: "after the shell" })
+    await main.request("send", { to: "claude-app-explore-aceb", body: "after the shell" })
     const hook = await open(broker)
     const again = await hook.hello({ transient: true, claim: sub })
     expect(again).toMatchObject({ subagent: true, endpoint: { id: first.endpoint!.id, status: { state: "waiting", note: "from the shell" } } })
@@ -106,7 +106,21 @@ describe("broker, subagent endpoints", () => {
         .filter((e) => e.kind === "agent")
         .map((e) => e.address)
         .sort(),
-    ).toEqual(["me/claude-app", "me/claude-app-explore-aceb55"])
+    ).toEqual(["me/claude-app", "me/claude-app-explore-aceb"])
+  })
+
+  test("a parent hook's subagent_title names the subagent before or after its endpoint exists; a renamed root's new subagents carry its new name", async () => {
+    const { broker, main, claim } = await setup()
+    const parent = await open(broker)
+    await parent.hello({ transient: true, claim })
+    expect(await parent.request("subagent_title", { id: "f00d42", title: "Review the parser" })).toEqual({ changed: false })
+    const first = await (await open(broker)).hello({ transient: true, claim: { ...claim, subagent: { id: "f00d42", type: "Explore" } } })
+    expect(first.endpoint).toMatchObject({ address: "me/claude-app-explore-f00d", title: "Review the parser" })
+    await main.request("rename", { handle: "lead" })
+    const second = await (await open(broker)).hello({ transient: true, claim: { ...claim, subagent: { id: "aceb553c19f223c70", type: "general-purpose" } } })
+    expect(second.endpoint?.address).toBe("me/lead-gp-aceb")
+    expect(await parent.request("subagent_title", { id: "aceb553c19f223c70", title: "Map the broker" })).toEqual({ changed: true })
+    expect(broker.core.whoami(second.endpoint!.id).title).toBe("Map the broker")
   })
 
   test("a subagent hello from another process is refused", async () => {

@@ -494,6 +494,17 @@ function inferredTitle(harness: string, event: HookEvent, named: string, payload
   return text ? { text, from: "summary" } : undefined
 }
 
+/** a Claude Code session's Agent (or Task) call: the subagent's id from the tool's response and the description it was given, as its title */
+function launchedSubagent(harness: string, event: HookEvent, payload: Json): { id: string; title: string } | undefined {
+  if (harness !== "claude-code" || event.kind !== "tool" || event.agent || !/^(agent|task)$/i.test(event.tool ?? "")) return undefined
+  const input = field(payload, "tool_input", "toolInput")
+  const response = field(payload, "tool_response", "toolResponse")
+  if (typeof input !== "object" || typeof response !== "object" || Array.isArray(response)) return undefined
+  const id = asString((response as Json).agentId)
+  const title = titleText(asString((input as Json).description))
+  return id && title && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? { id, title } : undefined
+}
+
 /** Formats harness replies; older Claude Code needs a blocking reason instead of Stop context. */
 export function hookReply(harness: string, kind: HookEvent["kind"], text: string, unread = 0, continues = true): string {
   if (kind === "stop" && harness === "claude-code" && continues)
@@ -608,6 +619,8 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (turn) posted.push(client.request("peek_turn", turn))
     const title = inferredTitle(claim.harness, event, named, payload)
     if (title) posted.push(client.request("title_infer", title))
+    const launched = launchedSubagent(claim.harness, event, payload)
+    if (launched) posted.push(client.request("subagent_title", launched))
     const injected = inject
       ? client.request<Injected>(
           "inject",
@@ -681,6 +694,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
   const client = await options.connect(false)
   try {
     await client.hello({ transient: true, claim })
+    await client.request("wake", { via: OPENCODE_WAKE }).catch(() => {})
     const result = await client.request<Injected>("inject", { wait_s: waitMs / 1000 })
     if (!result.offered.length) return
     const intro = result.intro ? introText(result.intro, result.intro_key) : undefined

@@ -38,6 +38,21 @@ function code(fn: () => unknown): string | undefined {
 
 const view = (address: string, extra: Record<string, unknown> = {}) => ({ address, kind: "agent", harness: "claude-code", presence: "online", ...extra })
 
+describe("wake", () => {
+  test("a mirrored agent keeps the wake its machine sent, until a view changes it; an unknown value or none is null", () => {
+    const { hub } = pair()
+    const lead = () => hub.list().find((e) => e.address === "ada/desk/lead")!
+    hub.mirror("desk", [view("ada/desk/lead", { wake: "pi" })])
+    expect(lead().wake).toBe("pi")
+    hub.mirror("desk", [view("ada/desk/lead", { status: { state: "working", note: "" } })])
+    expect(lead().wake).toBe("pi")
+    hub.mirror("desk", [view("ada/desk/lead", { wake: "smoke-signal" })])
+    expect(lead().wake).toBeNull()
+    hub.mirror("desk", [view("ada/desk/lead", { wake: "opencode-plugin" })])
+    expect(hub.mirror("desk", [view("ada/desk/lead", { wake: "none" })]).map((c) => c.view.wake)).toEqual([null])
+  })
+})
+
 describe("addresses", () => {
   test("me, the user, aliases and this machine stay local; other machines and accounts are remote; another account never resolves locally", () => {
     const { broker } = pair()

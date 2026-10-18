@@ -148,7 +148,19 @@ const CHANGES_SCOPE = new Set(["rules_set", "rules_widen", "rules_lift", "group"
 const ASK_RECHECK_MS = 1000
 /** how often a waiting stop rechecks its workers, since a worker's exit or lapse wakes no one */
 const STOP_RECHECK_MS = 1000
-const TRANSIENT_METHODS = new Set(["event", "status", "whoami", "inject", "injected", "peek_turn", "stop_wait", "prompted", "title_infer"])
+const TRANSIENT_METHODS = new Set([
+  "event",
+  "status",
+  "whoami",
+  "inject",
+  "injected",
+  "peek_turn",
+  "stop_wait",
+  "prompted",
+  "title_infer",
+  "subagent_title",
+  "wake",
+])
 const GRANT_UNBOUND = `a spawn-env grant binds only a new harness process: run the harness with it, or name the child (${CLI_NAME} spawn-env --name / --as)`
 
 /** the workers' messages and handbacks a stop's push would show, and those of theirs left unread past it */
@@ -868,6 +880,17 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "title_infer": {
         const changed = core.inferTitle(me, params, hookOf(s))
+        if (changed) bridge?.changed(me)
+        return { changed }
+      }
+      case "subagent_title": {
+        const changed = core.subagentTitle(me, params, hookOf(s))
+        if (changed) bridge?.changed(changed)
+        return { changed: changed !== null }
+      }
+      case "wake": {
+        if (s.data.lineage && !s.data.own) throw new RelayError("unauthorized", "only the endpoint's own session says how it wakes")
+        const changed = core.setWake(me, params.via, hookOf(s))
         if (changed) bridge?.changed(me)
         return { changed }
       }

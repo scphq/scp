@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Envelope, PeekResult } from "./protocol"
-import { clock, reachLines, receiptLines, shortId, steerNote, stripSteerNote, wrapMessage, wrapPeek } from "./render"
+import { clock, presenceText, reachLines, receiptLines, shortId, steerNote, stripSteerNote, wakeText, wrapMessage, wrapPeek } from "./render"
 
 const base: Envelope = {
   seq: 7,
@@ -171,6 +171,29 @@ describe("reachLines", () => {
     ])
     expect(reachLines(all, true)).toEqual(reachLines(all).slice(1, 4))
     expect(reachLines([d("me/a"), d("me/b")])).toEqual([])
+  })
+
+  test("an idle running recipient is woken when it has a wake, else sees it at its next turn", () => {
+    const running = { address: "me/w", offline: false, state: "running" as const }
+    expect(reachLines([{ ...running, idle: true, wake: "channels" }])).toEqual(["me/w: delivered; waking it"])
+    expect(reachLines([{ ...running, idle: true }])).toEqual(["me/w: delivered; it sees this at its next turn"])
+    expect(reachLines([{ ...running, idle: true, wake: "none" }])).toEqual(["me/w: delivered; it sees this at its next turn"])
+    expect(reachLines([{ ...running, wake: "pi" }])).toEqual(["me/w: delivered; it sees this at its next tool call or when its turn ends"])
+    expect(reachLines([{ ...running, idle: true }], true)).toEqual([])
+  })
+})
+
+describe("presenceText and wakeText", () => {
+  test("an idle agent with no wake reads at its next turn; humans have no wake", () => {
+    expect(presenceText({ kind: "agent", presence: "idle", wake: "opencode-plugin" })).toBe("idle")
+    expect(presenceText({ kind: "agent", presence: "idle", wake: null })).toBe("idle (next turn)")
+    expect(presenceText({ kind: "agent", presence: "idle", wake: "none" })).toBe("idle (next turn)")
+    expect(presenceText({ kind: "agent", presence: "online", wake: null })).toBe("online")
+    expect(presenceText({ kind: "human", presence: "idle" })).toBe("idle")
+    expect(wakeText({ kind: "agent", wake: "codex-app-server" })).toBe("codex-app-server")
+    expect(wakeText({ kind: "agent", wake: null })).toBe("turn")
+    expect(wakeText({ kind: "agent", wake: "none" })).toBe("turn")
+    expect(wakeText({ kind: "human" })).toBe("-")
   })
 })
 
