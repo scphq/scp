@@ -36,6 +36,10 @@ export const BLOCK_STOP = "--block-stop-on-unread"
 export const NO_INJECT = "--no-inject"
 /** `--push-wait <s>`: how long a stop may wait on the workers `swarm spawn` started; the installed stop's timeout covers it, 0 turns it off */
 export const PUSH_WAIT = "--push-wait"
+/** `--wake <s>`: wait up to that long for new messages and print them as the next turn's prompt */
+export const WAKE = "--wake"
+/** the wake binding an OpenCode endpoint advertises */
+export const OPENCODE_WAKE = "opencode-plugin"
 export const PUSH_WAIT_DEFAULT_S = 600
 /** an installed stop's timeout past its push wait, so the wait ends and the reply prints well before the harness kills the hook */
 const PUSH_TIMEOUT_MARGIN_S = 30
@@ -215,6 +219,7 @@ export interface HookOptions {
   remaining?: () => number
   /** writes the reply and says whether all of it went out; without it, returning the reply counts as printing it */
   print?: (text: string) => boolean
+  stopping?: () => boolean
   harnessPid?: (harness: string) => number
 }
 
@@ -522,8 +527,11 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   const takes = !args.includes(NO_INJECT)
   const subagents = args.includes(SUBAGENT)
   const waits = pushWait(args, options.env)
+  const wakeAt = args.indexOf(WAKE)
+  const wakeS = wakeAt < 0 ? 0 : Number(args[wakeAt + 1])
   const [harnessArg, eventArg] = args.filter(
-    (arg, i) => arg !== BLOCK_STOP && arg !== NO_INJECT && arg !== SUBAGENT && arg !== PUSH_WAIT && args[i - 1] !== PUSH_WAIT,
+    (arg, i) =>
+      arg !== BLOCK_STOP && arg !== NO_INJECT && arg !== SUBAGENT && arg !== PUSH_WAIT && args[i - 1] !== PUSH_WAIT && arg !== WAKE && args[i - 1] !== WAKE,
   )
   let payload: Json
   try {
@@ -532,6 +540,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   } catch {
     payload = {}
   }
+  if (Number.isFinite(wakeS) && wakeS > 0) return wakeHook(harnessArg, payload, wakeS, options)
   const event = mapHookPayload(payload, eventArg)
   if (!event || options.env.SCP_TRANSPORT === "cloud") return
   const sub = subagents && (event.kind === "tool" || event.kind === "stop") ? subagentOf(payload) : undefined
@@ -642,6 +651,47 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   }
 }
 
+/** Waits for context to start the harness's next turn and confirms only printed output. */
+async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: number, options: HookOptions): Promise<string | undefined> {
+  if (options.env.SCP_TRANSPORT === "cloud" || field(payload, "agent_id", "agentId", "agent_type", "agentType", "subagentType")) return
+  const claim = relayIdentity({
+    harness: hookHarness(harnessArg, options.env),
+    fallbackHarness: "hook",
+    cwd: asString(payload.cwd) ?? options.cwd,
+    env: options.env,
+    harnessPid: options.harnessPid ?? ((harness) => hookHarnessPid(options.env, harness)),
+  })
+  if (!validHandle(claim.handle)) return
+  const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
+  options.deadline?.(waitMs + PUSH_PRINT_MS + 1000)
+  const client = await options.connect(false)
+  try {
+    await client.hello({ transient: true, claim })
+    const result = await client.request<Injected>("inject", { wait_s: waitMs / 1000 })
+    if (!result.offered.length) return
+    const intro = result.intro ? introText(result.intro, result.intro_key) : undefined
+    const shown = injectionText({ ...result, more: await moreNow(client, result) })
+    const text = [intro, shown].filter(Boolean).join("\n\n")
+    if (!text) return
+    const reply = hookReply(claim.harness, "prompt", text)
+    if (options.stopping?.()) return
+    if (options.print?.(reply) ?? true) {
+      const read = result.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
+      await client.request("injected", {
+        seqs: result.offered,
+        hold: result.hold,
+        ...(read.length ? { read } : {}),
+        deferred: true,
+        ...(shown && !result.brief && result.messages.length ? { preamble: true } : {}),
+        ...(intro ? { intro: true } : {}),
+      })
+    }
+    return reply
+  } finally {
+    client.close()
+  }
+}
+
 /** Harnesses whose named subagents receive foreground PostToolUse context. */
 const SUBAGENT_HARNESSES = new Set(["claude-code"])
 
@@ -741,6 +791,7 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
   const started = Date.now()
   const agy = args[0] === "agy"
   let printed = false
+  let stopping = false
   const print = (text: string | undefined): boolean => {
     if (printed) return false
     printed = true
@@ -756,6 +807,11 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
     print(undefined)
     process.exit(0)
   }
+  const terminate = () => {
+    stopping = true
+    if (!printed) quit()
+  }
+  if (args.includes(WAKE)) process.on("SIGTERM", terminate)
   let ends = started + (agy ? 900 : 1500)
   let timer = setTimeout(quit, ends - Date.now())
   const deadline = (ms: number) => {
@@ -774,12 +830,14 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
         deadline,
         remaining: () => ends - Date.now(),
         print,
+        stopping: () => stopping,
         connect: (start) => (start ? connectBroker(dir, () => startDaemon(dir), 1000) : connectBroker(dir)),
       }),
     )
   } catch {}
   print(undefined)
   clearTimeout(timer)
+  if (args.includes(WAKE)) process.off("SIGTERM", terminate)
   return 0
 }
 
@@ -858,7 +916,7 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>):
   return { ...(settings as Json), hooks: merged }
 }
 
-/** Only root sessions receive context. Failed or aborted sessions report activity without holding the stop. */
+/** Root sessions receive context and wake while idle; failed or aborted sessions do not hold the stop. */
 export function opencodePlugin(options: { blockStop?: boolean } = {}): string {
   return `// scp: reports this session to the local SCP broker and hands it new messages
 import { spawn } from "node:child_process"
@@ -907,6 +965,54 @@ const partId = (parts: Record<string, unknown>[]) => {
 }
 
 export const Scp = async ({ client, directory }: { client: any; directory: string }) => {
+  const WAKE = process.env.SCP_WAKE !== "0"
+  const busy = new Set<string>()
+  let target: string | undefined
+  let waiter: ReturnType<typeof spawn> | undefined
+  let looping = false
+  let armed = 0
+  const cancel = () => { waiter?.kill("SIGTERM") }
+  const wake = async () => {
+    if (looping) return
+    looping = true
+    let version = armed
+    try {
+      while (WAKE && target && busy.size === 0) {
+        const id = target
+        const began = Date.now()
+        let text: string | undefined
+        try {
+          const args = ["${CLI_NAME}", "hook", "opencode", "${WAKE}", "50"]
+          const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", "pipe", "ignore"] })
+          waiter = child
+          const ended = new Promise<void>((resolve, reject) => {
+            child.once("error", reject)
+            child.once("close", () => resolve())
+          })
+          child.stdin!.on("error", () => {})
+          child.stdin!.end(JSON.stringify({ hook_event_name: "Wake", session_id: id, cwd: directory }))
+          const [output] = await Promise.all([readAll(child.stdout!), ended])
+          text = output.trim() ? context(JSON.parse(output) as Reply) : undefined
+        } catch {} finally {
+          waiter = undefined
+        }
+        if (text) {
+          version = armed
+          await client.session.promptAsync({ path: { id }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
+          break
+        }
+        if (Date.now() - began < 2000) await new Promise((resolve) => setTimeout(resolve, 5000))
+      }
+    } catch {} finally {
+      looping = false
+      if (armed !== version) void wake()
+    }
+  }
+  const arm = (id: string) => {
+    target = id
+    armed++
+    void wake()
+  }
   const children = new Map<string, Promise<boolean | undefined>>()
   const failed = new Set<string>()
   const isChild = async (id: string) => {
@@ -934,11 +1040,14 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
     },
     "chat.message": async (input: { sessionID: string }, output: { message?: { id?: string }; parts: Record<string, unknown>[] }) => {
       const messageID = output.message?.id
-      if (!messageID || (await isChild(input.sessionID))) return
+      if (await isChild(input.sessionID)) return
+      busy.add(input.sessionID)
+      cancel()
+      if (!messageID) return
       const text = context(await hook({ hook_event_name: "UserPromptSubmit", session_id: input.sessionID, cwd: directory }, true))
       if (text) output.parts.push({ id: partId(output.parts), sessionID: input.sessionID, messageID, type: "text", text, synthetic: true })
     },
-    event: async ({ event }: { event: { type: string; properties?: { sessionID?: string; info?: { id?: string; parentID?: string; sessionID?: string; role?: string; error?: unknown } } } }) => {
+    event: async ({ event }: { event: { type: string; properties?: { sessionID?: string; status?: { type?: string }; info?: { id?: string; parentID?: string; sessionID?: string; role?: string; error?: unknown } } } }) => {
       const info = event.properties?.info
       if (event.type === "message.updated") {
         if (info?.role === "assistant" && info.sessionID && info.error) failed.add(info.sessionID)
@@ -950,11 +1059,28 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
       if (!sessionID) return
       if (event.type === "session.error") failed.add(sessionID)
       if (event.type === "session.deleted") {
+        const child = await isChild(sessionID)
         children.delete(sessionID)
         failed.delete(sessionID)
+        if (!child) {
+          busy.delete(sessionID)
+          if (target === sessionID) target = undefined
+          cancel()
+        }
+        return
       }
       if (event.type === "session.created" && info) children.set(sessionID, Promise.resolve(Boolean(info.parentID)))
-      if (!name || (await isChild(sessionID))) return
+      if (await isChild(sessionID)) return
+      if (event.type === "session.status") {
+        const status = event.properties?.status?.type
+        if (status === "busy" || status === "retry") {
+          busy.add(sessionID)
+          cancel()
+        } else if (status === "idle") busy.delete(sessionID)
+        return
+      }
+      if (event.type === "session.idle") busy.delete(sessionID)
+      if (!name) return
       const stop = name === "Stop" && !failed.has(sessionID)
       const title = name === "Stop" ? await client.session.get({ path: { id: sessionID } }).then((found: any) => found?.data?.title).catch(() => undefined) : undefined
       const reply = await hook(
@@ -965,6 +1091,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
       )
       const text = reply.decision === "block" && typeof reply.reason === "string" && !reply.reason.includes("<relay-message") ? reply.reason : undefined
       if (text) await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
+      else arm(sessionID)
     },
   }
 }

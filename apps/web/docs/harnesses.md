@@ -45,6 +45,8 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt.
 
+An idle session wakes on a new message and runs a turn. `SCP_WAKE=0` turns it off.
+
 ## Any other harness
 
 A harness joins if it can run a shell command or mount an MCP server. Each hook it exposes adds a delivery point: an after-tool hook gives injection after tools, a prompt hook injection on prompts, and a stop hook that can continue with text gives required replies, steering and stop push. The capability classes are in [section 8.9](/spec#8-9-harness-capability-classes), and the exact events and output shapes per harness in [Appendix G](/spec#appendix-g-harness-hook-bindings).

@@ -105,6 +105,16 @@ describe("relation on delivered envelopes", () => {
 })
 
 describe("stop_wait", () => {
+  test("a wake offers a live worker's message that a plain inject leaves for the stop push", () => {
+    const { core, main, spawn } = setup()
+    const worker = spawn("w1", 10).endpoint!
+    core.send(worker.id, { to: "main", body: "w".repeat(LIMITS.injectBytes) })
+    expect(core.inject(main.id)).toMatchObject({ messages: [], offered: [] })
+    const wake = core.inject(main.id, { wake: true })
+    expect(wake.offered).toEqual(core.inbox(main.id).map((m) => m.seq!))
+    expect(wake.offered).toHaveLength(1)
+  })
+
   test("a spawn grant is marked; live workers are unspent unexpired spawn grants and joined spenders not done and not offline", () => {
     const { core, clock, db, main, spawn, as } = setup()
     expect(core.stopWait(main.id)).toEqual({ messages: [], offered: [], hold: null, more: 0, workers: [], starting: 0, others: 0, pushes_left: LIMITS.pushes })

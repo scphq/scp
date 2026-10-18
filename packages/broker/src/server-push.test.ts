@@ -34,6 +34,26 @@ async function setup() {
 }
 
 describe("broker, stop_wait", () => {
+  test("a waiting inject offers a worker's message as soon as it arrives", async () => {
+    const { hook, worker } = await setup()
+    const started = Date.now()
+    const waiting = hook.request<{ messages: Envelope[]; offered: number[] }>("inject", { wait_s: 10 })
+    await Bun.sleep(100)
+    await worker.request("send", { to: "main", body: "wake up" })
+    const result = await waiting
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(result.messages.map((m) => m.body.text)).toEqual(["wake up"])
+    expect(result.offered).toEqual(result.messages.map((m) => m.seq!))
+  })
+
+  test("a waiting inject returns empty at its deadline", async () => {
+    const { hook } = await setup()
+    const started = Date.now()
+    expect(await hook.request("inject", { wait_s: 0.3 })).toMatchObject({ messages: [], offered: [] })
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250)
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+
   test("waits while a worker runs, and returns as its message arrives", async () => {
     const { hook, worker } = await setup()
     const started = Date.now()
