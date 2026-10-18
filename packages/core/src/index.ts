@@ -9,6 +9,7 @@ export {
   RelayCore,
   seqList,
   SYSTEM_HANDLE,
+  TITLE_CHARS,
   unreachable,
   type CoreOptions,
   type EndpointRow,

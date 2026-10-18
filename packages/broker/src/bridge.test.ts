@@ -822,6 +822,45 @@ describe("bridge", () => {
     expect(b.core.log().some((r) => r.event === "dead_letter")).toBe(false)
   })
 
+  test("another member's machines show under the org handle, the member's own under me/, and both forms and local/ are accepted", async () => {
+    const tokens = { [TOKEN]: "member-a", [OTHER_TOKEN]: "member-b", [`hub-cred-${"e".repeat(32)}`]: "member-a" }
+    const fake = startFakeHubServer({
+      tokens: Object.fromEntries(Object.entries(tokens).map(([token, actor], i) => [token, { tokenId: `tok_${i}`, user: "scp-dev", actor }])),
+    })
+    cleanups.push(() => fake.stop())
+    const laptop = await machine(fake, "laptop")
+    const desk = await machine(fake, "desk", { token: `hub-cred-${"e".repeat(32)}` })
+    const impl = await agent(laptop, "impl")
+    await agent(desk, "build")
+    const other = await machine(fake, "teammate-mac", { token: OTHER_TOKEN })
+    const review = await agent(other, "review", "codex")
+    const listed = await waitFor(async () => {
+      const { endpoints } = await impl.request<{ endpoints: { address: string }[] }>("list")
+      const addresses = endpoints.map((e) => e.address)
+      return addresses.includes("scp-dev/teammate-mac/review") && addresses.includes("me/desk/build") ? addresses : null
+    }, "the other machines on laptop")
+    expect(listed).toContain("me/impl")
+    const seen = await waitFor(async () => {
+      const { endpoints } = await review.request<{ endpoints: { address: string }[] }>("list")
+      return endpoints.some((e) => e.address === "scp-dev/laptop/impl") ? endpoints : null
+    }, "laptop on teammate-mac")
+    expect(seen.some((e) => e.address === "me/laptop/impl")).toBe(false)
+
+    for (const to of ["scp-dev/teammate-mac/review", "me/teammate-mac/review"]) await impl.request("send", { to, body: `via ${to}` })
+    const got = await waitFor(async () => {
+      const { messages } = await review.request<Inbox>("inbox", {})
+      return messages.length === 2 ? messages : null
+    }, "both sends")
+    expect(got.map((m) => [m.body.text, m.from.address])).toEqual([
+      ["via scp-dev/teammate-mac/review", "scp-dev/laptop/impl"],
+      ["via me/teammate-mac/review", "scp-dev/laptop/impl"],
+    ])
+    await review.request("send", { to: "scp-dev/laptop/impl", body: "back" })
+    const back = (await impl.request<Inbox>("inbox", { wait_s: 5 })).messages[0]!
+    expect([back.body.text, back.from.address]).toEqual(["back", "scp-dev/teammate-mac/review"])
+    expect(await code(impl.request("send", { to: "local/impl", body: "self" }))).toBeUndefined()
+  })
+
   test("without a bridge, a remote address is not found", async () => {
     const root = mkdtempSync(join(tmpdir(), "relay-bridge-none-"))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }))

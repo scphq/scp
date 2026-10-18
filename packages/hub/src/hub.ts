@@ -641,8 +641,11 @@ export class RelayHub {
     serverFields(params)
     const observe = params.observe === true
     const named = params.machine
-    if ((!observe || named !== undefined) && (typeof named !== "string" || !MACHINE_NAME.test(named) || named === "me" || named === this.account)) {
-      throw new RelayError("invalid_params", "machine is a name of lowercase letters, digits and -, other than me and the account handle")
+    if (
+      (!observe || named !== undefined) &&
+      (typeof named !== "string" || !MACHINE_NAME.test(named) || named === "me" || named === "local" || named === this.account)
+    ) {
+      throw new RelayError("invalid_params", "machine is a name of lowercase letters, digits and -, other than me, local and the account handle")
     }
     const bridge = params.bridge === true
     const human = params.human === true
@@ -690,7 +693,7 @@ export class RelayHub {
         this.release(other, true)
       }
       core.record("bridge", null, machine, { machine })
-      return { ...base, endpoints: core.remoteViews({ except: machine }) }
+      return { ...base, endpoints: core.remoteViews({ except: machine }), others: this.othersOf(conn.grant, machine) }
     }
 
     if (one<{ kind: string }>(this.deps.sql, `SELECT kind FROM machines WHERE name = ?`, machine)?.kind === "bridge") {
@@ -1320,10 +1323,21 @@ export class RelayHub {
     if (view) this.toBridges(machine, { machine, endpoints: [view], full: false })
   }
 
-  private toBridges(machine: string, params: unknown): void {
+  /** `own` tells each bridge whether a bound machine is its member's own device */
+  private toBridges(machine: string, params: Record<string, unknown>): void {
+    const bound = one<{ actor_id: string | null }>(this.deps.sql, `SELECT actor_id FROM machines WHERE name = ?`, machine)
     for (const socket of this.deps.sockets()) {
-      if (socket.conn.role === "bridge" && socket.conn.machine !== machine) this.write(socket, { jsonrpc: "2.0", method: "endpoints", params })
+      if (socket.conn.role !== "bridge" || socket.conn.machine === machine) continue
+      const own = bound ? { own: (bound.actor_id ?? null) === (socket.conn.grant.actorId ?? null) } : {}
+      this.write(socket, { jsonrpc: "2.0", method: "endpoints", params: { ...params, ...own } })
     }
+  }
+
+  /** the machines of other members than the grant's, which a bridge shows under the account handle */
+  private othersOf(grant: HubGrant, except: string): string[] {
+    return this.deps.sql
+      .all<{ name: string }>(`SELECT name FROM machines WHERE name != ? AND actor_id IS NOT ?`, except, grant.actorId ?? null)
+      .map((row) => row.name)
   }
 
   private fleet(event: Record<string, unknown>): void {

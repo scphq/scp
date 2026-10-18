@@ -257,9 +257,10 @@ export function startBridge(options: BridgeOptions): Bridge {
   }
 
   async function handshake(socket: WebSocket) {
-    const hello = await request<{ account: string; endpoints: RemoteView[] }>("hello", { protocol: PROTOCOL, machine, bridge: true })
+    const hello = await request<{ account: string; endpoints: RemoteView[]; others?: string[] }>("hello", { protocol: PROTOCOL, machine, bridge: true })
     account = hello.account
     core.setAliases([account])
+    core.setOthers(account, Array.isArray(hello.others) ? hello.others.filter((name): name is string => typeof name === "string") : [])
     ready = true
     applyRemote(hello.endpoints, true)
     await Promise.all(fullMirror().map((params) => request("mirror", params)))
@@ -354,7 +355,7 @@ export function startBridge(options: BridgeOptions): Bridge {
   function localAddress(address: unknown): unknown {
     if (typeof address !== "string" || !account || !address.startsWith(`${account}/`)) return address
     const rest = address.slice(account.length + 1)
-    return rest.includes("/") ? `${core.user}/${rest}` : `${core.user}/${account}/${rest}`
+    return rest.includes("/") ? core.remoteAddress(rest) : `${core.user}/${account}/${rest}`
   }
 
   /** the lowest seq a fresh subscribe must replay from: every delivery at or below it was acked */
@@ -391,6 +392,7 @@ export function startBridge(options: BridgeOptions): Bridge {
       }
       case "endpoints": {
         if (typeof params.machine !== "string" || params.machine === machine) return
+        if (typeof params.own === "boolean") core.setOther(params.machine, !params.own)
         try {
           core.mirror(params.machine, params.endpoints, { full: params.full === true })
         } catch (error) {

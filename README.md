@@ -97,7 +97,7 @@ flowchart LR
 - **Hub.** One per account. It re-checks scope against mirrored rules, queues deliveries for offline machines, and holds contacts and the hosted judge with its hold queue.
 - **Contact hub.** Another account's hub, reached only through an accepted contact, after an egress gate on the sender's side and an ingress gate on the receiver's.
 
-Addresses follow the same layers: `parser` or `me/parser` on this machine, `<machine>/<handle>` in the same account, `<account>/<machine>/<handle>` through a contact.
+Addresses follow the same layers: `parser`, `me/parser` or `local/parser` on this machine; `me/<machine>/<handle>` on another of your own devices; `<org>/<machine>/<handle>` on a device another member of your org linked (`me/<machine>/<handle>` is accepted for those too); `<account>/<machine>/<handle>` through a contact.
 
 Mesh mode (hubless, peer to peer, for example over a tailnet) is on the roadmap.
 

@@ -1332,6 +1332,51 @@ describe("broker, self bind and titles", () => {
     expect(await code(hook.request("title", { text: "x" }))).toBe("unauthorized")
     expect(broker.core.list({ all: true }).find((e) => e.address === "me/hooked")!.title).toBeNull()
   })
+
+  test("a prompt reminds the agent to refresh its note every n prompts, counted from its last note or reminder", async () => {
+    const { broker } = await setup()
+    const h = await connect(broker)
+    await h.hello({ transient: true, claim: { handle: "tl", harness: "claude-code", session: key(820), process: key(820) } })
+    const due = async () => ((await h.request<{ tldr?: boolean }>("prompted", { tldr_every: 3 })).tldr ?? false) as boolean
+    expect([await due(), await due(), await due(), await due()]).toEqual([false, false, true, false])
+    const shell = await connect(broker)
+    await shell.hello({ observe: true, self: [821, 820].map(key), lineage: [821, 820].map(key), brief: true })
+    await due()
+    await shell.request("status", { note: "fixing the parser" })
+    expect([await due(), await due(), await due()]).toEqual([false, false, true])
+    expect((await h.request<{ tldr?: boolean }>("prompted", { tldr_every: 0 })).tldr).toBeUndefined()
+  })
+
+  test("a hook infers a title from the first prompt, then the session's summary at most every few prompts; an explicit title always wins", async () => {
+    const { broker } = await setup()
+    const hook = async () => {
+      const client = await connect(broker)
+      await client.hello({ transient: true, claim: { handle: "inf", harness: "claude-code", session: key(800), process: key(800) } })
+      return client
+    }
+    const title = () => broker.core.list({ all: true }).find((e) => e.address === "me/inf")!.title
+    const h = await hook()
+    expect(await h.request("title_infer", { from: "prompt", text: "fix the  parser\n tests" })).toEqual({ changed: true })
+    expect(title()).toBe("fix the parser tests")
+    expect(await h.request("title_infer", { from: "prompt", text: "a later prompt" })).toEqual({ changed: false })
+    expect(await h.request("title_infer", { from: "summary", text: "Parser test fixes" })).toEqual({ changed: true })
+    expect(await h.request("title_infer", { from: "summary", text: "Something newer" })).toEqual({ changed: false })
+    for (let i = 0; i < LIMITS.titleRefreshTurns; i++) await h.request("prompted", {})
+    expect(await h.request("title_infer", { from: "summary", text: `use sk-ant-${"a".repeat(40)} ${"x".repeat(70)}` })).toEqual({ changed: true })
+    expect(title()).toHaveLength(64)
+    expect(title()).not.toContain("aaaa")
+    await h.request("event", { kind: "session_start", summary: "compact" })
+    expect(title()).toStartWith("use [redacted")
+    await h.request("event", { kind: "session_start", summary: "startup" })
+    expect(title()).toBeNull()
+
+    const shell = await connect(broker)
+    await shell.hello({ observe: true, self: [801, 800].map(key), lineage: [801, 800].map(key), brief: true })
+    await shell.request("title", { text: "chosen" })
+    expect(await h.request("title_infer", { from: "summary", text: "Parser test fixes" })).toEqual({ changed: false })
+    expect(await h.request("title_infer", { from: "prompt", text: "anything" })).toEqual({ changed: false })
+    expect(title()).toBe("chosen")
+  })
 })
 
 describe("broker, spawn bindings and ended asks", () => {

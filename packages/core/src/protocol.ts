@@ -73,6 +73,8 @@ export const LIMITS = {
   grantTtlS: 7 * 86_400,
   groupIdleS: 86_400,
   policyLoadsKept: 8,
+  /** the prompts between two refreshes of a title a hook inferred */
+  titleRefreshTurns: 5,
 } as const
 
 export type ErrorCode =

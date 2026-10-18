@@ -168,7 +168,7 @@ describe("a stop waits on spawned workers", () => {
 
   test("a user prompt tells the broker, which ends a waiting stop and resets the push budget; agy's model calls do not", async () => {
     const prompt = await stop(["claude"], {}, [], { payload: { hook_event_name: "UserPromptSubmit", prompt: "go on", cwd: process.env.HOME } })
-    expect(prompt.sent("prompted")).toEqual([{}])
+    expect(prompt.sent("prompted")).toEqual([{ tldr_every: 10 }])
     const agy = await stop(["agy", "PreInvocation"], {}, [], { env: { CLAUDECODE: "" }, payload: { cwd: process.env.HOME } })
     expect(agy.sent("prompted")).toEqual([])
   })

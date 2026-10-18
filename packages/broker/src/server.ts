@@ -134,7 +134,7 @@ const CHANGES_SCOPE = new Set(["rules_set", "rules_widen", "rules_lift", "group"
 const ASK_RECHECK_MS = 1000
 /** how often a waiting stop rechecks its workers, since a worker's exit or lapse wakes no one */
 const STOP_RECHECK_MS = 1000
-const TRANSIENT_METHODS = new Set(["event", "status", "whoami", "inject", "injected", "peek_turn", "stop_wait", "prompted"])
+const TRANSIENT_METHODS = new Set(["event", "status", "whoami", "inject", "injected", "peek_turn", "stop_wait", "prompted", "title_infer"])
 const GRANT_UNBOUND = `a spawn-env grant binds only a new harness process: run the harness with it, or name the child (${CLI_NAME} spawn-env --name / --as)`
 
 /** the workers' messages and handbacks a stop's push would show, and those of theirs left unread past it */
@@ -822,6 +822,11 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         bridge?.changed(me)
         return view
       }
+      case "title_infer": {
+        const changed = core.inferTitle(me, params, hookOf(s))
+        if (changed) bridge?.changed(me)
+        return { changed }
+      }
       case "status": {
         core.status(me, params.state, params.note)
         const view = core.whoami(me)
@@ -863,7 +868,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "prompted": {
         const prompted = core.prompted(me, hookOf(s))
         if (prompted) wake(me)
-        return { prompted }
+        const tldr = prompted && typeof params.tldr_every === "number" && core.tldrDue(me, params.tldr_every)
+        return { prompted, ...(tldr ? { tldr } : {}) }
       }
       case "injected":
         return {
