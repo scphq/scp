@@ -37,13 +37,13 @@ function formOf(page: string, action: string): Record<string, string> {
   return Object.fromEntries([...form.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map((m) => [m[1]!, m[2]!]));
 }
 
-async function deviceLogin(browser: Browser, label: string): Promise<string> {
+async function deviceLogin(browser: Browser, label: string, org?: string): Promise<string> {
   const start = (await (
     await relay.fetch("/v1/device/code", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) })
   ).json()) as { device_code: string; verification_uri_complete: string };
   const link = new URL(start.verification_uri_complete);
   const page = await (await browser.get(link.pathname + link.search)).text();
-  await browser.post("/device", { ...formOf(page, "/device"), action: "approve" });
+  await browser.post("/device", { ...formOf(page, "/device"), ...(org ? { org } : {}), action: "approve" });
   const issued = await relay.fetch("/v1/device/token", { method: "POST", body: JSON.stringify({ device_code: start.device_code }) });
   return ((await issued.json()) as { access_token: string }).access_token;
 }
@@ -244,6 +244,88 @@ describe("org overview", () => {
     expect((await stranger.get("/orgs/freshco")).status).toBe(404);
   });
 
+  test("every org tab renders for a member under one tab bar, old paths redirect, and strangers and signed-out visitors get no tab", async () => {
+    const owner = new Browser(relay);
+    await owner.signIn("tabs-owner@example.com");
+    await owner.post("/orgs", { handle: "tabco" });
+    await owner.post("/orgs/tabco/invites", { email: "tabs-member@example.com", role: "member" });
+    const member = new Browser(relay);
+    await member.signIn("tabs-member@example.com");
+    const invite = /name="invite" value="([^"]+)"/.exec(await (await member.get("/orgs")).text())![1]!;
+    await member.post("/invites/accept", { invite });
+
+    const tabs: [string, string, string][] = [
+      ["", "Overview", "Connect your first machine"],
+      ["/activity", "Activity", "Recent activity"],
+      ["/sessions", "Sessions", "Connect your first machine"],
+      ["/graph", "Graph", 'data-graph data-full data-events="/orgs/tabco/events"'],
+      ["/tokens", "Tokens and devices", "API tokens"],
+      ["/members", "Members", "Relay judge"],
+    ];
+    for (const [path, label, marker] of tabs) {
+      const res = await member.get(`/orgs/tabco${path}`);
+      expect(res.status).toBe(200);
+      const page = await res.text();
+      expect(page).toContain(marker);
+      expect(page).toContain(`<a href="/orgs/tabco${path}" aria-current="page">${label}</a>`);
+      expect(page.match(/aria-current="page"/g)).toHaveLength(2);
+      for (const [other] of tabs) expect(page).toContain(`href="/orgs/tabco${other}"`);
+      expect(page).toContain('<body class="wide">');
+    }
+    expect(await (await member.get("/orgs/tabco/tokens")).text()).toContain("Machines");
+    expect((await member.get("/orgs/tabco/graph/full")).status).toBe(200);
+
+    for (const [old, to] of [
+      ["overview", ""],
+      ["agents", "/sessions"],
+      ["devices", "/tokens"],
+      ["machines", "/tokens"],
+      ["settings", "/members"],
+    ]) {
+      const res = await member.get(`/orgs/tabco/${old}`);
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe(`/orgs/tabco${to}`);
+    }
+    expect((await member.get("/orgs/tabco/nope")).status).toBe(404);
+
+    const stranger = new Browser(relay);
+    await stranger.signIn("tabs-stranger@example.com");
+    for (const [path] of tabs) expect((await stranger.get(`/orgs/tabco${path}`)).status).toBe(404);
+    const anon = new Browser(relay);
+    for (const [path] of tabs) {
+      const res = await anon.get(`/orgs/tabco${path}`);
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toStartWith("/sign-in");
+    }
+  });
+
+  test("the organizations list counts devices and live agents with their harnesses, and creating one is its own tab", async () => {
+    const owner = new Browser(relay);
+    await owner.signIn("list-owner@example.com");
+    await owner.post("/orgs", { handle: "listco" });
+    await owner.post("/orgs", { handle: "quietco" });
+    const device = await deviceLogin(owner, "laptop", "listco");
+    const laptop = await machine(await relay.listening(), "laptop", device);
+    await agent(laptop, "lead");
+    const list = await waitFor(async () => {
+      const text = await (await owner.get("/orgs")).text();
+      return /<a href="\/orgs\/listco">listco<\/a>[\s\S]*?<\/tr>/.exec(text)?.[0].includes('aria-label="claude-code"') ? text : null;
+    }, "listco's agent on the list");
+    const row = (h: string) => new RegExp(`<a href="/orgs/${h}">${h}</a>[\\s\\S]*?</tr>`).exec(list)![0];
+    expect(list).toContain('<th class="end">Devices</th>');
+    expect(row("listco")).toMatch(/<td class="mono end">1<\/td><td class="end agents-cell">[\s\S]*<span class="mono">1<\/span>/);
+    expect(row("quietco")).toMatch(/<td class="mono end">0<\/td>/);
+    expect(list).not.toContain('action="/orgs"');
+    expect(list).toContain('<a href="/orgs" aria-current="page">Member of</a>');
+
+    const form = await (await owner.get("/orgs/new")).text();
+    expect(form).toContain('<a href="/orgs/new" aria-current="page">New organization</a>');
+    expect(form).toContain('<form class="form" method="post" action="/orgs">');
+    const taken = await owner.post("/orgs", { handle: "new" });
+    expect(taken.status).toBe(409);
+    expect(await taken.text()).toContain('value="new"');
+  });
+
   test("bridged machines show with their agents, presence, status, token labels and recent activity", async () => {
     const owner = new Browser(relay);
     await owner.signIn("overview-owner@example.com");
@@ -262,17 +344,28 @@ describe("org overview", () => {
     await lead.request("title", { text: "overview page" });
 
     const page = await waitFor(async () => {
-      const text = await (await owner.get("/orgs/liveco")).text();
-      return text.includes("token=ambient") && text.includes("overview page") && text.includes("wiring the overview") && text.includes("bun test")
-        ? text
-        : null;
-    }, "both machines on the overview");
+      const text = await (await owner.get("/orgs/liveco/sessions")).text();
+      return text.includes("token=ambient") && text.includes("overview page") && text.includes("wiring the overview") ? text : null;
+    }, "both machines on the sessions tab");
     expect(page).not.toContain("Connect your first machine");
     expect(page).toMatch(/<h3 class="mono">laptop<\/h3>[\s\S]*aria-label="claude-code"[\s\S]*<span class="mono">lead<\/span>[\s\S]*overview page/);
     expect(page).toMatch(/<h3 class="mono">runner<\/h3>[\s\S]*<span class="mono">bot<\/span>[\s\S]*<span class="tag">token=ambient<\/span>/);
     expect(page).toMatch(/<span class="role">working<\/span> <span class="small">wiring the overview<\/span>/);
-    expect(page).toMatch(/laptop\/lead[\s\S]*?Bash: bun test/);
     expect(page).toContain("2 machines, 2 online, 2 agents");
+    expect(page).toContain('data-events="/orgs/liveco/events"');
+
+    const feed = await waitFor(async () => {
+      const text = await (await owner.get("/orgs/liveco/activity")).text();
+      return text.includes("bun test") ? text : null;
+    }, "the tool call on the activity tab");
+    expect(feed).toMatch(/laptop\/lead[\s\S]*?Bash: bun test/);
+
+    const overview = await (await owner.get("/orgs/liveco")).text();
+    expect(overview).toMatch(/<p class="tile-label">Online<\/p><p class="tile-value">2<\/p>/);
+    expect(overview).toMatch(/<p class="tile-label">Machines<\/p><p class="tile-value">2<\/p><p class="mini">2 online<\/p>/);
+    expect(overview).toMatch(/<span class="mono">lead<\/span>[\s\S]*?<span class="role">working<\/span> wiring the overview/);
+    expect(overview).toContain("1 device and 1 API token signed in");
+    expect(overview).not.toContain("<table");
   });
 
   test("the overview carries a live graph of the agents with spawn and message edges, counts only, and its script", async () => {
@@ -294,15 +387,15 @@ describe("org overview", () => {
 
     type Edge = { kind: string; from: string; to: string; count?: number; last_at?: string };
     const data = await waitFor(async () => {
-      const text = await (await owner.get("/orgs/graphco")).text();
+      const text = await (await owner.get("/orgs/graphco/graph")).text();
       const json = /<script type="application\/json" data-graph-data>([\s\S]*?)<\/script>/.exec(text)?.[1];
       const g = json ? (JSON.parse(json) as { nodes: { address: string; machine: string; label: string }[]; edges: Edge[] }) : null;
       return g?.edges.some((e) => e.kind === "message" && e.count === 2) ? { text, g } : null;
     }, "a message edge on the graph");
     expect(data.text).toMatch(/<script src="\/graph\.js\?v=[a-z0-9]+" defer><\/script>/);
     expect(data.text).toMatch(/<link rel="stylesheet" href="\/graph\.css\?v=[a-z0-9]+">/);
-    expect(data.text).toContain(`data-graph data-events="/orgs/graphco/events" hidden`);
-    expect(data.text).toContain('data-view-set="table"');
+    expect(data.text).toContain(`data-graph data-full data-events="/orgs/graphco/events"`);
+    expect(data.text).toContain('<a href="/orgs/graphco/graph" aria-current="page">Graph</a>');
     expect(data.text).not.toContain("private plan");
     expect(data.g.nodes.find((n) => n.label === "lead")).toMatchObject({ machine: "laptop" });
     expect(data.g.edges.find((e) => e.kind === "message")).toMatchObject({
@@ -332,13 +425,13 @@ describe("org overview", () => {
       return endpoints.some((e) => e.address.endsWith("/desk/review"));
     }, "desk/review on the laptop");
 
-    const page = await (await owner.get("/orgs/streamco/graph")).text();
+    const page = await (await owner.get("/orgs/streamco/graph/full")).text();
     expect(page).toContain('<body class="bare">');
     expect(page).toContain('data-events="/orgs/streamco/events"');
-    expect(page).toContain('href="/orgs/streamco">Back to overview</a>');
+    expect(page).toContain('href="/orgs/streamco/graph">Back to the dashboard</a>');
     expect(page).toMatch(/<script type="application\/json" data-graph-data>[\s\S]*streamco\/desk\/review/);
     expect(page).toMatch(/<script src="\/graph\.js\?v=[a-z0-9]+" defer><\/script>/);
-    expect(await (await owner.get("/orgs/streamco")).text()).toContain('href="/orgs/streamco/graph">Full screen</a>');
+    expect(await (await owner.get("/orgs/streamco/graph")).text()).toContain('href="/orgs/streamco/graph/full">Full screen</a>');
 
     const cookie = (b: Browser): string => [...b.jar].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
     const open = (b: Browser | null, from = relay.origin) =>

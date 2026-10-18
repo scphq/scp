@@ -45,7 +45,7 @@ function signInPage(ctx: Ctx, next: string, email = "", error = "", status = 200
   const head = html`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`;
   return page(
     ctx,
-    { title: "Sign in", head },
+    { title: "Sign in", head, narrow: true },
     html`<p class="label">Sign in or sign up</p>
       <h1>Sign in to the relay</h1>
       <p class="lead">Enter your email and we send you a one-time code. A new email creates an account.</p>
@@ -98,7 +98,7 @@ export async function postSignIn(ctx: Ctx): Promise<Response> {
 function codePage(ctx: Ctx, email: string, error = "", status = 200): Response {
   return page(
     ctx,
-    { title: "Enter code" },
+    { title: "Enter code", narrow: true },
     html`<p class="label">Check your email</p>
       <h1>Enter your code</h1>
       <p class="lead">We sent a code to <strong>${email}</strong>. It expires in 10 minutes.</p>

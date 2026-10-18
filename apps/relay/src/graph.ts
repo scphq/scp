@@ -2,7 +2,7 @@ import type { HubGraph } from "@scp-dev/hub";
 import type { User } from "./env";
 import { hubEvents, hubGraph } from "./hub/routes";
 import { Html, html, stamp } from "./html";
-import { requireMember } from "./orgs";
+import { orgHeader, requireMember } from "./orgs";
 import { APP_JS, harnessIcon, ICON_PATHS, REFRESH_MS, shown } from "./overview";
 import { HttpError } from "./util";
 import { type Ctx, checkOrigin, page } from "./web";
@@ -49,20 +49,6 @@ const canvas = html`<div class="graph-canvas"><svg class="graph-svg" role="group
 
 const legend = html`<p class="mini graph-legend"><span class="key spawn" aria-hidden="true"></span>spawned <span class="key msg" aria-hidden="true"></span>messages, last <span data-graph-minutes>15</span> min</p>`;
 
-/** the view toggle and the graph canvas; outside the live region so node positions survive a refresh. Hidden until the script runs */
-export function graphShell(handle: string): Html {
-  return html`<div class="view-bar" data-view-bar hidden>
-      <div class="seg" role="group" aria-label="View"><button type="button" data-view-set="graph" aria-pressed="true">Graph</button><button type="button" data-view-set="table" aria-pressed="false">Table</button></div>
-      <label class="mini graph-only"><input type="checkbox" data-graph-offline> show offline</label>
-      <span class="mini graph-only" data-graph-stream></span>
-      <a class="mini-link graph-only push" href="/orgs/${handle}/graph">Full screen</a>
-    </div>
-    <section class="graph" data-graph data-events="/orgs/${handle}/events" hidden aria-label="Live graph of agents and their links">
-      ${legend}
-      ${canvas}
-    </section>`;
-}
-
 /** the stamped script and stylesheet tags a graph page loads */
 export const graphAssets = (): Html =>
   html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script><script src="/graph.js?v=${stamp(graphScript())}" defer></script><link rel="stylesheet" href="/graph.css?v=${stamp(GRAPH_CSS)}">`;
@@ -72,7 +58,7 @@ export function graphFull(org: { handle: string; name: string }, g: HubGraph | n
   return html`<div class="graph gfull" data-graph data-full data-events="/orgs/${org.handle}/events" aria-label="Live graph of agents and their links">
       ${canvas}
       <header class="g-over g-left">
-        <a class="mini-link" href="/orgs/${org.handle}">Back to overview</a>
+        <a class="mini-link" href="/orgs/${org.handle}/graph">Back to the dashboard</a>
         <h1 title="${org.name}">${org.name}</h1>
         <p class="mini" data-graph-counts></p>
         <p class="mini" data-graph-stream></p>
@@ -86,10 +72,34 @@ export function graphFull(org: { handle: string; name: string }, g: HubGraph | n
     </div>`;
 }
 
-/** `/orgs/<handle>/graph`: the graph alone, filling the window, for a big screen */
+/** `/orgs/<handle>/graph/full`: the graph alone, filling the window, for a big screen */
 export async function graphPage(ctx: Ctx, user: User, handle: string): Promise<Response> {
   const m = await requireMember(ctx.env.DB, handle, user.id);
   return page(ctx, { title: `${m.org.name} graph`, bare: true, head: graphAssets() }, graphFull(m.org, await hubGraph(ctx.env, m.org.id)));
+}
+
+/** `/orgs/<handle>/graph`: the graph tab, the same canvas filling the rest of the window under the tab bar */
+export async function graphTabPage(ctx: Ctx, user: User, handle: string): Promise<Response> {
+  const m = await requireMember(ctx.env.DB, handle, user.id);
+  const g = await hubGraph(ctx.env, m.org.id);
+  return page(
+    ctx,
+    { title: `${m.org.name} graph`, nav: "orgs", head: graphAssets() },
+    html`${orgHeader(m, "graph")}
+      <div class="graph gfull gtab" data-graph data-full data-events="/orgs/${m.org.handle}/events" aria-label="Live graph of agents and their links">
+        ${canvas}
+        <div class="g-over g-left">
+          <p class="mini" data-graph-counts></p>
+          <p class="mini" data-graph-stream></p>
+        </div>
+        <div class="g-over g-right">
+          ${legend}
+          <span class="g-acts"><label class="mini"><input type="checkbox" data-graph-offline> show offline</label><a class="mini-link" href="/orgs/${m.org.handle}/graph/full">Full screen</a></span>
+        </div>
+        <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
+        ${g ? "" : html`<p class="g-empty mini">The hub did not answer. This page retries on its own.</p>`}
+      </div>`,
+  );
 }
 
 /** `/orgs/<handle>/events`: a member's same-origin WebSocket of presence, endpoint and message metadata from the org hub */
@@ -101,15 +111,7 @@ export async function eventsRoute(ctx: Ctx, user: User, handle: string): Promise
 }
 
 export const GRAPH_CSS = `
-.view-bar[hidden]{display:none}
-.view-bar{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;margin-top:2rem}
-.seg{display:inline-flex;border:1px solid var(--line)}
-.seg button{height:2rem;padding-inline:.875rem;border:0;background:transparent;color:var(--ink);font-family:var(--mono);font-size:.6875rem;cursor:pointer}
-.seg button+button{border-left:1px solid var(--line)}
-.seg button[aria-pressed=true]{background:var(--fg);color:var(--bg)}
-.view-bar label,.g-over label{display:inline-flex;align-items:center;gap:.375rem;cursor:pointer}
-[data-view=table] .graph,[data-view=table] .graph-only{display:none}
-[data-view=graph] [data-live]>.block:has(.machine){display:none}
+.g-over label{display:inline-flex;align-items:center;gap:.375rem;cursor:pointer}
 .graph{margin-top:1.25rem}
 .graph-legend{display:flex;flex-wrap:wrap;align-items:center;gap:.375rem}
 .graph-legend .key{display:inline-block;width:1.25rem;height:0;margin-left:.5rem;border-top:1.5px solid var(--faint)}
@@ -170,6 +172,11 @@ export const GRAPH_CSS = `
 .graph-tip .t-kv dd{color:var(--fg);overflow-wrap:anywhere}
 body.bare{overflow:hidden;height:100dvh;min-height:0}
 .gfull{position:fixed;inset:0;margin:0}
+.gfull.gtab{position:relative;inset:auto;height:max(26rem,calc(100dvh - 19rem));margin-top:1.5rem;border:1px solid var(--line-soft)}
+.gtab .g-left{top:.75rem;left:.75rem}
+.gtab .g-right{top:.75rem;right:.75rem}
+.g-acts{display:inline-flex;align-items:center;gap:1rem}
+@media (max-width:40rem){.gtab .g-right{top:auto;bottom:.75rem;left:.75rem;justify-items:start}.gtab{height:max(26rem,calc(100dvh - 16rem))}}
 .gfull .graph-canvas{position:absolute;inset:0;margin:0;border:0}
 .gfull .graph-svg{height:100%}
 .g-over{position:absolute;z-index:2;display:grid;gap:.25rem;padding:.875rem 1rem;border:1px solid var(--line-soft);background:var(--head);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
@@ -405,10 +412,11 @@ function pack(list) {
   const height = Math.max(y - GAP, 1);
   const margin = full ? Math.min(120, cw * 0.06) : 24;
   let top = margin, bottom = margin;
+  const at = full ? canvas.getBoundingClientRect().top : 0;
   if (full) for (const o of root.querySelectorAll(".g-over")) {
     const b = o.getBoundingClientRect();
-    if (b.top < ch / 2) top = Math.max(top, b.bottom + 16);
-    else bottom = Math.max(bottom, ch - b.top + 16);
+    if (b.top - at < ch / 2) top = Math.max(top, b.bottom - at + 16);
+    else bottom = Math.max(bottom, ch - (b.top - at) + 16);
   }
   const scale = full
     ? Math.min(CAP, (cw - 2 * margin) / widest, (ch - top - bottom) / height)

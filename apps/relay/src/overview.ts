@@ -1,11 +1,8 @@
 import { type ActivityRow, type EndpointView, GONE_PREFIX } from "@scp-dev/core";
 import type { MachineRow } from "@scp-dev/hub";
-import type { User } from "./env";
-import { graphAssets, graphData, graphShell } from "./graph";
-import { hubGraph, hubOverview, type Overview } from "./hub/routes";
+import type { Overview } from "./hub/routes";
 import { Html, html } from "./html";
-import { notice, orgHeader, requireMember } from "./orgs";
-import { type Ctx, page } from "./web";
+import { notice } from "./orgs";
 
 /** how often the page refetches itself, in ms */
 export const REFRESH_MS = 8000;
@@ -48,7 +45,7 @@ export function groupByMachine(o: Overview): MachineGroup[] {
 }
 
 /** how an idle agent gets woken by a message; absent or `none` means it reads at its next turn */
-const wakeOf = (e: EndpointView): string | null => (e.wake && e.wake !== "none" ? e.wake : null);
+export const wakeOf = (e: EndpointView): string | null => (e.wake && e.wake !== "none" ? e.wake : null);
 
 const BOLT = html`<svg class="bolt" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1 3 9h4.5L6.5 15 13 7H8.5z" fill="currentColor"/></svg>`;
 
@@ -81,8 +78,8 @@ export const ICON_PATHS: Record<string, string> = {
   gemini:
     '<path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81" fill="currentColor"/>',
   agy: '<path d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .307 5.387.307 12s5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36 2.16-2.16 2.84-5.213 2.84-7.667 0-.76-.053-1.467-.173-2.053H12.48z" fill="currentColor"/>',
-  grok: '<g transform=\"translate(2.4 2.4) scale(.8)\"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" fill="currentColor"/></g>',
-  muse: '<g transform=\"translate(-1.2 -1.2) scale(1.1)\"><path d="M6.915 4.03c-1.968 0-3.683 1.28-4.871 3.113C.704 9.208 0 11.883 0 14.449c0 .706.07 1.369.21 1.973a6.624 6.624 0 0 0 .265.86 5.297 5.297 0 0 0 .371.761c.696 1.159 1.818 1.927 3.593 1.927 1.497 0 2.633-.671 3.965-2.444.76-1.012 1.144-1.626 2.663-4.32l.756-1.339.186-.325c.061.1.121.196.183.3l2.152 3.595c.724 1.21 1.665 2.556 2.47 3.314 1.046.987 1.992 1.22 3.06 1.22 1.075 0 1.876-.355 2.455-.843a3.743 3.743 0 0 0 .81-.973c.542-.939.861-2.127.861-3.745 0-2.72-.681-5.357-2.084-7.45-1.282-1.912-2.957-2.93-4.716-2.93-1.047 0-2.088.467-3.053 1.308-.652.57-1.257 1.29-1.82 2.05-.69-.875-1.335-1.547-1.958-2.056-1.182-.966-2.315-1.303-3.454-1.303zm10.16 2.053c1.147 0 2.188.758 2.992 1.999 1.132 1.748 1.647 4.195 1.647 6.4 0 1.548-.368 2.9-1.839 2.9-.58 0-1.027-.23-1.664-1.004-.496-.601-1.343-1.878-2.832-4.358l-.617-1.028a44.908 44.908 0 0 0-1.255-1.98c.07-.109.141-.224.211-.327 1.12-1.667 2.118-2.602 3.358-2.602zm-10.201.553c1.265 0 2.058.791 2.675 1.446.307.327.737.871 1.234 1.579l-1.02 1.566c-.757 1.163-1.882 3.017-2.837 4.338-1.191 1.649-1.81 1.817-2.486 1.817-.524 0-1.038-.237-1.383-.794-.263-.426-.464-1.13-.464-2.046 0-2.221.63-4.535 1.66-6.088.454-.687.964-1.226 1.533-1.533a2.264 2.264 0 0 1 1.088-.285z" fill="currentColor"/></g>',
+  grok: '<g transform="translate(2.4 2.4) scale(.8)"><path d="M18.901 1.153h3.68l-8.04 9.19L24 22.846h-7.406l-5.8-7.584-6.638 7.584H.474l8.6-9.83L0 1.154h7.594l5.243 6.932ZM17.61 20.644h2.039L6.486 3.24H4.298Z" fill="currentColor"/></g>',
+  muse: '<g transform="translate(-1.2 -1.2) scale(1.1)"><path d="M6.915 4.03c-1.968 0-3.683 1.28-4.871 3.113C.704 9.208 0 11.883 0 14.449c0 .706.07 1.369.21 1.973a6.624 6.624 0 0 0 .265.86 5.297 5.297 0 0 0 .371.761c.696 1.159 1.818 1.927 3.593 1.927 1.497 0 2.633-.671 3.965-2.444.76-1.012 1.144-1.626 2.663-4.32l.756-1.339.186-.325c.061.1.121.196.183.3l2.152 3.595c.724 1.21 1.665 2.556 2.47 3.314 1.046.987 1.992 1.22 3.06 1.22 1.075 0 1.876-.355 2.455-.843a3.743 3.743 0 0 0 .81-.973c.542-.939.861-2.127.861-3.745 0-2.72-.681-5.357-2.084-7.45-1.282-1.912-2.957-2.93-4.716-2.93-1.047 0-2.088.467-3.053 1.308-.652.57-1.257 1.29-1.82 2.05-.69-.875-1.335-1.547-1.958-2.056-1.182-.966-2.315-1.303-3.454-1.303zm10.16 2.053c1.147 0 2.188.758 2.992 1.999 1.132 1.748 1.647 4.195 1.647 6.4 0 1.548-.368 2.9-1.839 2.9-.58 0-1.027-.23-1.664-1.004-.496-.601-1.343-1.878-2.832-4.358l-.617-1.028a44.908 44.908 0 0 0-1.255-1.98c.07-.109.141-.224.211-.327 1.12-1.667 2.118-2.602 3.358-2.602zm-10.201.553c1.265 0 2.058.791 2.675 1.446.307.327.737.871 1.234 1.579l-1.02 1.566c-.757 1.163-1.882 3.017-2.837 4.338-1.191 1.649-1.81 1.817-2.486 1.817-.524 0-1.038-.237-1.383-.794-.263-.426-.464-1.13-.464-2.046 0-2.221.63-4.535 1.66-6.088.454-.687.964-1.226 1.533-1.533a2.264 2.264 0 0 1 1.088-.285z" fill="currentColor"/></g>',
   pi: '<path d="M0 0h18v6H0zM0 6h6v18H0zM12 6h6v6h-6zM6 12h6v6H6zM18 12h6v12h-6z" fill="currentColor"/>',
   generic:
     '<g transform="scale(1.5)"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M4.5 6.25 6.5 8l-2 1.75M8 10h3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></g>',
@@ -106,7 +103,7 @@ const ICON_OF: Record<string, string> = {
 export const harnessIcon = (harness: string | null): string => ICON_OF[(harness ?? "").toLowerCase()] ?? "generic";
 
 /** sized in markup too, so a stale or missing stylesheet never blows it up */
-const hicon = (harness: string | null): Html => {
+export const hicon = (harness: string | null): Html => {
   const key = harnessIcon(harness);
   return html`<svg class="hicon h-${key}" width="12" height="12" viewBox="0 0 24 24" role="img" aria-label="${harness ?? "unknown harness"}">${new Html(ICON_PATHS[key]!)}</svg>`;
 };
@@ -116,7 +113,7 @@ const CARET = html`<svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true
 /** a handle as people read it: a retired row's `_gone_<id>` shows as ended */
 export const shown = (handle: string): string => (handle.startsWith(GONE_PREFIX) ? "(ended)" : handle);
 
-const handleOf = (address: string): string => shown(splitAddress(address).handle);
+export const handleOf = (address: string): string => shown(splitAddress(address).handle);
 
 /** labels worth a chip: the machine label repeats the section header */
 export const chips = (l: Record<string, string>): [string, string][] => Object.entries(l).filter(([k]) => k !== "machine");
@@ -220,7 +217,7 @@ function machineBlock(g: MachineGroup, now: number): Html {
   </div>`;
 }
 
-function describe(a: ActivityRow): string {
+export function describe(a: ActivityRow): string {
   switch (a.kind) {
     case "session_start":
       return "started a session";
@@ -235,12 +232,15 @@ function describe(a: ActivityRow): string {
   }
 }
 
-function activityBlock(rows: ActivityRow[], now: number): Html {
-  return html`<section class="block"><h2>Recent activity</h2>
+/** newest first, whatever order the hub merged its machines' rows in */
+export const newest = (rows: ActivityRow[]): ActivityRow[] => [...rows].sort((a, b) => b.at.localeCompare(a.at));
+
+export function activityBlock(rows: ActivityRow[], now: number): Html {
+  return html`<section class="block"><div class="block-head"><h2>Recent activity</h2>${liveStamp(now)}</div>
     ${
       rows.length
         ? html`<div class="table"><table class="activity"><colgroup><col class="c-when"><col class="c-who"><col></colgroup><thead><tr><th>When</th><th>Agent</th><th>What</th></tr></thead>
-          <tbody>${rows.map((a) => {
+          <tbody>${newest(rows).map((a) => {
             const { machine, handle } = splitAddress(a.endpoint);
             const who = `${machine}/${shown(handle)}`;
             const what = describe(a);
@@ -253,7 +253,11 @@ function activityBlock(rows: ActivityRow[], now: number): Html {
 const command = (cmd: string): Html =>
   html`<div class="cmd"><code><span class="prompt" aria-hidden="true">$ </span>${cmd}</code><button class="btn btn-ghost btn-small" type="button" data-copy="${cmd}">Copy</button></div>`;
 
-function onboarding(handle: string): Html {
+/** the live marker a refreshed region carries: the stream state, then the time of the last render */
+export const liveStamp = (now: number): Html =>
+  html`<span class="mini push live-stamp"><span class="dot online pulse" aria-hidden="true"></span><span data-feed>polling</span>, updated ${new Date(now).toISOString().slice(11, 19)} UTC</span>`;
+
+export function onboarding(handle: string): Html {
   return html`<section class="block onboard"><h2>Connect your first machine</h2>
     <p class="small">No machines have joined this hub yet. Run these on the machine your agents work on. The page updates on its own once it connects.</p>
     <ol class="steps">
@@ -270,40 +274,26 @@ function onboarding(handle: string): Html {
   </section>`;
 }
 
+export const hubDown = (): Html => notice("The hub did not answer. This page retries on its own.", true) || html``;
+
+/** the sessions tab's live region: each machine with its agent tree, or the onboarding steps before the first one joins */
 export function liveRegion(o: Overview | null, handle: string, now: number): Html {
-  if (!o) return notice("The hub did not answer. This page retries on its own.", true) || html``;
+  if (!o) return hubDown();
   const groups = groupByMachine(o);
   if (!groups.length) return onboarding(handle);
   const agents = groups.reduce((n, g) => n + g.endpoints.length, 0);
   const online = groups.filter((g) => g.machine?.online || g.endpoints.some((e) => e.presence === "online")).length;
   return html`<section class="block"><div class="block-head"><h2>Machines</h2>
       <span class="mini">${groups.length} ${groups.length === 1 ? "machine" : "machines"}, ${online} online, ${agents} ${agents === 1 ? "agent" : "agents"}</span>
-      <span class="mini push"><span class="dot online pulse" aria-hidden="true"></span>live, updated ${new Date(now).toISOString().slice(11, 19)} UTC</span></div>
+      ${liveStamp(now)}</div>
       ${groups.map((g) => machineBlock(g, now))}
-    </section>
-    ${activityBlock(o.activity, now)}`;
-}
-
-export async function overviewPage(ctx: Ctx, user: User, handle: string): Promise<Response> {
-  const m = await requireMember(ctx.env.DB, handle, user.id);
-  const [o, g] = await Promise.all([hubOverview(ctx.env, m.org.id), hubGraph(ctx.env, m.org.id)]);
-  return page(
-    ctx,
-    {
-      title: m.org.name,
-      nav: "orgs",
-      wide: true,
-      head: html`${graphAssets()}<noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>`,
-    },
-    html`${orgHeader(m, "overview")}
-      ${graphShell(m.org.handle)}
-      <div data-live="${REFRESH_MS}">${liveRegion(o, m.org.handle, ctx.now)}${graphData(g)}</div>`,
-  );
+    </section>`;
 }
 
 /**
  * copy buttons, agent tree toggles, and a refetch of the page that swaps in its live region while the tab is visible;
- * slower while the graph's event stream is open, and at once on its `scp:refresh` event
+ * slower while the graph's event stream is open, and soon after an `scp:refresh` event. A page without the graph opens
+ * the event stream itself and refreshes on each event, keeping its poll for what the stream does not carry
  */
 export const APP_JS = `
 const chosen = new Map();
@@ -335,7 +325,9 @@ if (live) {
   const every = Number(live.getAttribute("data-live")) || 8000;
   let timer = 0;
   const later = (ms) => { clearTimeout(timer); timer = setTimeout(tick, ms); };
+  let soon = false;
   const tick = async () => {
+    soon = false;
     const selecting = String(window.getSelection() || "").length > 0;
     if (!document.hidden && !selecting) {
       try {
@@ -351,7 +343,32 @@ if (live) {
     }
     later(document.documentElement.getAttribute("data-stream") === "open" ? every * 4 : every);
   };
-  document.addEventListener("scp:refresh", () => later(250));
+  document.addEventListener("scp:refresh", () => { if (!soon) { soon = true; later(250); } });
   later(every);
+  const path = live.getAttribute("data-events");
+  if (path && !document.querySelector("[data-graph]") && typeof WebSocket === "function") {
+    const state = (open) => {
+      document.documentElement.setAttribute("data-feed-state", open ? "open" : "poll");
+      for (const s of document.querySelectorAll("[data-feed]")) s.textContent = open ? "live" : "polling";
+    };
+    let backoff = 1000;
+    const connect = () => {
+      let ws, ping = 0;
+      try { ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + path); } catch { return; }
+      ws.onopen = () => { backoff = 1000; state(true); ping = setInterval(() => { try { ws.send("ping"); } catch {} }, 30000); };
+      ws.onmessage = (m) => { if (typeof m.data === "string" && m.data !== "pong" && !m.data.includes('"hello"')) document.dispatchEvent(new CustomEvent("scp:refresh")); };
+      ws.onclose = (c) => {
+        clearInterval(ping);
+        state(false);
+        if (c.code === 4003) return;
+        setTimeout(connect, backoff);
+        backoff = Math.min(backoff * 2, 30000);
+      };
+    };
+    new MutationObserver(() => state(document.documentElement.getAttribute("data-feed-state") === "open")).observe(live, { childList: true });
+    connect();
+  }
 }
+const tab = document.querySelector('.tabs [aria-current="page"]');
+if (tab) tab.scrollIntoView({ block: "nearest", inline: "nearest" });
 `;
