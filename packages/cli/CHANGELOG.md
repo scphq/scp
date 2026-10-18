@@ -1,5 +1,17 @@
 # @scp-dev/cli
 
+## 0.3.1
+
+### Patch Changes
+
+- 100a961: Ambient pi swarms come up and stay clean. A broker whose state directory was wiped or whose socket another broker took over stops, so its shims reconnect to the live one. A pi session starts its shim only once the previous one exited and reports a shim that could not claim the endpoint, and a shim exits once its harness is gone. A named relaunch, or a session its harness restarted in process, takes back its own endpoint instead of minting a `-2`. A broker linked again under a new machine name relabels its endpoints, and bridges drop the rows of released machines and of their own former name. `swarm --version` reads the installed package.json, and a closed stdout pipe ends a command quietly.
+- Updated dependencies [100a961]
+- Updated dependencies [100a961]
+  - @scp-dev/core@0.1.6
+  - @scp-dev/broker@0.2.1
+  - @scp-dev/hub@0.5.1
+  - @scp-dev/mcp@0.1.8
+
 ## 0.3.0
 
 ### Minor Changes
