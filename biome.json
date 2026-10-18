@@ -18,16 +18,16 @@
     }
   },
   "overrides": [
-    { "includes": ["packages/core/**"], "javascript": { "formatter": { "semicolons": "asNeeded" } } },
+    { "includes": ["packages/core/**", "packages/hub/**"], "javascript": { "formatter": { "semicolons": "asNeeded" } } },
     {
-      "includes": ["packages/core/src/**", "!**/*.test.ts"],
+      "includes": ["packages/core/src/**", "packages/hub/src/**", "!**/*.test.ts"],
       "linter": {
         "rules": {
           "correctness": { "noNodejsModules": "error" },
           "style": {
             "noRestrictedGlobals": {
               "level": "error",
-              "options": { "deniedGlobals": { "Buffer": "core runs outside Node: use utf8Bytes or TextEncoder", "process": "core runs outside Node: take it as an option" } }
+              "options": { "deniedGlobals": { "Buffer": "core and hub run outside Node: use utf8Bytes or TextEncoder", "process": "core and hub run outside Node: take it as an option" } }
             }
           }
         }
