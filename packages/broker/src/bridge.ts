@@ -73,6 +73,8 @@ export interface Bridge {
   changed(endpoint: string): void
   /** rules, caps, groups or a title changed, which can touch several endpoints: every mirrored endpoint is sent again */
   resync(): void
+  /** a local endpoint took another handle: the hub renames its mirror in place, keeping what queued for it */
+  renamed(endpoint: string, was: string): void
   /** a local endpoint's activity, posted to the hub */
   activity(endpoint: string, row: ActivityRow): void
   /** the endpoints of other accounts this account's contacts let it reach */
@@ -603,6 +605,18 @@ export function startBridge(options: BridgeOptions): Bridge {
     if (mirrored(view)) fireAndForget("mirror", { endpoints: [outward(view)], full: false })
   }
 
+  function renamed(endpoint: string, was: string) {
+    if (!ready) return
+    let view: EndpointView
+    try {
+      view = core.whoami(endpoint)
+    } catch {
+      return
+    }
+    if (mirrored(view)) fireAndForget("mirror", { endpoints: [{ ...outward(view), was }], full: false })
+    else resync()
+  }
+
   function resync() {
     if (!ready) return
     let frames: ReturnType<typeof fullMirror>
@@ -656,5 +670,5 @@ export function startBridge(options: BridgeOptions): Bridge {
   }
 
   connect()
-  return { forward, changed, resync, activity, contacts, status, relink, stop }
+  return { forward, changed, resync, renamed, activity, contacts, status, relink, stop }
 }

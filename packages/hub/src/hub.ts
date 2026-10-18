@@ -1304,7 +1304,7 @@ export class RelayHub {
   /** a machine's endpoint changes: `endpoints` to the other bridges, presence and status to watchers */
   private announce(machine: string, changes: MirrorChange[], full: boolean): void {
     if (full || changes.length) {
-      const endpoints = full ? this.relay.remoteRowsOf(machine) : changes.map((c) => c.view)
+      const endpoints = full ? this.relay.remoteRowsOf(machine) : changes.map((c) => (c.was === undefined ? c.view : { ...c.view, was: c.was }))
       this.toBridges(machine, { machine, endpoints, full })
     }
     for (const change of changes) {

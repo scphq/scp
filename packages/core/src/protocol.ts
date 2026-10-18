@@ -92,6 +92,7 @@ export type ErrorCode =
   | "scope_refused"
   | "unavailable"
   | "judge_refused"
+  | "not_live"
 
 export class RelayError extends Error {
   constructor(
@@ -388,6 +389,8 @@ export interface SendParams {
   mime?: string
   /** on a request only: the recipient's stop is held until it replies */
   require_reply?: boolean
+  /** refuse `not_live`, queueing nothing, when an agent recipient has no live session */
+  live?: boolean
 }
 
 /** what ask and ask_wait answer: the reply; or pending, with `ended` once every recipient present at the send went offline without replying; or expired */
@@ -431,6 +434,8 @@ export interface SendResult {
    * offline; `state`: an agent recipient's {@link Reach} on this machine (an older broker leaves it out)
    */
   deliveries: { endpoint: string; address: string; seq: number; offline: boolean; queued?: boolean; last_seen: string | null; state?: Reach }[]
+  /** one line per agent recipient no live session holds: `queued: no live session holds <address>` */
+  warnings?: string[]
   duplicate?: boolean
   held?: JudgeHeld
   redacted?: JudgeRedacted

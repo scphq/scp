@@ -31,6 +31,7 @@ import { type Deliver, type JudgeClientFactory, JudgeGate } from "./judge-gate"
 import { releaseBrokerLock, takeBrokerLock } from "./lock"
 import { encodeLine, LineReader, LineWriter, MAX_LINE } from "./ndjson"
 import { accountHome, accountHomeVerified, policyPath as defaultPolicyPath, privateDir, shortHostname, socketPath } from "./paths"
+import { writeSessionMarker } from "./sessions"
 import { Conn } from "./socket"
 import { type Database, openDatabase } from "./sqlite"
 
@@ -384,6 +385,22 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     bridge?.changed(view.id)
   }
 
+  /** after a join, rename or leave: the session's marker, the fleet and the hub's mirror learn it; `was` is the handle before */
+  function membership(view: EndpointView, session: string | null, joined: boolean, was?: string) {
+    const handle = view.address.slice(view.address.lastIndexOf("/") + 1)
+    if (session && !session.startsWith("sub:")) {
+      try {
+        writeSessionMarker(dir, session, { joined, handle })
+      } catch (error) {
+        log(`relay broker: the session marker was not written: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    known.set(view.id, view.presence)
+    notifyFleet({ type: "presence", endpoint: view.address, presence: view.presence, harness: view.harness, labels: view.labels })
+    if (was !== undefined && was !== handle) bridge?.renamed(view.id, was)
+    else bridge?.changed(view.id)
+  }
+
   function notifyFleet(event: Record<string, unknown>) {
     const at = new Date((options.now ?? Date.now)()).toISOString()
     let line: Uint8Array | undefined
@@ -678,13 +695,21 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (params.human === true || params.observe === true || params.resume !== undefined) {
           throw new RelayError("invalid_params", "a hook connection claims an agent endpoint: transient does not go with human, observe or resume")
         }
-        const before = new Map(core.list({ all: true }).map((view) => [view.id, view.presence]))
-        const { endpoint, subagent, created } = core.claim((params.claim ?? {}) as Claim, { transient: true })
+        const join = params.join
+        if (join !== undefined && (typeof join !== "object" || join === null || Array.isArray(join)))
+          throw new RelayError("invalid_params", "join is {handle?}")
+        const before = new Map(core.list({ all: true }).map((view) => [view.id, view]))
+        const { endpoint, subagent, created } =
+          join === undefined
+            ? core.claim((params.claim ?? {}) as Claim, { transient: true })
+            : { endpoint: core.joinSession((params.claim ?? {}) as Claim, (join as { handle?: unknown }).handle), subagent: undefined, created: undefined }
         s.data.endpoint = endpoint.id
         s.data.transient = true
         const key = (params.claim as Claim | undefined)?.process
         if (typeof key === "string") s.data.process = key
-        if ((before.get(endpoint.id) ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
+        const was = before.get(endpoint.id)?.address
+        if (join !== undefined) membership(endpoint, core.sessionOf(endpoint.id), true, was?.slice(was.lastIndexOf("/") + 1))
+        else if ((before.get(endpoint.id)?.presence ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
         return {
           endpoint,
           ...(subagent ? { subagent, ...(created ? { created } : {}) } : {}),
@@ -827,6 +852,17 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const changed = core.inferTitle(me, params, hookOf(s))
         if (changed) bridge?.changed(me)
         return { changed }
+      }
+      case "rename": {
+        const renamed = core.rename(actorOf(s), { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), handle: params.handle })
+        membership(renamed.endpoint, renamed.session, true, renamed.from)
+        return renamed.endpoint
+      }
+      case "leave": {
+        const left = core.leaveSession(actorOf(s), params.endpoint !== undefined ? { endpoint: params.endpoint } : {})
+        for (const c of connections) if (c.data.endpoint === left.endpoint.id && !c.data.transient && !c.data.lineage && c !== s) c.end()
+        membership(left.endpoint, left.session, false)
+        return left.endpoint
       }
       case "status": {
         core.status(me, params.state, params.note)

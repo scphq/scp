@@ -163,6 +163,21 @@ describe("bridge", () => {
     expect(await observer.request<unknown>("cloud_status")).toMatchObject({ enabled: true, machine: "a", url: fake.url, connected: true, last_error: null })
   })
 
+  test("a rename reaches the other machines in place: the new handle is live there and the old one is gone", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a")
+    const b = await machine(fake, "b")
+    const lead = await agent(a, "claude-app")
+    await agent(b, "review", "codex")
+    const on = (address: string) => b.core.remoteViews().find((v) => v.machine === "a" && v.address.endsWith(address))
+    const before = await waitFor(() => on("/claude-app"), "a/claude-app on b")
+    await lead.request("rename", { handle: "lead" })
+    const after = await waitFor(() => on("/lead"), "a/lead on b")
+    expect(after.id).toBe(before.id)
+    expect(after.presence).toBe("online")
+    expect(on("/claude-app")).toBeUndefined()
+  })
+
   test("a bridge dropped mid-flight gets the message exactly once after it reconnects", async () => {
     const fake = hubServer()
     const a = await machine(fake, "a")

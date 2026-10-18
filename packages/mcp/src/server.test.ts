@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Claim, LIMITS, PREAMBLE } from "@scp-dev/core"
-import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
+import { type Broker, readSessionMarker, RelayClient, startBroker } from "@scp-dev/broker"
 import { MCP_PROTOCOLS, runRelayMcp, type SpawnRequest, TOOLS } from "./server"
 
 setDefaultTimeout(20_000)
@@ -27,6 +27,7 @@ function shim(
     initialize?: false
     claim?: Partial<Claim>
     spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
+    membership?: () => { dark: string } | { handle?: string }
   },
 ) {
   const lines: string[] = []
@@ -60,6 +61,7 @@ function shim(
     ...(options.launched === undefined ? {} : { launchedWithChannels: options.launched }),
     ...(options.channels === undefined ? {} : { channels: options.channels }),
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+    ...(options.membership === undefined ? {} : { membership: options.membership }),
   })
   let nextId = 1
   if (options.initialize !== false) push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
@@ -102,7 +104,7 @@ describe("relay MCP shim, in process", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("initialize negotiates the protocol and lists the sixteen tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
+  test("initialize negotiates the protocol and lists the eighteen tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
     const s = shim(broker, { handle: "init-a" })
     const init = await s.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } })
     expect(init.result).toMatchObject({ protocolVersion: "2025-06-18", serverInfo: { name: "scp" }, capabilities: { tools: {} } })
@@ -115,6 +117,8 @@ describe("relay MCP shim, in process", () => {
       "relay_ask_wait",
       "relay_group",
       "relay_inbox",
+      "relay_join",
+      "relay_leave",
       "relay_list",
       "relay_peek",
       "relay_peers",
@@ -160,7 +164,35 @@ describe("relay MCP shim, in process", () => {
     expect(s.messages().some((m) => (m as { id?: unknown }).id === true)).toBe(false)
     s.close()
     await s.done
-    expect(TOOLS).toHaveLength(17)
+    expect(TOOLS).toHaveLength(19)
+  })
+
+  test("a dark session's shim claims nothing until relay_join, which names it; relay_leave takes it offline; relay_send warns or refuses with live", async () => {
+    const proc = "pid:4242:Thu-Oct-15-10:00:00-2026"
+    const membership = (): { dark: string } | { handle?: string } => {
+      const marker = readSessionMarker(join(dir, "relay"), proc)
+      if (!marker?.joined) return { dark: marker ? "this session left the relay" : "this session has not joined the relay" }
+      return marker.handle ? { handle: marker.handle } : {}
+    }
+    const s = shim(broker, { handle: "claude-dark", session: proc, claim: { process: proc }, membership })
+    expect(textOf(await s.call("relay_whoami"))).toBe("unavailable: this session has not joined the relay")
+    expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/claude-dark")
+    expect(textOf(await s.call("relay_join", { name: "mcp-lead" }))).toBe(
+      "joined the relay as me/mcp-lead: peers can message you, and new messages reach you after your tool calls",
+    )
+    expect(textOf(await s.call("relay_whoami"))).toContain("address: me/mcp-lead")
+    expect(textOf(await s.call("relay_leave"))).toContain("me/mcp-lead left the relay")
+    expect(textOf(await s.call("relay_whoami"))).toBe("unavailable: this session left the relay")
+    expect(broker.core.list({ all: true }).find((e) => e.address === "me/mcp-lead")?.presence).toBe("offline")
+    const t = shim(broker, { handle: "mcp-sender" })
+    expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "queued" }))).toContain("queued: no live session holds me/mcp-lead")
+    expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "no", live: true }))).toBe(
+      "not_live: no live session holds me/mcp-lead: nothing was queued",
+    )
+    for (const x of [s, t]) {
+      x.close()
+      await x.done
+    }
   })
 
   test("relay_reply answers a message a hook injected, which relay_inbox never handed over, by its short id, echoing it, and marks it read", async () => {

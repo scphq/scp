@@ -121,6 +121,8 @@ export interface MirrorView extends MirrorScope {
   presence?: Presence
   last_seen?: string | null
   title?: string | null
+  /** the handle the endpoint had before a rename: its mirror is renamed in place */
+  was?: string
 }
 
 export interface RemoteView extends Omit<EndpointView, "depth">, MirrorScope {
@@ -154,6 +156,7 @@ type ParsedView = {
   presence: Presence
   lastSeen: number | null
   scope: ParsedScope
+  was: string | null
 }
 
 const UNKNOWN: Placement = { tree: null, parent_ep: null, depth: null }
@@ -213,6 +216,8 @@ export interface MirrorChange {
   added: boolean
   presence: boolean
   status: boolean
+  /** the handle a renamed mirror had */
+  was?: string
 }
 
 export interface Delivery {
@@ -583,10 +588,17 @@ export class FederatedCore extends RelayCore {
       const changes: MirrorChange[] = []
       const seen = options.seen ?? new Set<string>()
       const batch: { view: ParsedView; id: string; before: FederatedRow | undefined }[] = []
+      const renamed = new Map<string, string>()
       for (const view of parsed) {
         const remote = `${machine}/${view.handle}`
         seen.add(remote)
-        const before = this.byRemote(remote)
+        let before = this.byRemote(remote)
+        const old = !before && view.was !== null ? this.byRemote(`${machine}/${view.was}`) : undefined
+        if (old && old.token_hash === null) {
+          this.sql.all(`UPDATE endpoints SET remote = ? WHERE id = ?`, remote, old.id)
+          before = this.byId(old.id) as FederatedRow
+          renamed.set(old.id, view.was!)
+        }
         if (before && before.token_hash !== null) continue
         if (!before) this.checkCap()
         batch.push({ view, id: before?.id ?? this.insertRemote(remote, view.kind, view.harness, auth, now), before })
@@ -611,14 +623,17 @@ export class FederatedCore extends RelayCore {
           ...(view.kind === "agent" ? this.scopeColumns(machine, view.scope, row, place(view.handle)) : {}),
         }
         const columns = Object.entries(next).filter(([column, value]) => row[column as keyof FederatedRow] !== value)
-        if (!columns.length) continue
-        this.sql.all(
-          `UPDATE endpoints SET ${columns.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`,
-          ...columns.map(([, value]) => value as SqlValue),
-          id,
-        )
+        const was = renamed.get(id)
+        if (!columns.length && was === undefined) continue
+        if (columns.length)
+          this.sql.all(
+            `UPDATE endpoints SET ${columns.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`,
+            ...columns.map(([, value]) => value as SqlValue),
+            id,
+          )
         const change = this.diff(before, this.byId(id)!)
-        if (change) changes.push(change)
+        if (was !== undefined) changes.push({ ...(change ?? { view: this.remoteView(this.byId(id)!), added: false, presence: true, status: false }), was })
+        else if (change) changes.push(change)
       }
       if (options.full) {
         const missing = this.sql.all<FederatedRow>(
@@ -1565,6 +1580,7 @@ export class FederatedCore extends RelayCore {
       presence,
       lastSeen: Number.isFinite(parsedSeen) ? parsedSeen : null,
       scope: kind === "agent" ? parseScope(view) : {},
+      was: kind === "agent" && typeof view.was === "string" && validHandle(view.was) && view.was !== handle ? view.was : null,
     }
     const leaked = [handle, out.model, out.cwd, out.labels, status?.note, out.scope.title].map((v) => (v ? findSecret(v) : null)).find(Boolean)
     if (leaked) throw new RelayError("secret_refused", `an endpoint looks like it carries a credential (${leaked})`)
