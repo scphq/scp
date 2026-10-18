@@ -47,13 +47,12 @@ function tree(x: number, y: number, fan: number[][]): Node {
 function graph(): string {
   const hub: Pt = { x: 985, y: 155 };
   const roots = [
-    tree(800, 285, [
+    tree(890, 285, [
       [0, 0],
       [0, 0, 0],
     ]),
-    tree(985, 285, [[0, 0, 0], [0]]),
-    tree(1170, 285, [
-      [0, 0],
+    tree(1080, 285, [
+      [0, 0, 0],
       [0, 0],
     ]),
   ];
@@ -72,9 +71,9 @@ function graph(): string {
   }
   const from = roots[0].kids?.[1].kids?.[0] as Pt;
   const via = roots[0].kids?.[1] as Pt;
-  const to = roots[2].kids?.[0].kids?.[1] as Pt;
-  const toVia = roots[2].kids?.[0] as Pt;
-  const route = [elbow(via, from), elbow(roots[0], via), elbow(hub, roots[0]), elbow(hub, roots[2]), elbow(roots[2], toVia), elbow(toVia, to)];
+  const to = roots[1].kids?.[1].kids?.[1] as Pt;
+  const toVia = roots[1].kids?.[1] as Pt;
+  const route = [elbow(via, from), elbow(roots[0], via), elbow(hub, roots[0]), elbow(hub, roots[1]), elbow(roots[1], toVia), elbow(toVia, to)];
   return `<svg class="g" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
     <defs>
       <radialGradient id="fade" cx="960" cy="315" r="330" gradientUnits="userSpaceOnUse">
