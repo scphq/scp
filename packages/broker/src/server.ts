@@ -962,13 +962,25 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "adopt": {
         const actor = actorOf(s)
-        const adopted = core.adopt(
+        const adopted = await core.adopt(
           actor,
           { endpoint: params.endpoint, ...(params.parent !== undefined ? { parent: params.parent } : {}) },
-          { tty: actor.kind === "endpoint" && s.data.terminal === true },
+          {
+            tty: actor.kind === "endpoint" && s.data.terminal === true,
+            send: (from: string, send: SendParams, origin: { link: "session" | "self" }) => {
+              loadPolicy()
+              if (policyError) throw new RelayError("policy_refused", policyError)
+              return judge.send(from, send, { tty: false, ...origin }, deliver)
+            },
+          },
         )
         bridge?.resync()
         return adopted
+      }
+      case "link_accept": {
+        const linked = core.linkAccept(actorOf(s), { id: params.id })
+        bridge?.resync()
+        return linked
       }
       case "unlink": {
         const unlinked = core.unlink(actorOf(s), params.endpoint !== undefined ? { endpoint: params.endpoint } : {})

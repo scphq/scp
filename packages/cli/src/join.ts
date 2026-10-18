@@ -1,7 +1,7 @@
 import { CLI_NAME } from "@scp-dev/core"
 import { connectBroker, readSessionMarker, relayDir } from "@scp-dev/broker"
 import { localHandle, RelayUsage, startDaemon, walkNow } from "./common"
-import { harnessAt, relayIdentity, sessionKey } from "./identity"
+import { codexShell, harnessAt, relayIdentity, sessionKey } from "./identity"
 
 type Values = { harness?: unknown; json?: unknown; under?: unknown }
 
@@ -16,7 +16,10 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
   const { keys, self } = walkNow()
   const key = self.at(-1)
   const match = key === undefined ? null : /^pid:(\d+):(.+)$/.exec(key)
-  if (!match) throw new RelayUsage(`${CLI_NAME} join runs in an agent session's shell: no harness process runs this shell`)
+  if (!match) {
+    if (codexShell(process.env)) throw new RelayUsage(`${CLI_NAME} join: the codex sandbox hides the harness; use relay_join (MCP) instead`)
+    throw new RelayUsage(`${CLI_NAME} join runs in an agent session's shell: no harness process runs this shell`)
+  }
   const dir = relayDir()
   const known = readSessionMarker(dir, sessionKey(process.env, key!))?.handle
   const claim = relayIdentity({

@@ -7,8 +7,48 @@ import { runHook } from "./hooks"
 import { harnessLineage } from "./identity"
 import { joinMode, setJoinMode } from "./relay"
 import { parseSetupArgs } from "./setup"
+import { rmSync, writeFileSync } from "node:fs"
+import { processKey, writeShimBinding } from "./identity"
 
 setDefaultTimeout(30_000)
+
+test("join and shell commands use the codex shim binding when the sandbox hides the harness", async () => {
+  const root = mkdtempSync(join(process.env.HOME!, "sandbox-join-"))
+  const dir = join(root, "relay")
+  const bin = join(root, "bin")
+  mkdirSync(bin)
+  writeFileSync(join(bin, "ps"), "#!/bin/sh\nexit 0\n", { mode: 0o700 })
+  const env = cleanEnv({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_SHIM_BINDING: "d".repeat(32), PATH: `${bin}:${process.env.PATH}` })
+  const broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "policy.json"), log: () => {} })
+  const parent = await RelayClient.connect(broker.socket)
+  const shim = await RelayClient.connect(broker.socket)
+  const key = processKey(process.pid)
+  const claim = { handle: "sandbox-worker", harness: "codex", process: key, session: key }
+  const clear = writeShimBinding(claim, env)
+  const run = async (...args: string[]) => {
+    const child = Bun.spawn([process.execPath, "--no-env-file", entry, ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { stdout, stderr, code }
+  }
+  try {
+    await parent.hello({ claim: { handle: "sandbox-parent", harness: "codex" } })
+    await shim.hello({ claim })
+    const joined = await run("join", "--under", "sandbox-parent", "--json")
+    expect([joined.code, joined.stderr]).toEqual([0, ""])
+    expect(JSON.parse(joined.stdout)).toMatchObject({ address: "me/sandbox-worker", parent: "me/sandbox-parent" })
+    expect((await run("whoami")).stdout.split("\n")[0]).toBe("me/sandbox-worker (agent, codex)")
+    clear()
+    const missing = await run("join", "--under", "sandbox-parent")
+    expect(missing.code).toBe(125)
+    expect(missing.stderr).toContain("the codex sandbox hides the harness; use relay_join (MCP) instead")
+  } finally {
+    clear()
+    shim.close()
+    parent.close()
+    await broker.stop()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 const entry = join(import.meta.dir, "cli.ts")
 const MARKERS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_|OPENCODE|GROK_|MUSE_|CODEX_THREAD_ID|SCP_)/
@@ -158,14 +198,17 @@ describe("swarm join --under, adopt and unlink", () => {
     other.close()
   })
 
-  test("adopt: refused for an agent without a terminal, done by the human; a cycle is refused", async () => {
+  test("adopt: an agent asks for consent, the child accepts; a cycle is refused", async () => {
     const solo = await RelayClient.connect(broker.socket)
     await solo.hello({ claim: { handle: "solo", harness: "codex" } })
+    await human.request("rules_set", { endpoint: "orch", out: ["*"] })
     const byAgent = await swarm("adopt", "solo")
-    expect(byAgent.code).not.toBe(0)
-    expect(byAgent.stderr).toContain("only the human at a terminal links another session under a parent")
+    expect(byAgent.code).toBe(0)
+    expect(byAgent.stdout).toMatch(/^asked me\/solo to link under me\/app; it accepts with swarm link accept [a-z0-9]+\n$/)
     expect(view("me/solo")?.parent ?? null).toBeNull()
-    expect(await human.request("adopt", { endpoint: "solo", parent: "app" })).toMatchObject({ parent: "me/app", endpoint: { depth: 2 } })
+    const { messages } = await solo.request<{ messages: { id: string; link?: { parent: string } }[] }>("inbox")
+    expect(messages[0]?.link).toEqual({ parent: "me/app" })
+    expect(await solo.request("link_accept", { id: messages[0]!.id })).toMatchObject({ parent: "me/app", endpoint: { depth: 2 } })
     const cycle = await human.request("adopt", { endpoint: "orch", parent: "solo" }).catch((error: Error) => error.message)
     expect(cycle).toContain("cannot go under its own descendant")
     solo.close()
@@ -178,5 +221,51 @@ describe("swarm join --under, adopt and unlink", () => {
     expect(await human.request("unlink", { endpoint: "app" })).toMatchObject({ parent: "me/orch", endpoint: { parent: null, depth: 0 } })
     expect(view("me/solo")).toMatchObject({ parent: "me/app", depth: 1 })
     expect((await swarm("send", "other", "free again")).code).toBe(0)
+  })
+
+  test("link accept from the session's shell accepts a short request id", async () => {
+    const { requested: id } = await orch.request<{ requested: string }>("adopt", { endpoint: "app" })
+    const accepted = await swarm("link", "accept", id.slice(-6))
+    expect(accepted).toEqual({ code: 0, stderr: "", stdout: "me/app now sits under me/orch\n" })
+    expect(view("me/app")).toMatchObject({ parent: "me/orch", depth: 1 })
+    expect((await swarm("link", "accept")).code).not.toBe(0)
+  })
+
+  test("a terminal adopts under a live parent while ignoring inherited name and grant", async () => {
+    const parent = await RelayClient.connect(broker.socket)
+    const child = await RelayClient.connect(broker.socket)
+    try {
+      await parent.hello({ claim: { handle: "terminal-parent", harness: "claude-code", session: "terminal-parent-session" } })
+      await child.hello({ claim: { handle: "terminal-child", harness: "cli" } })
+      let output = ""
+      let drained!: () => void
+      const closed = new Promise<void>((resolve) => {
+        drained = resolve
+      })
+      const command = Bun.spawn([process.execPath, "--no-env-file", entry, "adopt", "terminal-child", "--parent", "terminal-parent"], {
+        cwd: project,
+        env: cleanEnv({ SCP_DIR: dir, XDG_CONFIG_HOME: join(root, "config"), SCP_NAME: "terminal-parent", SCP_GRANT: "inherited-grant" }),
+        terminal: {
+          data: (_terminal, data) => {
+            output += new TextDecoder().decode(data)
+          },
+          exit: () => drained(),
+        },
+      })
+      try {
+        const [code] = await Promise.all([command.exited, closed])
+        expect({ code, output: output.replace(/\r/g, "") }).toEqual({ code: 0, output: "me/terminal-child now sits under me/terminal-parent\n" })
+      } finally {
+        command.terminal?.close()
+      }
+      expect(view("me/terminal-child")).toMatchObject({ parent: "me/terminal-parent", depth: 1 })
+      expect(broker.core.log({}).find((row) => row.event === "adopt" && row.detail.target === "me/terminal-child")?.detail).toMatchObject({
+        by: "me/",
+        auth: "tty",
+      })
+    } finally {
+      parent.close()
+      child.close()
+    }
   })
 })

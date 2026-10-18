@@ -6,8 +6,8 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
 import { setTimeout as sleep } from "node:timers/promises"
-import { connectBroker, relayDir } from "@scp-dev/broker"
-import { CLI_NAME, validHandle } from "@scp-dev/core"
+import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
+import { type Claim, CLI_NAME, RelayError, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { parse } from "smol-toml"
 import { RelayUsage, startDaemon } from "./common"
@@ -50,13 +50,13 @@ export function codexLaunch(args: string[], env: Env, _self: string[]): { name?:
   }
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
-  const { SCP_SESSION: _session, SCP_GRANT: _grant, SCP_PARENT: _parent, ...clean } = env
+  const { SCP_SESSION: _session, SCP_PARENT: _parent, ...clean } = env
   return {
     ...(name !== undefined ? { name } : {}),
     headless,
     ...(resume !== undefined ? { resume } : {}),
     codexArgs: resume !== undefined && !headless ? ["resume", resume, ...codexArgs] : codexArgs,
-    env: { ...clean, SCP_HARNESS: "codex", ...(name !== undefined ? { SCP_NAME: name } : {}) },
+    env: { ...clean, SCP_HARNESS: "codex", SCP_SHIM_BINDING: randomBytes(16).toString("hex"), ...(name !== undefined ? { SCP_NAME: name } : {}) },
   }
 }
 
@@ -402,6 +402,31 @@ function appServerPid(pid: number): number {
   return pid
 }
 
+/** bind the channel only after the mounted shim has claimed its harness process */
+export async function connectCodexChannel(
+  connect: () => Promise<RelayClient>,
+  claim: Pick<Claim, "grant"> & { process: string },
+  cwd: string,
+  stopped: () => boolean,
+): Promise<RelayClient> {
+  while (!stopped()) {
+    const client = await connect()
+    try {
+      const hello = await client.hello({ observe: true, self: [claim.process], ...(claim.grant ? { grant: claim.grant } : {}), cwd })
+      if (hello.endpoint) {
+        client.hello = async () => hello
+        return client
+      }
+    } catch (error) {
+      client.close()
+      if (!claim.grant || !(error instanceof RelayError) || error.code !== "unauthorized") throw error
+    }
+    client.close()
+    await sleep(100)
+  }
+  throw new Error("codex channel stopped")
+}
+
 /** runs an app-server with a channel waker and either a remote TUI or an ambient thread */
 export async function codexCommand(args: string[]): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {
@@ -515,25 +540,13 @@ export async function codexCommand(args: string[]): Promise<number> {
     const broker = relayDir(launch.env)
     let lines = ""
     channel = runRelayMcp({
-      connect: async () => {
-        while (!input.writableEnded) {
-          const client = await connectBroker(broker, () => startDaemon(broker))
-          try {
-            // A second live claim gets a new endpoint; bind to the mounted shim's process instead.
-            const hello = await client.hello({ observe: true, self: [claim.process], cwd })
-            if (hello.endpoint) {
-              client.hello = async () => hello
-              return client
-            }
-          } catch (error) {
-            client.close()
-            throw error
-          }
-          client.close()
-          await sleep(100)
-        }
-        throw new Error("codex channel stopped")
-      },
+      connect: () =>
+        connectCodexChannel(
+          () => connectBroker(broker, () => startDaemon(broker)),
+          claim,
+          cwd,
+          () => input.writableEnded,
+        ),
       claim,
       channels: true,
       wake: "codex-app-server",

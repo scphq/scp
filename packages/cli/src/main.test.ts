@@ -9,8 +9,64 @@ import { cliVersion, RELAY_BRIEF, RELAY_HELP, verbHelp } from "./main"
 import { claimHarness, grantParams, localHandle, RelayUsage, selectorList, terminalAttached } from "./common"
 import { harnessLineage, hiddenHarness, lineage, parsePsCommTable, parsePsTable, processKey, relayIdentity, shortHostname } from "./identity"
 import { alive, waitFor } from "./testing/fixtures"
+import { walkNow } from "./common"
+import { detectHarness, writeShimBinding } from "./identity"
 
 setDefaultTimeout(30_000)
+
+test("codex sandbox markers identify a shell without a thread id", () => {
+  expect(detectHarness({ CODEX_THREAD_ID: "thread" })).toBe("codex")
+  expect(detectHarness({ CODEX_SANDBOX: "seatbelt" })).toBe("codex")
+  expect(detectHarness({ CODEX_SANDBOX_NETWORK_DISABLED: "1" })).toBe("codex")
+  expect(detectHarness({ CODEX_SANDBOX: "seatbelt", SCP_HARNESS_DETECT: "0" })).toBeUndefined()
+  expect(detectHarness({ CODEX_SANDBOX: "", CODEX_SANDBOX_NETWORK_DISABLED: "" })).toBeUndefined()
+  expect(detectHarness({ OPENCODE: "1", CODEX_SANDBOX: "seatbelt" })).toBe("opencode")
+})
+
+test("a codex shell recovers a hidden parent from the shim's pid binding", () => {
+  const dir = mkdtempSync(join(process.env.HOME!, "walk-binding-"))
+  const env = { SCP_DIR: dir, CODEX_SANDBOX: "seatbelt" }
+  const table = parsePsCommTable("600 550 Thu Oct 16 09:00:00 2026 sh\n550 500 Thu Oct 16 09:00:00 2026 sandbox-exec")
+  const claim = { process: "pid:500:Thu-Oct-16-09:00:00-2026", handle: "worker", harness: "codex" }
+  const clear = writeShimBinding(claim, env)
+  try {
+    const bound = [...lineage(600, table), claim.process]
+    expect(walkNow(env, 600, table)).toEqual({ keys: bound, self: bound, harness: "codex" })
+    expect(walkNow({ ...env, SCP_HARNESS_DETECT: "0" }, 600, table).self).toEqual([])
+    expect(walkNow({ ...env, CODEX_SANDBOX: "" }, 600, table).self).toEqual([])
+    expect(walkNow({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_HARNESS_DETECT: "0" }, 600, table)).toEqual({
+      keys: bound,
+      self: bound,
+      harness: "codex",
+    })
+    const visible = new Map(table).set(550, { ppid: 500, start: "start", args: "other-harness" })
+    expect(walkNow(env, 600, visible).self).toEqual(harnessLineage(600, visible))
+  } finally {
+    clear()
+  }
+  expect(walkNow(env, 600, table).self).toEqual([])
+})
+
+test("a codex shell in a pid namespace recovers the host harness by launch key", () => {
+  const dir = mkdtempSync(join(process.env.HOME!, "walk-namespace-"))
+  const env = { SCP_DIR: dir, CODEX_SANDBOX_NETWORK_DISABLED: "1", SCP_SHIM_BINDING: "c".repeat(32) }
+  const table = parsePsCommTable("3 2 Thu Oct 16 09:00:00 2026 sh\n2 1 Thu Oct 16 09:00:00 2026 bash\n1 0 Thu Oct 16 09:00:00 2026 bwrap")
+  const claim = { process: "pid:500:host-start", handle: "worker", harness: "codex" }
+  const clear = writeShimBinding(claim, env)
+  const other = { ...claim, process: "pid:700:other-start" }
+  const clearOther = writeShimBinding(other, { SCP_DIR: dir })
+  try {
+    const bound = [...lineage(3, table), claim.process]
+    expect(walkNow(env, 3, table)).toEqual({ keys: bound, self: bound, harness: "codex" })
+    expect(walkNow({ ...env, SCP_SHIM_BINDING: "" }, 3, table).self).toEqual([])
+    const partial = parsePsCommTable("3 700 Thu Oct 16 09:00:00 2026 sh")
+    expect(walkNow(env, 3, partial).self.at(-1)).toBe(claim.process)
+    expect(walkNow({ ...env, SCP_SHIM_BINDING: "../invalid" }, 3, partial).self.at(-1)).toBe(other.process)
+  } finally {
+    clear()
+    clearOther()
+  }
+})
 
 const entry = join(import.meta.dir, "cli.ts")
 async function swarm(args: string[], env: Record<string, string> = {}, stdin?: string, cwd?: string) {

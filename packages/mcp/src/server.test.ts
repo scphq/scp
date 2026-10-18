@@ -110,7 +110,27 @@ describe("relay MCP shim, in process", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("initialize negotiates the protocol and lists the eighteen tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
+  test("relay_link_accept accepts the session's delivered link request", async () => {
+    const parent = await RelayClient.connect(broker.socket)
+    const child = shim(broker, { handle: "link-child" })
+    try {
+      await parent.hello({ claim: { handle: "link-parent", harness: "cli" } })
+      await child.call("relay_whoami")
+      const { requested: id } = await parent.request<{ requested: string }>("adopt", { endpoint: "link-child" })
+      const accepted = await child.call("relay_link_accept", { id: id.slice(-6) })
+      expect(accepted.isError).not.toBe(true)
+      expect(textOf(accepted)).toBe("me/link-child now sits under me/link-parent as its worker")
+      expect(broker.core.list({ all: true }).find((e) => e.address === "me/link-child")).toMatchObject({ parent: "me/link-parent", depth: 1 })
+      expect((await child.call("relay_link_accept", { id: "missing" })).isError).toBe(true)
+      expect((await child.call("relay_link_accept", {})).isError).toBe(true)
+    } finally {
+      parent.close()
+      child.close()
+      await child.done
+    }
+  })
+
+  test("initialize negotiates the protocol and lists the tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
     const s = shim(broker, { handle: "init-a" })
     const init = await s.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } })
     expect(init.result).toMatchObject({ protocolVersion: "2025-06-18", serverInfo: { name: "scp" }, capabilities: { tools: {} } })
@@ -125,6 +145,7 @@ describe("relay MCP shim, in process", () => {
       "relay_inbox",
       "relay_join",
       "relay_leave",
+      "relay_link_accept",
       "relay_list",
       "relay_peek",
       "relay_peers",
@@ -170,7 +191,7 @@ describe("relay MCP shim, in process", () => {
     expect(s.messages().some((m) => (m as { id?: unknown }).id === true)).toBe(false)
     s.close()
     await s.done
-    expect(TOOLS).toHaveLength(19)
+    expect(TOOLS).toHaveLength(20)
   })
 
   test("a dark session's shim claims nothing until relay_join, which names it; relay_leave takes it offline; relay_send warns or refuses with live", async () => {

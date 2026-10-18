@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { RelayCore } from "./core"
-import { RelayError, type ScopeActor } from "./protocol"
+import { LIMITS, RelayError, type ScopeActor, type SendParams } from "./protocol"
 import type { Sql, SqlValue } from "./sql"
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`
@@ -115,9 +115,8 @@ describe("adopt", () => {
     })
   })
 
-  test("an agent without a terminal and the human without one are refused; the human names the parent", () => {
-    const { core, lead } = setup()
-    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("scope_refused")
+  test("the human without a terminal is refused; the human names the parent", () => {
+    const { core } = setup()
     expect(failure(() => core.adopt(NO_TTY, { endpoint: "peer", parent: "lead" })).code).toBe("scope_refused")
     expect(failure(() => core.adopt(HUMAN, { endpoint: "peer" })).code).toBe("invalid_params")
     expect(core.list({ all: true }).find((v) => v.address === "me/peer")?.parent ?? null).toBeNull()
@@ -126,6 +125,80 @@ describe("adopt", () => {
   test("an agent with a terminal attached links under itself by default", () => {
     const { core, lead } = setup()
     expect(core.adopt(self(lead.id), { endpoint: "peer" }, { tty: true }).endpoint.parent).toBe("me/lead")
+  })
+
+  test("an agent requests consent, the recipient accepts a short id and takes on worker scope", () => {
+    const { core, lead, peer, send } = setup()
+    core.setPolicy({ rules: [], defaults: { child_default: "parent" } })
+    const result = core.adopt(self(lead.id), { endpoint: "peer" })
+    expect(result).toMatchObject({ parent: "me/lead", endpoint: { id: peer.id, parent: null } })
+    expect(result.requested).toBeString()
+    expect(core.whoami(peer.id).parent).toBeNull()
+    expect(core.inbox(peer.id)[0]).toMatchObject({ id: result.requested, kind: "request", from: { endpoint: lead.id }, link: { parent: "me/lead" } })
+    expect(core.inbox(peer.id)[0]!.body.text).toContain("swarm link accept <id>")
+    expect(core.log({}).find((row) => row.event === "adopt_request")).toMatchObject({
+      ref: result.requested,
+      detail: { auth: "session", target: "me/peer", parent: "me/lead" },
+    })
+    expect(core.linkAccept({ kind: "endpoint", id: peer.id, auth: "self" }, { id: result.requested!.slice(-6) })).toMatchObject({
+      endpoint: { parent: "me/lead", depth: 1 },
+      parent: "me/lead",
+    })
+    expect(core.log({}).find((row) => row.event === "adopt")).toMatchObject({
+      ref: result.requested,
+      detail: { request: result.requested, by: "me/peer", auth: "self" },
+    })
+    expect(send(peer.id, "lead")).toBe("ok")
+    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
+    expect(send(peer.id, other.address)).toBe("not_found")
+  })
+
+  test("only the recipient's own session accepts an authentic link request", () => {
+    const { core, lead, peer } = setup()
+    const { requested: id } = core.adopt({ kind: "endpoint", id: lead.id, auth: "self" }, { endpoint: "peer", parent: "lead" })
+    expect(failure(() => core.linkAccept(self(lead.id), { id })).code).toBe("not_found")
+    expect(failure(() => core.linkAccept({ kind: "endpoint", id: peer.id, auth: "lineage" }, { id })).code).toBe("scope_refused")
+    expect(failure(() => core.linkAccept(HUMAN, { id })).code).toBe("scope_refused")
+    const ordinary = core.send(lead.id, { to: "peer", body: "link under me", kind: "request" })
+    expect(failure(() => core.linkAccept(self(peer.id), { id: ordinary.id })).code).toBe("not_found")
+    expect(failure(() => core.send(lead.id, { to: "peer", body: "x", link: { parent: "me/lead" } } as SendParams)).code).toBe("invalid_params")
+    expect(core.whoami(peer.id).parent).toBeNull()
+  })
+
+  test("requests enforce sender authority, scopes, policy and a local root target", () => {
+    const { core, lead, peer } = setup()
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer", parent: "peer" })).code).toBe("scope_refused")
+    expect(failure(() => core.adopt({ kind: "endpoint", id: lead.id, auth: "lineage" }, { endpoint: "peer" }, { tty: true })).code).toBe("scope_refused")
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "me/" })).code).toBe("invalid_params")
+    core.rulesSet(HUMAN, { endpoint: "peer", in: [] })
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("not_found")
+    core.rulesSet(HUMAN, { endpoint: "peer", in: ["*"] })
+    core.setPolicy({ rules: [{ match: "ep:lead", send_to: [] }] })
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("policy_refused")
+    expect(core.inbox(peer.id)).toEqual([])
+    core.setPolicy({ rules: [] })
+    core.adopt(HUMAN, { endpoint: "peer", parent: "lead" })
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("scope_refused")
+  })
+
+  test("acceptance rechecks cycles, depth, existing placement, expiry and the sender", () => {
+    const { core, lead, peer, clock, db } = setup()
+    const { requested: id } = core.adopt(self(lead.id), { endpoint: "peer" })
+    core.adopt(HUMAN, { endpoint: "lead", parent: "peer" })
+    expect(failure(() => core.linkAccept(self(peer.id), { id })).message).toContain("its own descendant")
+    core.unlink(HUMAN, { endpoint: "lead" })
+    db.query("UPDATE endpoints SET depth = ? WHERE id = ?").run(LIMITS.depthMax, lead.id)
+    expect(failure(() => core.linkAccept(self(peer.id), { id })).message).toContain("deeper")
+    db.query("UPDATE endpoints SET depth = 0 WHERE id = ?").run(lead.id)
+    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
+    core.adopt(HUMAN, { endpoint: "peer", parent: other.address })
+    expect(failure(() => core.linkAccept(self(peer.id), { id })).message).toContain("already sits under")
+    core.unlink(HUMAN, { endpoint: "peer" })
+    db.query("UPDATE endpoints SET kind = 'human' WHERE id = ?").run(lead.id)
+    expect(failure(() => core.linkAccept(self(peer.id), { id })).code).toBe("invalid_params")
+    clock.now += 86_400_001
+    expect(failure(() => core.linkAccept(self(peer.id), { id })).code).toBe("not_found")
+    expect(core.whoami(peer.id).parent).toBeNull()
   })
 
   test("refuses a cycle", () => {

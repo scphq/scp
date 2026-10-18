@@ -358,6 +358,8 @@ export interface Envelope {
   expires_at: string
   /** a request whose sender holds the recipient's stop until it replies */
   require_reply?: true
+  /** a broker-issued request to link under its sender */
+  link?: { parent: string }
   /** set by inbox on a message a background hook already showed (and marked read), whose text may reach the agent only after this call */
   shown_at?: string
   /**
@@ -473,6 +475,13 @@ export interface SendResult {
   redacted?: JudgeRedacted
 }
 
+export interface AdoptResult {
+  endpoint: EndpointView
+  parent: string
+  requested?: string
+  held?: JudgeHeld
+}
+
 /**
  * a message the caller sent and, per recipient, when it read the message (acked), or when a background hook delivered it (acked by that
  * showing; the agent gets it with its next request), and when a hook or channel showed it: ISO times, or null
@@ -493,4 +502,4 @@ export interface AuditRow {
 }
 
 /** fields only the server sets: a client that sends them gets invalid_params */
-export const SERVER_FIELDS = ["from", "id", "seq", "hop", "created_at", "auth", "expires_at", "relation"] as const
+export const SERVER_FIELDS = ["from", "id", "seq", "hop", "created_at", "auth", "expires_at", "relation", "link"] as const
