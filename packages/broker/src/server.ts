@@ -34,6 +34,7 @@ import { accountHome, accountHomeVerified, policyPath as defaultPolicyPath, priv
 import { writeSessionMarker } from "./sessions"
 import { Conn } from "./socket"
 import { type Database, openDatabase } from "./sqlite"
+import { startWakers, type Wakers } from "./wakers"
 
 export interface BrokerOptions {
   dir: string
@@ -70,6 +71,10 @@ export interface BrokerOptions {
   env?: Record<string, string | undefined> | undefined
   /** the judge model client for a policy's `judge.model` (default the provider's HTTP API) */
   judgeClient?: JudgeClientFactory | undefined
+  /** the wake hooks' configuration file (default wakers.json beside the policy file), read again when it changes */
+  wakersPath?: string | undefined
+  /** the wake hooks by provider, in place of the file */
+  wakers?: Record<string, unknown> | undefined
 }
 
 /** what a link gets from the broker: its core, the remote hooks a bridge gets, and a send as a local endpoint or a mirrored one through the judge */
@@ -131,6 +136,8 @@ interface Connection {
 const SWEEP_MS = 10 * 60_000
 const PRESENCE_MS = 60_000
 const OWNERSHIP_MS = 2_000
+/** how long a hibernate waits for the hub to take its mirror */
+const HIBERNATE_BARRIER_MS = 10_000
 const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "policy", "policy_check", "cloud_status", "bridge_relink"])
 const SCOPE_METHODS = new Set([
   "rules",
@@ -223,6 +230,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   let core!: FederatedCore
   let judge!: JudgeGate
   let bridge: Bridge | null = null
+  let wakers: Wakers | null = null
   let listener!: Server
   let socketIno: number | bigint | undefined
   try {
@@ -305,6 +313,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       if ((known.get(view.id) ?? "offline") !== view.presence) presenceChanged(view)
       else if (wakes.has(view.id) && wakes.get(view.id) !== view.wake) bridge?.changed(view.id)
       wakes.set(view.id, view.wake)
+      if (view.presence === "hibernated") wakers?.kick(view.id)
     }
     for (const id of known.keys()) if (!live.has(id)) known.delete(id)
     for (const id of wakes.keys()) if (!live.has(id)) wakes.delete(id)
@@ -340,6 +349,16 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
   if (options.bridge) bridge = startBridge({ ...options.bridge, core, onRemote: remoteHooks })
   else if (options.link) bridge = options.link({ core, hooks: remoteHooks, send: (from, params, origin) => judge.send(from, params, origin, deliver) })
+  wakers = startWakers({
+    core,
+    path: options.wakersPath ?? join(dirname(policyFile), "wakers.json"),
+    wakers: options.wakers,
+    dir,
+    machine: options.machine ?? options.bridge?.machine ?? shortHostname(),
+    now: options.now ?? Date.now,
+    log,
+    changed: (endpoint) => presenceChanged(core.whoami(endpoint)),
+  })
 
   /** links the bridge again with the credential on disk; a configuration this broker cannot take without a restart stops it */
   async function relink(): Promise<object> {
@@ -461,7 +480,15 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   /** an endpoint's presence changed outside a connection's own hello or close: watchers and the other machines hear it */
   function presenceChanged(view: EndpointView) {
     known.set(view.id, view.presence)
-    notifyFleet({ type: "presence", endpoint: view.address, presence: view.presence, harness: view.harness, labels: view.labels })
+    notifyFleet({
+      type: "presence",
+      endpoint: view.address,
+      presence: view.presence,
+      harness: view.harness,
+      labels: view.labels,
+      ...(view.wake_failed ? { wake_failed: view.wake_failed } : {}),
+      ...(view.wake_declined ? { wake_declined: view.wake_declined } : {}),
+    })
     bridge?.changed(view.id)
   }
 
@@ -558,11 +585,28 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }
   }
 
+  /** whether the hub took these endpoints' mirror within HIBERNATE_BARRIER_MS, so the machine may be suspended at once */
+  async function mirrorBarrier(endpoints: string[]): Promise<boolean> {
+    if (!bridge?.mirrorNow || !endpoints.length) return false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), HIBERNATE_BARRIER_MS)
+    })
+    try {
+      return await Promise.race([bridge.mirrorNow(endpoints), timeout])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** a delivery reached `endpoint`: its waiters return, and a hibernated one's wake hook runs when due */
   function wake(endpoint: string) {
     const set = waiters.get(endpoint)
-    if (!set) return
-    waiters.delete(endpoint)
-    for (const fn of set) fn()
+    if (set) {
+      waiters.delete(endpoint)
+      for (const fn of set) fn()
+    }
+    wakers?.kick(endpoint)
   }
 
   function waitFor(endpoint: string, ms: number, s: Conn<Connection>): Promise<void> {
@@ -993,6 +1037,26 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         bridge?.resync()
         return unlinked
       }
+      case "hibernate": {
+        const known = { known: (provider: string) => wakers?.known(provider) ?? false }
+        const set = { wake: params.wake, ref: params.ref, eta_s: params.eta_s }
+        if (params.all !== undefined && params.all !== true) throw new RelayError("invalid_params", "all is true or absent")
+        if (params.all === true && params.endpoint !== undefined) throw new RelayError("invalid_params", "all names no endpoint")
+        const result =
+          params.all === true
+            ? core.hibernateAll(actorOf(s), set, known)
+            : core.hibernate(actorOf(s), { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), ...set }, known)
+        const views = "endpoints" in result ? result.endpoints : [result.endpoint]
+        for (const view of views) presenceChanged(view)
+        return { ...result, mirrored: await mirrorBarrier(views.map((view) => view.id)) }
+      }
+      case "machine_wake": {
+        if (actorOf(s).kind !== "human") throw new RelayError("unauthorized", "only the human sets this machine's waker")
+        if (!bridge?.machineWake) throw new RelayError("unavailable", "this broker has no hub link: the machine waker lives on the hub")
+        if (params.url !== null && typeof params.url !== "string") throw new RelayError("invalid_params", "url is an https URL, or null to clear it")
+        if (params.secret !== undefined && typeof params.secret !== "string") throw new RelayError("invalid_params", "secret is a string")
+        return bridge.machineWake({ url: params.url, ...(params.secret !== undefined ? { secret: params.secret } : {}) })
+      }
       case "leave": {
         const left = core.leaveSession(actorOf(s), params.endpoint !== undefined ? { endpoint: params.endpoint } : {})
         for (const c of connections) if (c.data.endpoint === left.endpoint.id && !c.data.transient && !c.data.lineage && c !== s) c.end()
@@ -1292,6 +1356,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       clearInterval(sweeper)
       clearInterval(presenceTimer)
       clearInterval(ownership)
+      wakers?.stop()
       await bridge?.stop()
       if (idleTimer) clearTimeout(idleTimer)
       for (const set of [...waiters.values()]) for (const fn of [...set]) fn()

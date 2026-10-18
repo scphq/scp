@@ -21,6 +21,7 @@ import {
   newId,
   one,
   type PolicySubject,
+  PRESENCES,
   type Presence,
   randomHex,
   RelayCore,
@@ -57,7 +58,8 @@ export const MACHINE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
 const REMOTE = /^[a-z0-9][a-z0-9._-]{0,63}\/([a-z0-9][a-z0-9._-]{0,62})?$/
 const MESSAGE_ID = /^[a-z]{2,8}_[a-z0-9]{8,64}$/
 const AUTHS: readonly RelayAuth[] = ["local-uid", "account", "account+bridge", "contact"]
-const PRESENCES: readonly Presence[] = ["online", "idle", "offline"]
+/** a hibernated agent's shown wake, its provider's hook */
+const HOOK_WAKE = /^hook:[a-z0-9][a-z0-9-]{0,31}$/
 
 export interface FederatedOptions extends CoreOptions {
   /** this host's own machine name; addresses naming it stay local */
@@ -510,11 +512,20 @@ export class FederatedCore extends RelayCore {
     return shown ? null : this.remoteAddress(key)
   }
 
-  /** a live mirrored row shows the presence its machine mirrored, not one its last_seen decays to here */
+  /**
+   * a live mirrored row shows the presence its machine mirrored, not one its last_seen decays to here; a hibernated one stays hibernated with
+   * its hook wake after its bridge closed
+   */
   protected override view(row: EndpointRow, shown?: Set<string>): EndpointView {
     const view = super.view(row, shown)
     const { remote, mirrored_presence: mirrored } = row as FederatedRow
+    if (remote && mirrored === "hibernated")
+      return { ...view, presence: "hibernated", ...(view.kind === "agent" && row.wake && HOOK_WAKE.test(row.wake) ? { wake: row.wake as Wake } : {}) }
     return remote && row.connections > 0 && (mirrored === "online" || mirrored === "idle") ? { ...view, presence: mirrored } : view
+  }
+
+  protected override hibernated(row: EndpointRow): boolean {
+    return super.hibernated(row) || ((row as FederatedRow).remote !== null && (row as FederatedRow).mirrored_presence === "hibernated")
   }
 
   protected override address(row: EndpointRow): string {
@@ -686,7 +697,7 @@ export class FederatedCore extends RelayCore {
       for (const { view, id, before } of batch) {
         const row = before ?? (this.byId(id) as FederatedRow)
         if (before && view.kind === "agent") this.dropEarlierHolder(before, view.scope.incarnation)
-        const live = view.presence !== "offline"
+        const live = view.presence !== "offline" && view.presence !== "hibernated"
         const next: Partial<FederatedRow> = {
           kind: view.kind,
           harness: view.harness,
@@ -1664,7 +1675,7 @@ export class FederatedCore extends RelayCore {
       status = { state: view.status.state, note: cleanText(view.status.note, "note", LIMITS.noteChars) ?? "" }
     }
     const presence = view.presence ?? "offline"
-    if (!PRESENCES.includes(presence)) throw new RelayError("invalid_params", "presence is online, idle or offline")
+    if (!PRESENCES.includes(presence)) throw new RelayError("invalid_params", "presence is online, idle, offline or hibernated")
     const parsedSeen = typeof view.last_seen === "string" ? Date.parse(view.last_seen) : Number.NaN
     const out = {
       handle,
@@ -1958,7 +1969,9 @@ function parseScope(view: Partial<MirrorView>): ParsedScope {
     throw new RelayError("too_large", `an endpoint's rules and caps are more than ${SCOPE_BYTES} bytes`)
   if (given("title"))
     out.title = view.title === null ? null : cleanText(typeof view.title === "string" ? view.title.replace(/\s+/g, " ") : view.title, "title", 64) || null
-  if (given("wake")) out.wake = typeof view.wake === "string" && view.wake !== "none" && WAKES.includes(view.wake as Wake) ? (view.wake as Wake) : null
+  if (given("wake"))
+    out.wake =
+      typeof view.wake === "string" && view.wake !== "none" && (WAKES.includes(view.wake as Wake) || HOOK_WAKE.test(view.wake)) ? (view.wake as Wake) : null
   if (given("incarnation")) {
     if (view.incarnation !== null && (typeof view.incarnation !== "string" || !INCARNATION.test(view.incarnation))) throw bad("incarnation")
     out.incarnation = view.incarnation ?? null

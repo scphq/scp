@@ -76,6 +76,8 @@ export interface Bridge {
   forward(from: string, params: SendParams, origin?: { tty?: boolean }): Promise<SendResult>
   /** a local endpoint was claimed, let go or changed its status: mirrored as a delta */
   changed(endpoint: string): void
+  /** mirrors these endpoints now and resolves true once the hub took the delta, false when it did not or none is mirrored */
+  mirrorNow?(endpoints: string[]): Promise<boolean>
   /** rules, caps, groups or a title changed, which can touch several endpoints: every mirrored endpoint is sent again */
   resync(): void
   /** a local endpoint took another handle: the hub renames its mirror in place, keeping what queued for it */
@@ -86,6 +88,8 @@ export interface Bridge {
   local?(event: LocalDelivery): void
   /** the endpoints of other accounts this account's contacts let it reach */
   contacts(): Promise<XListed[]>
+  /** sets (or with a null url clears) the URL the hub calls to wake this machine; the secret signs those calls and is never shown again */
+  machineWake?(params: { url: string | null; secret?: string }): Promise<{ set: boolean }>
   status(): BridgeStatus
   /** reads the credential again and reconnects now, also after the hub revoked or replaced this bridge */
   relink(): void
@@ -101,6 +105,9 @@ export interface LocalDelivery {
   to: string[]
   at: number
 }
+
+/** the endpoints one mirrorNow frame carries */
+const MIRROR_NOW_BATCH = 32
 
 /** local deliveries waiting for the next batch; past this, new ones are dropped until it is sent */
 const LOCAL_BUFFER = 1000
@@ -639,6 +646,25 @@ export function startBridge(options: BridgeOptions): Bridge {
     if (mirrored(view)) fireAndForget("mirror", { endpoints: [outward(view)], full: false })
   }
 
+  async function mirrorNow(endpoints: string[]): Promise<boolean> {
+    if (!ready) return false
+    const views = endpoints.flatMap((id) => {
+      try {
+        const view = core.whoami(id)
+        return mirrored(view) ? [outward(view)] : []
+      } catch {
+        return []
+      }
+    })
+    if (!views.length) return false
+    try {
+      for (let i = 0; i < views.length; i += MIRROR_NOW_BATCH) await request("mirror", { endpoints: views.slice(i, i + MIRROR_NOW_BATCH), full: false })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   function renamed(endpoint: string, was: string) {
     if (!ready) return
     let view: EndpointView
@@ -700,6 +726,11 @@ export function startBridge(options: BridgeOptions): Bridge {
     return (await request<{ contacts: XListed[] }>("list", { contacts: true })).contacts
   }
 
+  async function machineWake(params: { url: string | null; secret?: string }): Promise<{ set: boolean }> {
+    if (!connected) throw unavailable()
+    return request<{ set: boolean }>("machine_wake", params)
+  }
+
   function status(): BridgeStatus {
     return { enabled: true, machine, url: options.url, connected, last_error: lastError, since }
   }
@@ -732,5 +763,5 @@ export function startBridge(options: BridgeOptions): Bridge {
   }
 
   connect()
-  return { forward, changed, resync, renamed, activity, local, contacts, status, relink, stop }
+  return { forward, changed, mirrorNow, resync, renamed, activity, local, contacts, machineWake, status, relink, stop }
 }

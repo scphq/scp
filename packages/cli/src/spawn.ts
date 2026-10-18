@@ -46,10 +46,10 @@ const SERVER = "scp"
 export const SPAWN_RUNNER = "SCP_SPAWN_RUNNER"
 
 /** the spawner's own identity, which the harness it starts must not inherit */
-const SPAWNER_IDENTITY = ["SCP_NAME", "SCP_SESSION", "SCP_GRANT", "SCP_PARENT", "SCP_HARNESS", "SCP_SHIM_BINDING", "SCP_HARNESS_PID", SPAWN_RUNNER]
+const SPAWNER_IDENTITY = ["SCP_NAME", "SCP_SESSION", "SCP_GRANT", "SCP_PARENT", "SCP_UNDER", "SCP_HARNESS", "SCP_SHIM_BINDING", "SCP_HARNESS_PID", SPAWN_RUNNER]
 
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
-const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING"]
+const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_UNDER", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING"]
 
 /** the harness's environment: ours without the spawner's identity, plus the grant's variables and --labels */
 export function spawnEnvironment(parent: Env, grant: Record<string, string>, labels?: string): Record<string, string> {
@@ -894,6 +894,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   const bytes = values["handback-bytes"] === undefined ? undefined : handbackBytes(values["handback-bytes"] as string)
   const runner = process.env[SPAWN_RUNNER]
   delete process.env[SPAWN_RUNNER]
+  if (typeof values.via === "string") return (await import("./remote-spawn")).viaSpawn(values, command, cwd)
   if (
     runner === undefined &&
     (values.bg === true || (values.fg !== true && (process.stdout.isTTY !== true || (process.stdin.isTTY !== true && agentShell(process.env)))))
@@ -909,6 +910,23 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
             closeSync(channel)
           } catch {}
         })
+  if (typeof values.under === "string") {
+    const remote = await import("./remote-spawn")
+    let plan: Awaited<ReturnType<typeof remote.linkedPlan>>
+    try {
+      plan = await remote.linkedPlan(values, command)
+    } catch (error) {
+      handshake?.({ error: error instanceof Error ? error.message : String(error), ...(error instanceof RelayUsage ? { usage: true as const } : {}) })
+      throw error
+    }
+    if (plan) {
+      const name = plan.name
+      const started =
+        handshake &&
+        ((failed?: { message: string; code: number }) => handshake(failed ? { error: failed.message, code: failed.code } : { name, pid: process.pid }))
+      return remote.linkedSpawn(plan, command, cwd, { group: runner !== undefined, ...(started ? { started } : {}), ...(bytes !== undefined ? { bytes } : {}) })
+    }
+  }
   const bound = spawnerKey()
   const prompt = values.peek === undefined ? undefined : spawnPrompt(command)?.slice(0, PEEK.rawChars)
   const walk = runner === undefined ? walkNow() : (JSON.parse(runner) as Walk)
@@ -976,7 +994,8 @@ function parseSpawn(args: string[]): { values: Values; command: string[] } {
     throw new RelayUsage(error instanceof Error ? error.message : String(error))
   }
   if (values.help) return { values, command: split.command }
-  for (const key of Object.keys(values) as Option[]) if (!SPAWN_OPTIONS.includes(key)) throw new RelayUsage(`${CLI_NAME} spawn does not take --${key}`)
+  for (const key of Object.keys(values) as Option[])
+    if (!SPAWN_OPTIONS.includes(key) && !(key === "json" && values.via !== undefined)) throw new RelayUsage(`${CLI_NAME} spawn does not take --${key}`)
   if (values.bg && values.fg) throw new RelayUsage("--bg and --fg: pick one")
   const command = split.command
   if (!command.length)

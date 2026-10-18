@@ -567,6 +567,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     process: harnessProcess,
     labels: labelsFor(input.env),
     ...(input.env.SCP_PARENT ? { parent: input.env.SCP_PARENT } : {}),
+    ...(input.env.SCP_UNDER ? { under: input.env.SCP_UNDER } : {}),
     ...(keys.length ? { lineage: keys } : {}),
     ...(grant ? { grant } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),

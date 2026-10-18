@@ -98,6 +98,26 @@ describe("join under a parent", () => {
   })
 })
 
+describe("a claim under a parent", () => {
+  test("links a root claim under the parent as a join under does, and a later claim under it is a no-op", () => {
+    const { core, claim } = setup()
+    const app = core.claim({ ...claim("app", 20), under: "lead" }, { transient: true }).endpoint
+    expect(app).toMatchObject({ parent: "me/lead", depth: 1 })
+    expect(core.log({}).find((row) => row.event === "adopt")?.detail).toMatchObject({ by: "me/app", auth: "session", target: "me/app", parent: "me/lead" })
+    expect(core.claim({ ...claim("app", 20), under: "lead" }, { transient: true }).endpoint).toMatchObject({ id: app.id, parent: "me/lead" })
+    expect(core.log({}).filter((row) => row.event === "adopt")).toHaveLength(1)
+  })
+
+  test("a refused link keeps the claim, audited claim_under_refused, and under is an address of at most 128 characters", () => {
+    const { core, claim } = setup()
+    const lone = core.claim({ ...claim("lone", 30), under: "nobody" }, { transient: true }).endpoint
+    expect(lone.parent ?? null).toBeNull()
+    expect(core.log({}).find((row) => row.event === "claim_under_refused")?.detail).toEqual({ target: "me/lone", under: "nobody", code: "not_found" })
+    expect(failure(() => core.claim({ ...claim("long", 40), under: "x".repeat(129) })).code).toBe("too_large")
+    expect(failure(() => core.claim({ ...claim("odd", 41), under: 5 as unknown as string })).code).toBe("invalid_params")
+  })
+})
+
 describe("adopt", () => {
   test("the human at a terminal links a root, its subtree moving along", () => {
     const { core, claim, lead } = setup()

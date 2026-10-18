@@ -11,9 +11,11 @@ export {
   SYSTEM_HANDLE,
   TITLE_CHARS,
   unreachable,
+  WAKE_PROVIDER,
   type CoreOptions,
   type EndpointRow,
   type MessageRow,
+  type WakeJob,
 } from "./core"
 export * from "./protocol"
 export {

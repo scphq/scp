@@ -16,6 +16,7 @@ export const SPAWN_HELP = `${CLI_NAME} spawn [flags] [--] <harness cmd...>: run 
   --peek local          peekable from its start
   --scope P --rules S --in S --out S --allow S --group G --under EP --ttl S --labels K=V,...
                         its scope and grant, as for ${CLI_NAME} spawn-env (default scope: parent)
+  --via R               start it on another machine through runner R (runners.json, see help --all)
 The command starts after -- or at the first word that is not one of these flags.
 
 It returns at once, printing the worker's name and its runner's pid: do not background it (no &, no
