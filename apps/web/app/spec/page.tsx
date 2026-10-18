@@ -1,14 +1,18 @@
 import type { Metadata } from "next";
 import { Header } from "../chrome";
 import { loadSpec } from "../../lib/spec";
+import { shareMetadata } from "../share";
 import { Toc } from "./toc";
 
 export const dynamic = "force-static";
 
+const description = "The Swarm Communication Protocol, version 1: identity, messages, delivery into harnesses, authorization, federation and judging.";
+
 export const metadata: Metadata = {
   title: "Specification",
-  description: "The Swarm Communication Protocol, version 1: identity, messages, delivery into harnesses, authorization, federation and judging.",
+  description,
   alternates: { canonical: "/spec" },
+  ...shareMetadata("Specification, SCP", description, "/spec"),
 };
 
 const spec = loadSpec();

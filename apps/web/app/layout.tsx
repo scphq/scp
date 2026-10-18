@@ -3,6 +3,7 @@ import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import { Footer } from "./chrome";
 import { SITE, SITE_DESCRIPTION, SITE_TITLE } from "./content";
+import { shareMetadata } from "./share";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -10,8 +11,7 @@ export const metadata: Metadata = {
   title: { default: SITE_TITLE, template: "%s, SCP" },
   description: SITE_DESCRIPTION,
   alternates: { canonical: "/" },
-  openGraph: { type: "website", siteName: "SCP", url: SITE, title: SITE_TITLE, description: SITE_DESCRIPTION },
-  twitter: { card: "summary", title: SITE_TITLE, description: SITE_DESCRIPTION },
+  ...shareMetadata(SITE_TITLE, SITE_DESCRIPTION, "/"),
   icons: { icon: "/icon.svg" },
 };
 
