@@ -2,7 +2,7 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { LIMITS, PROTOCOL, type Sql, type SqlValue } from "@scp-dev/core"
-import { HUB_LIMITS, type HubConn, type HubGrant, type HubLimits, RelayHub, type HubSocket } from "./hub"
+import { GRAPH_MINUTES, GRAPH_MINUTES_MAX, HUB_LIMITS, type HubConn, type HubGrant, type HubLimits, RelayHub, type HubSocket } from "./hub"
 
 const START = 1_800_000_000_000
 
@@ -1193,5 +1193,41 @@ describe("in-flight calls and forwards", () => {
       params: { to: "desk/review", body: "see the file", attachments: [{ kind: "path", path: "/home/ada/notes.md" }] },
     })
     expect(desk.pushes("deliver").map((p) => p.message.attachments)).toEqual([[]])
+  })
+})
+
+describe("graph", () => {
+  test("listed endpoints, spawn edges and message counts per sender and recipient in the window, never a body", async () => {
+    const { hub, clock, bridge, ok } = setup()
+    const laptop = await bridge("laptop", [
+      { address: "me/lead", parent_ep: null, depth: 0 },
+      { address: "me/kid", tree: "lead", parent_ep: "lead", depth: 1 },
+      { address: "me/", kind: "human" },
+    ])
+    await bridge("desk", [{ address: "me/review" }])
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "secret plan one" } })
+    clock.now += 1000
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "secret plan two" } })
+    await ok(laptop, "forward", { from: "kid", params: { to: "laptop/lead", body: "done" } })
+
+    const graph = hub.graph()
+    expect(graph.minutes).toBe(GRAPH_MINUTES)
+    expect(graph.machines.map((m) => m.name)).toEqual(["desk", "laptop"])
+    expect(graph.nodes.find((n) => n.address === "ada/laptop/")?.kind).toBe("human")
+    expect(graph.nodes.find((n) => n.address === "ada/laptop/kid")).toMatchObject({ kind: "agent", parent: "ada/laptop/lead", presence: "online" })
+    expect(graph.edges).toEqual([
+      { kind: "spawn", from: "ada/laptop/lead", to: "ada/laptop/kid" },
+      { kind: "message", from: "ada/laptop/kid", to: "ada/laptop/lead", count: 1, last_at: new Date(START + 1000).toISOString() },
+      { kind: "message", from: "ada/laptop/lead", to: "ada/desk/review", count: 2, last_at: new Date(START + 1000).toISOString() },
+    ])
+    const wire = JSON.stringify(graph)
+    expect(wire).not.toContain("secret plan")
+    expect(wire).not.toContain("done")
+    expect(wire).not.toContain("body")
+
+    clock.now += (GRAPH_MINUTES + 1) * 60_000
+    expect(hub.graph().edges.map((e) => e.kind)).toEqual(["spawn"])
+    expect(hub.graph(GRAPH_MINUTES_MAX).edges.filter((e) => e.kind === "message")).toHaveLength(2)
+    expect(hub.graph(10_000).minutes).toBe(GRAPH_MINUTES_MAX)
   })
 })

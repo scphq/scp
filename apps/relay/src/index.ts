@@ -5,6 +5,7 @@ import type { Env } from "./env";
 import { hubRoute } from "./hub/routes";
 import { CSS, html, layout } from "./html";
 import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
+import { GRAPH_CSS, graphScript } from "./graph";
 import { APP_JS, overviewPage } from "./overview";
 import { tokensPage, tokensPost } from "./tokens";
 import { DAY, HttpError, json } from "./util";
@@ -70,6 +71,10 @@ export default {
         return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
       if (url.pathname === "/app.js")
         return new Response(APP_JS, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=3600" } });
+      if (url.pathname === "/graph.css")
+        return new Response(GRAPH_CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
+      if (url.pathname === "/graph.js")
+        return new Response(graphScript(), { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=3600" } });
       if (url.pathname === "/v1/device/code" && req.method === "POST") return await deviceCode(req, env.DB, url.origin, Date.now());
       if (url.pathname === "/v1/device/token" && req.method === "POST") return await deviceToken(req, env.DB, url.origin, Date.now());
       if (url.pathname === "/v1/relay/ws") return await hubRoute(req, env, "ws");

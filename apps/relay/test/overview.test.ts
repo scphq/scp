@@ -99,3 +99,31 @@ test("an idle agent a message can wake shows apart from one that reads at its ne
   expect(page).toContain('class="hicon h-claude"');
   expect(page).not.toContain('class="harness"');
 });
+
+test("the graph data block names each node's machine and label, escapes markup and drops a retired handle", async () => {
+  const graphPath = "../src/graph";
+  const { graphData }: { graphData(g: unknown): { value: string } } = await import(graphPath);
+  const block = graphData({
+    minutes: 15,
+    machines: [
+      { name: "box", kind: "bridge", online: true },
+      { name: "old", kind: "revoked", online: false },
+    ],
+    nodes: [
+      { ...ep("lead", "online"), address: "acme/box/lead", title: "</script><b>x</b>" },
+      { ...ep("_gone_ep_1", "offline"), parent: null },
+      { ...ep("", "online"), kind: "human", address: "acme/box/" },
+    ],
+    edges: [{ kind: "message", from: "acme/box/", to: "acme/box/lead", count: 3, last_at: "2026-01-01T00:00:00.000Z" }],
+  }).value;
+  expect(block.match(/<\/script>/g)).toHaveLength(1);
+  const g = JSON.parse(/data-graph-data>([\s\S]*)<\/script>/.exec(block)![1]!);
+  expect(g.machines).toEqual([{ name: "box", online: true }]);
+  expect(g.nodes.map((n: { machine: string; label: string; icon: string }) => [n.machine, n.label, n.icon])).toEqual([
+    ["box", "lead", "claude"],
+    ["box", "(ended)", "claude"],
+    ["box", "human", "human"],
+  ]);
+  expect(g.nodes[0].title).toBe("</script><b>x</b>");
+  expect(g.edges[0]).toMatchObject({ kind: "message", count: 3 });
+});

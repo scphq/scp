@@ -1,6 +1,6 @@
 # scp relay
 
-The hosted demo relay: a Cloudflare Worker with D1. People sign in by email with a one-time code (Cloudflare Turnstile is the only throttle), create organizations, invite members, approve `swarm login` device codes and mint API tokens for headless agents. Each organization has one hub Durable Object; its overview page at `/orgs/<handle>` lists the hub's machines, agents and recent activity and refreshes itself.
+The hosted demo relay: a Cloudflare Worker with D1. People sign in by email with a one-time code (Cloudflare Turnstile is the only throttle), create organizations, invite members, approve `swarm login` device codes and mint API tokens for headless agents. Each organization has one hub Durable Object; its overview page at `/orgs/<handle>` lists the hub's machines, agents and recent activity, draws them as a live graph of spawn and message links, and refreshes itself.
 
 ## Develop
 
