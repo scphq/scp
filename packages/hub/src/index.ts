@@ -23,9 +23,20 @@ export {
   type HubAuth,
   type HubConn,
   type HubDeps,
+  type HubJudgeOptions,
   type HubGrant,
   type HubLimits,
   type HubRole,
   type HubSocket,
   type MachineRow,
 } from "./hub"
+export {
+  type Deliver,
+  type HoldView,
+  JUDGE_LIMITS,
+  type JudgeClientFactory,
+  JudgeGate,
+  type JudgeGateOptions,
+  type JudgeLimits,
+  type Origin as JudgeOrigin,
+} from "./judge-gate"

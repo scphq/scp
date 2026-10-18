@@ -1216,11 +1216,11 @@ The judge reviews message content where it crosses a boundary the owner configur
 
 | Side | Where | Applies to |
 | --- | --- | --- |
-| `local` | The broker | Local and same-account sends crossing a boundary of the policy's `judge` section. |
+| `local` | The broker, or a hub its operator configured to judge its own account | Local and same-account sends crossing a boundary of the policy's `judge` section, or on such a hub every send between the account's machines. |
 | `egress` | The sender's hub | Every cross-account message leaving the account. |
 | `ingress` | The receiver's hub | Every cross-account message entering the account. |
 
-The local judge does not judge cross-account sends (it audits `judge_skipped`); the hub does not judge same-account traffic. For each sender and recipient the first matching boundary in the section's list applies. A send whose recipients are judged at different boundaries merges their verdicts to the strictest, with every category and redaction.
+The local judge does not judge cross-account sends (it audits `judge_skipped`); a hub judges same-account traffic only when its operator configured a local-side judge for the account, reviewed by the account's owners and admins in the console. For each sender and recipient the first matching boundary in the section's list applies. A send whose recipients are judged at different boundaries merges their verdicts to the strictest, with every category and redaction.
 
 ### 15.2 Verdicts
 

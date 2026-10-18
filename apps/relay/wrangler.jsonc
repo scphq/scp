@@ -23,7 +23,8 @@
     "MAIL_FROM": "login@scp.dev",
     "TURNSTILE_SITE_KEY": "0x4AAAAAAFaDQzRHNz0wV0wZ"
   },
-  // Secrets: SESSION_SECRET, TURNSTILE_SECRET, optional RESEND_API_KEY (with MAILER=resend).
+  // Secrets: SESSION_SECRET, TURNSTILE_SECRET, optional RESEND_API_KEY (with MAILER=resend), optional JUDGE_API_KEY or OPENROUTER_API_KEY.
+  // Optional vars for the relay judge, set per deployment: JUDGE_MODEL (no default, the judge stays off without it), JUDGE_PROVIDER (default openrouter).
   "triggers": { "crons": ["17 3 * * *"] },
   "observability": { "enabled": true }
 }

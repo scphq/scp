@@ -18,6 +18,7 @@ import {
   honestSender,
   joinRedacted,
   judgeDetailForAgents,
+  type JudgePolicy,
   LIMITS,
   MESSAGE_KINDS,
   type MessageKind,
@@ -48,6 +49,7 @@ import {
   xlimits,
 } from "@scp-dev/core"
 import { FederatedCore, MACHINE_NAME, type MirrorChange, type XEndpoint } from "./federation"
+import { type Deliver, type HoldView, type JudgeClientFactory, JudgeGate, type JudgeLimits } from "./judge-gate"
 
 export type HubAuth = "account" | "account+bridge"
 
@@ -143,6 +145,16 @@ export interface HubDeps {
   limits?: Partial<HubLimits>
   /** the link to other accounts' relays; without it an address of another account is not found */
   crossAccount?: CrossAccountLink
+}
+
+/** what a configured judge needs besides its policy */
+export interface HubJudgeOptions {
+  /** where the model's key_env is read */
+  env: Record<string, string | undefined>
+  /** the model client (default the provider's HTTP API) */
+  client?: JudgeClientFactory | undefined
+  /** overrides of the judge's own caps; `Infinity` disables one */
+  limits?: Partial<JudgeLimits> | undefined
 }
 
 export const HUB_LIMITS = {
@@ -276,6 +288,8 @@ export class RelayHub {
   private xcounters: XCounters | null = null
   private xkey: string | null = null
   private readonly limits: Readonly<HubLimits>
+  private judgeConfig: { policy: JudgePolicy; options: HubJudgeOptions } | null = null
+  private gate: JudgeGate | null = null
 
   constructor(private readonly deps: HubDeps) {
     this.now = deps.now ?? Date.now
@@ -303,6 +317,7 @@ export class RelayHub {
     })
     core.migrate()
     this.core = core
+    this.gate = null
     this.account = account.user
     if (this.deps.crossAccount) {
       this.xkey = core.xstate("key", () => randomHex(32))
@@ -318,8 +333,38 @@ export class RelayHub {
     this.denied = null
     this.xcounters = null
     this.xkey = null
+    this.gate = null
     this.buckets.clear()
     this.gone.clear()
+  }
+
+  /**
+   * judges this account's own sends (client send and ask, bridge forward) before delivery; sends to other accounts are left to the
+   * cross-account gate. Without a policy, or with mode off, the hub holds no judge and creates no judge tables
+   */
+  configureJudge(policy: JudgePolicy | undefined, options: HubJudgeOptions = { env: {} }): void {
+    this.gate = null
+    this.judgeConfig = policy && policy.mode !== "off" ? { policy, options } : null
+  }
+
+  /** the held messages, newest first, without bodies */
+  holds(state?: string): HoldView[] {
+    return this.judged().holds(state)
+  }
+
+  /** one hold with its body while it waits */
+  holdShow(id: string): ReturnType<JudgeGate["show"]> {
+    return this.judged().show(id)
+  }
+
+  /** delivers a held message as its sender, every send check run again */
+  holdRelease(id: string, options: { redacted?: boolean; by: string }): Promise<SendResult> {
+    return this.judged().release(id, options, this.deliverJudged)
+  }
+
+  /** refuses a held message: never delivered, its sender told why */
+  holdRefuse(id: string, reason: string, by: string): HoldView {
+    return this.judged().refuse(id, reason, by)
   }
 
   /** a fresh connection state for an accepted socket */
@@ -483,6 +528,7 @@ export class RelayHub {
       this.gone.clear()
       for (const [key, bucket] of this.buckets) if (bucket.tokens + ((now - bucket.at) * bucket.rate) / 60_000 >= bucket.rate) this.buckets.delete(key)
       this.xcounters?.prune()
+      this.judgeGate()?.sweep()
       this.setState("last_sweep", now)
     }
     if (this.idle(now)) {
@@ -835,11 +881,12 @@ export class RelayHub {
         const send = { ...(params as unknown as SendParams) }
         delete (send as Params).wait_s
         if (method === "ask") send.kind = "request"
-        const bytes = this.room(me, send.body)
-        const result = core.within(conn.machine, () => core.send(me, send, conn.tty === undefined ? {} : { tty: conn.tty }))
-        if (!result.duplicate) this.stash(bytes)
-        if (!result.duplicate) this.delivered(me, result, send.kind ?? "message")
-        if (method === "send") return result
+        const origin = conn.tty === undefined ? {} : { tty: conn.tty }
+        const gate = this.judgeGate()
+        const result = gate
+          ? await gate.send(me, send, { ...origin, machine: conn.machine }, this.deliverJudged)
+          : this.deliverOn(conn.machine, me, send, origin)
+        if (method === "send" || result.held) return result
         return this.awaitReply(socket, me, result.id, this.waitMs(socket, params.wait_s), result)
       }
       case "ask_wait": {
@@ -915,11 +962,10 @@ export class RelayHub {
         delete send.attachments
         const floor = Math.min(asked as number, LIMITS.hopMax + 1)
         if (floor > 0) core.markReceived(sender, floor - 1)
-        const bytes = this.room(sender, send.body)
-        const result = core.within(machine, () => core.send(sender, send as unknown as SendParams, { tty: params.tty === true }))
-        if (!result.duplicate) this.stash(bytes)
-        if (!result.duplicate) this.delivered(sender, result, (send.kind as string | undefined) ?? "message")
-        return result
+        const gate = this.judgeGate()
+        const origin = { tty: params.tty === true }
+        if (gate) return gate.send(sender, send as unknown as SendParams, { ...origin, machine }, this.deliverJudged)
+        return this.deliverOn(machine, sender, send as unknown as SendParams, origin)
       }
       case "subscribe": {
         const after = params.after ?? 0
@@ -1272,6 +1318,49 @@ export class RelayHub {
         })),
     )
   }
+
+  // judge
+
+  /** the judge, made on first use once configured; null when it is not */
+  private judgeGate(): JudgeGate | null {
+    if (!this.judgeConfig) return null
+    if (this.gate) return this.gate
+    const core = this.relay
+    const { policy, options } = this.judgeConfig
+    const gate = new JudgeGate({
+      sql: this.deps.sql,
+      core,
+      now: this.now,
+      env: options.env,
+      client: options.client,
+      limits: options.limits,
+      log: (line) => this.deps.log?.("relay_judge", { account: this.account, line }),
+      wake: (endpoint) => this.wake(endpoint),
+      notice: (endpoint, text) => this.xnotice(endpoint, text),
+      within: (origin, fn) => core.within(origin.machine ?? null, fn),
+    })
+    gate.configure(policy)
+    this.gate = gate
+    return gate
+  }
+
+  private judged(): JudgeGate {
+    const gate = this.judgeGate()
+    if (!gate) throw new RelayError("not_found", "this relay has no judge")
+    return gate
+  }
+
+  /** a send of this account as it runs unjudged: room for the body, the core send on the sender's machine, then push */
+  private deliverOn(machine: string | null, from: string, send: SendParams, origin: { tty?: boolean }): SendResult {
+    const core = this.relay
+    const bytes = this.room(from, send.body)
+    const result = core.within(machine, () => core.send(from, send, origin))
+    if (!result.duplicate) this.stash(bytes)
+    if (!result.duplicate) this.delivered(from, result, send.kind ?? "message")
+    return result
+  }
+
+  private readonly deliverJudged: Deliver = async (from, send, { machine, ...origin }) => this.deliverOn(machine ?? null, from, send, origin)
 
   // push and wait
 

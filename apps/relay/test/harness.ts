@@ -1,5 +1,5 @@
 import { Miniflare } from "miniflare";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -44,7 +44,15 @@ export interface Relay {
   dispose(): Promise<void>;
 }
 
-export async function startRelay(opts: { turnstileSecret?: string } = {}): Promise<Relay> {
+export interface RelayOptions {
+  turnstileSecret?: string;
+  /** more Worker bindings (vars and secrets) */
+  bindings?: Record<string, string>;
+  /** answers the Worker's outbound fetches instead of the network */
+  outbound?: (request: Request) => Promise<Response>;
+}
+
+export async function startRelay(opts: RelayOptions = {}): Promise<Relay> {
   const mails: Mail[] = [];
   let buffered = "";
   const mf = new Miniflare({
@@ -60,7 +68,9 @@ export async function startRelay(opts: { turnstileSecret?: string } = {}): Promi
       SESSION_SECRET: "test-session-secret",
       TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
       TURNSTILE_SECRET: opts.turnstileSecret ?? TURNSTILE_PASS,
+      ...opts.bindings,
     },
+    ...(opts.outbound ? { outboundService: opts.outbound as never } : {}),
     handleRuntimeStdio(stdout: Readable, stderr: Readable) {
       stdout.on("data", (chunk: Buffer) => {
         buffered += chunk.toString();
@@ -75,15 +85,19 @@ export async function startRelay(opts: { turnstileSecret?: string } = {}): Promi
     },
   });
   const db = await mf.getD1Database("DB");
-  const sql = readFileSync(join(ROOT, "migrations/0001_init.sql"), "utf8")
-    .split("\n")
-    .filter((l) => !l.startsWith("--"))
-    .join("\n");
-  for (const stmt of sql
-    .split(";")
-    .map((s) => s.replace(/\s+/g, " ").trim())
-    .filter(Boolean))
-    await db.prepare(stmt).run();
+  for (const file of readdirSync(join(ROOT, "migrations"))
+    .filter((f) => f.endsWith(".sql"))
+    .sort()) {
+    const sql = readFileSync(join(ROOT, "migrations", file), "utf8")
+      .split("\n")
+      .filter((l) => !l.startsWith("--"))
+      .join("\n");
+    for (const stmt of sql
+      .split(";")
+      .map((s) => s.replace(/\s+/g, " ").trim())
+      .filter(Boolean))
+      await db.prepare(stmt).run();
+  }
 
   const origin = "https://relay.test";
   return {
