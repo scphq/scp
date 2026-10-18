@@ -9,6 +9,7 @@ import {
   activityBlock,
   ago,
   describe,
+  fleetStrip,
   groupByMachine,
   handleOf,
   hicon,
@@ -105,18 +106,6 @@ function nowList(o: Overview, now: number, handle: string): Html {
         : ""
     }
   </section>`;
-}
-
-/** each machine as a row of squares, one per agent, shaded by presence: the fleet at a glance */
-function fleetStrip(o: Overview, handle: string): Html {
-  const groups = groupByMachine(o);
-  return html`<div class="strip" aria-label="Agents per machine">${groups.map((g) => {
-    const state = g.machine?.online || g.endpoints.some((e) => e.presence === "online") ? "online" : "offline";
-    const agents = [...g.endpoints].sort((a, b) => (RANK[a.presence] ?? 3) - (RANK[b.presence] ?? 3));
-    return html`<div class="strip-row"><span class="dot ${state}" aria-hidden="true"></span><span class="mono strip-name" title="${g.name}">${g.name}</span>
-      <span class="cells">${agents.map((e) => html`<span class="cell ${e.presence}${wakeOf(e) ? " wake" : ""}" title="${handleOf(e.address)}, ${e.presence}"></span>`)}</span>
-      <span class="mini push">${g.endpoints.length}</span></div>`;
-  })}</div><p class="mini strip-key"><span class="cell online"></span>online <span class="cell idle wake"></span>wakeable <span class="cell idle"></span>next turn <span class="cell offline"></span>offline <a class="mini-link push" href="/orgs/${handle}/graph">Graph</a></p>`;
 }
 
 interface Side {

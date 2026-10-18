@@ -162,6 +162,75 @@ export function orderRows(endpoints: EndpointView[]): Row[] {
   return out;
 }
 
+export interface Tree {
+  root: EndpointView;
+  /** its descendants via parent, live first */
+  kids: EndpointView[];
+  live: boolean;
+}
+
+/** each orchestrator (an agent with no listed parent) with its descendants: live trees first, then the biggest */
+export function fleetTrees(endpoints: EndpointView[]): Tree[] {
+  const agents = endpoints.filter((e) => e.kind === "agent");
+  const listed = new Set(agents.map((e) => e.address));
+  const under = new Map<string, EndpointView[]>();
+  const roots: EndpointView[] = [];
+  for (const e of agents) {
+    if (e.parent && e.parent !== e.address && listed.has(e.parent)) under.set(e.parent, [...(under.get(e.parent) ?? []), e]);
+    else roots.push(e);
+  }
+  const seen = new Set<string>();
+  const grow = (root: EndpointView): Tree => {
+    seen.add(root.address);
+    const kids: EndpointView[] = [];
+    const stack = [...(under.get(root.address) ?? [])];
+    while (stack.length) {
+      const e = stack.pop()!;
+      if (seen.has(e.address)) continue;
+      seen.add(e.address);
+      kids.push(e);
+      stack.push(...(under.get(e.address) ?? []));
+    }
+    kids.sort(byPresence);
+    return { root, kids, live: [root, ...kids].some((e) => e.presence !== "offline") };
+  };
+  const trees = roots.map(grow);
+  for (const e of agents) if (!seen.has(e.address)) trees.push(grow(e));
+  return trees.sort((a, b) => Number(b.live) - Number(a.live) || b.kids.length - a.kids.length || byPresence(a.root, b.root));
+}
+
+const SOLO_MAX = 3;
+const cell = (e: EndpointView): Html => html`<span class="cell ${e.presence}${wakeOf(e) ? " wake" : ""}" title="${handleOf(e.address)}, ${e.presence}"></span>`;
+
+function treeRow({ root, kids }: Tree): Html {
+  const { machine } = splitAddress(root.address);
+  return html`<div class="strip-row"><span class="strip-who" title="${root.address}">${hicon(root.harness)}<span class="mono strip-name">${handleOf(root.address)}</span><span class="mini">${machine}</span></span>
+    <span class="cells">${cell(root)}${kids.map(cell)}</span>${kids.length ? html`<span class="mini push">${kids.length}</span>` : ""}</div>`;
+}
+
+/** trees with children one row each; past a few, the childless ones share a row */
+function treeRows(trees: Tree[]): Html[] {
+  const solo = trees.filter((t) => !t.kids.length);
+  if (solo.length <= SOLO_MAX) return trees.map(treeRow);
+  return [
+    ...trees.filter((t) => t.kids.length).map(treeRow),
+    html`<div class="strip-row"><span class="strip-who"><span class="mono strip-name">${solo.length} solo agents</span></span>
+      <span class="cells">${solo.map((t) => cell(t.root))}</span></div>`,
+  ];
+}
+
+/** each orchestrator as a row of squares, its own first, then its subagents, shaded by presence; offline trees fold away */
+export function fleetStrip(o: Overview, handle: string): Html {
+  const trees = fleetTrees(o.endpoints);
+  const live = trees.filter((t) => t.live);
+  const off = trees.filter((t) => !t.live);
+  return html`<div class="strip" aria-label="Agents per orchestrator">${treeRows(live)}${
+    off.length
+      ? html`<details class="offline" data-key="fleet-offline"><summary class="mini"><span class="when-shut">show</span><span class="when-open">hide</span> ${off.length} offline ${off.length === 1 ? "tree" : "trees"}</summary><div class="strip">${treeRows(off)}</div></details>`
+      : ""
+  }</div><p class="mini strip-key"><span class="cell online"></span>online <span class="cell idle wake"></span>wakeable <span class="cell idle"></span>next turn <span class="cell offline"></span>offline <a class="mini-link push" href="/orgs/${handle}/graph">Graph</a></p>`;
+}
+
 function endpointRow({ e, depth, anc, kids }: Row, shut: Set<string>, now: number): Html {
   const handle = handleOf(e.address);
   const parent = e.parent ? handleOf(e.parent) : null;

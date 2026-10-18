@@ -4,10 +4,12 @@ import { expect, test } from "bun:test";
 interface OverviewModule {
   orderRows(endpoints: EndpointView[]): { e: EndpointView; depth: number; anc: string[]; kids: number }[];
   liveRegion(o: { machines: unknown[]; endpoints: EndpointView[]; activity: unknown[] }, handle: string, now: number): { value: string };
+  fleetTrees(endpoints: EndpointView[]): { root: EndpointView; kids: EndpointView[]; live: boolean }[];
+  fleetStrip(o: { machines: unknown[]; endpoints: EndpointView[]; activity: unknown[] }, handle: string): { value: string };
 }
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
 const path = "../src/overview";
-const { orderRows, liveRegion }: OverviewModule = await import(path);
+const { orderRows, liveRegion, fleetTrees, fleetStrip }: OverviewModule = await import(path);
 
 const ep = (handle: string, presence: Presence, parent?: string, labels: Record<string, string> = {}): EndpointView => ({
   id: `ep_${handle}`,
@@ -126,4 +128,41 @@ test("the graph data block names each node's machine and label, escapes markup a
   ]);
   expect(g.nodes[0].title).toBe("</script><b>x</b>");
   expect(g.edges[0]).toMatchObject({ kind: "message", count: 3 });
+});
+
+test("the fleet groups by orchestrator: live trees first, then by size, descendants under their root", () => {
+  const trees = fleetTrees([
+    ep("solo", "idle"),
+    ep("lead", "online"),
+    ep("a", "offline", "lead"),
+    ep("b", "online", "a"),
+    ep("big", "idle"),
+    ep("c", "idle", "big"),
+    ep("d", "idle", "big"),
+    ep("e", "offline", "big"),
+    ep("gone", "offline"),
+    ep("f", "offline", "gone"),
+    ep("orphan", "online", "missing"),
+  ]);
+  expect(trees.map((t) => [splitHandle(t.root.address), t.kids.map((k) => splitHandle(k.address)), t.live])).toEqual([
+    ["big", ["c", "d", "e"], true],
+    ["lead", ["b", "a"], true],
+    ["orphan", [], true],
+    ["solo", [], true],
+    ["gone", ["f"], false],
+  ]);
+});
+
+test("the fleet strip shows the root square first, folds offline trees and collapses many solo agents", () => {
+  const solos = ["s1", "s2", "s3", "s4"].map((h) => ep(h, "idle"));
+  const html = fleetStrip(
+    { machines: [], endpoints: [ep("lead", "online"), ep("kid", "idle", "lead"), ...solos, ep("old", "offline")], activity: [] },
+    "acme",
+  ).value;
+  const live = html.slice(0, html.indexOf("<details"));
+  expect(live.indexOf('title="lead, online"')).toBeLessThan(live.indexOf('title="kid, idle"'));
+  expect(live).toContain("4 solo agents");
+  expect(live).not.toContain("old");
+  expect(html).toContain("1 offline tree");
+  expect(html).toContain('<span class="mini">box</span>');
 });
