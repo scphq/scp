@@ -1,4 +1,3 @@
-import type { Socket } from "bun"
 import {
   type Claim,
   type EndpointView,
@@ -14,10 +13,13 @@ import {
   type WhyResult,
 } from "@scp-dev/core"
 import { existsSync, readFileSync } from "node:fs"
+import { createConnection } from "node:net"
 import { dirname, join } from "node:path"
+import { setTimeout as sleep } from "node:timers/promises"
 import { brokerLockHeld } from "./lock"
 import { encodeLine, LineReader, LineWriter, MAX_LINE } from "./ndjson"
 import { ownPrivateDir, socketPath } from "./paths"
+import { Conn } from "./socket"
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void }
 
@@ -98,22 +100,25 @@ export class RelayClient {
   private readonly pending = new Map<number, Pending>()
   private readonly reader = new LineReader(64 * 1024 * 1024)
   private readonly writer = new LineWriter()
-  private socket!: Socket<undefined>
+  private socket!: Conn<undefined>
   private closedError: Error | undefined
   private listeners: ((method: string, params: unknown) => void)[] = []
 
-  static async connect(path: string): Promise<RelayClient> {
+  static connect(path: string): Promise<RelayClient> {
     const client = new RelayClient()
-    client.socket = await Bun.connect({
-      unix: path,
-      socket: {
-        data: (_s, chunk) => client.onData(chunk),
-        drain: () => client.flush(),
-        close: () => client.onClose(new Error("the relay broker closed the connection")),
-        error: (_s, error) => client.onClose(error),
-      },
+    return new Promise((resolve, reject) => {
+      const socket = createConnection({ path })
+      socket.once("error", reject)
+      socket.once("connect", () => {
+        socket.off("error", reject)
+        client.socket = new Conn(socket, undefined, {
+          data: (_s, chunk) => client.onData(chunk),
+          drain: () => client.flush(),
+          close: (_s, error) => client.onClose(error ?? new Error("the relay broker closed the connection")),
+        })
+        resolve(client)
+      })
     })
-    return client
   }
 
   onNotification(fn: (method: string, params: unknown) => void): void {
@@ -318,7 +323,7 @@ export async function connectBroker(dir: string, start?: () => void, timeoutMs =
   start()
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    await Bun.sleep(50)
+    await sleep(50)
     try {
       return owned(await RelayClient.connect(path))
     } catch (error) {

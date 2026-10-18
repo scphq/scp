@@ -1,8 +1,9 @@
-import { Database } from "bun:sqlite"
+import { createHash } from "node:crypto"
 import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, rmdirSync, unlinkSync } from "node:fs"
+import { createServer, type Server } from "node:net"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, sep } from "node:path"
-import type { Socket, TCPSocketListener, UnixSocketListener } from "bun"
+import { setTimeout as sleep } from "node:timers/promises"
 import {
   type Attachment,
   BROKER_CAPABILITIES,
@@ -21,7 +22,6 @@ import {
   type SendResult,
   SERVER_FIELDS,
   type Sql,
-  type SqlValue,
   type StopWaitResult,
   stripControl,
 } from "@scp-dev/core"
@@ -31,6 +31,8 @@ import { type Deliver, type JudgeClientFactory, JudgeGate } from "./judge-gate"
 import { releaseBrokerLock, takeBrokerLock } from "./lock"
 import { encodeLine, LineReader, LineWriter, MAX_LINE } from "./ndjson"
 import { accountHome, accountHomeVerified, policyPath as defaultPolicyPath, privateDir, shortHostname, socketPath } from "./paths"
+import { Conn } from "./socket"
+import { type Database, openDatabase } from "./sqlite"
 
 export interface BrokerOptions {
   dir: string
@@ -146,7 +148,7 @@ function running(pid: number): boolean {
 }
 
 /** who a connection acts for, for the calls only the harness process holding an endpoint may make through its hooks */
-function hookOf(s: Socket<Connection>): { transient: boolean; process?: string } {
+function hookOf(s: Conn<Connection>): { transient: boolean; process?: string } {
   return { transient: s.data.transient === true, ...(s.data.process ? { process: s.data.process } : {}) }
 }
 
@@ -154,7 +156,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   const dir = privateDir(options.dir)
   const lock = takeBrokerLock(join(dir, "broker.lock"))
   const socket = socketPath(dir)
-  const connections = new Set<Socket<Connection>>()
+  const connections = new Set<Conn<Connection>>()
   const waiters = new Map<string, Set<() => void>>()
   const policyFile = options.policyPath ?? defaultPolicyPath()
   if (!options.policyPath && !accountHomeVerified())
@@ -177,20 +179,20 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   let core!: FederatedCore
   let judge!: JudgeGate
   let bridge: Bridge | null = null
-  let listener!: UnixSocketListener<Connection> | TCPSocketListener<Connection>
+  let listener!: Server
   try {
     privateDir(dirname(socket))
-    db = new Database(join(dir, "relay.db"), { create: true })
-    db.run("PRAGMA journal_mode = WAL")
-    db.run("PRAGMA busy_timeout = 5000")
+    db = openDatabase(join(dir, "relay.db"))
+    db.exec("PRAGMA journal_mode = WAL")
+    db.exec("PRAGMA busy_timeout = 5000")
     chmodSync(join(dir, "relay.db"), 0o600)
-    const sql: Sql = { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
+    const sql: Sql = db
     const machine = options.machine ?? options.bridge?.machine
     core = new FederatedCore(sql, {
       ...compact({ user: options.user, machine, now: options.now }),
       hostname: shortHostname(),
-      hash: (value) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
-      transaction: (fn) => db.transaction(fn)(),
+      hash: (value) => createHash("sha256").update(value).digest("hex"),
+      transaction: (fn) => db.transaction(fn),
       alive: running,
     })
     core.migrate()
@@ -199,35 +201,39 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     judge = new JudgeGate({ sql, core, now: options.now ?? Date.now, env: options.env ?? process.env, client: options.judgeClient, log, wake })
     judge.sweep()
     if (existsSync(socket)) unlinkSync(socket)
-    listener = Bun.listen<Connection>({
-      unix: socket,
-      socket: {
-        open: (s) => {
-          s.data = {
-            reader: new LineReader(MAX_LINE),
-            writer: new LineWriter(),
-            observer: false,
-            watching: false,
-            closed: false,
-            inFlight: 0,
-            queue: [],
-            queueHead: 0,
-          }
-          if (closing) {
-            s.end()
-            return
-          }
-          connections.add(s)
-          activity()
+    listener = createServer((raw) => {
+      const s = new Conn<Connection>(
+        raw,
+        {
+          reader: new LineReader(MAX_LINE),
+          writer: new LineWriter(),
+          observer: false,
+          watching: false,
+          closed: false,
+          inFlight: 0,
+          queue: [],
+          queueHead: 0,
         },
-        data: (s, chunk) => onData(s, chunk),
-        drain: (s) => flush(s),
-        close: (s) => onClose(s),
-        error: (s) => onClose(s),
-      },
+        { data: onData, drain: flush, close: (s) => onClose(s) },
+      )
+      if (closing) {
+        s.end()
+        return
+      }
+      connections.add(s)
+      activity()
     })
+    await new Promise<void>((resolve, reject) => {
+      listener.once("error", reject)
+      listener.listen(socket, () => {
+        listener.off("error", reject)
+        resolve()
+      })
+    })
+    listener.on("error", (error) => log(`relay broker: the socket listener failed: ${error.message}`))
     chmodSync(socket, 0o600)
   } catch (error) {
+    listener?.close()
     db?.close()
     releaseBrokerLock(lock)
     throw error
@@ -317,11 +323,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** a response; a connection whose unread bytes, this response included, would pass the cap is ended (one response alone always goes) */
-  function write(s: Socket<Connection>, value: unknown) {
+  function write(s: Conn<Connection>, value: unknown) {
     if (s.data.closed) return
     const line = encodeLine(value)
-    if (s.data.writer.pending > 0 && s.data.writer.pending + line.length > outboundCap) {
-      log(`relay broker: ended a connection with ${s.data.writer.pending} bytes it did not read and a ${line.length} byte response`)
+    const queued = unread(s)
+    if (queued > 0 && queued + line.length > outboundCap) {
+      log(`relay broker: ended a connection with ${queued} bytes it did not read and a ${line.length} byte response`)
       onClose(s)
       s.end()
       return
@@ -330,7 +337,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     flush(s)
   }
 
-  function flush(s: Socket<Connection>) {
+  /** bytes queued for a connection that its peer has not taken yet */
+  function unread(s: Conn<Connection>): number {
+    return s.data.writer.pending + s.unsent
+  }
+
+  function flush(s: Conn<Connection>) {
     if (!s.data.closed) s.data.writer.flush((bytes) => s.write(bytes))
   }
 
@@ -366,9 +378,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (!shown) continue
         bytes = encodeLine({ jsonrpc: "2.0", method: "fleet", params: { at, ...shown } })
       }
-      if (s.data.writer.pending + bytes.length > outboundCap) {
+      const queued = unread(s)
+      if (queued + bytes.length > outboundCap) {
         s.data.watching = false
-        s.data.writer.push({ jsonrpc: "2.0", method: "fleet", params: { at, type: "lagged", queued_bytes: s.data.writer.pending } })
+        s.data.writer.push({ jsonrpc: "2.0", method: "fleet", params: { at, type: "lagged", queued_bytes: queued } })
       } else {
         s.data.writer.pushBytes(bytes)
       }
@@ -386,7 +399,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** whether the connection is the human at a terminal, the only one exempt from scopes and shown everything */
-  function atTerminal(s: Socket<Connection>): boolean {
+  function atTerminal(s: Conn<Connection>): boolean {
     return s.data.human === true && s.data.tty === true
   }
 
@@ -394,20 +407,20 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
    * the endpoint whose view a connection gets; undefined for the human at a terminal, which sees everything. The human without a terminal, and an
    * observer with no lineage endpoint, see what the human may message with no exemption
    */
-  function viewerOf(s: Socket<Connection>): string | undefined {
+  function viewerOf(s: Conn<Connection>): string | undefined {
     if (s.data.lineage) return s.data.lineage
     if (s.data.observer || s.data.human) return atTerminal(s) ? undefined : core.humanId()
     return s.data.endpoint
   }
 
-  function actorOf(s: Socket<Connection>): ScopeActor {
+  function actorOf(s: Conn<Connection>): ScopeActor {
     if (s.data.lineage) return { kind: "endpoint", id: s.data.lineage, auth: s.data.own ? "self" : "lineage" }
     if (s.data.observer || s.data.human) return { kind: "human", tty: atTerminal(s) }
     return { kind: "endpoint", id: s.data.endpoint!, auth: "session" }
   }
 
   /** binds a hello to the agent endpoint its lineage lands on, acting with lineage auth, or with `own` as that endpoint (self auth) */
-  function bindLineage(s: Socket<Connection>, endpoint: string, params: Record<string, unknown>, own = false) {
+  function bindLineage(s: Conn<Connection>, endpoint: string, params: Record<string, unknown>, own = false) {
     s.data.endpoint = endpoint
     s.data.lineage = endpoint
     s.data.own = own
@@ -430,7 +443,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     for (const fn of set) fn()
   }
 
-  function waitFor(endpoint: string, ms: number, s: Socket<Connection>): Promise<void> {
+  function waitFor(endpoint: string, ms: number, s: Conn<Connection>): Promise<void> {
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(timer)
@@ -448,7 +461,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     })
   }
 
-  function onData(s: Socket<Connection>, chunk: Uint8Array) {
+  function onData(s: Conn<Connection>, chunk: Uint8Array) {
     const { lines, tooLong } = s.data.reader.push(chunk)
     for (const line of lines) s.data.queue.push(line)
     pump(s)
@@ -465,7 +478,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** a line must end within partialLineMs of its first byte, not counting time the broker itself paused reading */
-  function armLineTimer(s: Socket<Connection>) {
+  function armLineTimer(s: Conn<Connection>) {
     if (partialLineMs <= 0) return
     s.data.lineTimer = setTimeout(() => {
       s.data.lineTimer = undefined
@@ -476,7 +489,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }, partialLineMs)
   }
 
-  function onClose(s: Socket<Connection>) {
+  function onClose(s: Conn<Connection>) {
     if (s.data.closed) return
     s.data.closed = true
     clearTimeout(s.data.lineTimer)
@@ -495,7 +508,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** starts queued lines while fewer than maxPending run; reading pauses while any wait */
-  function pump(s: Socket<Connection>) {
+  function pump(s: Conn<Connection>) {
     const data = s.data
     while (data.queueHead < data.queue.length && data.inFlight < maxPending && !data.closed) void handleLine(s, data.queue[data.queueHead++]!)
     if (data.queueHead === data.queue.length) {
@@ -507,7 +520,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }
   }
 
-  async function handleLine(s: Socket<Connection>, line: string) {
+  async function handleLine(s: Conn<Connection>, line: string) {
     s.data.inFlight++
     try {
       await answer(s, line)
@@ -519,11 +532,11 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }
   }
 
-  function invalidRequest(s: Socket<Connection>, id: string | number | null, message: string) {
+  function invalidRequest(s: Conn<Connection>, id: string | number | null, message: string) {
     write(s, { jsonrpc: "2.0", id, error: { code: -32600, message, data: { code: "invalid_params" } } })
   }
 
-  async function answer(s: Socket<Connection>, line: string) {
+  async function answer(s: Conn<Connection>, line: string) {
     if (closing) return
     let parsed: unknown
     try {
@@ -567,7 +580,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }
   }
 
-  function endpointOf(s: Socket<Connection>): string {
+  function endpointOf(s: Conn<Connection>): string {
     if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
     if (!s.data.endpoint)
       throw new RelayError("unauthorized", s.data.observer ? "this connection only observes: say hello as an agent or the human" : "call hello first")
@@ -581,7 +594,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     return Math.min(value, LIMITS.waitMaxS) * 1000
   }
 
-  function checkAttachments(attachments: unknown, s: Socket<Connection>): Attachment[] | undefined {
+  function checkAttachments(attachments: unknown, s: Conn<Connection>): Attachment[] | undefined {
     if (attachments === undefined) return undefined
     if (!Array.isArray(attachments)) throw new RelayError("invalid_params", "attachments must be a list")
     const tooWide = new Set(["/", realOrSelf(homedir()), realOrSelf(accountHome())])
@@ -606,7 +619,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     })
   }
 
-  async function dispatch(s: Socket<Connection>, method: string, params: Record<string, unknown>): Promise<unknown> {
+  async function dispatch(s: Conn<Connection>, method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === "hello") {
       if (s.data.endpoint || s.data.observer) throw new RelayError("invalid_params", "hello was already called on this connection")
       if (params.protocol !== PROTOCOL) throw new RelayError("invalid_params", `this broker speaks ${PROTOCOL}`)
@@ -838,7 +851,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** held messages are reviewed only by the human at a terminal: never an agent, a script or a relay message */
-  function reviewer(s: Socket<Connection>, params: Record<string, unknown>): Record<string, unknown> {
+  function reviewer(s: Conn<Connection>, params: Record<string, unknown>): Record<string, unknown> {
     if (!atTerminal(s)) throw new RelayError("unauthorized", "only your human at a terminal reviews held messages")
     return params
   }
@@ -847,7 +860,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
    * what any connection that said hello may read; an agent, or an observer on its lineage endpoint, sees only what that endpoint could message or
    * be messaged by, checks the policy only for pairs it could ask why about, and reads the policy's state but not its rules
    */
-  function observe(s: Socket<Connection>, method: string, params: Record<string, unknown>): unknown {
+  function observe(s: Conn<Connection>, method: string, params: Record<string, unknown>): unknown {
     const viewer = viewerOf(s)
     switch (method) {
       case "list":
@@ -895,13 +908,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** rules, groups, grants, admins, peers, why and peeks, acting as the connection's actor */
-  function scope(s: Socket<Connection>, method: string, params: Record<string, unknown>): unknown {
+  function scope(s: Conn<Connection>, method: string, params: Record<string, unknown>): unknown {
     const result = scopeCall(s, method, params)
     if (CHANGES_SCOPE.has(method) && params.action !== "ls" && params.action !== "show") bridge?.resync()
     return result
   }
 
-  function scopeCall(s: Socket<Connection>, method: string, params: Record<string, unknown>): unknown {
+  function scopeCall(s: Conn<Connection>, method: string, params: Record<string, unknown>): unknown {
     const actor = actorOf(s)
     switch (method) {
       case "rules":
@@ -985,7 +998,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** the reply, or pending at the deadline, or pending with `ended` once every recipient present at the send went offline without replying */
-  async function awaitReply(s: Socket<Connection>, me: string, request: string, ms: number, sent?: SendResult): Promise<unknown> {
+  async function awaitReply(s: Conn<Connection>, me: string, request: string, ms: number, sent?: SendResult): Promise<unknown> {
     const deadline = Date.now() + ms
     const present = sent?.deliveries.filter((d) => !d.offline).map((d) => d.endpoint)
     for (;;) {
@@ -1013,10 +1026,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       if (idleTimer) clearTimeout(idleTimer)
       for (const set of [...waiters.values()]) for (const fn of [...set]) fn()
       const deadline = Date.now() + 2000
-      while (pending > 0 && Date.now() < deadline) await Bun.sleep(5)
-      await Promise.race([judge.settled(), Bun.sleep(Math.max(0, deadline - Date.now()))])
+      while (pending > 0 && Date.now() < deadline) await sleep(5)
+      await Promise.race([judge.settled(), sleep(Math.max(0, deadline - Date.now()))])
       for (const s of connections) s.end()
-      listener.stop(true)
+      listener.close()
       try {
         unlinkSync(socket)
       } catch {}

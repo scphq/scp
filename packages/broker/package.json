@@ -25,9 +25,12 @@
     },
     "./package.json": "./package.json"
   },
+  "engines": {
+    "node": ">=22.13"
+  },
   "files": ["dist", "src", "!src/**/*.test.ts"],
   "scripts": {
-    "build": "tsup src/index.ts src/testing.ts --format esm --dts --clean --external bun:sqlite --external bun:ffi",
+    "build": "tsup src/index.ts src/testing.ts --format esm --dts --clean --external bun:sqlite",
     "typecheck": "tsc -p ."
   },
   "dependencies": {

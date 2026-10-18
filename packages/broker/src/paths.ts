@@ -1,14 +1,14 @@
-import { CString, dlopen, FFIType, type Pointer, read } from "bun:ffi"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmodSync, lstatSync, mkdirSync } from "node:fs"
-import { homedir, hostname } from "node:os"
+import { chmodSync, lstatSync, mkdirSync, readFileSync } from "node:fs"
+import { homedir, hostname, userInfo } from "node:os"
 import { join } from "node:path"
 
 type Run = (cmd: string[]) => { exitCode: number | null; stdout: string | Buffer }
 
 const runQuiet: Run = (cmd) => {
-  const result = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "ignore", timeout: 2000 })
-  return { exitCode: result.exitCode, stdout: result.stdout ?? "" }
+  const result = spawnSync(cmd[0]!, cmd.slice(1), { stdio: ["ignore", "pipe", "ignore"], timeout: 2000 })
+  return { exitCode: result.status, stdout: result.stdout ?? "" }
 }
 
 /** macOS's LocalHostName (read only), or undefined when it is unset */
@@ -66,16 +66,34 @@ export function accountHomeVerified(): boolean {
   return verified
 }
 
-/** the account's home directory from getpwuid, falling back to HOME where that is unavailable */
+/**
+ * the home directory the user database holds for `uid`. Node's userInfo reads it with getpwuid; Bun's answers from HOME,
+ * so under Bun it comes from the system's directory tools instead: dscacheutil on macOS, getent or /etc/passwd elsewhere
+ */
+export function userDatabaseHome(uid: number, options: { platform?: string; bun?: boolean; run?: Run; passwd?: () => string } = {}): string | undefined {
+  const platform = options.platform ?? process.platform
+  if (!(options.bun ?? typeof process.versions.bun === "string")) return userInfo().homedir || undefined
+  const run = options.run ?? runQuiet
+  if (platform === "darwin") {
+    const result = run(["dscacheutil", "-q", "user", "-a", "uid", String(uid)])
+    return (result.exitCode === 0 && /^dir: (.+)$/m.exec(result.stdout.toString())?.[1]?.trim()) || undefined
+  }
+  const entry = (text: string) => text.split("\n").find((line) => line.split(":")[2] === String(uid))
+  const result = run(["getent", "passwd", String(uid)])
+  let line = result.exitCode === 0 ? entry(result.stdout.toString()) : undefined
+  if (!line) {
+    try {
+      line = entry((options.passwd ?? (() => readFileSync("/etc/passwd", "utf8")))())
+    } catch {}
+  }
+  return line?.split(":")[5] || undefined
+}
+
+/** the account's home directory from the user database, falling back to HOME where that is unavailable */
 export function accountHome(): string {
   if (home) return home
   try {
-    const symbols = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
-      getpwuid: { args: [FFIType.u32], returns: FFIType.ptr },
-    }).symbols
-    const entry = typeof process.getuid === "function" ? symbols.getpwuid(process.getuid()) : null
-    const dir = entry ? read.ptr(entry, process.platform === "darwin" ? 48 : 32) : 0
-    if (dir) home = new CString(dir as Pointer).toString()
+    if (typeof process.getuid === "function") home = userDatabaseHome(process.getuid())
     verified = Boolean(home)
   } catch {}
   home ||= homedir()

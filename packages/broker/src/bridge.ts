@@ -81,7 +81,7 @@ export interface Bridge {
   stop(): Promise<void>
 }
 
-/** Bun's WebSocket, which takes request headers */
+/** a WebSocket constructor that takes request headers, as Bun's and Node's do */
 export type WebSocketWithHeaders = new (url: string, options: { headers: Record<string, string> }) => WebSocket
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void }
