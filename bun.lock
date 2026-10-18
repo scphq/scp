@@ -38,6 +38,9 @@
     "packages/core": {
       "name": "@scp/core",
       "version": "0.0.0",
+      "dependencies": {
+        "@scp/spec": "workspace:*",
+      },
     },
     "packages/spec": {
       "name": "@scp/spec",
