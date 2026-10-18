@@ -111,3 +111,72 @@ describe("swarm join, leave and name, from a session's shell", () => {
     expect(taken.stderr).toContain("peer is held by a live endpoint: pick another name")
   })
 })
+
+describe("swarm join --under, adopt and unlink", () => {
+  let broker: Broker
+  let orch: RelayClient
+  let human: RelayClient
+  const root = mkdtempSync(join(process.env.HOME!, "adopt-"))
+  const dir = join(root, "relay")
+  const project = join(root, "lane")
+  const env = cleanEnv({ SCP_DIR: dir, XDG_CONFIG_HOME: join(root, "config"), CLAUDECODE: "1" })
+  const view = (address: string) => broker.core.list({ all: true }).find((e) => e.address === address)
+
+  async function swarm(...args: string[]) {
+    const child = Bun.spawn([process.execPath, "--no-env-file", entry, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env, cwd: project })
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { stdout, stderr, code }
+  }
+
+  beforeAll(async () => {
+    mkdirSync(join(project, ".git"), { recursive: true })
+    broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "policy.json"), log: () => {} })
+    orch = await RelayClient.connect(broker.socket)
+    await orch.hello({ claim: { handle: "orch", harness: "codex" } })
+    human = await RelayClient.connect(broker.socket)
+    await human.hello({ human: true, tty: true })
+  })
+  afterAll(async () => {
+    orch.close()
+    human.close()
+    await broker.stop()
+  })
+
+  test("join --under links the session under its parent: list --tree nests it and its scope narrows to the parent's", async () => {
+    await human.request("rules_set", { endpoint: "orch", out: ["tree:children"], in: ["*"] })
+    const other = await RelayClient.connect(broker.socket)
+    await other.hello({ claim: { handle: "other", harness: "codex" } })
+    expect((await swarm("join", "app")).code).toBe(0)
+    expect((await swarm("send", "other", "before")).code).toBe(0)
+    const joined = await swarm("join", "--under", "orch")
+    expect([joined.code, joined.stderr, joined.stdout.split(":")[0]]).toEqual([0, "", "joined as me/app under me/orch"])
+    expect(view("me/app")).toMatchObject({ parent: "me/orch", depth: 1 })
+    const tree = (await swarm("list", "--tree")).stdout.split("\n")
+    expect(tree.findIndex((line) => line.startsWith("  me/app"))).toBe(tree.findIndex((line) => line.startsWith("me/orch")) + 1)
+    const refused = await swarm("send", "other", "after")
+    expect(refused.code).not.toBe(0)
+    other.close()
+  })
+
+  test("adopt: refused for an agent without a terminal, done by the human; a cycle is refused", async () => {
+    const solo = await RelayClient.connect(broker.socket)
+    await solo.hello({ claim: { handle: "solo", harness: "codex" } })
+    const byAgent = await swarm("adopt", "solo")
+    expect(byAgent.code).not.toBe(0)
+    expect(byAgent.stderr).toContain("only the human at a terminal links another session under a parent")
+    expect(view("me/solo")?.parent ?? null).toBeNull()
+    expect(await human.request("adopt", { endpoint: "solo", parent: "app" })).toMatchObject({ parent: "me/app", endpoint: { depth: 2 } })
+    const cycle = await human.request("adopt", { endpoint: "orch", parent: "solo" }).catch((error: Error) => error.message)
+    expect(cycle).toContain("cannot go under its own descendant")
+    solo.close()
+  })
+
+  test("unlink: the session may not detach itself; the human puts it back at the root with its subtree", async () => {
+    const self = await swarm("unlink")
+    expect(self.code).not.toBe(0)
+    expect(self.stderr).toContain("only the human at a terminal unlinks it")
+    expect(await human.request("unlink", { endpoint: "app" })).toMatchObject({ parent: "me/orch", endpoint: { parent: null, depth: 0 } })
+    expect(view("me/solo")).toMatchObject({ parent: "me/app", depth: 1 })
+    expect((await swarm("send", "other", "free again")).code).toBe(0)
+  })
+})

@@ -3,11 +3,12 @@ import { connectBroker, readSessionMarker, relayDir } from "@scp-dev/broker"
 import { localHandle, RelayUsage, startDaemon, walkNow } from "./common"
 import { relayIdentity, sessionKey } from "./identity"
 
-type Values = { harness?: unknown; json?: unknown }
+type Values = { harness?: unknown; json?: unknown; under?: unknown }
 
 /**
  * `swarm join [<handle>]`: puts the harness session that runs this shell on the relay, as its hooks would claim it, and takes `handle` when
- * given (renaming it in place when it already joined). Works for a session started before the hooks were installed too
+ * given (renaming it in place when it already joined), and with `--under` links it under that agent. Works for a session started before the
+ * hooks were installed too
  */
 export async function joinCommand(values: Values, positionals: string[], cwd: string, out: (line: string) => void): Promise<number> {
   if (positionals.length > 1) throw new RelayUsage(`${CLI_NAME} join takes one handle, or none to keep the session's name`)
@@ -30,9 +31,12 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
   })
   const client = await connectBroker(dir, () => startDaemon(dir))
   try {
-    const hello = await client.hello({ transient: true, claim, join: handle ? { handle } : {} })
-    if (values.json === true) out(JSON.stringify(hello.endpoint, null, 2))
-    else out(`joined as ${hello.endpoint!.address}: peers can message it, and its hooks hand it new messages at turn boundaries`)
+    const under = typeof values.under === "string" ? values.under : undefined
+    const hello = await client.hello({ transient: true, claim, join: { ...(handle ? { handle } : {}), ...(under ? { under } : {}) } })
+    const view = hello.endpoint!
+    if (values.json === true) out(JSON.stringify(view, null, 2))
+    else
+      out(`joined as ${view.address}${view.parent ? ` under ${view.parent}` : ""}: peers can message it, and its hooks hand it new messages at turn boundaries`)
   } finally {
     client.close()
   }

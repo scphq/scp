@@ -256,6 +256,8 @@ export interface EndpointRow {
   peek: PeekLevel | null
   /** when the session last set its handle itself (join or rename): a later claim with another handle does not rename it back */
   named: number | null
+  /** when the session itself or the human linked it under a parent by hand: a later root claim of it takes it back where it sits */
+  linked: number | null
 }
 
 export interface MessageRow {
@@ -520,6 +522,7 @@ export class RelayCore {
       ["title_turn", "INTEGER"],
       ["tldr_turn", "INTEGER"],
       ["named", "INTEGER"],
+      ["linked", "INTEGER"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -1111,7 +1114,7 @@ export class RelayCore {
    */
   private restarts(row: EndpointRow, parent: EndpointRow | null, process: string | null): boolean {
     if (parent?.id === row.id) return process !== null && row.process !== null && sameHarness(row.process, process)
-    return (parent?.id ?? null) === row.parent_ep
+    return (parent?.id ?? null) === row.parent_ep || (parent === null && row.linked !== null)
   }
 
   /**
@@ -1444,15 +1447,126 @@ export class RelayCore {
    * a session joins on demand: its hook claim registers or takes back its endpoint, marked seen now even right after a leave, and `handle`,
    * when given, renames it in place ({@link rename}'s rules). Nothing is kept when the rename is refused
    */
-  joinSession(claim: Claim, handle?: unknown): EndpointView {
+  joinSession(claim: Claim, handle?: unknown, under?: unknown): EndpointView {
     return this.scopeTx(() => {
       const { endpoint } = this.claim(claim, { transient: true })
       const row = this.mustEndpoint(endpoint.id)
       if (handle !== undefined && handle !== null && handle !== "") this.renameRow(row, handle, false)
       this.sql.all(`UPDATE endpoints SET hook_seen = ?, hook_ended = NULL WHERE id = ?`, this.now(), row.id)
       this.audit("join", row.id, null, { handle: this.byId(row.id)!.handle })
+      if (under !== undefined && under !== null && under !== "") {
+        const me = this.byId(row.id)!
+        const parent = this.resolve(under)
+        if (parent.id !== me.parent_ep && parent.kind === "agent" && !this.mayMessage(me, parent)) throw unreachable(under)
+        this.link(me, parent, { by: this.address(me), auth: "session" })
+      }
       return this.whoami(row.id)
     })
+  }
+
+  /**
+   * links a local root agent under `parent`, as a spawned worker sits: in the parent's tree one level down, under the policy's child scope.
+   * Only the human at a terminal links another session, or an agent from its own shell with a terminal attached, under itself by default.
+   * A session links itself with {@link joinSession}'s `under`
+   */
+  adopt(actor: ScopeActor, params: { endpoint: unknown; parent?: unknown }, options: { tty?: boolean } = {}): { endpoint: EndpointView; parent: string } {
+    return this.scopeTx(() => {
+      const me = this.actorRow(actor)
+      if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
+      else if (options.tty !== true)
+        throw this.scopeRefused(
+          actor,
+          me,
+          { target: String(params.endpoint), reason: "adopt" },
+          `only the human at a terminal links another session under a parent; the session links itself with ${CLI_NAME} join --under`,
+        )
+      const target = this.resolve(params.endpoint)
+      if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be linked")
+      const parentAddress = params.parent ?? (actor.kind === "human" ? undefined : this.address(me))
+      if (parentAddress === undefined || parentAddress === null || parentAddress === "")
+        throw new RelayError("invalid_params", "the human names the parent to link under")
+      const parent = this.resolve(parentAddress)
+      this.link(target, parent, this.actorDetail(actor, me))
+      return { endpoint: this.whoami(target.id), parent: this.address(parent) }
+    })
+  }
+
+  /**
+   * a linked agent back to a root: its subtree moves along and the policy's child scope comes off. The human at a terminal unlinks any local
+   * agent; an agent only itself, and only when the policy's `defaults.unlink` is `self`, since a worker detaching widens its own scope
+   */
+  unlink(actor: ScopeActor, params: { endpoint?: unknown } = {}): { endpoint: EndpointView; parent: string } {
+    return this.scopeTx(() => {
+      const me = this.actorRow(actor)
+      if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
+      else if (actor.auth === "lineage") throw new RelayError("scope_refused", "only the session itself unlinks it: run this from the session's own shell")
+      const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
+      if (actor.kind !== "human" && target.id !== me.id) throw new RelayError("scope_refused", "an agent unlinks only itself")
+      if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be unlinked")
+      if (target.parent_ep === null) throw new RelayError("invalid_params", `${this.address(target)} is a root: it has no parent`)
+      if (actor.kind !== "human" && this.policy?.defaults?.unlink !== "self")
+        throw this.scopeRefused(
+          actor,
+          me,
+          { target: this.address(target), reason: "unlink" },
+          "unlinking widens a worker's scope: only the human at a terminal unlinks it (policy defaults.unlink: self lets it)",
+        )
+      const parent = this.byId(target.parent_ep)
+      const from = parent ? this.address(parent) : target.parent_ep
+      const shift = target.depth ?? 0
+      this.sql.all(
+        `WITH RECURSIVE below(id) AS (SELECT id FROM endpoints WHERE parent_ep = ? UNION SELECT e.id FROM endpoints e JOIN below b ON e.parent_ep = b.id)
+         UPDATE endpoints SET tree = ?, depth = depth - ? WHERE id IN (SELECT id FROM below)`,
+        target.id,
+        target.id,
+        shift,
+      )
+      const caps = this.capsOf(target)
+      const kept = caps.caps.filter((cap) => cap.by !== "policy")
+      this.sql.all(
+        `UPDATE endpoints SET tree = NULL, parent_ep = NULL, depth = 0, linked = NULL, caps = ? WHERE id = ?`,
+        kept.length || Object.keys(caps.allow).length ? JSON.stringify({ ...caps, caps: kept }) : null,
+        target.id,
+      )
+      this.scopeMemo?.ancestors.clear()
+      this.scopeMemo?.limited.clear()
+      this.audit("unlink", target.id, null, { ...this.actorDetail(actor, me), target: this.address(target), parent: from })
+      return { endpoint: this.whoami(target.id), parent: from }
+    })
+  }
+
+  /** `row`, a root, and its subtree moved under `parent`, a local agent that is neither `row` nor one of its descendants */
+  private link(row: EndpointRow, parent: EndpointRow, by: { by: string; auth: string }): void {
+    if (parent.kind !== "agent" || !this.localRow(parent)) throw new RelayError("invalid_params", "the parent is a local agent endpoint")
+    if (row.parent_ep === parent.id) return
+    if (parent.id === row.id || this.ancestorsOf(parent).includes(row.id))
+      throw new RelayError("scope_refused", `${this.address(parent)} sits under ${this.address(row)}: a session cannot go under its own descendant`)
+    if (row.parent_ep !== null) {
+      const now = this.byId(row.parent_ep)
+      throw new RelayError("scope_refused", `${this.address(row)} already sits under ${now ? this.address(now) : "another agent"}; unlink it first`)
+    }
+    const depth = (parent.depth ?? 0) + 1
+    const deepest = one<{ d: number | null }>(this.sql, `SELECT MAX(depth) AS d FROM endpoints WHERE tree = ?`, row.id)?.d ?? 0
+    if (deepest + depth > LIMITS.depthMax)
+      throw new RelayError("scope_refused", `${this.address(row)} would sit deeper than ${LIMITS.depthMax} under ${this.address(parent)}`)
+    const tree = parent.tree ?? parent.id
+    this.sql.all(`UPDATE endpoints SET tree = ?, depth = depth + ? WHERE tree = ?`, tree, depth, row.id)
+    const caps = this.capsOf(row)
+    const childDefault = this.defaults().childDefault
+    if (childDefault !== "open" && childDefault !== "inherit" && !caps.caps.some((cap) => cap.by === "policy"))
+      for (const dir of this.presetDirs()) caps.caps.push({ id: capId(), dir, by: "policy", sels: PRESET_LISTS[childDefault].map((sel) => ({ sel })) })
+    this.sql.all(
+      `UPDATE endpoints SET tree = ?, parent_ep = ?, depth = ?, linked = ?, caps = ? WHERE id = ?`,
+      tree,
+      parent.id,
+      depth,
+      this.now(),
+      caps.caps.length || Object.keys(caps.allow).length ? JSON.stringify(caps) : null,
+      row.id,
+    )
+    this.scopeMemo?.ancestors.clear()
+    this.scopeMemo?.limited.clear()
+    this.audit("adopt", row.id, null, { ...by, target: this.address(row), parent: this.address(parent) })
   }
 
   /**
@@ -1508,7 +1622,7 @@ export class RelayCore {
 
   /**
    * a session leaves: it lets go of its session and token and shows offline, its mail kept; a later join takes it back. An agent leaves only
-   * itself, the human at a terminal any local root. A spawned worker stays joined while it runs
+   * itself, the human at a terminal any local root or linked agent. A spawned worker stays joined while it runs
    */
   leaveSession(actor: ScopeActor, params: { endpoint?: unknown } = {}): { endpoint: EndpointView; session: string | null } {
     return this.scopeTx(() => {
@@ -1518,7 +1632,7 @@ export class RelayCore {
       const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
       if (actor.kind !== "human" && target.id !== me.id) throw new RelayError("scope_refused", "an agent leaves only for itself")
       if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can leave")
-      if (target.parent_ep !== null) {
+      if (target.parent_ep !== null && target.linked === null) {
         const parent = this.byId(target.parent_ep)
         throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; a spawned worker stays joined while it runs`)
       }

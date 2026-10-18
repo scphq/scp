@@ -232,8 +232,12 @@ export const TOOLS = [
   {
     name: "relay_join",
     description:
-      "Put this session on the relay, so peers can message it and new messages reach you after your tool calls; name sets your handle once (renaming you in place when you already joined).",
-    inputSchema: { type: "object", properties: { name: { type: "string", maxLength: 63 } }, additionalProperties: false },
+      "Put this session on the relay, so peers can message it and new messages reach you after your tool calls; name sets your handle once (renaming you in place when you already joined); under links you below that agent, as if it had spawned you: you show as its child and reach only what a worker of it reaches.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string", maxLength: 63 }, under: { type: "string", maxLength: 128 } },
+      additionalProperties: false,
+    },
   },
   {
     name: "relay_leave",
@@ -777,17 +781,20 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       }
       case "relay_join": {
         const name = str(args, "name")
+        const under = str(args, "under")
         const joined = options.membership?.() ?? {}
         const claim = "handle" in joined && joined.handle ? { ...options.claim, handle: joined.handle } : options.claim
         const next = await options.connect()
         try {
-          const hello = await next.hello({ transient: true, claim, join: name ? { handle: name } : {} })
+          const hello = await next.hello({ transient: true, claim, join: { ...(name ? { handle: name } : {}), ...(under ? { under } : {}) } })
           me = hello.endpoint
         } finally {
           next.close()
         }
         await ensure()
-        return text(`joined the relay as ${me?.address}: peers can message you, and new messages reach you after your tool calls`)
+        return text(
+          `joined the relay as ${me?.address}${me?.parent ? ` under ${me.parent}` : ""}: peers can message you, and new messages reach you after your tool calls`,
+        )
       }
       case "relay_leave": {
         const view = await call<EndpointView>("leave")

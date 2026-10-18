@@ -195,6 +195,20 @@ describe("relay MCP shim, in process", () => {
     }
   })
 
+  test("relay_join under links the session below that agent", async () => {
+    const orch = await RelayClient.connect(broker.socket)
+    await orch.hello({ claim: { handle: "mcp-orch", harness: "codex" } })
+    const proc = "pid:4343:Thu-Oct-15-10:00:00-2026"
+    const s = shim(broker, { handle: "mcp-worker", session: proc, claim: { process: proc } })
+    expect(textOf(await s.call("relay_join", { under: "mcp-orch" }))).toBe(
+      "joined the relay as me/mcp-worker under me/mcp-orch: peers can message you, and new messages reach you after your tool calls",
+    )
+    expect(broker.core.list({ all: true }).find((e) => e.address === "me/mcp-worker")).toMatchObject({ parent: "me/mcp-orch", depth: 1 })
+    s.close()
+    await s.done
+    orch.close()
+  })
+
   test("relay_reply answers a message a hook injected, which relay_inbox never handed over, by its short id, echoing it, and marks it read", async () => {
     const a = shim(broker, { handle: "mcp-injected" })
     const peer = await RelayClient.connect(broker.socket)

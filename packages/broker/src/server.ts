@@ -99,6 +99,8 @@ interface Connection {
   tty?: boolean
   /** the connection holds the human inbox */
   human?: boolean
+  /** a human hello bound to the agent of this shell's lineage said a terminal was attached: the human at that agent's shell */
+  terminal?: boolean
   /**
    * the lineage endpoint of an observer, or of a hello bound to it: the connection sees and acts with that endpoint's view,
    * never widening unless `own`, and never counts as connected
@@ -704,18 +706,24 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         }
         const join = params.join
         if (join !== undefined && (typeof join !== "object" || join === null || Array.isArray(join)))
-          throw new RelayError("invalid_params", "join is {handle?}")
+          throw new RelayError("invalid_params", "join is {handle?, under?}")
+        const under = (join as { under?: unknown } | undefined)?.under
         const before = new Map(core.list({ all: true }).map((view) => [view.id, view]))
         const { endpoint, subagent, created } =
           join === undefined
             ? core.claim((params.claim ?? {}) as Claim, { transient: true })
-            : { endpoint: core.joinSession((params.claim ?? {}) as Claim, (join as { handle?: unknown }).handle), subagent: undefined, created: undefined }
+            : {
+                endpoint: core.joinSession((params.claim ?? {}) as Claim, (join as { handle?: unknown }).handle, under),
+                subagent: undefined,
+                created: undefined,
+              }
         s.data.endpoint = endpoint.id
         s.data.transient = true
         const key = (params.claim as Claim | undefined)?.process
         if (typeof key === "string") s.data.process = key
         const was = before.get(endpoint.id)?.address
         if (join !== undefined) membership(endpoint, core.sessionOf(endpoint.id), true, was?.slice(was.lastIndexOf("/") + 1))
+        if (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent) bridge?.resync()
         else if ((before.get(endpoint.id)?.presence ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
         return {
           endpoint,
@@ -748,7 +756,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       const claim = params.claim as Claim | undefined
       if (params.human === true && params.resume === undefined && params.lineage !== undefined) {
         const placed = core.placeLineage(params.lineage)
-        if (placed) return bindLineage(s, placed, params)
+        if (placed) {
+          s.data.terminal = params.tty === true
+          return bindLineage(s, placed, params)
+        }
       } else if (params.human !== true && params.resume === undefined && claim?.process === undefined && typeof claim?.handle === "string") {
         const placed = claim.lineage === undefined ? null : core.placeLineage(claim.lineage, claim.handle)
         if (placed && (claim.grant === undefined || core.grantBinds(claim.grant, placed))) {
@@ -864,6 +875,21 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const renamed = core.rename(actorOf(s), { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), handle: params.handle })
         membership(renamed.endpoint, renamed.session, true, renamed.from)
         return renamed.endpoint
+      }
+      case "adopt": {
+        const actor = actorOf(s)
+        const adopted = core.adopt(
+          actor,
+          { endpoint: params.endpoint, ...(params.parent !== undefined ? { parent: params.parent } : {}) },
+          { tty: actor.kind === "endpoint" && s.data.terminal === true },
+        )
+        bridge?.resync()
+        return adopted
+      }
+      case "unlink": {
+        const unlinked = core.unlink(actorOf(s), params.endpoint !== undefined ? { endpoint: params.endpoint } : {})
+        bridge?.resync()
+        return unlinked
       }
       case "leave": {
         const left = core.leaveSession(actorOf(s), params.endpoint !== undefined ? { endpoint: params.endpoint } : {})

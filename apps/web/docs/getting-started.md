@@ -64,6 +64,16 @@ swarm leave         # take it off the relay; its mail is kept until it joins aga
 
 `swarm join` works in a session started before the hooks were installed too. With `swarm setup --join manual --write`, sessions stay off the relay until they run `swarm join`; the default, `auto`, joins every hooked session when it starts. `swarm list` shows the live sessions, and `swarm list --all` adds the offline ones.
 
+A session you started by hand can sit under an orchestrator, as if the orchestrator had spawned it. It then shows as its child in `swarm list --tree`, the dashboard and the graph, and reaches only what a worker of it reaches:
+
+```sh
+swarm join --under lead          # from the session's own shell: link it under me/lead
+swarm adopt parser --parent lead # from your own terminal: link any root session under me/lead
+swarm unlink parser              # from your own terminal: back to a root
+```
+
+Linking narrows a session's scope, so a session may always join under an agent it can message. Adopting another session and unlinking one widen what someone controls, so they are for you at a terminal; an agent without a terminal is refused.
+
 From the orchestrator's shell, spawn a worker:
 
 ```sh

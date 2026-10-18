@@ -163,6 +163,27 @@ describe("bridge", () => {
     expect(await observer.request<unknown>("cloud_status")).toMatchObject({ enabled: true, machine: "a", url: fake.url, connected: true, last_error: null })
   })
 
+  test("adopt and unlink reach the hub and the other machines: the mirror sits under its new parent, then back at the root", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a")
+    const b = await machine(fake, "b")
+    await agent(a, "lead")
+    await agent(a, "app")
+    await agent(b, "review", "codex")
+    const on = (handle: string) => b.core.remoteViews().find((v) => v.machine === "a" && v.address.endsWith(`/${handle}`))
+    await waitFor(() => on("app"), "a/app on b")
+    const human = await RelayClient.connect(a.socket)
+    cleanups.push(() => human.close())
+    await human.hello({ human: true, tty: true })
+    expect(await human.request("adopt", { endpoint: "app", parent: "lead" })).toMatchObject({ parent: "me/lead", endpoint: { parent: "me/lead" } })
+    expect(await waitFor(() => (on("app")?.parent_ep === "lead" ? on("app") : undefined), "a/app under a/lead on b")).toMatchObject({ depth: 1 })
+    const hub = (fake.hub("ada") as unknown as { core: { list(f: { all: boolean }): { address: string; parent?: string | null }[] } }).core
+    expect(hub.list({ all: true }).find((v) => v.address.endsWith("app"))?.parent).toEndWith("lead")
+    await human.request("unlink", { endpoint: "app" })
+    await waitFor(() => (on("app")?.parent_ep === null ? true : undefined), "a/app a root again on b")
+    expect(hub.list({ all: true }).find((v) => v.address.endsWith("app"))?.parent ?? null).toBeNull()
+  })
+
   test("a rename reaches the other machines in place: the new handle is live there and the old one is gone", async () => {
     const fake = hubServer()
     const a = await machine(fake, "a")

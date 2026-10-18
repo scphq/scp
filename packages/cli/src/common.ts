@@ -69,6 +69,7 @@ export const OPTIONS = {
   peek: { type: "string" },
   endpoint: { type: "string" },
   live: { type: "boolean" },
+  parent: { type: "string" },
 } as const
 
 export type Option = keyof typeof OPTIONS

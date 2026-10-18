@@ -31,8 +31,8 @@ export interface Hello {
   tty?: boolean
   /** a hook's connection: it claims like an agent but never counts as connected, and posts only event and status */
   transient?: boolean
-  /** with `transient`: the session joins the relay on demand, taking `handle` when given */
-  join?: { handle?: string }
+  /** with `transient`: the session joins the relay on demand, taking `handle` when given, and links itself under the agent `under` */
+  join?: { handle?: string; under?: string }
   /** a one-shot command: the broker announces no presence change when it connects or goes */
   brief?: boolean
   /** no identity: list, status, watch, log and policy only */
