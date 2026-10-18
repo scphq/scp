@@ -177,7 +177,7 @@ describe("org hub", () => {
     expect(await grantValid(db, { ...grant, role: "admin" }, Date.now())).toBe(false);
     expect(await grantValid(db, grant, grant.expiresAt)).toBe(false);
 
-    const orgPage = await (await owner.get("/orgs/reval")).text();
+    const orgPage = await (await owner.get("/orgs/reval/members")).text();
     const memberId = /\/orgs\/reval\/members\/(usr_[A-Za-z0-9_-]+)\/remove/.exec(orgPage)![1]!;
     expect(memberId).toBe(auth.grant.userId);
     await owner.post(`/orgs/reval/members/${memberId}/remove`, {});
@@ -189,5 +189,61 @@ describe("org hub", () => {
     expect(res.status).toBe(401);
     const bad = await relay.fetch("/v1/relay/rpc", { method: "POST", ...bearer("scp_t_nope"), body: "{}" });
     expect(bad.status).toBe(401);
+  });
+});
+
+describe("org overview", () => {
+  test("a fresh org shows the onboarding commands, and its page loads the refresh script", async () => {
+    const owner = new Browser(relay);
+    await owner.signIn("fresh-owner@example.com");
+    const created = await owner.post("/orgs", { handle: "freshco" });
+    expect(created.headers.get("location")).toBe("/orgs/freshco");
+    const page = await (await owner.follow(created)).text();
+    expect(page).toContain("Connect your first machine");
+    for (const cmd of ["npm i -g @scp-dev/cli", "swarm login", "swarm hooks install", "swarm login --token &lt;token&gt;"])
+      expect(page).toContain(`data-copy="${cmd}"`);
+    expect(page).toContain("SCP_TOKEN");
+    expect(page).toContain('href="/orgs/freshco/tokens"');
+    expect(page).toContain('<script src="/app.js" defer></script>');
+    expect(page).toMatch(/data-live="\d+"/);
+
+    const js = await relay.fetch("/app.js");
+    expect(js.headers.get("content-type")).toStartWith("text/javascript");
+    expect(await js.text()).toContain("[data-live]");
+    expect((await owner.get("/orgs/freshco/members")).status).toBe(200);
+    const stranger = new Browser(relay);
+    await stranger.signIn("fresh-stranger@example.com");
+    expect((await stranger.get("/orgs/freshco")).status).toBe(404);
+  });
+
+  test("bridged machines show with their agents, presence, status, token labels and recent activity", async () => {
+    const owner = new Browser(relay);
+    await owner.signIn("overview-owner@example.com");
+    await owner.post("/orgs", { handle: "liveco" });
+    const device = await deviceLogin(owner, "laptop");
+    await owner.get("/orgs/liveco/tokens");
+    const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(await (await owner.post("/orgs/liveco/tokens", { name: "ambient" })).text())![0];
+
+    const origin = await relay.listening();
+    const laptop = await machine(origin, "laptop", device);
+    const runner = await machine(origin, "runner", token);
+    const lead = await agent(laptop, "lead");
+    await agent(runner, "bot");
+    await lead.request("status", { state: "working", note: "wiring the overview" });
+    await lead.request("event", { kind: "tool", tool: "Bash", summary: "bun test" });
+    await lead.request("title", { text: "overview page" });
+
+    const page = await waitFor(async () => {
+      const text = await (await owner.get("/orgs/liveco")).text();
+      return text.includes("token=ambient") && text.includes("overview page") && text.includes("wiring the overview") && text.includes("bun test")
+        ? text
+        : null;
+    }, "both machines on the overview");
+    expect(page).not.toContain("Connect your first machine");
+    expect(page).toMatch(/<h3 class="mono">laptop<\/h3>[\s\S]*<span class="mono">lead<\/span>[\s\S]*claude-code[\s\S]*overview page/);
+    expect(page).toMatch(/<h3 class="mono">runner<\/h3>[\s\S]*<span class="mono">bot<\/span>[\s\S]*<span class="tag">token=ambient<\/span>/);
+    expect(page).toMatch(/<span class="role">working<\/span> <span class="small">wiring the overview<\/span>/);
+    expect(page).toMatch(/laptop\/lead[\s\S]*?Bash: bun test/);
+    expect(page).toContain("2 machines, 2 online, 2 agents");
   });
 });

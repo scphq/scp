@@ -104,6 +104,10 @@ export class OrgHub extends DurableObject<Env> {
       await this.arm();
       return Response.json({ closed });
     }
+    if (request.method === "GET" && url.pathname === "/overview") {
+      if (!(await this.ready())) return Response.json({ machines: [], endpoints: [], activity: [] });
+      return Response.json(this.hub.overview());
+    }
     const route = url.pathname === "/ws" && request.method === "GET" ? "ws" : url.pathname === "/rpc" && request.method === "POST" ? "rpc" : null;
     if (!route) return error(404, "not_found", "Not found.");
     const grant = parseGrant(request.headers.get(GRANT_HEADER));

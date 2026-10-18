@@ -159,12 +159,12 @@ describe("organizations and invites", () => {
     expect(accepted.headers.get("location")).toBe("/orgs/acme");
     expect((await b.post("/invites/accept", { token: link!.split("/").pop()! })).status).toBe(409);
 
-    const members = await (await a.get("/orgs/acme")).text();
+    const members = await (await a.get("/orgs/acme/members")).text();
     expect(members).toMatch(/owner@example\.com.*?<span class="role">owner<\/span>/s);
     expect(members).toMatch(/member@example\.com.*?<span class="role">member<\/span>/s);
     expect((await stranger.get("/orgs/acme")).status).toBe(404);
 
-    const bPage = await (await b.get("/orgs/acme")).text();
+    const bPage = await (await b.get("/orgs/acme/members")).text();
     expect(bPage).not.toContain("/orgs/acme/invites");
     expect((await b.post("/orgs/acme/invites", { email: "x@example.com" })).status).toBe(403);
   });
@@ -372,7 +372,7 @@ describe("API tokens for ambient agents", () => {
     const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(await (await b.post("/orgs/team/tokens", { name: "runner" })).text())![0];
     expect((await relay.fetch("/v1/whoami", bearer(token))).status).toBe(200);
 
-    const members = await (await a.get("/orgs/team")).text();
+    const members = await (await a.get("/orgs/team/members")).text();
     const uid = /\/orgs\/team\/members\/(usr_[A-Za-z0-9_-]+)\/remove/.exec(members)![1];
     expect((await a.post(`/orgs/team/members/${uid}/remove`, {})).status).toBe(303);
     expect(await (await relay.fetch("/v1/whoami", bearer(token))).json()).toEqual({ error: "revoked" });

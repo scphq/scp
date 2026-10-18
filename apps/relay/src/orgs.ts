@@ -209,12 +209,13 @@ export async function removeMember(db: D1Database, m: Membership, actor: User, u
 
 const when = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-export function orgHeader(m: Membership, tab: "members" | "tokens"): Html {
+export function orgHeader(m: Membership, tab: "overview" | "members" | "tokens"): Html {
   return html`<p class="label"><a class="mini-link" href="/orgs">Orgs</a> / ${m.org.handle}</p>
     <h1>${m.org.name}</h1>
     <p class="lead">You are <span class="role">${m.role}</span> of <code>${m.org.handle}</code>.</p>
     <nav class="nav sub" aria-label="Organization">
-      <a href="/orgs/${m.org.handle}" ${tab === "members" ? html`aria-current="page"` : ""}>Members</a>
+      <a href="/orgs/${m.org.handle}" ${tab === "overview" ? html`aria-current="page"` : ""}>Overview</a>
+      <a href="/orgs/${m.org.handle}/members" ${tab === "members" ? html`aria-current="page"` : ""}>Members</a>
       <a href="/orgs/${m.org.handle}/tokens" ${tab === "tokens" ? html`aria-current="page"` : ""}>Tokens and devices</a>
     </nav>`;
 }
@@ -356,12 +357,12 @@ export async function orgsPost(ctx: Ctx, user: User, path: string[]): Promise<Re
     }
     if (kind === "invites" && id && action === "revoke") {
       await revokeInvite(ctx.env.DB, m, id, ctx.now);
-      return back(ctx, `/orgs/${handle}`);
+      return back(ctx, `/orgs/${handle}/members`);
     }
     if (kind === "members" && id && action === "remove") {
       await removeMember(ctx.env.DB, m, user, id, ctx.now);
       await closeGrants(ctx.env, m.org.id, { actorId: id });
-      return back(ctx, id === user.id ? "/orgs" : `/orgs/${handle}`);
+      return back(ctx, id === user.id ? "/orgs" : `/orgs/${handle}/members`);
     }
   } catch (e) {
     if (e instanceof HttpError && e.status < 500) return orgPage(ctx, user, handle, { err: e.message }, e.status);

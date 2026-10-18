@@ -1,4 +1,5 @@
 import {
+  type ActivityRow,
   allowlisted,
   CAPABILITIES,
   CLI_NAME,
@@ -79,6 +80,16 @@ export interface HubConn {
   subscribed: boolean
   /** whether a human client said a terminal is attached */
   tty?: boolean
+}
+
+/** a bound machine, or a revoked token's name kept as a tombstone */
+export interface MachineRow {
+  name: string
+  kind: string
+  online: boolean
+  bridge: boolean
+  created_at: string | null
+  last_seen: string | null
 }
 
 export interface HubSocket {
@@ -1442,7 +1453,13 @@ export class RelayHub {
   }
 
   /** bindings, then names a revoke left behind (kind `revoked`) */
-  private machineList(): { name: string; kind: string; online: boolean; bridge: boolean; created_at: string | null; last_seen: string | null }[] {
+  /** a read-only view of the account for a dashboard: its machines, listed endpoints and latest activity */
+  overview(activity = 20): { machines: MachineRow[]; endpoints: EndpointView[]; activity: ActivityRow[] } {
+    const { endpoints, activity: rows } = this.relay.snapshot({ activity })
+    return { machines: this.machineList(), endpoints, activity: rows }
+  }
+
+  private machineList(): MachineRow[] {
     const sockets = this.deps.sockets().filter((s) => !this.gone.has(s.conn.id))
     const bound = this.deps.sql
       .all<{ name: string; kind: string; created_at: number; last_seen: number | null }>(`SELECT name, kind, created_at, last_seen FROM machines ORDER BY name`)
