@@ -200,6 +200,7 @@ const HARNESSES = new Set([
   "antigravity",
   "gemini",
   "gemini-cli",
+  "pi-coding-agent",
 ])
 /** where installed tools live: a script from one of these is a program in its own right, possibly a harness, never a helper */
 const INSTALLED =

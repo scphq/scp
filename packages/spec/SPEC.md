@@ -758,6 +758,7 @@ Conformance depends on what a harness exposes, not on its vendor:
 | No stop hook | No stop handling. An integration MAY emulate a held stop by submitting the hold text as a new prompt when the harness goes idle. |
 | Subagent events in hook payloads | Subagent endpoints (section 6.9). |
 | Server-initiated tool messages | Channel push (section 8.4). |
+| A host API that queues a message as a turn | Wake: a push steers a running turn, or starts one on an idle session. |
 
 The bindings of the reference integration per harness are in Appendix G.
 
@@ -1628,7 +1629,10 @@ All hooks run `swarm hook <harness> [event] [--block-stop-on-unread] [--push-wai
 | Grok | Claude Code's hooks, labelled by environment | as Claude Code; injection after tools only | `{"decision":"block","reason":<text>}` | yes | no |
 | Muse | Plugin manifest: SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no |
 | Gemini / Antigravity (agy) | SessionStart, PreInvocation (prompt), PostToolUse (activity only), Stop (only when the termination reason is `NO_TOOL_CALL`) | `{"injectSteps":[{"ephemeralMessage":<text>}]}`; `{}` when empty | `{"decision":"continue","reason":<text>}`; directives as a count and pointer | no | no |
+| pi | Extension: mounts `swarm mcp --harness pi --channels` and registers its tools as pi tools | none; messages arrive by channel push | none | no | no |
 | OpenCode | Plugin: tool execution (text appended to the tool output), chat message (synthetic text part), session created, session idle | as Claude Code; prompt shows an unread pointer only | Emulated: on idle, a held stop's text is submitted as a new prompt | no | child sessions as activity |
+
+The pi extension (`@scp-dev/pi`, run by `swarm pi [--name N]`) declares the `claude/channel` capability and hands each pushed message to pi as a custom message with `deliverAs: "steer"` and `triggerTurn: true`: it steers a running turn after its tool calls, and starts a turn on an idle session. A resumed session (`pi --continue`, `pi --session <id>`) receives the messages that arrived while it was closed.
 
 Each integration also registers the MCP server (`swarm mcp --harness <h>`) under the name `scp` in the harness's MCP configuration. Shown messages are acknowledged on every harness except agy, where they are marked injected only.
 

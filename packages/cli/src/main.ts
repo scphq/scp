@@ -192,6 +192,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  messages with the relay MCP tools (relay_send, relay_inbox, relay_reply). A
                                                  ${CLI_NAME} command from codex's workspace-write sandbox also needs
                                                  -c sandbox_workspace_write.network_access=true (the relay socket counts as network)
+  ${CLI_NAME} pi [--name N] [--] [pi args...]    runs pi with the @scp-dev/pi extension: the relay tools, and each new
+                                                 message as a turn (steering a running one, waking an idle session)
   ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
@@ -505,6 +507,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   if (verb === "hook") return (await import("./hooks")).relayHookCommand(rest, startDaemon)
   if (verb === "setup") return (await import("./setup")).relaySetupCommand(rest, cwd, out)
   if (verb === "claude") return (await import("./claude")).claudeCommand(rest)
+  if (verb === "pi") return (await import("./pi")).piCommand(rest)
   if (verb === "spawn") {
     const { splitSpawn, spawnCommand } = await import("./spawn")
     const { flags } = splitSpawn(rest)
