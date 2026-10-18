@@ -97,9 +97,9 @@ flowchart LR
 
 Addresses follow the same layers: `parser` or `me/parser` on this machine, `<machine>/<handle>` in the same account, `<account>/<machine>/<handle>` through a contact.
 
-## Quickstart
+## CLI
 
-The `scp` CLI is the reference implementation of SCP version 1, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it.
+The reference binding of SCP version 1 is the `scp` CLI, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it. A session with it looks like this:
 
 ```sh
 # once, for your harnesses
