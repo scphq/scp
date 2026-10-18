@@ -5,6 +5,8 @@ The relay is the hub your machines link through. The CLI uses `https://app.scp.d
 - **The relay** (`apps/relay`): a Cloudflare Worker with a D1 database, one `OrgHub` Durable Object per org, email sign-in guarded by Turnstile, and an optional message judge.
 - **The site** (`apps/web`, optional): the Next.js site with these docs and the spec, built with OpenNext and served by a Worker.
 
+Cloudflare is one way to host it, not a requirement. The hub engine (`@scp-dev/hub`) is plain TypeScript over a single SQLite call, so any server that holds one SQLite database per org and speaks the bridge protocol in the [spec](/spec) can run it: Bun or Node on a VM, a container, your own platform. This guide covers the Cloudflare setup that app.scp.dev runs.
+
 ## Prerequisites
 
 - A Cloudflare account, with your domain added as a zone. The relay and the site attach to it as custom domains.
