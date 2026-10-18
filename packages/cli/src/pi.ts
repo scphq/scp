@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { RelayUsage } from "./common"
@@ -6,7 +7,7 @@ import { RelayUsage } from "./common"
 type Env = Record<string, string | undefined>
 
 export const PI_HELP = `${CLI_NAME} pi [--name NAME | --as NAME] [--] [pi args...]
-  runs pi with the @scp-dev/pi extension: the relay tools, and each new message as a turn, waking the session when idle.
+  runs pi with the bundled SCP extension: the relay tools, and each new message as a turn, waking the session when idle.
   $SCP_PI_BIN picks the pi binary (default pi on PATH), $SCP_PI_EXTENSION the extension file.`
 
 /** the pi argv and the env it runs with: the name becomes $SCP_NAME, the harness pi */
@@ -33,13 +34,14 @@ export function piLaunch(args: string[], env: Env, extension: string): { argv: s
   }
 }
 
-function extensionPath(env: Env): string {
+/** the extension file: $SCP_PI_EXTENSION, else the one bundled next to the CLI, else the workspace package's source */
+export function extensionPath(env: Env, base: string | URL = import.meta.url): string {
   if (env.SCP_PI_EXTENSION) return env.SCP_PI_EXTENSION
-  try {
-    return fileURLToPath(import.meta.resolve("@scp-dev/pi"))
-  } catch {
-    throw new RelayUsage(`${CLI_NAME} pi needs the @scp-dev/pi extension: install it next to ${CLI_NAME}, or set $SCP_PI_EXTENSION to its file`)
+  for (const candidate of ["./pi-extension.js", "../../pi/src/index.ts"]) {
+    const file = fileURLToPath(new URL(candidate, base))
+    if (existsSync(file)) return file
   }
+  throw new RelayUsage(`${CLI_NAME} pi found no pi extension next to ${CLI_NAME}: reinstall it, or set $SCP_PI_EXTENSION to the extension file`)
 }
 
 /** `swarm pi`: runs pi in the foreground with the extension loaded, exiting with its code */
