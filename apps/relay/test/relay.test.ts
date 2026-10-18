@@ -13,6 +13,13 @@ afterAll(async () => {
 
 const csrfOf = (page: string): string => /name="csrf" value="([^"]+)"/.exec(page)?.[1] ?? "";
 
+/** the hidden fields of the page's POST form to `action`, as a browser would submit them */
+function formOf(page: string, action: string): Record<string, string> {
+  const form = new RegExp(`<form[^>]*method="post" action="${action}"[^>]*>([\\s\\S]*?)</form>`).exec(page)?.[1];
+  if (!form) throw new Error(`no form posting to ${action}`);
+  return Object.fromEntries([...form.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map((m) => [m[1]!, m[2]!]));
+}
+
 describe("skeleton", () => {
   test("health answers", async () => {
     const res = await relay.fetch("/health");
@@ -220,18 +227,29 @@ describe("device login", () => {
     const bounced = await a.get(link.pathname + link.search);
     expect(bounced.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent(`/device?code=${start.user_code}`)}`);
     await a.follow(bounced);
-    const next = /name="next" value="([^"]+)"/.exec(a.last)?.[1] ?? "";
     const since = relay.mails.length;
-    await a.follow(await a.post("/sign-in", { email: "one-click@example.com", next, "cf-turnstile-response": DUMMY_TOKEN }));
+    const signIn = formOf(a.last, "/sign-in");
+    await a.follow(await a.post("/sign-in", { ...signIn, email: "one-click@example.com", "cf-turnstile-response": DUMMY_TOKEN }));
     const signedIn = await a.post("/sign-in/code", { code: codeOf(await relay.mailTo("one-click@example.com", since)) });
     expect(signedIn.headers.get("location")).toBe(`/device?code=${start.user_code}`);
     const page = await (await a.follow(signedIn)).text();
-    expect(page).toContain('<input type="hidden" name="org" value="clickorg">');
     expect(page).not.toContain("<select");
-    const approved = await a.post("/device", { code: start.user_code, org: "clickorg", action: "approve" });
+    const form = formOf(page, "/device");
+    expect(form).toMatchObject({ code: start.user_code.replace("-", ""), org: "clickorg" });
+    const approved = await a.post("/device", { ...form, action: "approve" });
     expect(await approved.text()).toContain("Device approved");
     const issued = await relay.fetch("/v1/device/token", { method: "POST", body: JSON.stringify({ device_code: start.device_code }) });
     expect(issued.status).toBe(200);
+  });
+
+  test("an unknown code re-renders the entry form with the code kept", async () => {
+    const a = new Browser(relay);
+    await a.signIn("typo@example.com");
+    const res = await a.get("/device?code=bbbb-bbbb");
+    expect(res.status).toBe(404);
+    const page = await res.text();
+    expect(page).toContain("unknown or has expired");
+    expect(page).toContain('name="code" value="BBBB-BBBB"');
   });
 
   test("a denied code yields access_denied and an unknown one invalid_grant", async () => {
@@ -253,7 +271,9 @@ describe("device login", () => {
     await a.post("/orgs", { handle: "outsider-org" });
     const start = (await (await relay.fetch("/v1/device/code", { method: "POST" })).json()) as { user_code: string };
     await a.get(`/device?code=${start.user_code}`);
-    expect((await a.post("/device", { code: start.user_code, org: "acme", action: "approve" })).status).toBe(404);
+    const refused = await a.post("/device", { code: start.user_code, org: "acme", action: "approve" });
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).toContain(`name="code" value="${start.user_code}"`);
   });
 });
 

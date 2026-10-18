@@ -99,34 +99,28 @@ async function pendingByUserCode(db: D1Database, code: string, now: number) {
   return row;
 }
 
-export async function devicePage(ctx: Ctx, userId: string, error = "", status = 200): Promise<Response> {
-  const code = normalizeUserCode(ctx.url.searchParams.get("code") ?? "");
+export async function devicePage(ctx: Ctx, userId: string, error = "", status = 200, raw = ctx.url.searchParams.get("code") ?? ""): Promise<Response> {
+  const code = normalizeUserCode(raw);
   const head = html`<p class="label">Device login</p>`;
-  if (!code || error) {
-    return page(
+  const entry = (message: string, st: number) =>
+    page(
       ctx,
       { title: "Device login", nav: "device" },
       html`${head}<h1>Connect a terminal</h1>
         <p class="lead">Enter the code that <code>swarm login</code> printed.</p>
-        ${notice(error, true)}
+        ${notice(message, true)}
         <form class="form" method="get" action="/device">
           <label class="field"><span>Code</span><input class="code" type="text" name="code" value="${code ? formatUserCode(code) : ""}" placeholder="BCDF-GHJK" maxlength="9" autocomplete="off" required autofocus></label>
           <div class="acts"><button class="btn btn-primary" type="submit">Continue</button></div>
         </form>`,
-      status,
+      st,
     );
-  }
+  if (!code || error) return entry(error, status);
   let row: CodeRow;
   try {
     row = await pendingByUserCode(ctx.env.DB, code, ctx.now);
   } catch (e) {
-    if (e instanceof HttpError)
-      return page(
-        ctx,
-        { title: "Device login", nav: "device" },
-        html`${head}<h1>Connect a terminal</h1>${notice(e.message, true)}<p class="small"><a href="/device">Enter another code</a></p>`,
-        e.status,
-      );
+    if (e instanceof HttpError) return entry(e.message, e.status);
     throw e;
   }
   const orgs = await listOrgs(ctx.env.DB, userId);
@@ -177,7 +171,7 @@ export async function devicePost(ctx: Ctx, userId: string): Promise<Response> {
     if (!res.meta.changes) throw new HttpError(409, "decided", "That code was already used.");
     return done("Device approved", `The terminal joins ${m.org.name} in a few seconds. You can close this tab.`);
   } catch (e) {
-    if (e instanceof HttpError && e.status < 500) return devicePage(ctx, userId, e.message, e.status);
+    if (e instanceof HttpError && e.status < 500) return devicePage(ctx, userId, e.message, e.status, code);
     throw e;
   }
 }
