@@ -1,5 +1,21 @@
 # @scp-dev/cli
 
+## 0.7.0
+
+### Minor Changes
+
+- 4fbdc8f: `swarm agy` and `swarm grok` run the harness headless and wake it: the launcher holds the endpoint, and each batch of new messages becomes a turn that resumes the same conversation (`agy --conversation <id> -p`, `grok --resume <id> -p`). grok's session id is preassigned with `-s`; agy's scp hooks report the conversation it opened. The endpoint advertises the new wake values `agy-resume` and `grok-resume`. Interactive flags are refused.
+- 53c05c3: `swarm muse [--name N] [--resume S] [--approval-mode never|on-request|untrusted] [-- muse serve args...]` runs a headless Muse session through `muse serve` that relay messages wake: each message starts a turn on the idle session or steers the running one, and the agent's replies print to standard output. It advertises the new wake value `muse-serve`, honours `swarm spawn-env` grants through a launch file the session's shim and hooks read, and fails loudly when the session's scp mount never joins. A prompt made of relay messages no longer becomes the session's inferred title.
+
+### Patch Changes
+
+- Updated dependencies [4fbdc8f]
+- Updated dependencies [53c05c3]
+  - @scp-dev/core@0.4.0
+  - @scp-dev/broker@0.4.2
+  - @scp-dev/hub@0.6.3
+  - @scp-dev/mcp@0.2.2
+
 ## 0.6.0
 
 ### Minor Changes
