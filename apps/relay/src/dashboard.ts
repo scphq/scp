@@ -1,5 +1,5 @@
 import type { ActivityRow, EndpointView } from "@scp-dev/core";
-import type { HubGraph } from "@scp-dev/hub";
+import type { IdentifiedGraph } from "./identity";
 import type { User } from "./env";
 import { hubGraph, hubHolds, hubOverview, judgeEnabled, type Overview } from "./hub/routes";
 import { judgeSetup } from "./hub/judge";
@@ -35,7 +35,7 @@ export interface Counts {
   minutes: number;
 }
 
-export function countsOf(o: Overview, g: HubGraph | null): Counts {
+export function countsOf(o: Overview, g: IdentifiedGraph | null): Counts {
   const agents = o.endpoints.filter((e) => e.kind === "agent");
   const idle = agents.filter((e) => e.presence === "idle");
   const groups = groupByMachine(o);
@@ -138,7 +138,7 @@ async function sideOf(ctx: Ctx, m: Membership, user: User): Promise<Side> {
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
-export function overviewRegion(o: Overview | null, g: HubGraph | null, side: Side, handle: string, now: number): Html {
+export function overviewRegion(o: Overview | null, g: IdentifiedGraph | null, side: Side, handle: string, now: number): Html {
   if (!o) return hubDown();
   if (!o.machines.length && !o.endpoints.length) return onboarding(handle);
   const c = countsOf(o, g);

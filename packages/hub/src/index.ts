@@ -18,6 +18,7 @@ export {
   GRAPH_MINUTES,
   GRAPH_MINUTES_MAX,
   type GraphEdge,
+  type GraphMachine,
   type GraphNode,
   type HubGraph,
   HUB_LIMITS,

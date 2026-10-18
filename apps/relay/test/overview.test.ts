@@ -118,7 +118,7 @@ test("the graph data block names each node's machine and label, escapes markup a
   }).value;
   expect(block.match(/<\/script>/g)).toHaveLength(1);
   const g = JSON.parse(/data-graph-data>([\s\S]*)<\/script>/.exec(block)![1]!);
-  expect(g.machines).toEqual([{ name: "box", online: true }]);
+  expect(g.machines).toEqual([{ name: "box", online: true, identity: null }]);
   expect(g.nodes.map((n: { machine: string; label: string; icon: string }) => [n.machine, n.label, n.icon])).toEqual([
     ["box", "lead", "claude"],
     ["box", "(ended)", "claude"],

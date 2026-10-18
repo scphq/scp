@@ -111,10 +111,15 @@ export interface GraphNode {
 /** `spawn`: parent to child; `message`: sender to recipient, with the count and newest send in the graph's window */
 export type GraphEdge = { kind: "spawn"; from: string; to: string } | { kind: "message"; from: string; to: string; count: number; last_at: string }
 
+/** a machine as the graph draws it: `actor` is the member who bound it, null for the personal account's owner or a revoked name */
+export interface GraphMachine extends MachineRow {
+  actor: string | null
+}
+
 export interface HubGraph {
   /** the window message edges count over */
   minutes: number
-  machines: MachineRow[]
+  machines: GraphMachine[]
   nodes: GraphNode[]
   edges: GraphEdge[]
 }
@@ -1716,7 +1721,9 @@ export class RelayHub {
       return from && to && from !== to ? [{ kind: "message" as const, from, to, count: row.n, last_at: iso(row.last)! }] : []
     })
     edges.push(...traffic.sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to)))
-    return { minutes: window, machines: this.machineList(), nodes, edges }
+    const actors = new Map(this.deps.sql.all<{ name: string; actor_id: string | null }>(`SELECT name, actor_id FROM machines`).map((r) => [r.name, r.actor_id]))
+    const machines = this.machineList().map((m) => ({ ...m, actor: actors.get(m.name) ?? null }))
+    return { minutes: window, machines, nodes, edges }
   }
 
   private machineList(): MachineRow[] {

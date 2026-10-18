@@ -1205,7 +1205,7 @@ describe("graph", () => {
       { address: "me/kid", tree: "lead", parent_ep: "lead", depth: 1 },
       { address: "me/", kind: "human" },
     ])
-    await bridge("desk", [{ address: "me/review" }])
+    await bridge("desk", [{ address: "me/review" }], "tok_b", "usr_v")
     await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "secret plan one" } })
     clock.now += 1000
     await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "secret plan two" } })
@@ -1213,7 +1213,10 @@ describe("graph", () => {
 
     const graph = hub.graph()
     expect(graph.minutes).toBe(GRAPH_MINUTES)
-    expect(graph.machines.map((m) => m.name)).toEqual(["desk", "laptop"])
+    expect(graph.machines.map((m) => [m.name, m.actor])).toEqual([
+      ["desk", "usr_v"],
+      ["laptop", null],
+    ])
     expect(graph.nodes.find((n) => n.address === "ada/laptop/")?.kind).toBe("human")
     expect(graph.nodes.find((n) => n.address === "ada/laptop/kid")).toMatchObject({ kind: "agent", parent: "ada/laptop/lead", presence: "online" })
     expect(graph.nodes.find((n) => n.address === "ada/laptop/lead")?.wake).toBe("channels")
