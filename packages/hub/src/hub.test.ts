@@ -646,7 +646,7 @@ describe("machine ownership", () => {
     const refused = await rpc(scoped, "machines_rm", { name: "laptop" })
     expect([refused.error?.data?.code, refused.error?.message]).toEqual([
       "unauthorized",
-      "only the token machine laptop is bound to, a full login of the member who bound it, or an org owner or admin can release it",
+      "only the token machine laptop is bound to, a full login of the member who bound it, or an org owner or admin can release it; any credential of that member can once it is offline",
     ])
     const other = connect("tok_v", "usr_v", { role: "member" })
     await ok(other, "hello", observe)
@@ -665,6 +665,19 @@ describe("machine ownership", () => {
     const own = connect("tok_s", "usr_m", { scoped: true, role: "member" })
     await ok(own, "hello", { protocol: PROTOCOL, machine: "ci", claim: { handle: "impl" } })
     expect(await ok(own, "machines_rm", { name: "ci" })).toEqual({ removed: "ci", endpoints: 1 })
+  })
+
+  test("a member's rotated token releases the offline machine its old token bound, and only once no connection holds it", async () => {
+    const { bridge, connect, ok, fails, disconnect } = setup()
+    const runner = await bridge("runner", [{ address: "me/bot" }], "tok_old", "usr_m", { scoped: true, role: "member" })
+    const rotated = connect("tok_new", "usr_m", { scoped: true, role: "member" })
+    await ok(rotated, "hello", observe)
+    expect(await fails(rotated, "machines_rm", { name: "runner" })).toBe("unauthorized")
+    const stranger = connect("tok_v", "usr_v", { scoped: true, role: "member" })
+    await ok(stranger, "hello", observe)
+    disconnect(runner)
+    expect(await fails(stranger, "machines_rm", { name: "runner" })).toBe("unauthorized")
+    expect(await ok(rotated, "machines_rm", { name: "runner" })).toEqual({ removed: "runner", endpoints: 1 })
   })
 
   test("after a revoke a scoped token or another member can't rebind or release the name, and gets nothing replayed", async () => {

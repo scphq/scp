@@ -450,6 +450,8 @@ export class RelayCore {
   private readonly capEverySender: boolean
   private readonly alive: (pid: number) => boolean
   private readonly hostMachine: string | null
+  private readonly namedMachine: string | null
+  private readonly hostname: string | null
   private policy: Policy | null = null
   /** the identity each policy `group:<name>` naming no policy group bound to when the policy's text first loaded: that group's then, or `none` */
   private policyBinds = new Map<string, string>()
@@ -469,6 +471,14 @@ export class RelayCore {
     this.capEverySender = options.capEverySender === true
     this.alive = options.alive ?? (() => true)
     this.hostMachine = options.machine ?? options.hostname ?? null
+    this.namedMachine = options.machine ?? null
+    this.hostname = options.hostname ?? null
+  }
+
+  /** a `machine` label naming this host by its hostname, as clients default it, names it by its machine name when one is set */
+  private machineLabel(labels: Record<string, string>): Record<string, string> {
+    if (this.namedMachine !== null && labels.machine !== undefined && labels.machine === this.hostname) labels.machine = this.namedMachine
+    return labels
   }
 
   migrate(): void {
@@ -669,7 +679,7 @@ export class RelayCore {
       model: cleanText(claim.model, "model", 128),
       cwd: cleanText(claim.cwd, "cwd", 1024),
       parent: cleanText(claim.parent, "parent", 128),
-      labels: JSON.stringify(cleanLabels(claim.labels)),
+      labels: JSON.stringify(this.machineLabel(cleanLabels(claim.labels))),
       session: cleanText(claim.session, "session", 128),
       process: cleanText(claim.process, "process", 128),
     }
@@ -784,6 +794,7 @@ export class RelayCore {
     scope: ClaimScope = { handle: wanted, lineage: [], grant: null, rules: {}, groups: [], cwd: fields.cwd },
   ): { endpoint: EndpointView; token?: string; created?: true } {
     const now = this.now()
+    this.endExited(now)
     const bare = transient && fields.session !== null && BARE_PID_KEY.test(fields.session)
     let row = fields.session
       ? one<EndpointRow>(
@@ -1308,6 +1319,7 @@ export class RelayCore {
     } = {},
   ): EndpointView[] {
     const now = this.now()
+    this.endExited(now)
     this.settleOffline(now)
     const cutoff = now - LIMITS.listOfflineWithinS * 1000
     const viewer = filters.viewer === undefined ? undefined : this.mustEndpoint(filters.viewer)
@@ -2657,6 +2669,7 @@ export class RelayCore {
     this.sql.all(`DELETE FROM idempotency WHERE created_at <= ?`, now - LIMITS.idempotencyS * 1000)
     this.sql.all(`DELETE FROM pair_events WHERE at <= ?`, now - 3600 * 1000)
     this.sql.all(`DELETE FROM blocks WHERE until <= ?`, now)
+    this.endExited(now)
     this.settleOffline(now)
     this.sql.all(
       `DELETE FROM endpoints WHERE kind = 'agent' AND connections = 0 AND COALESCE(last_seen, created_at) <= ?
@@ -2680,6 +2693,17 @@ export class RelayCore {
         now - LIMITS.groupIdleS * 1000,
       )
       if (!root || root.handle.startsWith(GONE_PREFIX) || !seen) this.dropGroup(group.name)
+    }
+  }
+
+  /** ends the hook presence of local agent endpoints whose harness process exited without a session_end, as one would */
+  endExited(now = this.now()): void {
+    for (const row of this.sql.all<EndpointRow>(
+      `SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL`,
+    )) {
+      const pid = Number(/^pid:(\d+)/.exec(row.process!)?.[1])
+      if (!pid || !this.localRow(row) || this.alive(pid)) continue
+      this.sql.all(`UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL WHERE id = ? AND connections = 0`, now, row.id)
     }
   }
 

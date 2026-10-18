@@ -577,6 +577,28 @@ describe("bridge", () => {
     await waitFor(async () => (await presence("me/a/silent")) === "offline", "a/silent offline on b once its hooks stopped")
   })
 
+  test("a hook-only endpoint goes offline on the other machines once its harness process exits, and its handle is free again", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a", { presenceEveryMs: 20 })
+    const b = await machine(fake, "b")
+    const review = await agent(b, "review")
+    const presence = async () =>
+      (await review.request<{ endpoints: { address: string; presence: string }[] }>("list", { all: true })).endpoints.find((e) => e.address === "me/a/gone")
+        ?.presence
+    const harness = Bun.spawn(["sleep", "30"])
+    const client = await RelayClient.connect(a.socket)
+    await client.hello({ transient: true, claim: { handle: "gone", harness: "opencode", session: "s-gone", process: `pid:${harness.pid}:start` } })
+    await client.request("event", { kind: "tool" })
+    client.close()
+    await waitFor(async () => (await presence()) === "online", "a/gone online on b")
+    harness.kill()
+    await harness.exited
+    await waitFor(async () => (await presence()) === "offline", "a/gone offline on b once its harness exited")
+    const next = await RelayClient.connect(a.socket)
+    cleanups.push(() => next.close())
+    expect((await next.hello({ claim: { handle: "gone", harness: "opencode", exact: true }, brief: true })).endpoint).toMatchObject({ address: "me/gone" })
+  })
+
   test("attachment paths stay on the sending machine", async () => {
     const fake = hubServer()
     const a = await machine(fake, "a")

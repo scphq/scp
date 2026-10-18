@@ -56,3 +56,24 @@ test.skipIf(!supported)(
   },
   180_000,
 )
+
+test.skipIf(!supported)(
+  "under Node, a shell whose stdout is a socket, as Node hands a child, keeps writing to it after a swarm command exits",
+  () => {
+    ensureBuilt()
+    const root = mkdtempSync(join(tmpdir(), "swarm-node-"))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const env = { ...process.env, SCP_DIR: join(root, "state"), SCP_IDLE: "1s", SWARM_CLI: join(packages, "cli", "dist", "cli.js") }
+    const parent = `
+      const { spawn } = require("node:child_process")
+      const child = spawn("sh", ["-c", '"$0" "$SWARM_CLI" whoami --as peer; echo after', process.execPath], { stdio: ["ignore", "pipe", "inherit"] })
+      let out = ""
+      child.stdout.on("data", (chunk) => (out += chunk))
+      child.on("close", (code) => console.log(JSON.stringify({ code, out })))
+    `
+    const result = spawnSync(node!, ["-e", parent], { env, encoding: "utf8", timeout: 60_000 })
+    const { code, out } = JSON.parse(result.stdout) as { code: number; out: string }
+    expect([code, out]).toEqual([0, expect.stringMatching(/^me\/peer \(agent, cli\)[\s\S]*\nafter\n$/)])
+  },
+  180_000,
+)

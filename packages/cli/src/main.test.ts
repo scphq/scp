@@ -1474,10 +1474,11 @@ describe("swarm, from a hooks-only session's shell", () => {
   })
 
   test("--as of a handle another live session holds is refused, and creates no endpoint", async () => {
+    const session = Bun.spawn(["sleep", "30"])
     const other = await RelayClient.connect(broker.socket)
     await other.hello({
       transient: true,
-      claim: { handle: "other-lane", harness: "claude-code", session: "env:other-lane", process: "pid:4242:Thu-Oct-16-09:00:00-2026" },
+      claim: { handle: "other-lane", harness: "claude-code", session: "env:other-lane", process: `pid:${session.pid}:Thu-Oct-16-09:00:00-2026` },
     })
     await other.request("event", { kind: "session_start" })
     other.close()
@@ -1486,6 +1487,7 @@ describe("swarm, from a hooks-only session's shell", () => {
     expect(refused.code).not.toBe(0)
     expect(refused.stderr).toContain("held by a live claude-code session")
     expect(addresses()).toEqual(before)
+    session.kill()
   })
 })
 

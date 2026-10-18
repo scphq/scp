@@ -1491,7 +1491,10 @@ export class RelayHub {
     return [...bound, ...revoked]
   }
 
-  /** only the token the machine is bound to, a full login of the member who bound it, or an admin may release it (or a revoked token's name) */
+  /**
+   * only the token the machine is bound to, a full login of the member who bound it, or an admin may release it (or a revoked token's name);
+   * while no connection holds a bound machine, any credential of that member may too, so a rotated token releases what the old one bound
+   */
   private releaseMachine(caller: HubSocket, name: unknown): unknown {
     const core = this.relay
     if (typeof name !== "string" || !MACHINE_NAME.test(name)) throw new RelayError("invalid_params", "name is a machine name")
@@ -1499,11 +1502,12 @@ export class RelayHub {
     const tomb = bound ? undefined : one<{ actor_id: string | null }>(this.deps.sql, `SELECT actor_id FROM machine_tombstones WHERE name = ?`, name)
     if (!bound && !tomb) throw new RelayError("not_found", `no machine ${name}`)
     const grant = caller.conn.grant
-    if (!(bound?.token_id === grant.tokenId || fullOf(grant, (bound ?? tomb)!.actor_id) || accountAdmin(grant))) {
+    const member = !!bound && bound.actor_id !== null && grant.actorId === bound.actor_id
+    if (!(bound?.token_id === grant.tokenId || fullOf(grant, (bound ?? tomb)!.actor_id) || accountAdmin(grant) || (member && !this.liveMachines().has(name)))) {
       core.record("refuse", null, name, { code: "unauthorized", machine: name })
       throw new RelayError(
         "unauthorized",
-        `only the token machine ${name} is bound to, a full login of the member who bound it, or an org owner or admin can release it`,
+        `only the token machine ${name} is bound to, a full login of the member who bound it, or an org owner or admin can release it${member ? "; any credential of that member can once it is offline" : ""}`,
       )
     }
     for (const socket of [...this.deps.sockets()]) {
