@@ -128,7 +128,29 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   ${CLI_NAME} daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground (it otherwise starts on demand)
 
 agent sessions:
-  ${CLI_NAME} hook <harness> [event]             what a harness hook runs: one event from the hook JSON on stdin; prints only the reply
+  ${CLI_NAME} mcp [--as NAME] [--harness H] [--channels]   the MCP shim a harness mounts: relay tools for one agent, never me/
+  ${CLI_NAME} mcp install --harness claude|codex|opencode|grok|muse|agy [--as NAME]   prints the command that mounts it
+  ${CLI_NAME} hooks install --harness claude|codex|opencode|agy|muse [--scope project|user|local] [--write]
+        [--block-stop-on-unread] [--push-wait S] prints the hooks and their file; --write merges them in (with a backup); claude
+                                                 defaults to local (.claude/settings.local.json), muse to user, the others to project.
+                                                 They report activity and hand the model new messages after tools and with prompts;
+                                                 a stop names each unanswered request once and is held while a require_reply request
+                                                 waits; --block-stop-on-unread also holds it while messages are unread (3 times a session).
+                                                 While workers you started with ${CLI_NAME} spawn (not --no-push) run, a stop of claude,
+                                                 codex, grok or muse waits up to --push-wait S (default 600) for their next message
+                                                 or handback and continues with it, at most 20 times a prompt; a prompt you type ends
+                                                 the wait. On by default, since spawning is explicit; 0 turns it off, and
+                                                 $SCP_PUSH_WAIT=S lowers it for one session (0 opts out)
+  ${CLI_NAME} setup [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH]
+                                                 mounts the shim and installs the hooks (--no-hooks: the shim only) in every installed
+                                                 harness at user scope; prints the plan, --write applies it, --undo removes what it added
+  ${CLI_NAME} hook <harness> [event]             what those hooks run: one event from the hook JSON on stdin; prints only the reply
+  A session's shim and hooks share one endpoint, keyed by $SCP_SESSION, else the harness process's pid and start time.
+  Without --as or $SCP_NAME the handle is <harness>-<worktree>; labels gain machine=<short hostname>.
+  A Claude Code subagent's hooks give it a child endpoint, <session handle>-<type>-<first 6 of its id>, whose messages
+  reach it after its tools; its shell is the session's, so it acts as that child with --as.
+  Grok runs the Claude Code hooks, labelled grok; Muse takes them as a plugin; Codex runs new hooks after /hooks review.
+  --channels pushes messages into Claude Code started with --dangerously-load-development-channels server:scp.
 
 identity:
   --as HANDLE (or --as=HANDLE, anywhere on the line, or $SCP_NAME, a local handle; a leading me/ is dropped) acts as that agent, with --harness H
@@ -215,6 +237,8 @@ const VERBS: Record<string, Option[]> = {
   "set-peek": IDENTITY,
   why: IDENTITY,
   daemon: ["idle", "policy"],
+  mcp: ["as", "harness", "human", "channels"],
+  hooks: ["harness", "scope", "write", "print", "block-stop-on-unread", "push-wait"],
 }
 
 /** a short message reference: `last`, or a suffix of an id such as its short id; all digits may be a seq too */
@@ -247,6 +271,11 @@ function waitArg(value: string | undefined, fallback: number): number {
   const seconds = Number(value)
   if (!Number.isFinite(seconds) || seconds < 0) throw new RelayUsage(`--wait takes seconds, not ${JSON.stringify(value)}`)
   return seconds
+}
+
+function pushWaitSeconds(value: string): number {
+  if (!/^\d+$/.test(value)) throw new RelayUsage("--push-wait takes whole seconds, 0 to 3600")
+  return Number(value)
 }
 
 function countArg(value: string | undefined, flag: string): number | undefined {
@@ -377,6 +406,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     return 0
   }
   if (verb === "hook") return (await import("./hooks")).relayHookCommand(rest, startDaemon)
+  if (verb === "setup") return (await import("./setup")).relaySetupCommand(rest, cwd, out)
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
@@ -393,6 +423,23 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   for (const key of Object.keys(values) as Option[]) if (!allowed.includes(key)) throw new RelayUsage(`${CLI_NAME} ${verb} does not take --${key}`)
 
   if (verb === "daemon") return daemon(values.idle as string | undefined, values.policy as string | undefined)
+  if (verb === "mcp")
+    return (await import("./mcp")).relayMcpCommand(values as { as?: string; harness?: string; human?: boolean; channels?: boolean }, positionals)
+  if (verb === "hooks") {
+    if (positionals[0] !== "install" || positionals.length > 1) throw new RelayUsage(`${CLI_NAME} hooks takes install --harness claude|codex|opencode|agy|muse`)
+    if (values.write && values.print) throw new RelayUsage("--print and --write: pick one")
+    return (await import("./install")).installHooks({
+      harness: values.harness as string | undefined,
+      scope: values.scope as string | undefined,
+      write: values.write === true,
+      blockStop: values["block-stop-on-unread"] === true,
+      ...(values["push-wait"] !== undefined ? { pushWait: pushWaitSeconds(values["push-wait"] as string) } : {}),
+      env: process.env,
+      cwd,
+      out,
+    })
+  }
+
   if (verb === "holds") holdsArgs(values, positionals)
   const bodyFromStdin = (verb === "send" || verb === "ask" || verb === "reply") && (positionals[1] === undefined || positionals[1] === "-")
   const opened = await open(verb, values as Identity, cwd, bodyFromStdin)

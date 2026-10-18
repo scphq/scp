@@ -767,7 +767,7 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>):
 
 /** Only root sessions receive context. Failed or aborted sessions report activity without holding the stop. */
 export function opencodePlugin(options: { blockStop?: boolean } = {}): string {
-  return `// ${CLI_NAME}: reports this session to the local SCP broker and hands it new messages
+  return `// scp: reports this session to the local SCP broker and hands it new messages
 import { spawn } from "node:child_process"
 import { text as readAll } from "node:stream/consumers"
 const BLOCK_STOP = ${options.blockStop === true}

@@ -10,6 +10,11 @@ export class RelayUsage extends Error {}
 
 export const OPTIONS = {
   json: { type: "boolean" },
+  channels: { type: "boolean" },
+  write: { type: "boolean" },
+  print: { type: "boolean" },
+  "block-stop-on-unread": { type: "boolean" },
+  "push-wait": { type: "string" },
   all: { type: "boolean" },
   as: { type: "string" },
   harness: { type: "string" },

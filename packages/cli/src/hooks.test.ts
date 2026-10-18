@@ -449,17 +449,23 @@ describe("swarm hook", () => {
     }
   })
 
-  async function sessionClient(as: string, env: Record<string, string>) {
-    const client = await RelayClient.connect(socketPath(dir))
-    const hello = await client.hello({ claim: relayIdentity({ as, fallbackHarness: "mcp", cwd: project, env, harnessPid: () => process.pid }) })
-    return { client, hello }
-  }
-
-  test("a live client and a hook with the same session key share one endpoint", async () => {
+  test("a shim and a hook with the same session key share one endpoint", async () => {
     const env = { SCP_DIR: dir, SCP_SESSION: "shared-1", CLAUDECODE: "1" }
-    const { client, hello } = await sessionClient("shim-x", env)
+    const shim = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", "--as", "shim-x"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: cleanEnv(env),
+      cwd: project,
+    })
     try {
-      expect(hello.endpoint!.address).toBe("me/shim-x")
+      shim.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
+      shim.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "relay_whoami", arguments: {} } })}\n`)
+      shim.stdin.flush()
+      const reader = shim.stdout.getReader()
+      let out = ""
+      while (!out.includes('"id":1')) out += new TextDecoder().decode((await reader.read()).value)
+      expect(out).toContain("me/shim-x")
       expect(await hook(["claude"], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Grep", tool_input: { pattern: "x" } }, env)).toMatchObject({
         code: 0,
         stdout: "",
@@ -469,17 +475,33 @@ describe("swarm hook", () => {
       expect(
         broker.core.list({ all: true }).filter((e) => e.harness === "claude-code" && e.address.startsWith("me/claude-hook-project-") && !e.parent),
       ).toEqual([])
+      reader.releaseLock()
     } finally {
-      client.close()
+      shim.stdin.end()
+      await shim.exited
     }
   })
 
-  test("with $SCP_SESSION, reconnecting in the harness process keeps the endpoint its hooks post to under the explicit name", async () => {
+  test("with $SCP_SESSION, a shim restarted in its harness process keeps the endpoint its hooks post to, under the shim's --as name", async () => {
     const env = { SCP_DIR: dir, SCP_SESSION: "restart-1", CLAUDECODE: "1" }
     const whoami = async () => {
-      const { client, hello } = await sessionClient("restart-lane", env)
-      client.close()
-      return hello.endpoint!.address
+      const shim = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", "--as", "restart-lane"], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: cleanEnv(env),
+        cwd: project,
+      })
+      shim.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
+      shim.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "relay_whoami", arguments: {} } })}\n`)
+      shim.stdin.flush()
+      const reader = shim.stdout.getReader()
+      let out = ""
+      while (!out.includes('"id":1')) out += new TextDecoder().decode((await reader.read()).value)
+      reader.releaseLock()
+      shim.stdin.end()
+      await shim.exited
+      return /address: (me\/[a-z0-9._-]+)/.exec(out)?.[1] ?? out
     }
     expect(await hook(["claude"], { hook_event_name: "SessionStart", cwd: project, source: "startup" }, env)).toMatchObject({ code: 0 })
     const hooked = endpoint(broker.core.activity({ limit: 1 })[0]!.endpoint)!.id
@@ -500,29 +522,43 @@ describe("swarm hook", () => {
     ])
   })
 
-  test("a named client reuses its hook's session and activity while preserving another live agent's name", async () => {
+  test("a shim whose hooks claimed the session first still gets the --as name a shim alone gets, never another live agent's, keeping the hooks' activity", async () => {
     const live = broker.core.claim({ handle: "taken-lane", harness: "claude-code", session: "pid:9999", process: "pid:9999:Mon-Oct-12-09:00:00-2026" })
+    const shimAs = async (env: Record<string, string>) => {
+      const shim = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", "--as", "taken-lane"], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: cleanEnv(env),
+        cwd: project,
+      })
+      shim.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
+      shim.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "relay_whoami", arguments: {} } })}\n`)
+      shim.stdin.flush()
+      const reader = shim.stdout.getReader()
+      let out = ""
+      while (!out.includes('"id":1')) out += new TextDecoder().decode((await reader.read()).value)
+      reader.releaseLock()
+      shim.stdin.end()
+      await shim.exited
+      return /address: (me\/[a-z0-9._-]+)/.exec(out)?.[1] ?? out
+    }
     const hooksFirst = { SCP_DIR: dir, SCP_SESSION: "race-hooks-first", CLAUDECODE: "1" }
     expect(await hook(["claude"], { hook_event_name: "SessionStart", cwd: project, source: "startup" }, hooksFirst)).toMatchObject({ code: 0 })
     const hooked = endpoint(broker.core.activity({ limit: 1 })[0]!.endpoint)!
     expect(hooked.address).toStartWith("me/claude-hook-project")
     expect(await hook(["claude"], { hook_event_name: "UserPromptSubmit", cwd: project, prompt: "go" }, hooksFirst)).toMatchObject({ code: 0 })
-    const { client, hello } = await sessionClient("taken-lane", hooksFirst)
-    try {
-      const named = hello.endpoint!.address
-      expect(named).toBe("me/taken-lane-2")
-      expect(endpoint(named)!.id).toBe(hooked.id)
-      expect(
-        await hook(["claude"], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Grep", tool_input: { pattern: "x" } }, hooksFirst),
-      ).toMatchObject({ code: 0 })
-      expect(rows(named).map((r) => [r.kind, r.tool])).toEqual([
-        ["session_start", null],
-        ["tool", "Grep"],
-      ])
-      expect(broker.core.whoami(live.endpoint.id).address).toBe("me/taken-lane")
-    } finally {
-      client.close()
-    }
+    const named = await shimAs(hooksFirst)
+    expect(named).toBe("me/taken-lane-2")
+    expect(endpoint(named)!.id).toBe(hooked.id)
+    expect(await hook(["claude"], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Grep", tool_input: { pattern: "x" } }, hooksFirst)).toMatchObject(
+      { code: 0 },
+    )
+    expect(rows(named).map((r) => [r.kind, r.tool])).toEqual([
+      ["session_start", null],
+      ["tool", "Grep"],
+    ])
+    expect(broker.core.whoami(live.endpoint.id).address).toBe("me/taken-lane")
   })
 
   test("an agy hook prints exactly {} on stdout, on success and on every failure path", async () => {
