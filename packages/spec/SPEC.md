@@ -265,6 +265,8 @@ An endpoint row holds at least: `id`, `handle`, `kind`, `harness`, `model`, `cwd
 
 - A handle MUST match `^[a-z0-9][a-z0-9._-]{0,62}$` and MUST NOT be `user`, `me` or `relay`.
 - A harness name MUST match `^[a-z0-9][a-z0-9-]{0,31}$`. A claim without a harness uses `cli`; a claim without a handle uses the harness name.
+- `cli`, `hook`, `mcp` and `shell` are generic harness names: they name the path a claim came by, not the agent. A claim of any harness counts as the same harness as a generic row for a takeover and a session join, and the row takes the claim's harness: a row created generic heals on its next specific claim. A generic claim never replaces a non-generic harness.
+- A harness integration that names no harness and detects none from the harness's environment SHOULD infer it from the harness process's command line (its program, or the script an interpreter runs) before falling back to a generic name.
 - Handles, titles, status notes and claim fields are scanned for credentials (section 7.8). A match is refused `secret_refused`.
 
 ### 6.3 Addresses
@@ -297,7 +299,7 @@ A client that wants an endpoint sends a claim in `hello`:
 | Field | Type | Effect |
 | --- | --- | --- |
 | `handle` | string? | The wanted handle. |
-| `harness` | string? | The harness name. A takeover requires the same harness. |
+| `harness` | string? | The harness name. A takeover requires the same harness, or a generic one (section 6.2). |
 | `model`, `cwd`, `parent` | string? | Stored for display. |
 | `labels` | object? | Up to 16 string labels. |
 | `session` | string? | A harness session key. A hook and an MCP server of one session share one endpoint through it. |
@@ -312,7 +314,7 @@ A client that wants an endpoint sends a claim in `hello`:
 Processing rules:
 
 1. **Session join.** A claim whose `session` names an endpoint that is not offline joins that endpoint. A connecting (non-hook) claim joins only when the row has no connection and is held by the same harness process. When the connecting claim names a different handle than the hooks registered, the hooks' endpoint is renamed to it, or an eligible offline row of that handle is taken and the hooks' unread messages move to it, unless the session named its endpoint itself (section 6.12): such a row keeps its handle and the claim joins it.
-2. **Handle search.** The broker tries the wanted handle, then `<wanted, at most 58 characters>-<n>` for n from 2 to 999. A free handle creates a new row. An existing row is taken over only when it is an agent with no connections, offline, of the same harness, not a subagent root, and the claim either restarts it in place (same `parent_ep`, both roots, or a root claim of a linked row, section 6.12) or redeems its grant. A hook's takeover additionally requires the same harness process, an ended hook session, or `last_seen` older than `LIMITS.restartGraceS`.
+2. **Handle search.** The broker tries the wanted handle, then `<wanted, at most 58 characters>-<n>` for n from 2 to 999. A free handle creates a new row. An existing row is taken over only when it is an agent with no connections, offline, of the same harness (or a generic one, section 6.2), not a subagent root, and the claim either restarts it in place (same `parent_ep`, both roots, or a root claim of a linked row, section 6.12) or redeems its grant. A hook's takeover additionally requires the same harness process, an ended hook session, or `last_seen` older than `LIMITS.restartGraceS`.
 3. **Handle reuse.** A connectionless row idle longer than `LIMITS.handleBoundS` (30 days) is renamed out of the way (`_gone_<id>`) and its handle becomes free. The sweep deletes such rows once nothing references them.
 4. **Placement.** The endpoint is placed under the shallowest, then oldest, agent whose `process` equals the first lineage key that any agent holds. With no match it is a root. `depth` is the parent's depth plus one. A depth above `LIMITS.depthMax` (32) is refused `scope_refused`. A grant overrides lineage placement (section 9.1).
 5. **Token.** A new non-hook session receives a resume token `kre_<64 hex>`; the broker stores only its hash. `hello {resume}` with that token rebinds the session; an unknown token is `unauthorized`.
@@ -686,7 +688,7 @@ Pull is sufficient for conformance. Push is what makes delivery native and is RE
 
 `inject {}` returns fresh deliveries: unacknowledged, unexpired, never injected and not under an offer hold.
 
-- **Budget.** Oldest first, at most `LIMITS.injectMessages` (5) messages and at most `LIMITS.injectBytes` (4096) bytes of wrapped text per injection. A single message larger than the byte budget is offered but not shown; it stays unread for the inbox. A message from one of the session's live workers that fits `LIMITS.pushBytes` is left for the stop push (section 8.6) to show whole.
+- **Budget.** Oldest first, at most `LIMITS.injectMessages` (5) messages and at most `LIMITS.injectBytes` (7168) bytes of wrapped text per injection. A single message larger than the byte budget is offered but not shown; it stays unread for the inbox. A message from one of the session's live workers that fits `LIMITS.pushBytes` is left for the stop push (section 8.6) to show whole.
 - **Wait.** `inject {wait_s}` (a wake) blocks up to `wait_s` seconds (at most `LIMITS.waitMaxS`) until it has a delivery to offer, and offers a live worker's message rather than leaving it for the stop push. A wake's showing is confirmed `deferred`, since the harness hands it to the model as the next turn.
 - **Offer hold.** Returned deliveries are offered under a hold id `hld_...` for `LIMITS.injectHoldS` (10 s). Other hooks and channel pushes skip offered deliveries. Offers not confirmed in time become fresh again.
 - **Confirmation.** After printing, the hook sends `injected {seqs, hold, read, deferred?, preamble?, intro?}`. `seqs` are all offered seqs; `read` are those shown, which the broker acknowledges. Offered but unshown seqs are marked injected and stay unacknowledged. `preamble: true` records that the session saw the full preamble. `deferred: true` marks a showing the harness hands the model only later: the acknowledged deliveries stay listed by `inbox` until the showing settles, and count as delivered rather than read (sections 7.11, 7.13).
@@ -1618,7 +1620,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `onlineWithinS` | 60 | `hookOnlineS` | 300 |
 | `hookIdleS` | 1800 | `hookEndedGraceS` | 30 |
 | `restartGraceS` | 60 | `injectMessages` | 5 |
-| `injectBytes` | 4096 | `pushBytes` | 20480 |
+| `injectBytes` | 7168 | `pushBytes` | 20480 |
 | `pushes` | 20 | `pushGapS` | 30 |
 | `pushQuietS` | 3 | `pushGraceS` | 6 |
 | `stopBlocks` | 3 | `directiveHolds` | 5 |
@@ -1662,6 +1664,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `ask-wait <id> [--wait <s>]` | `ask_wait` |
 | `inbox [--wait <s>] [--keep]` | `inbox`, `ack` |
 | `ack <ref>... or --all` | `message`, `ack` |
+| `show <ref>` | `message`; prints one delivered message whole, read state unchanged |
 | `status [--all] [--activity]`, `watch`, `log [--since] [--limit] [--scope] [--judge] [--peek]` | `snapshot`, `watch`, `log` |
 | `set-status <state> [note]`, `set-now <text>`, `set-title <text>`, `event <kind>` | `status`, `title`, `event` |
 | `rules show or set or widen or lift [--in] [--out] [--scope] [--allow]`, `why <from> <to>` | `rules*`, `why` |
@@ -1721,6 +1724,8 @@ All hooks run `swarm hook <harness> [event] [--block-stop-on-unread] [--push-wai
 | Gemini / Antigravity (agy) | SessionStart, PreInvocation (prompt), PostToolUse (activity only), Stop (only when the termination reason is `NO_TOOL_CALL`) | `{"injectSteps":[{"ephemeralMessage":<text>}]}`; `{}` when empty | `{"decision":"continue","reason":<text>}`; directives as a count and pointer | no | no |
 | pi | Extension: mounts `swarm mcp --harness pi --channels` and registers its tools as pi tools | none; messages arrive by channel push | none | no | no |
 | OpenCode | Plugin: tool execution (text appended to the tool output), chat message (synthetic text part), session created, session idle, session status | as Claude Code; prompt shows an unread pointer only | Emulated: on idle, a held stop's text is submitted as a new prompt | no | child sessions as activity |
+
+Claude Code passes on at most 8000 characters and 200 lines of a hook's `additionalContext`, and 2000 characters and 20 lines of a `reason`, cutting longer text mid-line. The Claude Code hook fits its text within those caps itself: it cuts relay message bodies from the last one back, and ends each cut body with `[truncated, <n> more chars: swarm show <short id>]`, so the agent can read the whole message.
 
 The pi extension (`@scp-dev/pi`, bundled in the CLI and run by `swarm pi [--name N]`) declares the `claude/channel` capability and hands each pushed message to pi as a custom message with `deliverAs: "steer"` and `triggerTurn: true`: it steers a running turn after its tool calls, and starts a turn on an idle session. A resumed session (`pi --continue`, `pi --session <id>`) receives the messages that arrived while it was closed.
 

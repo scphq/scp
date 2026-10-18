@@ -38,6 +38,9 @@ import {
   type StopNudge,
   type StopWaitResult,
   type ThreadMessage,
+  GENERIC_HARNESSES,
+  harnessFits,
+  keptHarness,
   validHandle,
   validHarness,
   type Wake,
@@ -69,6 +72,8 @@ import { handbackOutput } from "./handback"
 import { findSecret, redactSecrets } from "./scrub"
 import { one, type Sql, type SqlValue } from "./sql"
 import { utf8Bytes } from "./utf8"
+
+const GENERIC_SQL = `harness IN (${[...GENERIC_HARNESSES].map((h) => `'${h}'`).join(", ")})`
 
 export const HUMAN_HANDLE = "_human"
 /** an agent title's length cap */
@@ -811,7 +816,7 @@ export class RelayCore {
     let row = fields.session
       ? one<EndpointRow>(
           this.sql,
-          `SELECT * FROM endpoints WHERE kind = 'agent' AND harness = ?
+          `SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR ${GENERIC_SQL})
            AND (session = ? OR (? = 1 AND substr(session, 1, ?) = ? AND (connections = 0 OR hook_seen >= ?)))
            AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY COALESCE(last_seen, created_at) DESC LIMIT 1`,
           harness,
@@ -848,7 +853,7 @@ export class RelayCore {
         if (!held) {
           this.sql.all(`UPDATE endpoints SET handle = ? WHERE id = ?`, handle, hooks.id)
           settled = true
-        } else if (held.kind === "agent" && held.connections === 0 && presenceOf(held, now) === "offline" && held.harness === harness) {
+        } else if (held.kind === "agent" && held.connections === 0 && presenceOf(held, now) === "offline" && harnessFits(held.harness, harness)) {
           if (this.restarts(held, this.placement(scope, now).parent, fields.process) || this.redeems(held, scope, { harness, ...fields })) {
             ;({ moved, stopBlocks } = this.leaveHooks(hooks, held.id))
             row = undefined
@@ -881,7 +886,7 @@ export class RelayCore {
         held.kind === "agent" &&
         held.connections === 0 &&
         presenceOf(held, now) === "offline" &&
-        held.harness === harness &&
+        harnessFits(held.harness, harness) &&
         held.id !== scope.subagent?.root &&
         !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
       ) {
@@ -897,7 +902,7 @@ export class RelayCore {
         held.kind === "agent" &&
         held.process === null &&
         held.session === null &&
-        held.harness === harness &&
+        harnessFits(held.harness, harness) &&
         this.restarts(held, this.placement(scope, now).parent, null)
       ) {
         row = held
@@ -924,7 +929,7 @@ export class RelayCore {
        stop_blocks = CASE WHEN ? IS NOT NULL THEN ? WHEN ? IS NOT NULL AND session IS NOT ? THEN 0 ELSE stop_blocks END,
        briefed = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE briefed END, introduced = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE introduced END,
        directive_holds = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE directive_holds END WHERE id = ?`,
-      harness,
+      keptHarness(row.harness, harness),
       fields.model,
       fields.cwd,
       fields.parent,
@@ -1062,7 +1067,7 @@ export class RelayCore {
     if ((held.session !== null || held.process !== null) && presenceOf(held, now) !== "offline") {
       return new RelayError("unauthorized", `${handle} is held by a live ${held.harness} session: act as it from that session's own shell, no --as needed`)
     }
-    if (held.harness !== harness) return new RelayError("unauthorized", `${handle} is a ${held.harness} endpoint: pass --harness ${held.harness}`)
+    if (!harnessFits(held.harness, harness)) return new RelayError("unauthorized", `${handle} is a ${held.harness} endpoint: pass --harness ${held.harness}`)
     return new RelayError("unauthorized", `${handle} is placed in another tree or under another parent than this shell`)
   }
 
@@ -1132,7 +1137,7 @@ export class RelayCore {
     const spent = this.spentGrant(scope)
     if (spent?.used_by !== row.id) return false
     const lineage = this.lineageParent(scope.lineage)
-    if (!lineage) return row.harness === claimant.harness && spent.spent_cwd !== null && spent.spent_cwd === claimant.cwd
+    if (!lineage) return harnessFits(row.harness, claimant.harness) && spent.spent_cwd !== null && spent.spent_cwd === claimant.cwd
     return this.restarts(row, lineage, claimant.process) || this.ancestorsOf(row).includes(lineage.id)
   }
 

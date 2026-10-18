@@ -18,7 +18,7 @@ swarm up
 swarm cloud status
 ```
 
-`swarm up` logs in if needed, links this machine's broker to the org hub and runs `swarm setup --write`. The login opens the relay's device page in your browser and prints a code. Check that the page shows the same code and approve it. The credential goes in `~/.config/scp/credentials.json`. Run it before you start any agent session: a broker that was already running stays local-only until it exits.
+`swarm up` logs in if needed, links this machine's broker to the org hub and runs `swarm setup --write`, which installs the hooks and the MCP server in every installed harness. It ends by printing the wake-enabled launch command of each harness it found. The login opens the relay's device page in your browser and prints a code. Check that the page shows the same code and approve it. The credential goes in `~/.config/scp/credentials.json`. Run it before you start any agent session: a broker that was already running stays local-only until it exits.
 
 | Where you are | Command |
 | --- | --- |
@@ -32,7 +32,13 @@ Once linked, agents on your own other devices show up as `me/<machine>/<handle>`
 
 ## Hooks and MCP
 
-Each harness needs the MCP server (pull: the model calls `relay_send`, `relay_inbox`, `relay_reply`) and the hooks (push: messages enter the model's context after tools, on prompts and at stops). `swarm up` installs both, at user scope, in every installed harness. `swarm setup` prints that plan without applying it.
+Each harness needs the MCP server (pull: the model calls `relay_send`, `relay_inbox`, `relay_reply`) and the hooks (push: messages enter the model's context after tools, on prompts and at stops). `swarm up` installs both, at user scope, in every installed harness. To verify, run:
+
+```sh
+swarm setup
+```
+
+It prints the plan without applying it: once the hooks and mounts are in place, there is nothing left to do. Harnesses read hooks only at session start, so restart sessions started before the install.
 
 To install one harness at a time instead:
 
@@ -46,15 +52,18 @@ swarm mcp install --harness claude              # print the command that mounts 
 
 ## A first swarm
 
-Start a named orchestrator session:
+Start each session wake-enabled, so a peer's message wakes it even while it waits for input:
 
-```sh
-swarm claude --name lead
-```
+| Harness | Command | How it wakes |
+| --- | --- | --- |
+| Claude Code | `swarm claude --name lead` | the scp channel pushes each message |
+| Codex | `swarm codex --name impl` | messages start a turn on an idle thread or steer a running one |
+| pi | `swarm pi --name scout` | the bundled SCP extension hands each message to pi as a turn |
+| OpenCode | `opencode` | the scp plugin `swarm up` installed submits new messages as a prompt (on by default; `SCP_WAKE=0` turns it off) |
 
-`swarm claude` starts Claude Code with the scp channel loaded, so peer messages wake it even while it is idle. Its hooks join it to the relay as `me/lead`.
+The hooks join the session to the relay under its name, for example `me/lead`.
 
-A session that is already running joins from its own shell, so you can tell any session:
+A session that is already running joins from its own shell, so you can tell any session. It then sees messages only at turn boundaries: after a tool call, on a prompt and at a stop. An idle one stays asleep until you relaunch it wake-enabled as above.
 
 ```sh
 swarm join lead     # put this session on the relay as me/lead

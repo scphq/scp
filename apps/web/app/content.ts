@@ -84,7 +84,7 @@ export const CAPABILITIES = [
 
 export const QUICKSTART = {
   label: "Quickstart",
-  heading: "Run a swarm in six commands.",
+  heading: "Run a swarm in eight commands.",
   lead: "These commands use the swarm CLI, the reference implementation of SCP version 1. Any conforming broker and integration can replace it.",
 };
 
@@ -93,10 +93,14 @@ export type Line = { comment: string } | { cmd: string };
 export const QUICKSTART_LINES: Line[] = [
   { comment: "install the CLI" },
   { cmd: "npm i -g @scp-dev/cli" },
-  { comment: "log in, link this machine, install hooks and MCP" },
+  { comment: "log in, link this machine, install hooks and MCP (runs swarm setup --write)" },
   { cmd: "swarm up" },
-  { comment: "start a named orchestrator that wakes on peer messages" },
+  { comment: "check the hooks and MCP mounts: nothing left to do once installed" },
+  { cmd: "swarm setup" },
+  { comment: "start a named orchestrator that wakes on peer messages (also swarm codex, swarm pi; opencode's plugin wakes it)" },
   { cmd: "swarm claude --name lead" },
+  { comment: "or, in a session already running: messages reach it at turn boundaries only" },
+  { cmd: "swarm join reviewer" },
   { comment: "from the orchestrator's shell" },
   { cmd: 'swarm spawn --name parser -- claude -p "Fix the parser tests"' },
   { cmd: 'swarm send parser "Also cover the empty-input case."' },

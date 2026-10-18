@@ -226,6 +226,17 @@ describe("claimOn and resumeOn", () => {
     expect(code(() => hub.resumeOn("ci", live.token!))).toBe("unauthorized")
   })
 
+  test("a direct claim heals a generic row to its harness and never turns a known one generic", () => {
+    const { hub } = pair()
+    const shell = hub.claimOn("ci", { handle: "impl", exact: true })
+    expect(shell.endpoint.harness).toBe("cli")
+    hub.disconnect(shell.endpoint.id)
+    const healed = hub.claimOn("ci", { handle: "impl", harness: "codex", exact: true })
+    expect([healed.endpoint.id, healed.endpoint.harness]).toEqual([shell.endpoint.id, "codex"])
+    hub.disconnect(healed.endpoint.id)
+    expect(() => hub.claimOn("ci", { handle: "impl", harness: "cli", exact: true })).toThrow(/codex endpoint/)
+  })
+
   test("a mirrored row offline past the bound is retired for a new claim", () => {
     const { hub, hubClock } = pair()
     hub.mirror("ci", [view("me/impl", { presence: "offline", last_seen: new Date(START).toISOString() })])

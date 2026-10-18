@@ -40,6 +40,8 @@ import {
   SYSTEM_HANDLE,
   seqList,
   unreachable,
+  harnessFits,
+  keptHarness,
   validHandle,
   validHarness,
   validSelector,
@@ -734,7 +736,7 @@ export class FederatedCore extends RelayCore {
           this.checkCap()
           row = this.byId(this.insertRemote(`${machine}/${handle}`, "agent", harness, auth, now)) as FederatedRow
           created = true
-        } else if (held.kind === "agent" && held.connections === 0 && held.harness === harness) {
+        } else if (held.kind === "agent" && held.connections === 0 && harnessFits(held.harness, harness)) {
           row = held
         } else if (
           exact &&
@@ -743,7 +745,7 @@ export class FederatedCore extends RelayCore {
           held.process === null &&
           held.session === null &&
           held.parent_ep === null &&
-          held.harness === harness
+          harnessFits(held.harness, harness)
         ) {
           row = held
           joined = true
@@ -764,7 +766,7 @@ export class FederatedCore extends RelayCore {
       const token = joined ? undefined : `kre_${randomHex(32)}`
       this.sql.all(
         `UPDATE endpoints SET harness = ?, model = ?, cwd = ?, parent = ?, labels = ?, token_hash = ${token ? "?" : "token_hash"}, auth = ?, connections = connections + 1, last_seen = ? WHERE id = ?`,
-        harness,
+        keptHarness(row.harness, harness),
         fields.model,
         fields.cwd,
         fields.parent,

@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { hostMachine } from "./remote"
 import { configDir, readCredentials, saveCredential } from "./relay"
 import { waitFor } from "./testing/fixtures"
+import { nextSteps } from "./up"
 
 const TOKEN = "scp_d_test-device-secret"
 const API_TOKEN = "scp_t_test-api-secret"
@@ -219,4 +220,15 @@ describe("swarm login", () => {
     }
     expect(existsSync(join(configDir(f.env), "config.json"))).toBe(true)
   })
+})
+
+test("swarm up ends with the wake-enabled launch of each installed harness, join for a running session, and setup to check", () => {
+  const lines = nextSteps(new Set(["claude", "opencode", "grok"]))
+  expect(lines[0]).toBe("next: start each agent session wake-enabled:")
+  expect(lines.some((line) => line.includes("swarm claude --name <name>"))).toBe(true)
+  expect(lines.some((line) => line.trim().startsWith("opencode"))).toBe(true)
+  expect(lines.some((line) => line.includes("swarm codex") || line.includes("swarm pi"))).toBe(false)
+  expect(lines.at(-2)).toContain("swarm join <name>")
+  expect(lines.at(-1)).toContain("swarm setup")
+  expect(nextSteps(new Set(["codex", "pi"])).filter((line) => /swarm (codex|pi) --name <name>/.test(line))).toHaveLength(2)
 })

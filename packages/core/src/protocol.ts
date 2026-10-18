@@ -34,7 +34,7 @@ export const LIMITS = {
   hookEndedGraceS: 30,
   restartGraceS: 60,
   injectMessages: 5,
-  injectBytes: 4096,
+  injectBytes: 7168,
   pushBytes: 20480,
   /** the stops a session's push may continue between two prompts */
   pushes: 20,
@@ -142,6 +142,21 @@ export function validHandle(handle: string): boolean {
 
 export function validHarness(harness: string): boolean {
   return HARNESS.test(harness)
+}
+
+/** harness names of the path a claim came by (a bare CLI, hook or MCP shim), not of the agent behind it */
+export const GENERIC_HARNESSES: ReadonlySet<string> = new Set(["cli", "hook", "mcp", "shell"])
+
+const generic = (harness: string | null): boolean => harness === null || GENERIC_HARNESSES.has(harness)
+
+/** whether a claim of harness `claimed` may take a row of harness `held`: the same harness, or a generic row, which heals to the claim's */
+export function harnessFits(held: string | null, claimed: string): boolean {
+  return held === claimed || generic(held)
+}
+
+/** the harness a claimed row keeps: the claim's, except that a generic claim never replaces a known harness */
+export function keptHarness(held: string | null, claimed: string): string {
+  return generic(claimed) && !generic(held) ? held! : claimed
 }
 
 export interface Claim {

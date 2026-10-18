@@ -1,7 +1,7 @@
 import { CLI_NAME } from "@scp-dev/core"
 import { connectBroker, readSessionMarker, relayDir } from "@scp-dev/broker"
 import { localHandle, RelayUsage, startDaemon, walkNow } from "./common"
-import { relayIdentity, sessionKey } from "./identity"
+import { harnessAt, relayIdentity, sessionKey } from "./identity"
 
 type Values = { harness?: unknown; json?: unknown; under?: unknown }
 
@@ -26,6 +26,7 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
     cwd,
     env: process.env,
     harnessPid: () => Number(match[1]),
+    inferHarness: (pid) => harnessAt(pid),
     startOf: () => match[2],
     lineageOf: () => keys.slice(Math.max(0, keys.indexOf(key!))),
   })
