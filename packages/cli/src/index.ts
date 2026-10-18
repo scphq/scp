@@ -1,1 +1,1 @@
-export const BIN = "swarm";
+export const BIN = "swarm"

@@ -55,13 +55,19 @@ jobs:
       - name: Build packages
         run: bun run build:packages
 
-      - name: Import every package entry in plain Node
+      - name: Import every package entry and run every bin in plain Node
         run: |
           for dir in packages/*/; do
             if [ -d "$dir/dist" ]; then
               name=$(node -p "require('./$dir/package.json').name")
-              (cd "$dir" && node --input-type=module -e "await import('$name')")
-              echo "imported $name"
+              bin=$(node -p "Object.values(require('./$dir/package.json').bin ?? {})[0] ?? ''")
+              if [ -n "$bin" ]; then
+                (cd "$dir" && node "$bin" --version)
+                echo "ran $name"
+              else
+                (cd "$dir" && node --input-type=module -e "await import('$name')")
+                echo "imported $name"
+              fi
             fi
           done
 
