@@ -240,7 +240,7 @@ describe("org overview", () => {
         : null;
     }, "both machines on the overview");
     expect(page).not.toContain("Connect your first machine");
-    expect(page).toMatch(/<h3 class="mono">laptop<\/h3>[\s\S]*<span class="mono">lead<\/span>[\s\S]*claude-code[\s\S]*overview page/);
+    expect(page).toMatch(/<h3 class="mono">laptop<\/h3>[\s\S]*aria-label="claude-code"[\s\S]*<span class="mono">lead<\/span>[\s\S]*overview page/);
     expect(page).toMatch(/<h3 class="mono">runner<\/h3>[\s\S]*<span class="mono">bot<\/span>[\s\S]*<span class="tag">token=ambient<\/span>/);
     expect(page).toMatch(/<span class="role">working<\/span> <span class="small">wiring the overview<\/span>/);
     expect(page).toMatch(/laptop\/lead[\s\S]*?Bash: bun test/);
