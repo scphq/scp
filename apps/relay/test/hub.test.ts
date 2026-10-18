@@ -274,4 +274,46 @@ describe("org overview", () => {
     expect(page).toMatch(/laptop\/lead[\s\S]*?Bash: bun test/);
     expect(page).toContain("2 machines, 2 online, 2 agents");
   });
+
+  test("the overview carries a live graph of the agents with spawn and message edges, counts only, and its script", async () => {
+    const owner = new Browser(relay);
+    await owner.signIn("graph-owner@example.com");
+    await owner.post("/orgs", { handle: "graphco" });
+    const device = await deviceLogin(owner, "laptop");
+    const origin = await relay.listening();
+    const laptop = await machine(origin, "laptop", device);
+    const desk = await machine(origin, "desk", device);
+    const lead = await agent(laptop, "lead");
+    await agent(desk, "review");
+    await waitFor(async () => {
+      const { endpoints } = await lead.request<{ endpoints: { address: string }[] }>("list");
+      return endpoints.some((e) => e.address.endsWith("/desk/review"));
+    }, "desk/review on the laptop");
+    await lead.request("send", { to: "graphco/desk/review", body: "a private plan" });
+    await lead.request("send", { to: "graphco/desk/review", body: "a second private plan" });
+
+    type Edge = { kind: string; from: string; to: string; count?: number; last_at?: string };
+    const data = await waitFor(async () => {
+      const text = await (await owner.get("/orgs/graphco")).text();
+      const json = /<script type="application\/json" data-graph-data>([\s\S]*?)<\/script>/.exec(text)?.[1];
+      const g = json ? (JSON.parse(json) as { nodes: { address: string; machine: string; label: string }[]; edges: Edge[] }) : null;
+      return g?.edges.some((e) => e.kind === "message" && e.count === 2) ? { text, g } : null;
+    }, "a message edge on the graph");
+    expect(data.text).toMatch(/<script src="\/graph\.js\?v=[a-z0-9]+" defer><\/script>/);
+    expect(data.text).toMatch(/<link rel="stylesheet" href="\/graph\.css\?v=[a-z0-9]+">/);
+    expect(data.text).toContain("data-graph hidden");
+    expect(data.text).toContain('data-view-set="table"');
+    expect(data.text).not.toContain("private plan");
+    expect(data.g.nodes.find((n) => n.label === "lead")).toMatchObject({ machine: "laptop" });
+    expect(data.g.edges.find((e) => e.kind === "message")).toMatchObject({
+      count: 2,
+      from: expect.stringContaining("/laptop/lead"),
+      to: expect.stringContaining("/desk/review"),
+    });
+
+    const js = await relay.fetch("/graph.js");
+    expect(js.headers.get("content-type")).toStartWith("text/javascript");
+    expect(await js.text()).toContain("[data-graph-data]");
+    expect(await (await relay.fetch("/graph.css")).text()).toContain(".graph-svg");
+  });
 });

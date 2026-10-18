@@ -1,5 +1,5 @@
 import type { ActivityRow, EndpointView } from "@scp-dev/core";
-import type { MachineRow } from "@scp-dev/hub";
+import type { HubGraph, MachineRow } from "@scp-dev/hub";
 import { authenticate } from "../credentials";
 import type { Env } from "../env";
 import { json } from "../util";
@@ -56,6 +56,21 @@ export async function hubOverview(env: Env, orgId: string): Promise<Overview | n
     return (await res.json()) as Overview;
   } catch (e) {
     console.error("scp-relay hub overview failed", e);
+    return null;
+  }
+}
+
+/** the org hub's live graph: endpoints, spawn edges and message counts over the last `minutes`, no bodies; null when the hub does not answer */
+export async function hubGraph(env: Env, orgId: string, minutes?: number): Promise<HubGraph | null> {
+  try {
+    const res = await hubStub(env, orgId).fetch(`${INTERNAL}/graph${minutes === undefined ? "" : `?minutes=${minutes}`}`);
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    return (await res.json()) as HubGraph;
+  } catch (e) {
+    console.error("scp-relay hub graph failed", e);
     return null;
   }
 }

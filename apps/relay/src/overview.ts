@@ -1,7 +1,8 @@
 import { type ActivityRow, type EndpointView, GONE_PREFIX } from "@scp-dev/core";
 import type { MachineRow } from "@scp-dev/hub";
 import type { User } from "./env";
-import { type Overview, hubOverview } from "./hub/routes";
+import { GRAPH_CSS, graphData, graphScript, graphShell } from "./graph";
+import { hubGraph, hubOverview, type Overview } from "./hub/routes";
 import { Html, html, stamp } from "./html";
 import { notice, orgHeader, requireMember } from "./orgs";
 import { type Ctx, page } from "./web";
@@ -70,7 +71,7 @@ function presence(e: Listed): { cell: Html; tip: string } {
   };
 }
 
-const ICON_PATHS: Record<string, string> = {
+export const ICON_PATHS: Record<string, string> = {
   claude: '<path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
   codex:
     '<path d="M8 1.5 13.6 4.75v6.5L8 14.5l-5.6-3.25v-6.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M6 6.5 7.75 8 6 9.5M8.75 10h1.75" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -280,17 +281,18 @@ export function liveRegion(o: Overview | null, handle: string, now: number): Htm
 
 export async function overviewPage(ctx: Ctx, user: User, handle: string): Promise<Response> {
   const m = await requireMember(ctx.env.DB, handle, user.id);
-  const o = await hubOverview(ctx.env, m.org.id);
+  const [o, g] = await Promise.all([hubOverview(ctx.env, m.org.id), hubGraph(ctx.env, m.org.id)]);
   return page(
     ctx,
     {
       title: m.org.name,
       nav: "orgs",
       wide: true,
-      head: html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script><noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>`,
+      head: html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script><script src="/graph.js?v=${stamp(graphScript())}" defer></script><link rel="stylesheet" href="/graph.css?v=${stamp(GRAPH_CSS)}"><noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>`,
     },
     html`${orgHeader(m, "overview")}
-      <div data-live="${REFRESH_MS}">${liveRegion(o, m.org.handle, ctx.now)}</div>`,
+      ${graphShell()}
+      <div data-live="${REFRESH_MS}">${liveRegion(o, m.org.handle, ctx.now)}${graphData(g)}</div>`,
   );
 }
 

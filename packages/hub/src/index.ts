@@ -13,6 +13,11 @@ export {
   type XEndpoint,
 } from "./federation"
 export {
+  GRAPH_MINUTES,
+  GRAPH_MINUTES_MAX,
+  type GraphEdge,
+  type GraphNode,
+  type HubGraph,
   HUB_LIMITS,
   RelayHub,
   type HubAuth,

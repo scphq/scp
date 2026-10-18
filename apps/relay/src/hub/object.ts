@@ -1,5 +1,5 @@
 import { sha256Hex, type Sql, type SqlValue } from "@scp-dev/core";
-import { type HubConn, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub";
+import { GRAPH_MINUTES, type HubConn, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import { GRANT_HEADER, grantValid, ORG_HEADER, parseGrant } from "./grant";
@@ -107,6 +107,11 @@ export class OrgHub extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/overview") {
       if (!(await this.ready())) return Response.json({ machines: [], endpoints: [], activity: [] });
       return Response.json(this.hub.overview());
+    }
+    if (request.method === "GET" && url.pathname === "/graph") {
+      const minutes = Number(url.searchParams.get("minutes") ?? GRAPH_MINUTES);
+      if (!(await this.ready())) return Response.json({ minutes: GRAPH_MINUTES, machines: [], nodes: [], edges: [] });
+      return Response.json(this.hub.graph(minutes));
     }
     const route = url.pathname === "/ws" && request.method === "GET" ? "ws" : url.pathname === "/rpc" && request.method === "POST" ? "rpc" : null;
     if (!route) return error(404, "not_found", "Not found.");

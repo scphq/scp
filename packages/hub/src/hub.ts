@@ -92,6 +92,34 @@ export interface MachineRow {
   last_seen: string | null
 }
 
+/** an endpoint as the dashboard graph draws it */
+export interface GraphNode {
+  address: string
+  kind: EndpointKind
+  harness: string | null
+  title: string | null
+  presence: Presence
+  status: EndpointView["status"]
+  last_seen: string | null
+  parent: string | null
+  wake?: string | null
+}
+
+/** `spawn`: parent to child; `message`: sender to recipient, with the count and newest send in the graph's window */
+export type GraphEdge = { kind: "spawn"; from: string; to: string } | { kind: "message"; from: string; to: string; count: number; last_at: string }
+
+export interface HubGraph {
+  /** the window message edges count over */
+  minutes: number
+  machines: MachineRow[]
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+/** the default and widest window of message edges; the core keeps an hour of sender and recipient pairs */
+export const GRAPH_MINUTES = 15
+export const GRAPH_MINUTES_MAX = 60
+
 export interface HubSocket {
   conn: HubConn
   send(text: string): void
@@ -1471,6 +1499,39 @@ export class RelayHub {
   overview(activity = 20): { machines: MachineRow[]; endpoints: EndpointView[]; activity: ActivityRow[] } {
     const { endpoints, activity: rows } = this.relay.snapshot({ activity })
     return { machines: this.machineList(), endpoints, activity: rows }
+  }
+
+  /** a read-only graph for a dashboard: listed endpoints, spawn edges among them, and message counts per sender and recipient; never a body */
+  graph(minutes = GRAPH_MINUTES): HubGraph {
+    const window = Math.min(Math.max(1, Math.floor(Number.isFinite(minutes) ? minutes : GRAPH_MINUTES)), GRAPH_MINUTES_MAX)
+    const endpoints = this.relay.list() as (EndpointView & { wake?: string | null })[]
+    const byId = new Map(endpoints.map((e) => [e.id, e.address]))
+    const listed = new Set(byId.values())
+    const nodes: GraphNode[] = endpoints.map((e) => ({
+      address: e.address,
+      kind: e.kind,
+      harness: e.harness,
+      title: e.title,
+      presence: e.presence,
+      status: e.status,
+      last_seen: e.last_seen,
+      parent: e.parent ?? null,
+      ...(e.wake !== undefined ? { wake: e.wake } : {}),
+    }))
+    const edges: GraphEdge[] = nodes.flatMap((n) =>
+      n.parent && n.parent !== n.address && listed.has(n.parent) ? [{ kind: "spawn" as const, from: n.parent, to: n.address }] : [],
+    )
+    const pairs = this.deps.sql.all<{ from_ep: string; to_ep: string; n: number; last: number }>(
+      `SELECT from_ep, to_ep, COUNT(*) AS n, MAX(at) AS last FROM pair_events WHERE at > ? GROUP BY from_ep, to_ep`,
+      this.now() - window * 60_000,
+    )
+    const traffic: GraphEdge[] = pairs.flatMap((row) => {
+      const from = byId.get(row.from_ep)
+      const to = byId.get(row.to_ep)
+      return from && to && from !== to ? [{ kind: "message" as const, from, to, count: row.n, last_at: iso(row.last)! }] : []
+    })
+    edges.push(...traffic.sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to)))
+    return { minutes: window, machines: this.machineList(), nodes, edges }
   }
 
   private machineList(): MachineRow[] {
