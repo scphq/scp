@@ -10,13 +10,15 @@ type Bands = (
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
 const graphPath = "../src/graph";
 const identityPath = "../src/identity";
-const { BANDS_JS, DRAWN_JS }: { BANDS_JS: string; DRAWN_JS: string } = await import(graphPath);
+const { BANDS_JS, DRAWN_JS, SLOT_JS }: { BANDS_JS: string; DRAWN_JS: string; SLOT_JS: string } = await import(graphPath);
 const {
   identities,
   identify,
 }: { identities(m: { user_id: string; email: string }[]): Map<string, Identity>; identify(g: unknown, who: Map<string, Identity>): { machines: unknown[] } } =
   await import(identityPath);
 const bands = new Function(`${BANDS_JS}; return bands;`)() as Bands;
+type Extent = { x0: number; x1: number; y0: number; y1: number };
+const slot = new Function(`${SLOT_JS}; return slot;`)() as (e: Extent, w: number, h: number, min: number) => Extent;
 type Node = { address: string; kind: string; presence: string; wake: string | null };
 const drawn = new Function(`${DRAWN_JS}; return drawn;`)() as (n: Node, o: { offline: boolean; nextTurn: boolean }, talks: Set<string>) => boolean;
 
@@ -84,6 +86,35 @@ test("machines without an identity take no band, and a lone machine needs no hub
   expect(L.places.get("")).toEqual({ x: 0, y: 0 });
   expect(L.bands[0]).toMatchObject({ key: "", w: 140, h: 90 });
   expect(L.hub).toBeNull();
+});
+
+test("machine slots fit their labels, so empty machines with long labels and mixed widths never overlap", () => {
+  const o = { gap: 26, groupGap: 44, pad: 0, badge: 0, hub: 96, aspect: 1.6 };
+  const empty = { x0: 0, x1: 0, y0: 0, y1: 12 };
+  const machines = [
+    { name: "nebius-swarm-host", key: "vitor", e: empty, label: 330 },
+    { name: "vitors-macbook-pro", key: "vitor", e: empty, label: 360 },
+    { name: "laptop", key: "elia", e: { x0: -40, x1: 160, y0: -30, y1: 90 }, label: 120 },
+    { name: "x", key: "elia", e: empty, label: 20 },
+    { name: "build", key: "", e: { x0: -20, x1: 20, y0: -22, y1: 38 }, label: 280 },
+  ];
+  const items = machines.map((m) => {
+    const e = slot(m.e, m.label, 40, 96);
+    return { name: m.name, key: m.key, w: e.x1 - e.x0 + 40, h: e.y1 - e.y0 + 40 };
+  });
+  const L = bands(items, o);
+  const rects = items.map((it) => ({ ...L.places.get(it.name)!, w: it.w, h: it.h }));
+  machines.forEach((m, i) => {
+    expect(rects[i]!.w).toBeGreaterThanOrEqual(Math.max(m.label, 96, m.e.x1 - m.e.x0) + 40);
+  });
+  for (let i = 0; i < rects.length; i++)
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i]!;
+      const b = rects[j]!;
+      const apart = a.x + a.w + o.gap <= b.x || b.x + b.w + o.gap <= a.x || a.y + a.h + o.gap <= b.y || b.y + b.h + o.gap <= a.y;
+      expect(apart).toBe(true);
+    }
+  expect(L.places.get("vitors-macbook-pro")!.x).toBe(L.places.get("nebius-swarm-host")!.x + items[0]!.w + o.gap);
 });
 
 test("the graph shows online and wakeable idle by default, next-turn idle and offline only when asked", () => {

@@ -142,7 +142,7 @@ export const GRAPH_CSS = `
 .graph-svg .region.offline,.graph-svg .region-head.offline{opacity:.55}
 .graph-svg .mlabel{font-size:11px;font-weight:500;fill:var(--fg);paint-order:stroke;stroke:var(--surface);stroke-width:5px;stroke-linejoin:round}
 .graph-svg .mlabel .n{fill:var(--dim);font-weight:400}
-.graph-svg .mlabel .idn{fill:color-mix(in srgb,var(--id) 40%,var(--dim));font-weight:400}
+.graph-svg .mid{font-size:10px;fill:color-mix(in srgb,var(--id) 40%,var(--dim));paint-order:stroke;stroke:var(--surface);stroke-width:5px;stroke-linejoin:round}
 .graph-svg .mdot{fill:var(--bg);stroke:var(--faint)}
 .graph-svg .mdot.online{fill:var(--acc);stroke:var(--acc)}
 .graph-svg .empty-note{font-size:10.5px;fill:var(--faint)}
@@ -216,6 +216,11 @@ export const DRAWN_JS = `function drawn(n, o, talks) {
   return true;
 }`;
 
+/** a region's extent widened to fit its header (`w` wide, `h` tall) and a minimum width, so a slot is never narrower than its label */
+export const SLOT_JS = `function slot(e, w, h, min) {
+  return { x0: e.x0, x1: Math.max(e.x1, e.x0 + w, e.x0 + min), y0: e.y0 - h, y1: e.y1 };
+}`;
+
 export const BANDS_JS = `function bands(items, o) {
   const byKey = new Map();
   for (const it of items) { if (!byKey.has(it.key)) byKey.set(it.key, { key: it.key, items: [] }); byKey.get(it.key).items.push(it); }
@@ -270,8 +275,9 @@ const ICONS = ${JSON.stringify({ ...ICON_PATHS, human: HUMAN_ICON })};
 const MARK = ${JSON.stringify(MARK)};
 const COLORED = new Set(${JSON.stringify(COLORED)});
 const BOLT = "M9.5 1 3 9h4.5L6.5 15 13 7H8.5z";
-const R = 16, PAD = 20, HEAD = 26, GAP = 26, BAND_GAP = 44, LABEL_MAX = 132, CAP = 1.6;
+const R = 16, PAD = 20, HEAD = 26, ID_LINE = 14, GAP = 26, BAND_GAP = 44, LABEL_MAX = 132, NAME_MAX = 220, ID_MAX = 200, MIN_W = 96, CAP = 1.6;
 const TRAILS = [1, 0.5, 0.25];
+${SLOT_JS}
 ${BANDS_JS}
 ${DRAWN_JS}
 const svg = root.querySelector(".graph-svg");
@@ -314,18 +320,18 @@ let trail = TRAILS.includes(Number(load("scp.graph.trails"))) ? Number(load("scp
 
 const measure = document.createElement("canvas").getContext("2d");
 const widths = new Map();
-function textWidth(text, weight) {
-  const key = weight + "|" + text;
+function textWidth(text, weight, size = 11) {
+  const key = weight + "|" + size + "|" + text;
   if (!widths.has(key)) {
-    measure.font = weight + " 11px " + (getComputedStyle(document.documentElement).getPropertyValue("--mono") || "monospace");
+    measure.font = weight + " " + size + "px " + (getComputedStyle(document.documentElement).getPropertyValue("--mono") || "monospace");
     widths.set(key, measure.measureText(text).width);
   }
   return widths.get(key);
 }
-function fit(text) {
-  if (textWidth(text, 400) <= LABEL_MAX) return text;
+function fit(text, weight = 400, max = LABEL_MAX, size = 11) {
+  if (textWidth(text, weight, size) <= max) return text;
   let s = text;
-  while (s.length > 1 && textWidth(s + "…", 400) > LABEL_MAX) s = s.slice(0, -1);
+  while (s.length > 1 && textWidth(s + "…", weight, size) > max) s = s.slice(0, -1);
   return s + "…";
 }
 
@@ -438,22 +444,26 @@ function collide(P, B, mob) {
   return hit;
 }
 
+/** a region's header: the machine name and agent count, the identity on a second line, each cut to a sane width */
 function headOf(g) {
-  const name = g.name || "org";
-  const id = g.identity ? " · identity: " + g.identity.name : "";
+  const full = g.name || "org";
+  const name = fit(full, 500, NAME_MAX);
+  const id = g.identity ? fit("identity: " + g.identity.name, 400, ID_MAX, 10) : "";
   const count = g.nodes.length + (g.nodes.length === 1 ? " agent" : " agents") + (g.online ? "" : ", offline");
-  return { name, id, count, w: textWidth(name, 500) + textWidth(id, 400) + textWidth(count, 400) + 34 };
+  const w = Math.max(textWidth(name, 500) + 8 + textWidth(count, 400), id ? textWidth(id, 400, 10) : 0) + 34;
+  return { name, id, count, title: full + (g.identity ? "\\nidentity: " + g.identity.name : ""), w, h: HEAD + (id ? ID_LINE : 0) };
 }
 
-/** a region's extent around its own origin */
+/** a region's extent around its own origin, header included; an empty machine is one short row for its note */
 function extent(g) {
-  if (!g.nodes.length) return { x0: -70, x1: 70, y0: -HEAD - 34, y1: 34 };
+  const h = headOf(g);
+  if (!g.nodes.length) return slot({ x0: 0, x1: 0, y0: 0, y1: 12 }, h.w, h.h, MIN_W);
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const n of g.nodes) {
     const p = sim.get(n.address), b = box(n);
     x0 = Math.min(x0, p.x - b.hw); x1 = Math.max(x1, p.x + b.hw); y0 = Math.min(y0, p.y - b.up); y1 = Math.max(y1, p.y + b.down);
   }
-  return { x0, x1: Math.max(x1, x0 + headOf(g).w), y0: y0 - HEAD, y1 };
+  return slot({ x0, x1, y0, y1 }, h.w, h.h, MIN_W);
 }
 
 /** regions with one identity's machines side by side, wrapped to the window's shape; the hub sits above a single row, else between the middle rows */
@@ -529,9 +539,9 @@ function sync(v) {
     if (!r) {
       const gr = el("g", { class: "region" }, layers.regions);
       const head = el("g", { class: "region-head" }, layers.labels);
-      r = { g: gr, head, rim: el("path", { class: "hull-rim" }, gr), hull: el("path", { class: "hull" }, gr), dot: el("circle", { class: "mdot", r: "3" }, head), label: el("text", { class: "mlabel" }, head), note: el("text", { class: "empty-note" }, gr) };
+      r = { g: gr, head, rim: el("path", { class: "hull-rim" }, gr), hull: el("path", { class: "hull" }, gr), dot: el("circle", { class: "mdot", r: "3" }, head), label: el("text", { class: "mlabel" }, head), idl: el("text", { class: "mid" }, head), note: el("text", { class: "empty-note" }, gr) };
+      r.title = el("title", {}, head);
       r.name = el("tspan", {}, r.label);
-      r.id = el("tspan", { class: "idn" }, r.label);
       r.n = el("tspan", { class: "n", dx: "8" }, r.label);
       regionEls.set(g.name, r);
     }
@@ -540,7 +550,8 @@ function sync(v) {
     r.head.classList.toggle("offline", !g.online);
     r.dot.setAttribute("class", "mdot" + (g.online ? " online" : ""));
     r.name.textContent = head.name;
-    r.id.textContent = head.id;
+    r.idl.textContent = head.id;
+    r.title.textContent = head.title;
     r.n.textContent = head.count;
     r.note.textContent = g.nodes.length ? "" : "no agents";
     r.g.classList.toggle("ided", !!g.identity);
@@ -685,23 +696,26 @@ function draw() {
       x0 = Math.min(x0, p.x - b.hw); x1 = Math.max(x1, p.x + b.hw); y0 = Math.min(y0, p.y - b.up); y1 = Math.max(y1, p.y + b.down);
       pts.push([p.x - b.hw + 6, p.y - b.up + 6], [p.x + b.hw - 6, p.y - b.up + 6], [p.x - b.hw + 6, p.y + b.down - 6], [p.x + b.hw - 6, p.y + b.down - 6]);
     }
-    if (!pts.length) { x0 = o.x + PAD; y0 = o.y + PAD + HEAD; x1 = o.x + o.w - PAD; y1 = o.y + o.h - PAD; pts.push([x0, y0], [x1, y0], [x0, y1], [x1, y1]); }
-    const hw = x0 + headOf(g).w;
-    if (hw > x1) { x1 = hw; pts.push([x1, y1]); }
-    pts.push([x0, y0 - HEAD], [x1, y0 - HEAD]);
+    const head = headOf(g);
+    if (!pts.length) { x0 = o.x + PAD; y0 = o.y + PAD + head.h; x1 = o.x + o.w - PAD; y1 = o.y + o.h - PAD; pts.push([x0, y0], [x1, y0], [x0, y1], [x1, y1]); }
+    const hw = x0 + Math.max(head.w, MIN_W);
+    if (hw > x1) { x1 = hw; pts.push([x0, y1], [x1, y1]); }
+    pts.push([x0, y0 - head.h], [x1, y0 - head.h]);
     const d = "M" + hullOf(pts).map((q) => r1(q[0]) + " " + r1(q[1])).join("L") + "Z";
     r.hull.setAttribute("d", d);
     r.hull.setAttribute("stroke-width", String(2 * PAD));
     r.rim.setAttribute("d", d);
     r.rim.setAttribute("stroke-width", String(2 * PAD + 2));
-    const lx = x0 - PAD + 16, ly = y0 - HEAD - PAD + 22;
+    const lx = x0 - PAD + 16, ly = y0 - head.h - PAD + 22;
     r.dot.setAttribute("cx", r1(lx));
     r.dot.setAttribute("cy", r1(ly - 4));
     r.label.setAttribute("x", r1(lx + 9));
     r.label.setAttribute("y", r1(ly));
+    r.idl.setAttribute("x", r1(lx + 9));
+    r.idl.setAttribute("y", r1(ly + ID_LINE));
     r.note.setAttribute("x", r1(lx));
-    r.note.setAttribute("y", r1(ly + 30));
-    r.box = { x0: x0 - PAD, y0: y0 - HEAD - PAD, x1: x1 + PAD, y1: y1 + PAD };
+    r.note.setAttribute("y", r1(y0 + 9));
+    r.box = { x0: x0 - PAD, y0: y0 - head.h - PAD, x1: x1 + PAD, y1: y1 + PAD };
   }
   if (hubEl && hubAt) hubEl.setAttribute("transform", "translate(" + r1(hubAt.x) + " " + r1(hubAt.y) + ")");
   if (viewShown) {
