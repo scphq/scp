@@ -1,4 +1,5 @@
 import { statSync } from "node:fs"
+import { connect as connectSocket } from "node:net"
 import { isAbsolute } from "node:path"
 import {
   type AskResult,
@@ -67,6 +68,8 @@ export interface RelayMcpOptions {
   channels?: boolean
   /** the client was started with channels loaded (Claude Code does not declare the capability itself) */
   launchedWithChannels?: boolean
+  /** Claude Code's per-session inbox socket (CLAUDE_CODE_MESSAGING_SOCKET): with channels enabled but not loaded, as in a background session, deliveries are queued there as the next turn */
+  sessionInbox?: SessionInbox
   /** the wake the endpoint advertises while this shim pushes by channel, over `pi` for a pi client and `channels` for any other */
   wake?: Wake
   version?: string
@@ -517,6 +520,42 @@ function delivered(messages: Envelope[]): string {
   return [PREAMBLE, ...messages.map((message) => `${shown(message)}${wrapMessage(message)}`)].join("\n\n")
 }
 
+export type SessionInbox = { socket: string; token?: string; sessionId?: string }
+
+/** the inbox of the Claude Code session that started this process, from its environment */
+export function sessionInboxOf(env: Record<string, string | undefined>): SessionInbox | undefined {
+  const socket = env.CLAUDE_CODE_MESSAGING_SOCKET
+  if (!socket || !isAbsolute(socket)) return undefined
+  return {
+    socket,
+    ...(env.CLAUDE_CODE_MESSAGING_TOKEN ? { token: env.CLAUDE_CODE_MESSAGING_TOKEN } : {}),
+    ...(env.CLAUDE_CODE_SESSION_ID ? { sessionId: env.CLAUDE_CODE_SESSION_ID } : {}),
+  }
+}
+
+/** queues one user turn on a Claude Code session's inbox socket; resolves once the lines are flushed and the socket closed */
+export function sendToSessionInbox(inbox: SessionInbox, content: string, timeoutMs = 5000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = connectSocket(inbox.socket)
+    const timer = setTimeout(() => socket.destroy(new Error("session inbox timed out")), timeoutMs)
+    socket.once("error", (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    socket.once("close", (failed) => {
+      clearTimeout(timer)
+      if (!failed) resolve()
+    })
+    socket.once("connect", () => {
+      const lines = [
+        ...(inbox.token ? [{ type: "auth", token: inbox.token }] : []),
+        { type: "user", ...(inbox.sessionId ? { session_id: inbox.sessionId } : {}), priority: "next", message: { role: "user", content } },
+      ]
+      socket.end(lines.map((line) => `${JSON.stringify(line)}\n`).join(""))
+    })
+  })
+}
+
 /**
  * The relay's MCP server over stdio: newline-delimited JSON-RPC 2.0, nothing else on the output.
  * It claims one agent endpoint, keeps one broker connection (heartbeat, reconnect on the next call), and resolves when the input ends.
@@ -534,6 +573,8 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   let initialized = false
   /** whether the client takes channel notifications: it says so, or it was launched with channels (Claude Code does not say so itself) */
   let channelClient = false
+  /** the session inbox deliveries go to instead, for a Claude Code client without channels loaded */
+  let inbox: SessionInbox | undefined
   let stopped = false
   /** seqs this shim pushed, so a push whose confirm was lost is not pushed again */
   const channelPushed = new Set<number>()
@@ -929,7 +970,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   }
 
   async function pushChannel(): Promise<void> {
-    while (!stopped && channelClient) {
+    while (!stopped && (channelClient || inbox)) {
       try {
         const { messages, hold } = await call<{ messages: Envelope[]; hold?: string | null }>("inbox", { wait_s: LIMITS.injectHoldS, offer: true })
         for (const message of messages) {
@@ -937,14 +978,20 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
           channelPushed.add(message.seq)
           if (channelPushed.size > DELIVERED_KEEP) channelPushed.delete(channelPushed.values().next().value!)
           remember(message)
-          write({
-            jsonrpc: "2.0",
-            method: "notifications/claude/channel",
-            params: {
-              content: `${PREAMBLE}\n\n${wrapMessage(message)}`,
-              meta: { from: message.from.address, id: message.id, seq: String(message.seq), thread: message.thread },
-            },
-          })
+          const content = `${PREAMBLE}\n\n${wrapMessage(message)}`
+          if (inbox) {
+            try {
+              await sendToSessionInbox(inbox, content)
+            } catch (error) {
+              channelPushed.delete(message.seq)
+              throw error
+            }
+          } else
+            write({
+              jsonrpc: "2.0",
+              method: "notifications/claude/channel",
+              params: { content, meta: { from: message.from.address, id: message.id, seq: String(message.seq), thread: message.thread } },
+            })
         }
         const pushed = messages.flatMap((message) => (message.seq !== undefined && channelPushed.has(message.seq) ? [message.seq] : []))
         if (pushed.length) await call("injected", { seqs: pushed, hold })
@@ -969,7 +1016,8 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     }
     const params = (typeof message.params === "object" && message.params !== null ? message.params : {}) as Json
     if (!isRequest) {
-      if (method === "notifications/initialized" && options.channels && channelClient) channelLoop ??= pushChannel().finally(() => (channelLoop = undefined))
+      if (method === "notifications/initialized" && options.channels && (channelClient || inbox))
+        channelLoop ??= pushChannel().finally(() => (channelLoop = undefined))
       return
     }
     const respond = (result: unknown) => write({ jsonrpc: "2.0", id, result })
@@ -982,7 +1030,8 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         const channel = capabilities?.experimental?.["claude/channel"]
         channelClient = (typeof channel === "object" && channel !== null) || options.launchedWithChannels === true
         const clientInfo = params.clientInfo as { name?: unknown } | undefined
-        wake = options.channels && channelClient ? (options.wake ?? (clientInfo?.name === "pi" ? "pi" : "channels")) : null
+        inbox = options.channels && !channelClient && clientInfo?.name === "claude-code" ? options.sessionInbox : undefined
+        wake = options.channels && channelClient ? (options.wake ?? (clientInfo?.name === "pi" ? "pi" : "channels")) : inbox ? "claude-inbox" : null
         advertise()
         return respond({
           protocolVersion,

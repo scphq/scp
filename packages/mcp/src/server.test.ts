@@ -4,7 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Claim, LIMITS, PREAMBLE, type Wake } from "@scp-dev/core"
 import { type Broker, readSessionMarker, RelayClient, startBroker } from "@scp-dev/broker"
-import { MCP_PROTOCOLS, runRelayMcp, type SpawnRequest, TOOLS } from "./server"
+import { createServer } from "node:net"
+import { MCP_PROTOCOLS, runRelayMcp, type SessionInbox, type SpawnRequest, TOOLS } from "./server"
 
 setDefaultTimeout(20_000)
 
@@ -30,6 +31,7 @@ function shim(
     claim?: Partial<Claim>
     spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
     membership?: () => { dark: string } | { handle?: string }
+    sessionInbox?: SessionInbox
   },
 ) {
   const lines: string[] = []
@@ -65,6 +67,7 @@ function shim(
     ...(options.wake === undefined ? {} : { wake: options.wake }),
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     ...(options.membership === undefined ? {} : { membership: options.membership }),
+    ...(options.sessionInbox === undefined ? {} : { sessionInbox: options.sessionInbox }),
   })
   let nextId = 1
   if (options.initialize !== false) push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
@@ -806,6 +809,50 @@ describe("relay MCP shim, in process", () => {
       peer.close()
       a.close()
       await a.done
+    }
+  })
+
+  test("--channels queues each delivery once on the session inbox of Claude Code started without channels, and advertises claude-inbox", async () => {
+    const socket = join(dir, "inbox.sock")
+    const received: Record<string, unknown>[][] = []
+    const server = createServer((conn) => {
+      let buf = ""
+      conn.on("data", (d) => (buf += d))
+      conn.on("end", () =>
+        received.push(
+          buf
+            .split("\n")
+            .filter(Boolean)
+            .map((l) => JSON.parse(l)),
+        ),
+      )
+    })
+    await new Promise<void>((resolve) => server.listen(socket, resolve))
+    const a = shim(broker, { handle: "inbox-bg", channels: true, sessionInbox: { socket, token: "tok", sessionId: "sess-1" } })
+    const peer = await RelayClient.connect(broker.socket)
+    try {
+      await a.request("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code", version: "2" } })
+      a.notify("notifications/initialized")
+      await peer.hello({ claim: { handle: "inbox-pusher", harness: "codex" } })
+      await peer.request("send", { to: "inbox-bg", body: "wake up" })
+      for (let i = 0; i < 500 && !received.length; i++) await Bun.sleep(10)
+      await Bun.sleep(100)
+      expect(received).toHaveLength(1)
+      const [auth, user] = received[0] as [{ type: string; token: string }, { type: string; session_id: string; message: { role: string; content: string } }]
+      expect(auth).toEqual({ type: "auth", token: "tok" })
+      expect(user.type).toBe("user")
+      expect(user.session_id).toBe("sess-1")
+      expect(user.message.content.startsWith(`${PREAMBLE}\n\n<relay-message from="me/inbox-pusher"`)).toBe(true)
+      expect(user.message.content).toContain("wake up")
+      expect(a.messages().filter((m) => m.method === "notifications/claude/channel")).toEqual([])
+      expect(broker.core.list({ all: true }).find((e) => e.address === "me/inbox-bg")?.wake).toBe("claude-inbox")
+      const me = broker.core.list({ all: true }).find((e) => e.address === "me/inbox-bg")!.id
+      expect(broker.core.inject(me).messages).toEqual([])
+    } finally {
+      peer.close()
+      a.close()
+      await a.done
+      server.close()
     }
   })
 

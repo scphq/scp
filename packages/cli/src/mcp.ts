@@ -1,6 +1,6 @@
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { connectBroker, relayDir } from "@scp-dev/broker"
-import { runRelayMcp, type SpawnRequest } from "@scp-dev/mcp"
+import { runRelayMcp, sessionInboxOf, type SpawnRequest } from "@scp-dev/mcp"
 import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
@@ -36,6 +36,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     if (process.ppid !== parent) process.exit(0)
   }, ORPHAN_CHECK_MS)
   orphaned.unref()
+  const inbox = sessionInboxOf(process.env)
   await runRelayMcp({
     connect: () => connectBroker(dir, () => startDaemon(dir)),
     claim,
@@ -45,6 +46,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     env: process.env,
     channels: values.channels === true,
     launchedWithChannels: values.channels === true && launchedWithChannels(process.env),
+    ...(inbox ? { sessionInbox: inbox } : {}),
     spawn: (request) => spawnDetached(spawnWords(request), request.cwd ?? claim.cwd),
     log: (line) => void process.stderr.write(`${line}\n`),
   })

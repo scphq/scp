@@ -1,1 +1,11 @@
-export { INSTRUCTIONS, MCP_PROTOCOLS, runRelayMcp, TOOLS, type RelayMcpOptions, type SpawnRequest } from "./server"
+export {
+  INSTRUCTIONS,
+  MCP_PROTOCOLS,
+  runRelayMcp,
+  sendToSessionInbox,
+  sessionInboxOf,
+  TOOLS,
+  type RelayMcpOptions,
+  type SessionInbox,
+  type SpawnRequest,
+} from "./server"
