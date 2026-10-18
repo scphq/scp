@@ -28,6 +28,12 @@ export const DOCS: Doc[] = [
     description: "Point the CLI at your own relay, and deploy the relay to your own Cloudflare account.",
   },
   {
+    slug: "judge",
+    file: "judge.md",
+    nav: "Message judge",
+    description: "Have a model review messages before delivery, on the hosted relay or in a local broker's policy.",
+  },
+  {
     slug: "harnesses",
     file: "harnesses.md",
     nav: "Harnesses",

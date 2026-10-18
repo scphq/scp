@@ -398,4 +398,50 @@ describe("judge gate", () => {
     expect(asked.held?.hold_id).toStartWith("hold_")
     expect(performance.now() - started).toBeLessThan(2000)
   })
+
+  test("a policy.json judge section names an openrouter model, reads its key from key_env and asks that model", async () => {
+    const fake = new FakeJudgeClient([answer({ verdict: "hold", categories: ["private"], reason: "internal" })])
+    const asked: { id: string; key: string }[] = []
+    const judge = { mode: "enforce", fail: "open", timeout_s: 12, model: { id: "openrouter/test/judge", key_env: "SCP_JUDGE_KEY" }, boundaries: [{}] }
+    const { broker } = await setup(judge, [], {
+      env: { SCP_JUDGE_KEY: "k-scp" },
+      judgeClient: (model, key) => ({
+        judge: async (prompt, opts) => {
+          asked.push({ id: model.id, key: await key() })
+          return fake.judge(prompt, opts)
+        },
+      }),
+    })
+    const a = await agent(broker, "a")
+    const b = await agent(broker, "b")
+    const sent = await a.client.request<SendResult>("send", { to: "b", body: "the launch date" })
+    expect(sent.held?.side).toBe("local")
+    expect(asked).toEqual([{ id: "openrouter/test/judge", key: "k-scp" }])
+    expect(await inbox(b)).toEqual([])
+  })
+
+  test("a key_file model reads its key from disk, and judges with the prefilter alone while the file is missing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "relay-judge-key-"))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const file = join(root, "key")
+    writeFileSync(file, "k-file\n")
+    for (const [key_file, made] of [
+      [file, ["k-file"]],
+      [join(root, "missing"), []],
+    ] as const) {
+      const keys: string[] = []
+      const { broker } = await setup({ mode: "enforce", model: { id: "openrouter/test/judge", key_file }, boundaries: [{}] }, [], {
+        judgeClient: (_model, key) => ({
+          judge: async () => {
+            keys.push(await key())
+            return { text: answer({}) }
+          },
+        }),
+      })
+      const a = await agent(broker, "a")
+      await agent(broker, "b")
+      await a.client.request("send", { to: "b", body: "hello" })
+      expect(keys).toEqual([...made])
+    }
+  })
 })

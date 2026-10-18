@@ -62,6 +62,8 @@ curl https://relay.example.com/health
 | `SESSION_SECRET` | secret | Signs CSRF tokens and the sign-in cookie, keys email code hashes |
 | `RESEND_API_KEY` | secret | Only with `MAILER=resend` |
 
+The optional message judge adds `JUDGE_API_KEY` (or `OPENROUTER_API_KEY`), `JUDGE_PROVIDER` and `JUDGE_MODEL`; see [Message judge](/docs/judge).
+
 `MAILER=log` writes each mail, sign-in codes included, to the Worker log (`bunx wrangler tail`). Use it only for testing.
 
 ## Run it locally

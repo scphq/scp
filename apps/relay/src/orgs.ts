@@ -1,6 +1,7 @@
 import type { Env, Role, User } from "./env";
 import { closeGrants } from "./hub/routes";
 import { type Html, html } from "./html";
+import { judgePost, judgeSection } from "./judge";
 import { mailerFor } from "./mailer";
 import { DAY, HttpError, normalizeEmail, randomId, randomSecret, sha256 } from "./util";
 import { back, type Ctx, field, page, readForm } from "./web";
@@ -268,6 +269,7 @@ export async function orgPage(ctx: Ctx, user: User, handle: string, flash: { ok?
   const m = await requireMember(ctx.env.DB, handle, user.id);
   const members = await listMembers(ctx.env.DB, m.org.id);
   const invites = canManage(m.role) ? await listInvites(ctx.env.DB, m.org.id, ctx.now) : [];
+  const judge = await judgeSection(ctx, m);
   const removable = (target: { user_id: string; role: Role }) =>
     target.user_id === user.id ? target.role !== "owner" : m.role === "owner" || (m.role === "admin" && target.role === "member");
   return page(
@@ -307,7 +309,8 @@ export async function orgPage(ctx: Ctx, user: User, handle: string, flash: { ok?
               <button class="btn btn-primary" type="submit">Invite</button>
             </form></section>`
           : ""
-      }`,
+      }
+      ${judge}`,
     status,
   );
 }
@@ -359,6 +362,7 @@ export async function orgsPost(ctx: Ctx, user: User, path: string[]): Promise<Re
       await revokeInvite(ctx.env.DB, m, id, ctx.now);
       return back(ctx, `/orgs/${handle}/members`);
     }
+    if (kind && (await judgePost(ctx, user, m, form, kind, id, action))) return back(ctx, `/orgs/${handle}/members`);
     if (kind === "members" && id && action === "remove") {
       await removeMember(ctx.env.DB, m, user, id, ctx.now);
       await closeGrants(ctx.env, m.org.id, { actorId: id });
