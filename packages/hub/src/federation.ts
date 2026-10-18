@@ -483,13 +483,15 @@ export class FederatedCore extends RelayCore {
   }
 
   /**
-   * throws not_found, as send() does, when the scope refuses a local endpoint's message to an address on another machine; to another
-   * account, the cross-account rule on the sender's out lists, unless it replies (`replyTo`) to a message it got from exactly that address
+   * throws not_found, as send() does, when the scope refuses a local endpoint's message to an address on another machine, a reply
+   * (`replyTo`, its parent) to a message it got from that address passing as a solicited one; to another account, the cross-account rule on
+   * the sender's out lists, unless it replies to a message it got from exactly that address
    */
   scopeCheck(from: string, to: unknown, replyTo?: string): void {
     const foreign = this.foreignAccount(to)
     if (!foreign) {
-      this.checkScope(this.mustEndpoint(from), this.resolve(to), String(to).trim())
+      const parent = replyTo === undefined ? undefined : one<MessageRow>(this.sql, `SELECT * FROM messages WHERE id = ?`, String(replyTo))
+      this.checkScope(this.mustEndpoint(from), this.resolve(to), String(to).trim(), parent)
       return
     }
     const sender = this.mustEndpoint(from)
@@ -660,8 +662,12 @@ export class FederatedCore extends RelayCore {
     return next
   }
 
-  /** a direct client's claim of `<machine>/<handle>`, with claim()'s takeover and suffix rules */
-  claimOn(machine: string, claim: Claim, auth: RelayAuth = "account"): { endpoint: EndpointView; token: string } {
+  /**
+   * a direct client's claim of `<machine>/<handle>`, with claim()'s takeover and suffix rules, and its `exact`, `scope`, `allow`, `in` and
+   * `out`: a new row takes the claim's own rules, a taken-over one keeps its own. An exact claim is never suffixed: it joins a live claimed
+   * row of the same harness no process or session holds, with no new token, and is refused as claim() refuses one otherwise
+   */
+  claimOn(machine: string, claim: Claim, auth: RelayAuth = "account"): { endpoint: EndpointView; token?: string } {
     this.checkMachine(machine)
     const harness = cleanText(claim.harness, "harness", 32) ?? "cli"
     if (!validHarness(harness)) throw new RelayError("invalid_params", `harness ${JSON.stringify(harness)} is not a valid name`)
@@ -675,46 +681,78 @@ export class FederatedCore extends RelayCore {
     }
     const leaked = [wanted, fields.model, fields.cwd, fields.parent, fields.labels].map((v) => (v ? findSecret(v) : null)).find(Boolean)
     if (leaked) throw new RelayError("secret_refused", `the claim looks like it carries a credential (${leaked})`)
+    const rules = this.claimRules(claim)
+    const exact = claim.exact === true
     return this.tx(() => {
       const now = this.now()
-      const token = `kre_${randomHex(32)}`
       let row: FederatedRow | undefined
-      for (let n = 1; n < 1000 && !row; n++) {
+      let created = false
+      let joined = false
+      for (let n = 1; n < (exact ? 2 : 1000) && !row; n++) {
         const handle = n === 1 ? wanted : `${wanted.slice(0, 58)}-${n}`
         const held = this.byRemote(`${machine}/${handle}`)
         if (!held) {
           this.checkCap()
           row = this.byId(this.insertRemote(`${machine}/${handle}`, "agent", harness, auth, now)) as FederatedRow
+          created = true
         } else if (held.kind === "agent" && held.connections === 0 && held.harness === harness) {
           row = held
+        } else if (
+          exact &&
+          held.kind === "agent" &&
+          held.token_hash !== null &&
+          held.process === null &&
+          held.session === null &&
+          held.parent_ep === null &&
+          held.harness === harness
+        ) {
+          row = held
+          joined = true
         } else if (held.kind === "agent" && held.connections === 0 && (held.last_seen ?? held.created_at) < now - LIMITS.handleBoundS * 1000) {
           this.retire(held.id)
           n--
         }
       }
-      if (!row) throw new RelayError("invalid_params", `no free handle for ${wanted} on ${machine}`)
+      if (!row) {
+        if (exact) throw this.exactRefusal(this.byRemote(`${machine}/${wanted}`)!, wanted, harness, now)
+        throw new RelayError("invalid_params", `no free handle for ${wanted} on ${machine}`)
+      }
+      if (created) {
+        const own = this.boundRules(rules)
+        if (Object.keys(own).length) this.sql.all(`UPDATE endpoints SET rules = ? WHERE id = ?`, JSON.stringify(own), row.id)
+        for (const dir of ["in", "out"] as const) this.needGroups(this.byId(row.id)!, rules[dir])
+      }
+      const token = joined ? undefined : `kre_${randomHex(32)}`
       this.sql.all(
-        `UPDATE endpoints SET harness = ?, model = ?, cwd = ?, parent = ?, labels = ?, token_hash = ?, auth = ?, connections = connections + 1, last_seen = ? WHERE id = ?`,
+        `UPDATE endpoints SET harness = ?, model = ?, cwd = ?, parent = ?, labels = ?, token_hash = ${token ? "?" : "token_hash"}, auth = ?, connections = connections + 1, last_seen = ? WHERE id = ?`,
         harness,
         fields.model,
         fields.cwd,
         fields.parent,
         fields.labels,
-        this.hash(token),
+        ...(token ? [this.hash(token)] : []),
         auth,
         now,
         row.id,
       )
-      this.audit("claim", row.id, null, { handle: row.remote, harness })
-      return { endpoint: this.view(this.byId(row.id)!), token }
+      this.audit("claim", row.id, null, { handle: row.remote, harness, ...(joined ? { joined: true } : {}) })
+      return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}) }
     })
   }
 
-  /** resume() for a direct client of `machine`: a token of another machine's endpoint is refused */
-  resumeOn(machine: string, token: string): EndpointView {
+  /**
+   * resume() for a direct client of `machine`, its labels replaced by what `relabel` makes of them, held to the label limits: a token of
+   * another machine's endpoint is refused
+   */
+  resumeOn(machine: string, token: string, relabel?: (labels: Record<string, string>) => unknown): EndpointView {
     const row = typeof token === "string" ? one<FederatedRow>(this.sql, `SELECT * FROM endpoints WHERE token_hash = ?`, this.hash(token)) : undefined
     if (!row?.remote || machinePart(row.remote) !== machine) throw new RelayError("unauthorized", "unknown resume token")
-    return this.resume(token)
+    if (!relabel) return this.resume(token)
+    const merged = JSON.stringify(cleanLabels(relabel(JSON.parse(row.labels) as Record<string, string>)))
+    return this.tx(() => {
+      if (merged !== row.labels) this.sql.all(`UPDATE endpoints SET labels = ? WHERE id = ?`, merged, row.id)
+      return this.resume(token)
+    })
   }
 
   /** every live row of other machines (or of one machine), as views with their machine */

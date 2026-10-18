@@ -106,7 +106,7 @@ describe("mirror", () => {
     hub.disconnect(claimed.endpoint.id)
     hub.mirror("ci", [view("me/impl", { harness: "grok" })], { full: true })
     expect(hub.remoteRowsOf("ci").map((v) => [v.address, v.harness, v.presence])).toEqual([["ada/ci/impl", "codex", "offline"]])
-    expect(hub.resumeOn("ci", claimed.token).id).toBe(claimed.endpoint.id)
+    expect(hub.resumeOn("ci", claimed.token!).id).toBe(claimed.endpoint.id)
   })
 
   test("bad views and credentials are refused", () => {
@@ -135,8 +135,66 @@ describe("claimOn and resumeOn", () => {
     hub.disconnect(first.endpoint.id)
     expect(hub.claimOn("ci", { handle: "impl", harness: "grok" }).endpoint.address).toBe("ada/ci/impl-3")
     expect(hub.claimOn("ci", { handle: "impl", harness: "codex" }).endpoint.id).toBe(first.endpoint.id)
-    expect(code(() => hub.resumeOn("desk", first.token))).toBe("unauthorized")
+    expect(code(() => hub.resumeOn("desk", first.token!))).toBe("unauthorized")
     expect(code(() => hub.resumeOn("ci", "kre_unknown"))).toBe("unauthorized")
+  })
+
+  test("a claim's scope and lists hold on its row: none neither sends nor is reached, in and out persist and are enforced", () => {
+    const { hub } = pair()
+    hub.mirror("laptop", [view("me/app-main")], { auth: "account+bridge" })
+    const open = hub.claimOn("ci", { handle: "open", harness: "codex" }).endpoint.id
+    const fenced = hub.claimOn("ci", { handle: "fenced", harness: "codex", scope: "none" })
+    expect(fenced.endpoint.scope).toBe("none")
+    const ci = (fn: () => unknown) => code(() => hub.within("ci", fn))
+    expect(ci(() => hub.send(fenced.endpoint.id, { to: "open", body: "x" }))).toBe("not_found")
+    expect(code(() => hub.send(fenced.endpoint.id, { to: "laptop/app-main", body: "x" }))).toBe("not_found")
+    expect(ci(() => hub.send(open, { to: "fenced", body: "x" }))).toBe("not_found")
+    expect(code(() => hub.send(open, { to: "laptop/app-main", body: "x" }))).toBeUndefined()
+    const listed = hub.claimOn("ci", { handle: "listed", harness: "codex", in: ["machine:laptop"], out: ["machine:laptop", "machine:desk"] }).endpoint.id
+    expect(hub.remoteViews({ machine: "ci" }).map((v) => [v.address, v.rules])).toEqual([
+      ["ada/ci/fenced", { in: [], out: [] }],
+      ["ada/ci/listed", { in: ["machine:laptop"], out: ["machine:laptop", "machine:desk"] }],
+      ["ada/ci/open", null],
+    ])
+    const app = hub.remoteEndpoint("laptop", "app-main")
+    expect(code(() => hub.send(app, { to: "ci/listed", body: "x" }))).toBeUndefined()
+    expect(ci(() => hub.send(open, { to: "listed", body: "x" }))).toBe("not_found")
+    expect(code(() => hub.send(listed, { to: "laptop/app-main", body: "x" }))).toBeUndefined()
+    expect(ci(() => hub.send(listed, { to: "open", body: "x" }))).toBe("not_found")
+    hub.disconnect(fenced.endpoint.id)
+    expect(hub.claimOn("ci", { handle: "fenced", harness: "codex" }).endpoint).toMatchObject({ id: fenced.endpoint.id, scope: "none" })
+    expect(code(() => hub.claimOn("ci", { handle: "bad", scope: "wide" as never }))).toBe("invalid_params")
+    expect(code(() => hub.claimOn("ci", { handle: "bad", in: ["group:nope"] }))).toBe("invalid_params")
+    expect(hub.claimOn("ci", { handle: "bad" }).endpoint.address).toBe("ada/ci/bad")
+  })
+
+  test("an exact claim is never suffixed: it takes over an offline row, joins a live one with no new token, else is refused", () => {
+    const { hub } = pair()
+    const live = hub.claimOn("ci", { handle: "impl", harness: "codex" })
+    const joined = hub.claimOn("ci", { handle: "impl", harness: "codex", exact: true })
+    expect([joined.endpoint.id, joined.token]).toEqual([live.endpoint.id, undefined])
+    expect(hub.resumeOn("ci", live.token!).id).toBe(live.endpoint.id)
+    const refused = (claim: Parameters<FederatedCore["claimOn"]>[1], machine = "ci") => {
+      try {
+        hub.claimOn(machine, claim)
+      } catch (error) {
+        if (error instanceof RelayError) return [error.code, error.message]
+        throw error
+      }
+      return undefined
+    }
+    expect(refused({ handle: "impl", harness: "grok", exact: true })).toEqual(["unauthorized", "impl is a codex endpoint: pass --harness codex"])
+    hub.mirror("desk", [view("me/rev", { harness: "codex" })], { auth: "account+bridge" })
+    expect(refused({ handle: "rev", harness: "codex", exact: true }, "desk")).toEqual([
+      "unauthorized",
+      "rev is placed in another tree or under another parent than this shell",
+    ])
+    expect(hub.remoteViews({ machine: "ci" }).map((v) => v.address)).toEqual(["ada/ci/impl"])
+    for (let i = 0; i < 3; i++) hub.disconnect(live.endpoint.id)
+    const taken = hub.claimOn("ci", { handle: "impl", harness: "codex", exact: true })
+    expect(taken.endpoint.id).toBe(live.endpoint.id)
+    expect(taken.token).toStartWith("kre_")
+    expect(code(() => hub.resumeOn("ci", live.token!))).toBe("unauthorized")
   })
 
   test("a mirrored row offline past the bound is retired for a new claim", () => {
@@ -145,7 +203,7 @@ describe("claimOn and resumeOn", () => {
     hubClock.now += 31 * 86_400_000
     const claimed = hub.claimOn("ci", { handle: "impl", harness: "codex" })
     expect(claimed.endpoint.address).toBe("ada/ci/impl")
-    expect(hub.resumeOn("ci", claimed.token).id).toBe(claimed.endpoint.id)
+    expect(hub.resumeOn("ci", claimed.token!).id).toBe(claimed.endpoint.id)
   })
 })
 
@@ -360,7 +418,7 @@ describe("across machines", () => {
     const claimed = hub.claimOn("desk", { handle: "impl" })
     expect(hub.dropMachine("desk")).toBe(2)
     expect(hub.remoteRowsOf("desk")).toEqual([])
-    expect(code(() => hub.resumeOn("desk", claimed.token))).toBe("unauthorized")
+    expect(code(() => hub.resumeOn("desk", claimed.token!))).toBe("unauthorized")
     expect(hub.list({ all: true }).map((e) => e.address)).toEqual(["ada/"])
   })
 })

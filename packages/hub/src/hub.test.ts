@@ -597,15 +597,28 @@ describe("auth and lifecycle", () => {
     expect(() => setup({ limits: { revalidateMs: Infinity } })).toThrow(RangeError)
   })
 
-  test("a grant's labels go on every endpoint it claims or mirrors, over the client's own", async () => {
-    const { bridge, connect, ok, fails } = setup()
+  test("a grant's labels go on every endpoint it claims, resumes or mirrors, over the client's own", async () => {
+    const { bridge, connect, ok, fails, disconnect } = setup()
     const labels = { token: "ci-bot" }
-    const hello = await ok(connect("tok_c", null, { labels }), "hello", {
+    const first = connect("tok_c", null, { labels })
+    const hello = await ok(first, "hello", {
       protocol: PROTOCOL,
       machine: "ci",
       claim: { handle: "impl", labels: { token: "spoof", team: "x" } },
     })
     expect(hello.endpoint.labels).toEqual({ token: "ci-bot", team: "x" })
+    disconnect(first)
+    const relabeled = connect("tok_c", null, { labels: { token: "ci-bot-2", lane: "a" } })
+    const resumed = await ok(relabeled, "hello", { protocol: PROTOCOL, machine: "ci", resume: hello.token })
+    expect(resumed.endpoint).toMatchObject({ id: hello.endpoint.id, labels: { token: "ci-bot-2", team: "x", lane: "a" } })
+    disconnect(relabeled)
+    const many = Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`k${i}`, "v"]))
+    expect(await fails(connect("tok_c", null, { labels: many }), "hello", { protocol: PROTOCOL, machine: "ci", resume: hello.token })).toBe("too_large")
+    expect((await ok(connect("tok_c"), "hello", { protocol: PROTOCOL, machine: "ci", resume: hello.token })).endpoint.labels).toEqual({
+      token: "ci-bot-2",
+      team: "x",
+      lane: "a",
+    })
     const laptop = await bridge("laptop", [{ address: "me/review", labels: { token: "spoof" } }], "tok_b", null, { labels })
     const mirrored = async () => (await ok(laptop, "list", { all: true })).endpoints.find((e: any) => e.address === "ada/laptop/review").labels
     expect(await mirrored()).toEqual({ token: "ci-bot" })
@@ -613,8 +626,8 @@ describe("auth and lifecycle", () => {
     expect(await mirrored()).toEqual({ role: "rev", token: "ci-bot" })
     await ok(laptop, "mirror", { endpoints: [{ address: "me/review", kind: "agent", presence: "online" }] })
     expect(await mirrored()).toEqual({ token: "ci-bot" })
-    const many = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`k${i}`, "v"]))
-    expect(await fails(connect("tok_d", null, { labels }), "hello", { protocol: PROTOCOL, machine: "desk", claim: { handle: "many", labels: many } })).toBe(
+    const full = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`k${i}`, "v"]))
+    expect(await fails(connect("tok_d", null, { labels }), "hello", { protocol: PROTOCOL, machine: "desk", claim: { handle: "many", labels: full } })).toBe(
       "too_large",
     )
   })

@@ -89,6 +89,20 @@ describe("scopes with other machines", () => {
     )
   })
 
+  test("a reply to another machine's message the endpoint got passes the scope where an unsolicited send is refused", () => {
+    const { broker, hub, fenced, open, fromHub } = world()
+    const review = hub.remoteEndpoint("desk", "review")
+    const got = fromHub(review, "laptop/fenced", { kind: "request" })
+    broker.admit(fenced, got)
+    const elsewhere = fromHub(review, "laptop/open", { kind: "request" })
+    broker.admit(open, elsewhere)
+    expect(code(() => broker.scopeCheck(fenced, "desk/review"))).toBe("not_found")
+    expect(code(() => broker.scopeCheck(fenced, "desk/review", got.id))).toBeUndefined()
+    expect(code(() => broker.scopeCheck(fenced, "desk/", got.id))).toBe("not_found")
+    expect(code(() => broker.scopeCheck(fenced, "desk/review", elsewhere.id))).toBe("not_found")
+    expect(code(() => broker.scopeCheck(fenced, "desk/review", "msg_unknown0000"))).toBe("not_found")
+  })
+
   test("the human exemption is the account's own human endpoint, never a tty claim: another machine's human row is not exempt", () => {
     const { broker, hub, fenced, fromHub } = world()
     const human = broker.claimHuman(false).id

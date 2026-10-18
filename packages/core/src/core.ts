@@ -662,14 +662,11 @@ export class RelayCore {
     if (leaked) throw new RelayError("secret_refused", `the claim looks like it carries a credential (${leaked})`)
     if (claim.grant !== undefined && (typeof claim.grant !== "string" || !GRANT_TOKEN.test(claim.grant)))
       throw new RelayError("invalid_params", "grant is a krt_ token")
-    const rules: ScopeRules = {}
-    for (const [dir, list] of Object.entries(expandRules(this.ruleParams(claim), this.defaults().symmetric)) as [ScopeDirection, string[] | null][])
-      if (list) rules[dir] = list
     const scope: ClaimScope = {
       handle: wanted,
       lineage: lineageKeys(claim.lineage),
       grant: claim.grant === undefined ? null : this.hash(claim.grant),
-      rules,
+      rules: this.claimRules(claim),
       groups: groupNames(claim.groups, "groups"),
       cwd: fields.cwd,
       exact: claim.exact === true && !subagent,
@@ -704,6 +701,14 @@ export class RelayCore {
       if (bound) Object.assign(scope, { grant: bound.token_hash, handle: bound.name ?? wanted })
       return this.claimRow(scope.handle, harness, fields, options.transient === true, scope)
     })
+  }
+
+  /** a claim's own rules per direction, as its `scope`, `allow`, `in` and `out` expand */
+  protected claimRules(claim: Claim): ScopeRules {
+    const rules: ScopeRules = {}
+    for (const [dir, list] of Object.entries(expandRules(this.ruleParams(claim), this.defaults().symmetric)) as [ScopeDirection, string[] | null][])
+      if (list) rules[dir] = list
+    return rules
   }
 
   /**
@@ -857,7 +862,8 @@ export class RelayCore {
         n--
       }
     }
-    if (!row) throw scope.exact ? this.exactRefusal(wanted, harness, now) : new RelayError("invalid_params", `no free handle for ${wanted}`)
+    if (!row)
+      throw scope.exact ? this.exactRefusal(this.byHandle(wanted)!, wanted, harness, now) : new RelayError("invalid_params", `no free handle for ${wanted}`)
     if (exactFrom && exactFrom.id !== row.id) ({ moved, stopBlocks } = this.leaveHooks(exactFrom, row.id))
     const fresh = created || joined ? null : this.incarnates(row, scope, fields.process, now)
     const token = transient || live ? undefined : `kre_${randomHex(32)}`
@@ -1004,9 +1010,8 @@ export class RelayCore {
     })
   }
 
-  /** why an exact claim of a held handle is refused */
-  private exactRefusal(handle: string, harness: string, now: number): RelayError {
-    const held = this.byHandle(handle)!
+  /** why an exact claim of `handle`, which `held` holds, is refused */
+  protected exactRefusal(held: EndpointRow, handle: string, harness: string, now: number): RelayError {
     if ((held.session !== null || held.process !== null) && presenceOf(held, now) !== "offline") {
       return new RelayError("unauthorized", `${handle} is held by a live ${held.harness} session: act as it from that session's own shell, no --as needed`)
     }
@@ -1114,8 +1119,7 @@ export class RelayCore {
       const labels = { ...json<Record<string, string>>(grant.labels, {}), ...json<Record<string, string>>(row.labels, {}) }
       this.sql.all(`UPDATE endpoints SET labels = ?, title = COALESCE(title, ?) WHERE id = ?`, JSON.stringify(labels), grant.title, row.id)
     }
-    const rules: ScopeRules = {}
-    for (const dir of ["in", "out"] as const) if (scope.rules[dir]) this.setRule(rules, dir, scope.rules[dir])
+    const rules = this.boundRules(scope.rules)
     const childDefault = this.defaults().childDefault
     if (parent && !caps.caps.length && childDefault !== "open" && childDefault !== "inherit") {
       for (const dir of this.presetDirs()) caps.caps.push({ id: capId(), dir, by: "policy", sels: PRESET_LISTS[childDefault].map((sel) => ({ sel })) })
@@ -4177,7 +4181,7 @@ export class RelayCore {
    * refuses a `group:<name>` (but `group:self` in a group's rules) naming no group `me` may name: the human any group, an agent a policy or
    * pinned group, the human's, one in its fleet or one it sees. A group elsewhere answers as no group, so the refusal is no oracle
    */
-  private needGroups(me: EndpointRow, sels: string[] | null | undefined, groupRules = false): void {
+  protected needGroups(me: EndpointRow, sels: string[] | null | undefined, groupRules = false): void {
     for (const sel of sels ?? []) {
       if (!sel.startsWith("group:") || (groupRules && sel === "group:self")) continue
       const name = sel.slice("group:".length)
@@ -4211,6 +4215,13 @@ export class RelayCore {
   private rebindsRule(rules: ScopeRules, dir: ScopeDirection, next: string[] | null | undefined): boolean {
     const before = rules.groups?.[dir] ?? {}
     return (next ?? []).some((sel) => rules[dir]?.includes(sel) && (this.entry(sel).group ?? before[sel]) !== before[sel])
+  }
+
+  /** a new row's own rules: each `group:` selector bound to the group of that name now */
+  protected boundRules(own: ScopeRules): ScopeRules {
+    const rules: ScopeRules = {}
+    for (const dir of ["in", "out"] as const) if (own[dir]) this.setRule(rules, dir, own[dir])
+    return rules
   }
 
   /** sets own rules in `dir` to `next` (null clears them): a group selector binds to the group of that name now, or keeps its binding when there is none */

@@ -690,7 +690,8 @@ export class RelayHub {
     }
     let endpoint: EndpointView
     let token: string | undefined
-    if (typeof params.resume === "string") endpoint = core.resumeOn(machine, params.resume)
+    if (typeof params.resume === "string")
+      endpoint = core.resumeOn(machine, params.resume, conn.grant.labels ? (own) => grantLabels(conn.grant, own) : undefined)
     else ({ endpoint, token } = core.claimOn(machine, claim, "account"))
     this.bind(machine, conn.grant, "client", held)
     conn.role = "client"
