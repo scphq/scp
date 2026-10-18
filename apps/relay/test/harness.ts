@@ -14,7 +14,13 @@ let bundle: string | undefined;
 
 async function script(): Promise<string> {
   if (bundle) return bundle;
-  const out = await Bun.build({ entrypoints: [join(ROOT, "src/index.ts")], target: "browser", format: "esm" });
+  const out = await Bun.build({
+    entrypoints: [join(ROOT, "src/index.ts")],
+    target: "browser",
+    format: "esm",
+    conditions: ["bun"],
+    external: ["cloudflare:workers"],
+  });
   if (!out.success) throw new Error(out.logs.join("\n"));
   bundle = await out.outputs[0]!.text();
   return bundle;
@@ -31,6 +37,8 @@ export interface Relay {
   origin: string;
   mails: Mail[];
   fetch(path: string, init?: RequestInit): Promise<Response>;
+  /** the loopback origin Miniflare listens on, for real sockets */
+  listening(): Promise<string>;
   /** the first mail to `to` at or after index `since` of {@link Relay.mails} */
   mailTo(to: string, since?: number): Promise<Mail>;
   dispose(): Promise<void>;
@@ -45,6 +53,7 @@ export async function startRelay(opts: { turnstileSecret?: string } = {}): Promi
     compatibilityDate: "2026-06-01",
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: { DB: crypto.randomUUID() },
+    durableObjects: { HUB: { className: "OrgHub", useSQLite: true } },
     bindings: {
       MAILER: "log",
       MAIL_FROM: "login@scp.test",
@@ -95,6 +104,7 @@ export async function startRelay(opts: { turnstileSecret?: string } = {}): Promi
       }
       throw new Error(`no mail to ${to}`);
     },
+    listening: async () => (await mf.ready).origin,
     dispose: () => mf.dispose(),
   };
 }

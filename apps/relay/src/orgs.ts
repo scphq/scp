@@ -1,4 +1,5 @@
 import type { Env, Role, User } from "./env";
+import { closeGrants } from "./hub/routes";
 import { type Html, html } from "./html";
 import { mailerFor } from "./mailer";
 import { DAY, HttpError, normalizeEmail, randomId, randomSecret, sha256 } from "./util";
@@ -359,6 +360,7 @@ export async function orgsPost(ctx: Ctx, user: User, path: string[]): Promise<Re
     }
     if (kind === "members" && id && action === "remove") {
       await removeMember(ctx.env.DB, m, user, id, ctx.now);
+      await closeGrants(ctx.env, m.org.id, { actorId: id });
       return back(ctx, id === user.id ? "/orgs" : `/orgs/${handle}`);
     }
   } catch (e) {
