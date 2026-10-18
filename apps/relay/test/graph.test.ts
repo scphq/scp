@@ -10,7 +10,21 @@ type Bands = (
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
 const graphPath = "../src/graph";
 const identityPath = "../src/identity";
-const { BANDS_JS, DRAWN_JS, SLOT_JS }: { BANDS_JS: string; DRAWN_JS: string; SLOT_JS: string } = await import(graphPath);
+const {
+  BANDS_JS,
+  CLUSTER_JS,
+  DRAWN_JS,
+  LAYOUT,
+  SLOT_JS,
+  shortLabel,
+}: {
+  BANDS_JS: string;
+  CLUSTER_JS: string;
+  DRAWN_JS: string;
+  LAYOUT: Record<string, number>;
+  SLOT_JS: string;
+  shortLabel(handle: string, parent: string): string;
+} = await import(graphPath);
 const {
   identities,
   identify,
@@ -20,6 +34,12 @@ const bands = new Function(`${BANDS_JS}; return bands;`)() as Bands;
 type Extent = { x0: number; x1: number; y0: number; y1: number };
 const slot = new Function(`${SLOT_JS}; return slot;`)() as (e: Extent, w: number, h: number, min: number) => Extent;
 type Node = { address: string; kind: string; presence: string; wake: string | null };
+type Box = { hw: number; up: number; down: number };
+const cluster = new Function(`${CLUSTER_JS}; return cluster;`)() as (
+  ns: { address: string; parent: string | null }[],
+  B: Box[],
+  o: Record<string, number>,
+) => { x: number; y: number }[];
 const drawn = new Function(`${DRAWN_JS}; return drawn;`)() as (n: Node, o: { offline: boolean; nextTurn: boolean }, talks: Set<string>) => boolean;
 
 test("each machine carries its member's identity: the email's local part, initials and a distinct tone, never the member id", () => {
@@ -131,4 +151,51 @@ test("the graph shows online and wakeable idle by default, next-turn idle and of
   expect(pick({ offline: false, nextTurn: false })).toEqual(["on", "wakes", "me", "you"]);
   expect(pick({ offline: false, nextTurn: true })).toEqual(["on", "wakes", "next", "me", "you"]);
   expect(pick({ offline: true, nextTurn: false })).toEqual(["on", "wakes", "off", "me", "you"]);
+});
+
+test("each subtree clusters below its root, apart from the other clusters and the childless roots, with nothing overlapping", () => {
+  const ns = [
+    { address: "o/m/scp-orchestrator", parent: null },
+    ...[1, 2, 3, 4, 5, 6].map((i) => ({ address: `o/m/scp-orchestrator-gp-a10${i}`, parent: "o/m/scp-orchestrator" })),
+    { address: "o/m/docs-orchestrator", parent: null },
+    ...["a", "b", "c"].map((c) => ({ address: `o/m/docs-pi-${c}`, parent: "o/m/docs-orchestrator" })),
+    { address: "o/m/demo-1", parent: null },
+    { address: "o/m/cli-testing", parent: null },
+    { address: "o/m/elia", parent: null },
+  ];
+  const label = (n: (typeof ns)[number]) => shortLabel(n.address.slice(4), n.parent ? n.parent.slice(4) : "");
+  const B = ns.map((n) => ({ hw: Math.max(20, label(n).length * 3.3 + 6), up: 22, down: 38 }));
+  const P = cluster(ns, B, LAYOUT);
+  expect(cluster(ns, B, LAYOUT)).toEqual(P);
+  const roots = ns.map((n, i) => (n.parent ? -1 : i)).filter((i) => i >= 0);
+  const of = new Map(ns.map((n, i) => [n.address, i]));
+  const d = (a: number, b: number) => Math.hypot(P[a]!.x - P[b]!.x, P[a]!.y - P[b]!.y);
+  ns.forEach((n, i) => {
+    if (!n.parent) return;
+    const own = of.get(n.parent)!;
+    for (const r of roots) if (r !== own) expect(d(i, own)).toBeLessThan(d(i, r));
+    expect(P[i]!.y).toBeGreaterThan(P[own]!.y);
+  });
+  const rect = (m: number[]) => ({
+    x0: Math.min(...m.map((i) => P[i]!.x - B[i]!.hw)),
+    x1: Math.max(...m.map((i) => P[i]!.x + B[i]!.hw)),
+    y0: Math.min(...m.map((i) => P[i]!.y - B[i]!.up)),
+    y1: Math.max(...m.map((i) => P[i]!.y + B[i]!.down)),
+  });
+  const apart = (a: ReturnType<typeof rect>, b: ReturnType<typeof rect>, gap: number) =>
+    a.x1 + gap <= b.x0 || b.x1 + gap <= a.x0 || a.y1 + gap <= b.y0 || b.y1 + gap <= a.y0;
+  const clusters = roots.map((r) => rect(ns.map((_, i) => i).filter((i) => i === r || ns[i]!.parent === ns[r]!.address)));
+  const trees = roots.map((r, k) => (ns.some((n) => n.parent === ns[r]!.address) ? k : -1)).filter((k) => k >= 0);
+  for (const a of trees) for (let b = 0; b < clusters.length; b++) if (a !== b) expect(apart(clusters[a]!, clusters[b]!, LAYOUT.apart! - 1)).toBe(true);
+  for (let a = 0; a < ns.length; a++) for (let b = a + 1; b < ns.length; b++) expect(apart(rect([a]), rect([b]), 0)).toBe(true);
+});
+
+test("a child's label drops its parent's handle prefix, and keeps its handle when the prefix differs", () => {
+  expect(shortLabel("scp-orchestrator-gp-a107", "scp-orchestrator")).toBe("gp-a107");
+  expect(shortLabel("docs-pi-a", "docs-orchestrator")).toBe("docs-pi-a");
+  expect(shortLabel("lead.docs", "lead")).toBe("docs");
+  expect(shortLabel("leader", "lead")).toBe("leader");
+  expect(shortLabel("lead-", "lead")).toBe("lead-");
+  expect(shortLabel("lead", "lead")).toBe("lead");
+  expect(shortLabel("worker", "")).toBe("worker");
 });
