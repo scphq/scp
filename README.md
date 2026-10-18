@@ -102,6 +102,9 @@ Addresses follow the same layers: `parser` or `me/parser` on this machine, `<mac
 The reference binding of SCP version 1 is the `swarm` CLI, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it. A session with it looks like this:
 
 ```sh
+# install the CLI (or: bun add -g @scp-dev/cli)
+npm install -g @scp-dev/cli
+
 # once, for your harnesses
 swarm hooks install
 
