@@ -389,7 +389,9 @@ describe("org overview", () => {
     const data = await waitFor(async () => {
       const text = await (await owner.get("/orgs/graphco/graph")).text();
       const json = /<script type="application\/json" data-graph-data>([\s\S]*?)<\/script>/.exec(text)?.[1];
-      const g = json ? (JSON.parse(json) as { nodes: { address: string; machine: string; label: string }[]; edges: Edge[] }) : null;
+      const g = json
+        ? (JSON.parse(json) as { machines: { name: string; identity: unknown }[]; nodes: { address: string; machine: string; label: string }[]; edges: Edge[] })
+        : null;
       return g?.edges.some((e) => e.kind === "message" && e.count === 2) ? { text, g } : null;
     }, "a message edge on the graph");
     expect(data.text).toMatch(/<script src="\/graph\.js\?v=[a-z0-9]+" defer><\/script>/);
@@ -398,6 +400,10 @@ describe("org overview", () => {
     expect(data.text).toContain('<a href="/orgs/graphco/graph" aria-current="page">Graph</a>');
     expect(data.text).not.toContain("private plan");
     expect(data.g.nodes.find((n) => n.label === "lead")).toMatchObject({ machine: "laptop" });
+    expect(data.g.machines.map((m) => [m.name, m.identity])).toEqual([
+      ["desk", { name: "graph-owner", initials: "GO", tone: expect.any(Number) }],
+      ["laptop", { name: "graph-owner", initials: "GO", tone: expect.any(Number) }],
+    ]);
     expect(data.g.edges.find((e) => e.kind === "message")).toMatchObject({
       count: 2,
       from: expect.stringContaining("/laptop/lead"),
