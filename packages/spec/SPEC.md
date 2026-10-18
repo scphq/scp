@@ -1147,6 +1147,8 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 
 **Forwarding.** A send whose recipients are all on other machines goes to the bridge; mixing local and remote recipients is `invalid_params`. Before forwarding the broker checks local scope and policy, refuses `private` data unless the bridge is configured to allow it (`data_class_refused`), re-scans for credentials, applies idempotency and requires the sender to be mirrored (`policy_refused`). It sends `forward {from: <handle>, params, hop_floor, tty?}` with attachments removed. The hub resolves the sender on the bridge's own machine, caps the hop floor at `LIMITS.hopMax + 1`, checks scope against mirrored rules and caps, and stores the delivery.
 
+**Local traffic.** A delivery the broker makes between two endpoints of its own machine never reaches the hub. Unless the bridge configuration sets `mirror_local: false` (in `cloud.json`; default on), the broker reports its metadata so the hub can count and draw it: every second at most, it sends the notification `local_events {events}` with up to 200 events `{from, to, kind, at, id, thread}`. `from` and `to` are handles on the bridge's machine (at most 64 recipients), only of mirrored endpoints; `kind` is `message`, `request`, `reply`, `status`, `handback` or `spawn`; `at` is the delivery time in milliseconds; `id` and `thread` are the first 32 hex characters of the SHA-256 of the message and thread ids. Bodies, notes, labels and titles are never sent. The broker buffers at most 1000 events between batches and drops the rest; an unlinked bridge sends nothing. The hub skips events naming unknown endpoints, clamps `at` to the last 5 minutes, keeps the sender and recipient pairs for an hour for the graph's message edges, and streams each event to watchers and the dashboard as a `message` fleet event with `local: true` and the reporting `machine`.
+
 **Inbound.** The hub pushes `deliver` to the target machine's bridge. The bridge resolves the local target, checks local policy and scope, admits the delivery and acknowledges. A refusal answers `reject {seq, code}`; the hub then notifies the sender that the recipient refused the message. An internal error is retried after 1 s, doubling, and after 3 failures becomes `reject {code: "dead_letter"}`.
 
 **Outage.**
@@ -1405,6 +1407,7 @@ Frame and body limits, per-connection concurrency and output caps, inbox capacit
 - Titles, now lines, working directories and labels are visible to every endpoint that may message the agent, and are mirrored to the hub unless redaction is configured. An inferred title can carry the first line of the session's first prompt.
 - Peek is off by default, local only, audited, rate limited and visible to the peeked endpoint through `peek_who`.
 - The judge model sees bodies on judged boundaries; holds keep bodies until resolved. Audit never keeps bodies.
+- A linked broker reports metadata of same-machine deliveries to its hub (section 14.2): sender and recipient handles, kind, time and hashed message and thread ids. Only metadata leaves the machine, never a body, note, label or title. `mirror_local: false` in `cloud.json` turns it off.
 
 ---
 
@@ -1511,7 +1514,7 @@ An integration with push capability additionally:
 | `hold_release` | `id`, `redacted?` | SendResult | `unauthorized`, `not_found`, `invalid_params`, `policy_refused` | tty |
 | `hold_refuse` | `id`, `reason` | hold | `unauthorized`, `not_found`, `invalid_params` | tty |
 
-Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`, `status`, `event`; observer `list`, `snapshot`, `watch`, `log`, `machines`, `machines_rm`; bridge `mirror`, `forward`, `subscribe`, `ack`, `reject`, `event`, `list`, `watch` (section 14).
+Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`, `status`, `event`; observer `list`, `snapshot`, `watch`, `log`, `machines`, `machines_rm`; bridge `mirror`, `forward`, `subscribe`, `ack`, `reject`, `event`, `local_events`, `list`, `watch` (section 14).
 
 ## Appendix B. Schemas
 

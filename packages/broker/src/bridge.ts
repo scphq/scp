@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
   type ActivityRow,
   type EndpointView,
@@ -13,7 +14,7 @@ import {
   XLIMITS,
   type XListed,
 } from "@scp-dev/core"
-import { type FederatedCore, HUB_LIMITS, type RemoteView } from "@scp-dev/hub"
+import { type FederatedCore, HUB_LIMITS, type LOCAL_EVENT_KINDS, LOCAL_EVENTS, type RemoteView } from "@scp-dev/hub"
 
 /** what the broker gives the bridge: waking local waiters, telling local watchers, the local policy's state */
 export interface BridgeHooks {
@@ -42,6 +43,10 @@ export interface BridgeConfig {
   redact?: boolean | undefined
   /** let messages marked private leave this machine */
   privateOk?: boolean | undefined
+  /** report metadata of deliveries made on this machine to the hub, never bodies (default true) */
+  mirrorLocal?: boolean | undefined
+  /** how often reported local deliveries are sent, batched (default 1 s) */
+  localFlushMs?: number | undefined
   /** a WebSocket constructor (tests) */
   webSocket?: WebSocketWithHeaders | undefined
   /** reconnect backoff bounds (default 1 s to 60 s) */
@@ -77,6 +82,8 @@ export interface Bridge {
   renamed(endpoint: string, was: string): void
   /** a local endpoint's activity, posted to the hub */
   activity(endpoint: string, row: ActivityRow): void
+  /** a delivery between endpoints of this machine: its metadata is reported to the hub in the next batch */
+  local?(event: LocalDelivery): void
   /** the endpoints of other accounts this account's contacts let it reach */
   contacts(): Promise<XListed[]>
   status(): BridgeStatus
@@ -84,6 +91,21 @@ export interface Bridge {
   relink(): void
   stop(): Promise<void>
 }
+
+/** a delivery the broker made on its own machine, by local endpoint ids */
+export interface LocalDelivery {
+  id: string
+  thread: string
+  kind: (typeof LOCAL_EVENT_KINDS)[number]
+  from: string
+  to: string[]
+  at: number
+}
+
+/** local deliveries waiting for the next batch; past this, new ones are dropped until it is sent */
+const LOCAL_BUFFER = 1000
+
+const idHash = (id: string): string => createHash("sha256").update(id).digest("hex").slice(0, 32)
 
 /** a WebSocket constructor that takes request headers, as Bun's and Node's do */
 export type WebSocketWithHeaders = new (url: string, options: { headers: Record<string, string> }) => WebSocket
@@ -153,6 +175,10 @@ export function startBridge(options: BridgeOptions): Bridge {
   const inflight = new Set<number>()
   const injectFailures = new Map<number, number>()
   const fromHub = new WeakSet<Error>()
+  const mirrorLocal = options.mirrorLocal !== false
+  const localFlushMs = options.localFlushMs ?? 1000
+  let localQueue: object[] = []
+  let localTimer: ReturnType<typeof setTimeout> | undefined
 
   const setState = (up: boolean, error: string | null) => {
     if (up !== connected || error !== lastError) since = new Date().toISOString()
@@ -636,6 +662,32 @@ export function startBridge(options: BridgeOptions): Bridge {
     fireAndForget("event", { from: handle, kind: row.kind, tool: row.tool ?? undefined, summary: options.redact ? undefined : (row.summary ?? undefined) })
   }
 
+  function local(event: LocalDelivery) {
+    if (!mirrorLocal || !ready || localQueue.length >= LOCAL_BUFFER) return
+    let from: string | null
+    let to: string[]
+    try {
+      from = handleOf(event.from)
+      to = event.to.flatMap((endpoint) => {
+        const handle = handleOf(endpoint)
+        return handle === null ? [] : [handle]
+      })
+    } catch {
+      return
+    }
+    if (from === null || !to.length) return
+    localQueue.push({ from, to: to.slice(0, LOCAL_EVENTS.recipients), kind: event.kind, at: event.at, id: idHash(event.id), thread: idHash(event.thread) })
+    localTimer ??= setTimeout(flushLocal, localFlushMs)
+  }
+
+  function flushLocal() {
+    localTimer = undefined
+    const batch = localQueue
+    localQueue = []
+    if (!ready) return
+    for (let i = 0; i < batch.length; i += LOCAL_EVENTS.perFrame) fireAndForget("local_events", { events: batch.slice(i, i + LOCAL_EVENTS.perFrame) })
+  }
+
   async function contacts(): Promise<XListed[]> {
     if (!connected) throw unavailable()
     return (await request<{ contacts: XListed[] }>("list", { contacts: true })).contacts
@@ -660,6 +712,8 @@ export function startBridge(options: BridgeOptions): Bridge {
     stopped = true
     shutDown = true
     clearTimeout(retryTimer)
+    clearTimeout(localTimer)
+    localQueue = []
     for (const fn of waitingForLink.splice(0)) fn()
     const socket = ws
     ws = null
@@ -671,5 +725,5 @@ export function startBridge(options: BridgeOptions): Bridge {
   }
 
   connect()
-  return { forward, changed, resync, renamed, activity, contacts, status, relink, stop }
+  return { forward, changed, resync, renamed, activity, local, contacts, status, relink, stop }
 }

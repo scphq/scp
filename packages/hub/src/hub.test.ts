@@ -1235,6 +1235,38 @@ describe("graph", () => {
   })
 })
 
+describe("local events", () => {
+  test("a bridge's same-machine deliveries count in the graph and stream as local messages; stray fields, kinds and endpoints are dropped", async () => {
+    const events: DashboardEvent[] = []
+    const { hub, ok, bridge, clock } = setup({ dashboard: (e) => events.push(e) })
+    const laptop = await bridge("laptop", [{ address: "me/lead" }, { address: "me/kid" }])
+    await bridge("desk", [{ address: "me/review" }])
+    const id = "a".repeat(32)
+    const result = await ok(laptop, "local_events", {
+      events: [
+        { from: "lead", to: ["kid"], kind: "request", at: START - 1000, id, thread: id, body: "secret plan", note: "secret note" },
+        { from: "kid", to: ["lead", "nobody"], kind: "handback", at: clock.now + 60_000, id: "not a hash" },
+        { from: "lead", to: ["desk/review"], kind: "message", at: clock.now },
+        { from: "lead", to: ["kid"], kind: "gossip", at: clock.now },
+        { from: "nobody", to: ["kid"], kind: "message", at: clock.now },
+      ],
+    })
+    expect(result).toEqual({ recorded: 2 })
+    const at = new Date(START).toISOString()
+    expect(events.filter((e) => e.type === "message")).toEqual([
+      { type: "message", at, kind: "request", from: "ada/laptop/lead", to: ["ada/laptop/kid"], local: true },
+      { type: "message", at, kind: "handback", from: "ada/laptop/kid", to: ["ada/laptop/lead"], local: true },
+    ])
+    expect(hub.graph().edges.filter((e) => e.kind === "message")).toEqual([
+      { kind: "message", from: "ada/laptop/kid", to: "ada/laptop/lead", count: 1, last_at: at },
+      { kind: "message", from: "ada/laptop/lead", to: "ada/laptop/kid", count: 1, last_at: new Date(START - 1000).toISOString() },
+    ])
+    expect(JSON.stringify(events)).not.toContain("secret")
+    clock.now += GRAPH_MINUTES_MAX * 60_000 + 1000
+    expect(hub.graph(GRAPH_MINUTES_MAX).edges.filter((e) => e.kind === "message")).toEqual([])
+  })
+})
+
 describe("dashboard events", () => {
   test("presence, endpoint changes and messages reach the dashboard as addresses and kinds only, never a body, note or label", async () => {
     const events: DashboardEvent[] = []

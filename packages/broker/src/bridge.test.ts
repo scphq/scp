@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type EndpointView, type Envelope, LIMITS, PROTOCOL, RelayError, type SendResult, wrapMessage } from "@scp-dev/core"
-import { HUB_LIMITS } from "@scp-dev/hub"
+import { type DashboardEvent, HUB_LIMITS } from "@scp-dev/hub"
 import { relaySocketUrl } from "./bridge"
 import { RelayClient } from "./client"
 import { type Broker, startBroker } from "./server"
@@ -43,6 +43,7 @@ async function machine(
     policy?: unknown
     redact?: boolean
     privateOk?: boolean
+    mirrorLocal?: boolean
     now?: () => number
     presenceEveryMs?: number
     forwardWaitMs?: number
@@ -67,6 +68,8 @@ async function machine(
       injectBackoffMs: 20,
       redact: options.redact,
       privateOk: options.privateOk,
+      mirrorLocal: options.mirrorLocal,
+      localFlushMs: 20,
       forwardWaitMs: options.forwardWaitMs,
       credentials: options.credentials,
     },
@@ -947,6 +950,85 @@ describe("bridge", () => {
     await observer.hello({ observe: true })
     expect(await observer.request<unknown>("cloud_status")).toEqual({ enabled: false })
     expect(await code(observer.request("list", { contacts: true }))).toBe("unavailable")
+  })
+})
+
+describe("same-machine traffic", () => {
+  async function linked(mirrorLocal?: boolean) {
+    const dashboard: DashboardEvent[] = []
+    const fake = startFakeHubServer({ tokens: { [TOKEN]: { tokenId: "tok_1", user: "ada" } }, dashboard: (_, event) => dashboard.push(event) })
+    cleanups.push(() => fake.stop())
+    const a = await machine(fake, "a", mirrorLocal === undefined ? {} : { mirrorLocal })
+    const b = await machine(fake, "b")
+    const impl = await agent(a, "impl")
+    const review = await agent(a, "review", "codex")
+    const watcher = await RelayClient.connect(b.socket)
+    cleanups.push(() => watcher.close())
+    await watcher.hello({ observe: true })
+    const fleet: Record<string, unknown>[] = []
+    watcher.onNotification((method, params) => {
+      if (method === "fleet") fleet.push(params as Record<string, unknown>)
+    })
+    await watcher.request("watch")
+    await waitFor(
+      () =>
+        fake
+          .hub("ada")
+          .graph()
+          .nodes.some((n) => n.address === "ada/a/review"),
+      "a/review mirrored",
+    )
+    return { fake, impl, review, fleet, dashboard }
+  }
+
+  test("a send between two endpoints of one machine reaches the hub's graph, watchers and dashboard as metadata only", async () => {
+    const { fake, impl, review, fleet, dashboard } = await linked()
+    const sent = await impl.request<{ id: string; thread: string }>("send", { to: "review", body: "secret plan text", note: "note text" })
+    const asked = impl.request("ask", { to: "review", body: "question text", wait_s: 10 })
+    const request = (await review.request<Inbox>("inbox", { wait_s: 5 })).messages.find((m) => m.kind === "request")!
+    await review.request("send", { to: "impl", kind: "reply", reply_to: request.id, body: "answer text" })
+    await asked
+
+    const seen = await waitFor(() => (fleet.filter((e) => e.type === "message" && e.local === true).length >= 3 ? fleet : null), "local events on b")
+    const local = seen.filter((e) => e.type === "message" && e.local === true)
+    for (const e of local) expect(Object.keys(e).sort()).toEqual(["at", "from", "id", "kind", "local", "machine", "thread", "to", "type"])
+    expect(local.map((e) => [e.kind, e.from, e.to, e.machine])).toEqual([
+      ["message", "me/a/impl", ["me/a/review"], "a"],
+      ["request", "me/a/impl", ["me/a/review"], "a"],
+      ["reply", "me/a/review", ["me/a/impl"], "a"],
+    ])
+    expect(local[0]!.id).toMatch(/^[0-9a-f]{32}$/)
+    expect(local[0]!.id).not.toBe(sent.id)
+    const text = JSON.stringify([local, dashboard])
+    for (const word of ["secret plan", "question text", "answer text", "note text", sent.id]) expect(text).not.toContain(word)
+
+    const dash = dashboard.filter((e) => e.type === "message")
+    expect(dash.map((e) => Object.keys(e).sort())).toEqual(Array(3).fill(["at", "from", "kind", "local", "to", "type"]))
+    expect(dash[0]).toMatchObject({ type: "message", kind: "message", from: "ada/a/impl", to: ["ada/a/review"], local: true })
+
+    const edges = fake
+      .hub("ada")
+      .graph()
+      .edges.filter((e) => e.kind === "message")
+    expect(edges).toEqual([
+      { kind: "message", from: "ada/a/impl", to: "ada/a/review", count: 2, last_at: expect.any(String) },
+      { kind: "message", from: "ada/a/review", to: "ada/a/impl", count: 1, last_at: expect.any(String) },
+    ])
+  })
+
+  test("with mirror_local off, same-machine sends tell the hub nothing", async () => {
+    const { fake, impl, review, fleet, dashboard } = await linked(false)
+    await impl.request("send", { to: "review", body: "hi" })
+    expect((await review.request<Inbox>("inbox", { wait_s: 5 })).messages).toHaveLength(1)
+    await Bun.sleep(200)
+    expect(fleet.filter((e) => e.type === "message")).toEqual([])
+    expect(dashboard.filter((e) => e.type === "message")).toEqual([])
+    expect(
+      fake
+        .hub("ada")
+        .graph()
+        .edges.filter((e) => e.kind === "message"),
+    ).toEqual([])
   })
 })
 

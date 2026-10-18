@@ -180,6 +180,8 @@ export interface CloudFile {
   mirror?: string[]
   redact?: boolean
   private_ok?: boolean
+  /** report metadata of same-machine deliveries to the hub (default true) */
+  mirror_local?: boolean
 }
 
 /** The bridge configuration beside the relay selection and credentials. */
@@ -201,6 +203,7 @@ export function readCloudFile(path: string, env: Env = process.env): CloudFile {
   }
   if (value.redact !== undefined && typeof value.redact !== "boolean") throw new Error(`${path}: redact is true or false`)
   if (value.private_ok !== undefined && typeof value.private_ok !== "boolean") throw new Error(`${path}: private_ok is true or false`)
+  if (value.mirror_local !== undefined && typeof value.mirror_local !== "boolean") throw new Error(`${path}: mirror_local is true or false`)
   return {
     bridge: true,
     machine: value.machine,
@@ -208,6 +211,7 @@ export function readCloudFile(path: string, env: Env = process.env): CloudFile {
     ...(value.mirror ? { mirror: value.mirror } : {}),
     ...(value.redact !== undefined ? { redact: value.redact } : {}),
     ...(value.private_ok !== undefined ? { private_ok: value.private_ok } : {}),
+    ...(value.mirror_local !== undefined ? { mirror_local: value.mirror_local } : {}),
   }
 }
 
@@ -238,6 +242,7 @@ export async function daemonBridge(env: Env = process.env, log: (line: string) =
     mirror: file.mirror,
     redact: file.redact,
     privateOk: file.private_ok,
+    mirrorLocal: file.mirror_local,
   }
 }
 

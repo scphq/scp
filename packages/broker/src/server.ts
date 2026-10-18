@@ -996,13 +996,23 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   /** a send as `from` to local endpoints or, through the bridge, other machines; wakes the recipients and tells the watchers */
   const deliver: Deliver = async (from, send, origin) => {
     let result: SendResult
-    if (remoteSend(core, send.to)) {
+    const remote = remoteSend(core, send.to)
+    if (remote) {
       if (!bridge)
         throw new RelayError("not_found", `no endpoint ${[send.to].flat().join(", ")}: this broker is not linked to a hub (${CLI_NAME} cloud enable)`)
       result = await bridge.forward(from, send, origin)
     } else {
       result = core.send(from, send, origin)
     }
+    if (!result.duplicate && !remote)
+      bridge?.local?.({
+        id: result.id,
+        thread: result.thread,
+        kind: send.kind ?? "message",
+        from,
+        to: result.deliveries.map((d) => d.endpoint),
+        at: (options.now ?? Date.now)(),
+      })
     if (!result.duplicate) {
       for (const delivery of result.deliveries) wake(delivery.endpoint)
       notifyFleet({
@@ -1138,6 +1148,14 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (result.handback) {
           const message = core.delivered(spawner, result.handback)!
           wake(spawner)
+          bridge?.local?.({
+            id: message.id,
+            thread: message.thread,
+            kind: "handback",
+            from: message.from.endpoint,
+            to: [spawner],
+            at: (options.now ?? Date.now)(),
+          })
           notifyFleet({
             type: "message",
             id: message.id,
