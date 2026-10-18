@@ -14,7 +14,8 @@ function fakeFetch(response: () => Response) {
 }
 
 const signal = () => new AbortController().signal
-const chat = (text: string) => Response.json({ choices: [{ message: { role: "assistant", content: text } }], usage: { prompt_tokens: 700, completion_tokens: 42 } })
+const chat = (text: string) =>
+  Response.json({ choices: [{ message: { role: "assistant", content: text } }], usage: { prompt_tokens: 700, completion_tokens: 42 } })
 
 describe("HttpJudgeClient", () => {
   test("no default model or provider: the model is required, the effort defaults to medium", () => {
@@ -37,7 +38,12 @@ describe("HttpJudgeClient", () => {
       expect(call!.init.redirect).toBe("manual")
       expect((call!.init.headers as Record<string, string>).authorization).toBe(`Bearer ${KEY}`)
       const cap = model?.startsWith("openai/") ? { max_completion_tokens: 4096 } : { max_tokens: 4096 }
-      expect(JSON.parse(String(call!.init.body))).toEqual({ model: name, messages: [{ role: "user", content: "the prompt" }], reasoning_effort: effort ?? "medium", ...cap })
+      expect(JSON.parse(String(call!.init.body))).toEqual({
+        model: name,
+        messages: [{ role: "user", content: "the prompt" }],
+        reasoning_effort: effort ?? "medium",
+        ...cap,
+      })
     }
   })
 
@@ -51,7 +57,15 @@ describe("HttpJudgeClient", () => {
   })
 
   test("anthropic: messages API with x-api-key and output_config effort", async () => {
-    const { fetch, calls } = fakeFetch(() => Response.json({ content: [{ type: "thinking", thinking: "" }, { type: "text", text: "{}" }], usage: { input_tokens: 9, output_tokens: 3 } }))
+    const { fetch, calls } = fakeFetch(() =>
+      Response.json({
+        content: [
+          { type: "thinking", thinking: "" },
+          { type: "text", text: "{}" },
+        ],
+        usage: { input_tokens: 9, output_tokens: 3 },
+      }),
+    )
     const client = new HttpJudgeClient({ fetch, key: () => KEY, model: "anthropic/claude-haiku-5-5", effort: "low" })
     expect(await client.judge("p", { signal: signal() })).toEqual({ text: "{}", usage: { input: 9, output: 3 } })
     const [call] = calls
@@ -60,7 +74,12 @@ describe("HttpJudgeClient", () => {
     expect(headers["x-api-key"]).toBe(KEY)
     expect(headers["anthropic-version"]).toBe("2023-06-01")
     expect(headers.authorization).toBeUndefined()
-    expect(JSON.parse(String(call!.init.body))).toEqual({ model: "claude-haiku-5-5", max_tokens: 4096, messages: [{ role: "user", content: "p" }], output_config: { effort: "low" } })
+    expect(JSON.parse(String(call!.init.body))).toEqual({
+      model: "claude-haiku-5-5",
+      max_tokens: 4096,
+      messages: [{ role: "user", content: "p" }],
+      output_config: { effort: "low" },
+    })
   })
 
   test("non-2xx, redirects and network failures throw without the key or the body", async () => {
@@ -90,7 +109,9 @@ describe("HttpJudgeClient", () => {
   test("a failure is an outage, a rejection of this input, or a missing key", async () => {
     const kind = async (response: () => Response, key: string | (() => string) = KEY, timeoutMs?: number) => {
       const { fetch } = fakeFetch(response)
-      const error = await new HttpJudgeClient({ fetch, key, model: MODEL, ...(timeoutMs ? { timeoutMs } : {}) }).judge("p", { signal: signal() }).catch((e: unknown) => e)
+      const error = await new HttpJudgeClient({ fetch, key, model: MODEL, ...(timeoutMs ? { timeoutMs } : {}) })
+        .judge("p", { signal: signal() })
+        .catch((e: unknown) => e)
       return error instanceof JudgeProviderError ? error.kind : "not a provider error"
     }
     for (const status of [401, 403, 404, 429, 500, 502, 503, 529]) expect(await kind(() => new Response("x", { status }))).toBe("outage")
@@ -115,8 +136,12 @@ describe("HttpJudgeClient", () => {
 
   test("a call that outlasts its own timeout is an outage", async () => {
     const fetch = ((_: unknown, init?: RequestInit) =>
-      new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))))) as unknown as typeof globalThis.fetch
-    const error = (await new HttpJudgeClient({ fetch, key: KEY, model: MODEL, timeoutMs: 20 }).judge("p", { signal: signal() }).catch((e: unknown) => e)) as JudgeProviderError
+      new Promise((_resolve, reject) =>
+        init!.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))),
+      )) as unknown as typeof globalThis.fetch
+    const error = (await new HttpJudgeClient({ fetch, key: KEY, model: MODEL, timeoutMs: 20 })
+      .judge("p", { signal: signal() })
+      .catch((e: unknown) => e)) as JudgeProviderError
     expect([error.kind, error.message]).toEqual(["outage", "judge provider openai timed out"])
   })
 

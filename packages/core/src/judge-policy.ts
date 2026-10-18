@@ -58,7 +58,8 @@ export function parseJudgePolicy(value: unknown, providers?: Readonly<Record<str
   unknownFields(rest, "judge")
   if (mode !== undefined && mode !== "off" && mode !== "shadow" && mode !== "enforce") throw refuse("mode is off, shadow or enforce")
   if (fail !== undefined && fail !== "open" && fail !== "closed") throw refuse("fail is open or closed")
-  if (timeout_s !== undefined && (typeof timeout_s !== "number" || !Number.isInteger(timeout_s) || timeout_s < 1 || timeout_s > 30)) throw refuse("timeout_s is 1 to 30 seconds")
+  if (timeout_s !== undefined && (typeof timeout_s !== "number" || !Number.isInteger(timeout_s) || timeout_s < 1 || timeout_s > 30))
+    throw refuse("timeout_s is 1 to 30 seconds")
   if (!Array.isArray(boundaries) || boundaries.length < 1 || boundaries.length > 64) throw refuse("boundaries is a list of 1 to 64 boundaries")
   const judge: JudgePolicy = {
     mode: mode ?? "shadow",
@@ -68,7 +69,10 @@ export function parseJudgePolicy(value: unknown, providers?: Readonly<Record<str
       if (!isObject(boundary)) throw refuse(`boundary ${index} is not an object`)
       const { from, to, across, ...extra } = boundary
       unknownFields(extra, `boundary ${index}`)
-      for (const [key, sel] of [["from", from], ["to", to]] as const) {
+      for (const [key, sel] of [
+        ["from", from],
+        ["to", to],
+      ] as const) {
         if (sel !== undefined && !validSelector(sel)) throw refuse(`boundary ${index} ${key}: ${JSON.stringify(sel)} is not a selector`)
       }
       if (across !== undefined && across !== "tree") throw refuse(`boundary ${index} across is tree`)
@@ -101,8 +105,13 @@ export function parseJudgePolicy(value: unknown, providers?: Readonly<Record<str
     if (effort !== undefined && !JUDGE_EFFORTS.includes(effort as JudgeEffort)) throw refuse(`model.effort is one of ${JUDGE_EFFORTS.join(", ")}`)
     if ((key_env === undefined) === (key_file === undefined)) throw refuse("model needs exactly one of key_env or key_file")
     if (key_env !== undefined && (typeof key_env !== "string" || !ENV_NAME.test(key_env))) throw refuse("model.key_env is an environment variable name")
-    if (key_file !== undefined && (typeof key_file !== "string" || !key_file.startsWith("/") || key_file.length > 1024)) throw refuse("model.key_file is an absolute path")
-    judge.model = { id, effort: (effort as JudgeEffort | undefined) ?? "medium", ...(key_env !== undefined ? { key_env: key_env as string } : { key_file: key_file as string }) }
+    if (key_file !== undefined && (typeof key_file !== "string" || !key_file.startsWith("/") || key_file.length > 1024))
+      throw refuse("model.key_file is an absolute path")
+    judge.model = {
+      id,
+      effort: (effort as JudgeEffort | undefined) ?? "medium",
+      ...(key_env !== undefined ? { key_env: key_env as string } : { key_file: key_file as string }),
+    }
   }
   return judge
 }

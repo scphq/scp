@@ -6,7 +6,13 @@ import { admits, crossFleet, isLeaving, type ScopeNode, type ScopeWorld } from "
 const local = (id: string, rules: ScopeNode["rules"] = {}, caps: ScopeCap[] = []): ScopeNode => ({
   id,
   address: `alice/${id}`,
-  subject: { handle: id, harness: "claude-code", kind: "agent", labels: {}, scope: { id, tree: id, ancestors: [], groups: [], rootHandle: id, machine: "laptop", local: true } },
+  subject: {
+    handle: id,
+    harness: "claude-code",
+    kind: "agent",
+    labels: {},
+    scope: { id, tree: id, ancestors: [], groups: [], rootHandle: id, machine: "laptop", local: true },
+  },
   rules,
   caps: { caps, allow: {} },
   groups: [],
@@ -44,7 +50,8 @@ describe("acct: selectors", () => {
     expect(matches("acct:bob", bob)).toBe(true)
     expect(matches("acct:*", bob)).toBe(true)
     expect(matches("acct:carol", bob)).toBe(false)
-    for (const sel of ["*", "fleet:*", "machine:desk", "ep:review", "kind:agent", "harness:claude-code", "handle:*", "tree:self", "group:x"]) expect(matches(sel, bob, mine)).toBe(false)
+    for (const sel of ["*", "fleet:*", "machine:desk", "ep:review", "kind:agent", "harness:claude-code", "handle:*", "tree:self", "group:x"])
+      expect(matches(sel, bob, mine)).toBe(false)
     expect(matches("acct:*", mine)).toBe(false)
     expect(matches("acct:bob", mine)).toBe(false)
     expect(crossFleet(local("impl"), peer("bob"))).toBe(true)

@@ -24,7 +24,11 @@ describe("parseJudgePolicy", () => {
       boundaries: [{ from: "fleet:qa", to: "tree:root" }, { to: "ep:main" }, { across: "tree" }],
     })
     expect(judge.model).toEqual({ id: "openrouter/anthropic/claude-haiku-5-5", effort: "low", key_env: "OPENROUTER_API_KEY" })
-    expect(judge.boundaries).toEqual([{ from: "fleet:qa", to: "tree:root" }, { from: "*", to: "ep:main" }, { from: "*", to: "*", across: "tree" }])
+    expect(judge.boundaries).toEqual([
+      { from: "fleet:qa", to: "tree:root" },
+      { from: "*", to: "ep:main" },
+      { from: "*", to: "*", across: "tree" },
+    ])
     expect(parseJudgePolicy({ model: { id: "anthropic/judge-small", key_file: "/home/u/.config/scp/judge.key" }, boundaries: [{}] }).model).toEqual({
       id: "anthropic/judge-small",
       effort: "medium",
@@ -36,7 +40,9 @@ describe("parseJudgePolicy", () => {
     const providers = { local: { url: "http://127.0.0.1:8080/v1/chat/completions", shape: "openai" as const } }
     expect(parseJudgePolicy({ model: { id: "local/judge", key_env: "K" }, boundaries: [{}] }, providers).model?.id).toBe("local/judge")
     expect(() => parseJudgePolicy({ model: { id: "openai/x", key_env: "K" }, boundaries: [{}] }, providers)).toThrow("provider one of local")
-    expect(parsePolicy({ rules: [], judge: { model: { id: "local/judge", key_env: "K" }, boundaries: [{}] } }, { judgeProviders: providers }).judge?.model?.id).toBe("local/judge")
+    expect(
+      parsePolicy({ rules: [], judge: { model: { id: "local/judge", key_env: "K" }, boundaries: [{}] } }, { judgeProviders: providers }).judge?.model?.id,
+    ).toBe("local/judge")
   })
 
   test("a broker-wide budget, absent unless set", () => {

@@ -49,7 +49,9 @@ export interface Policy {
 /** the policy as text that ignores the order of rules, groups and selector lists, none of which changes what it allows */
 export function canonicalPolicy(policy: Policy): string {
   const sorted = (list: Selector[] | undefined) => (list ? [...list].sort() : undefined)
-  const rules = policy.rules.map((rule) => JSON.stringify({ ...rule, accept_from: sorted(rule.accept_from), send_to: sorted(rule.send_to), scope: sorted(rule.scope) })).sort()
+  const rules = policy.rules
+    .map((rule) => JSON.stringify({ ...rule, accept_from: sorted(rule.accept_from), send_to: sorted(rule.send_to), scope: sorted(rule.scope) }))
+    .sort()
   const groups = (policy.groups ?? [])
     .map((group) => ({ ...group, members: sorted(group.members), in: sorted(group.in), out: sorted(group.out), rules: sorted(group.rules) }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
@@ -122,7 +124,10 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
       if (Object.keys(extra).length) throw new RelayError("invalid_params", `rule ${index} has unknown fields: ${Object.keys(extra).join(", ")}`)
       if (!validSelector(match, { absolute: true })) throw new RelayError("invalid_params", `rule ${index} match: ${JSON.stringify(match)} is not a selector`)
       const parsed: PolicyRule = { match }
-      for (const [key, sels] of [["accept_from", accept_from], ["send_to", send_to]] as const) {
+      for (const [key, sels] of [
+        ["accept_from", accept_from],
+        ["send_to", send_to],
+      ] as const) {
         const parsedList = list(sels, `rule ${index} ${key}`)
         if (parsedList) parsed[key] = parsedList
       }
@@ -142,10 +147,15 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
       if (!isObject(group)) throw new RelayError("invalid_params", `group ${index} is not an object`)
       const { name, members, in: inList, out, rules: both, ...extra } = group
       if (Object.keys(extra).length) throw new RelayError("invalid_params", `group ${index} has unknown fields: ${Object.keys(extra).join(", ")}`)
-      if (typeof name !== "string" || !GROUP_NAME.test(name) || name === "self" || names.has(name)) throw new RelayError("invalid_params", `group ${index} needs a unique name`)
+      if (typeof name !== "string" || !GROUP_NAME.test(name) || name === "self" || names.has(name))
+        throw new RelayError("invalid_params", `group ${index} needs a unique name`)
       names.add(name)
       const parsed: PolicyGroup = { name, members: list(members, `group ${name} members`, { absolute: true }) ?? [] }
-      for (const [key, sels] of [["in", inList], ["out", out], ["rules", both]] as const) {
+      for (const [key, sels] of [
+        ["in", inList],
+        ["out", out],
+        ["rules", both],
+      ] as const) {
         const parsedList = list(sels, `group ${name} ${key}`, { groupRules: true })
         if (parsedList) parsed[key] = parsedList
       }
@@ -157,7 +167,10 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
     const { human_always, symmetric_presets, child_default, verify_lineage, ...extra } = defaults
     if (Object.keys(extra).length) throw new RelayError("invalid_params", `unknown defaults: ${Object.keys(extra).join(", ")}`)
     const parsed: PolicyDefaults = {}
-    for (const [key, flag] of [["human_always", human_always], ["symmetric_presets", symmetric_presets]] as const) {
+    for (const [key, flag] of [
+      ["human_always", human_always],
+      ["symmetric_presets", symmetric_presets],
+    ] as const) {
       if (flag === undefined) continue
       if (typeof flag !== "boolean") throw new RelayError("invalid_params", `defaults.${key} is true or false`)
       parsed[key] = flag
@@ -169,8 +182,10 @@ export function parsePolicy(value: unknown, options: { judgeProviders?: Readonly
       parsed.child_default = child_default as ScopePreset | "inherit"
     }
     if (verify_lineage !== undefined) {
-      if (verify_lineage !== "spike" && typeof verify_lineage !== "boolean") throw new RelayError("invalid_params", "defaults.verify_lineage is spike, true or false")
-      if (verify_lineage === true) throw new RelayError("invalid_params", "defaults.verify_lineage true needs the peer-pid check, which this relay does not have yet: use spike or false")
+      if (verify_lineage !== "spike" && typeof verify_lineage !== "boolean")
+        throw new RelayError("invalid_params", "defaults.verify_lineage is spike, true or false")
+      if (verify_lineage === true)
+        throw new RelayError("invalid_params", "defaults.verify_lineage true needs the peer-pid check, which this relay does not have yet: use spike or false")
       parsed.verify_lineage = verify_lineage
     }
     policy.defaults = parsed
@@ -247,8 +262,10 @@ export function matches(selector: Selector, subject: PolicySubject, anchor?: Pol
 export function policyRefusal(policy: Policy | null, from: PolicySubject, to: PolicySubject, bound?: (name: string) => boolean): string | null {
   if (!policy) return null
   for (const rule of policy.rules) {
-    if (rule.send_to && matches(rule.match, from, undefined, bound) && !rule.send_to.some((s) => matches(s, to, from, bound))) return `the relay policy (${rule.match}, send_to) does not let this endpoint message that one`
-    if (rule.accept_from && matches(rule.match, to, undefined, bound) && !rule.accept_from.some((s) => matches(s, from, to, bound))) return `the relay policy (${rule.match}, accept_from) does not let that endpoint receive from this one`
+    if (rule.send_to && matches(rule.match, from, undefined, bound) && !rule.send_to.some((s) => matches(s, to, from, bound)))
+      return `the relay policy (${rule.match}, send_to) does not let this endpoint message that one`
+    if (rule.accept_from && matches(rule.match, to, undefined, bound) && !rule.accept_from.some((s) => matches(s, from, to, bound)))
+      return `the relay policy (${rule.match}, accept_from) does not let that endpoint receive from this one`
   }
   return null
 }

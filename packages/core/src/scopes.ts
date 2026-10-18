@@ -115,10 +115,17 @@ export function scopeLists(node: ScopeNode, dir: ScopeDirection): ScopeList[] {
   const own = node.rules[dir]
   const bound = node.rules.groups?.[dir] ?? {}
   if (own) lists.push({ source: "own rules", by: node.id, entries: own.map((sel) => (bound[sel] ? { sel, group: bound[sel] } : { sel })) })
-  for (const cap of node.caps.caps) if (cap.dir === dir) lists.push({ source: cap.by === "inherited" ? "inherited cap" : `cap ${cap.id}`, by: cap.by, entries: cap.sels, cap: cap.id })
+  for (const cap of node.caps.caps)
+    if (cap.dir === dir) lists.push({ source: cap.by === "inherited" ? "inherited cap" : `cap ${cap.id}`, by: cap.by, entries: cap.sels, cap: cap.id })
   for (const group of node.groups) {
     const rules = group[dir]
-    if (rules) lists.push({ source: `group:${group.name}`, by: group.owner, group: group.name, entries: [...rules, ...(node.caps.allow[groupCapKey(group.name, dir)] ?? [])] })
+    if (rules)
+      lists.push({
+        source: `group:${group.name}`,
+        by: group.owner,
+        group: group.name,
+        entries: [...rules, ...(node.caps.allow[groupCapKey(group.name, dir)] ?? [])],
+      })
   }
   for (const cap of node.policy) if (cap.dir === dir) lists.push({ source: `policy (${cap.match})`, by: "policy", entries: cap.sels })
   return lists
@@ -135,7 +142,7 @@ export function crossFleet(e: ScopeNode, x: ScopeNode): boolean {
   const a = e.subject.scope
   const b = x.subject.scope
   if (!b) return false
-  return !a || !a.local || !b.local || a.tree !== b.tree
+  return !a?.local || !b.local || a.tree !== b.tree
 }
 
 type Memo = Map<string, boolean>
@@ -255,10 +262,14 @@ function limitText(world: ScopeWorld, e: ScopeNode, list: ScopeList, dir: ScopeD
   const widen = `widen with scp rules widen ${short(e)} --${dir} ${add}`
   if (list.source === "own rules") {
     const set = `scp rules set --${dir} ${[...sels, add].join(",")}`
-    return you ? `your own rules limit ${whose} to ${to}; widen them with ${set}` : `${short(e)}'s own rules limit ${whose} to ${to}; ${short(e)} widens them with ${set}`
+    return you
+      ? `your own rules limit ${whose} to ${to}; widen them with ${set}`
+      : `${short(e)}'s own rules limit ${whose} to ${to}; ${short(e)} widens them with ${set}`
   }
-  if (list.source.startsWith("policy")) return `the ${list.source.replace(/^policy \((.*)\)$/, "policy rule for $1")} limits ${whose} to ${to}; change it in the policy file (scp policy path)`
-  if (list.group) return `group ${list.group}'s rules (set by ${list.by === "policy" ? "the policy file" : nameOf(world, list.by, e)}) limit ${whose} to ${to}; ${widen}`
+  if (list.source.startsWith("policy"))
+    return `the ${list.source.replace(/^policy \((.*)\)$/, "policy rule for $1")} limits ${whose} to ${to}; change it in the policy file (scp policy path)`
+  if (list.group)
+    return `group ${list.group}'s rules (set by ${list.by === "policy" ? "the policy file" : nameOf(world, list.by, e)}) limit ${whose} to ${to}; ${widen}`
   if (list.by === "inherited") {
     const parent = e.subject.scope?.ancestors[0]
     const reach = parent ? `what ${nameOf(world, parent, e)} reaches` : "what its parent reached"
@@ -284,7 +295,12 @@ export function relationText(peer: PolicySubject, me: PolicySubject): string {
  * or the system endpoint passes, except an `unverified` human sender (one without a terminal), which is checked like any unplaced sender; an
  * ancestor of `b` (unless `strict`) and a solicited reply pass both.
  */
-export function scopeDecision(world: ScopeWorld, a: ScopeNode, b: ScopeNode, options: { humanAlways: boolean; solicited?: boolean; unverified?: boolean; strict?: boolean }): ScopeDecision {
+export function scopeDecision(
+  world: ScopeWorld,
+  a: ScopeNode,
+  b: ScopeNode,
+  options: { humanAlways: boolean; solicited?: boolean; unverified?: boolean; strict?: boolean },
+): ScopeDecision {
   const kinds = [a.subject.kind, b.subject.kind]
   if (kinds.includes("system")) return { allowed: true, reasons: ["the relay itself"] }
   if (options.humanAlways && (b.human || (a.human && !options.unverified))) return { allowed: true, reasons: ["the human is always reachable"] }
@@ -311,7 +327,10 @@ export function clipped(world: ScopeWorld, via: string, sel: string, anchor: Sco
  * A preset and allowances, or explicit lists, as own rules per direction: a list sets it, null clears it, absent leaves it. A preset (and
  * `allow`, which appends to it; alone it appends to `none`) sets both directions under symmetric presets, else `out`; `in` and `out` win for theirs.
  */
-export function expandRules(params: { scope?: ScopePreset; allow?: string[]; in?: string[]; out?: string[] }, symmetric: boolean): Partial<Record<ScopeDirection, string[] | null>> {
+export function expandRules(
+  params: { scope?: ScopePreset; allow?: string[]; in?: string[]; out?: string[] },
+  symmetric: boolean,
+): Partial<Record<ScopeDirection, string[] | null>> {
   const result: Partial<Record<ScopeDirection, string[] | null>> = {}
   if (params.scope !== undefined || params.allow !== undefined) {
     if (params.scope === "open" && params.allow?.length) throw new RelayError("invalid_params", "allow adds to a preset with a list: tree, parent or none")
@@ -337,7 +356,12 @@ export function presetOf(node: ScopeNode, symmetric: boolean): ScopePreset | "cu
   const outs = set("out")
   if (!ins.length && !outs.length) return "open"
   for (const [preset, list] of Object.entries(PRESET_LISTS) as [ScopePreset, string[]][]) {
-    const is = (lists: ScopeList[]) => lists.length === 1 && sameSet(lists[0]!.entries.map((entry) => effectiveSelector(lists[0]!, entry)), list)
+    const is = (lists: ScopeList[]) =>
+      lists.length === 1 &&
+      sameSet(
+        lists[0]!.entries.map((entry) => effectiveSelector(lists[0]!, entry)),
+        list,
+      )
     if (symmetric ? is(ins) && is(outs) : is(outs) && !ins.length) return preset
   }
   return "custom"

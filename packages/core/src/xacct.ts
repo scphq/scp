@@ -195,7 +195,10 @@ export function gateRefusal(verdict: { code: string; categories: string[]; retry
 }
 
 /** one count of redactions for a message redacted on both sides */
-export function joinRedacted(a: { n: number; kinds: string[] } | undefined, b: { n: number; kinds: string[] } | undefined): { n: number; kinds: string[] } | undefined {
+export function joinRedacted(
+  a: { n: number; kinds: string[] } | undefined,
+  b: { n: number; kinds: string[] } | undefined,
+): { n: number; kinds: string[] } | undefined {
   if (!a || !b) return a ?? b
   return { n: a.n + b.n, kinds: [...new Set([...a.kinds, ...b.kinds])].sort() }
 }
@@ -222,7 +225,11 @@ export function replyGrant(hash: (value: string) => string, key: string, id: str
 }
 
 /** the caps of a contact (pair a minute and an hour, account a day) under `caps`, lowered by what the other side declared when it did */
-export function xlimits(own: XLimits | null, declared?: XLimits, caps: Readonly<XLimitConfig> = XLIMITS): { perMinute: number; perHour: number; perDay: number } {
+export function xlimits(
+  own: XLimits | null,
+  declared?: XLimits,
+  caps: Readonly<XLimitConfig> = XLIMITS,
+): { perMinute: number; perHour: number; perDay: number } {
   const limits = own ?? {}
   const lower = (cap: number, value: number | undefined) => (value === undefined ? cap : Math.min(cap, value))
   return {
@@ -253,7 +260,15 @@ export function parseXMessage(value: unknown): XMessage & { kind: MessageKind } 
   if (!isRecord(value)) throw bad("shape")
   const from = value.from
   if (!text(value.id, 128) || !MESSAGE_ID.test(value.id)) throw bad("id")
-  if (!isRecord(from) || !text(from.account, 64) || !ACCOUNT_HANDLE.test(from.account) || !text(from.address, 200) || typeof from.human !== "boolean" || from.auth !== "contact") throw bad("sender")
+  if (
+    !isRecord(from) ||
+    !text(from.account, 64) ||
+    !ACCOUNT_HANDLE.test(from.account) ||
+    !text(from.address, 200) ||
+    typeof from.human !== "boolean" ||
+    from.auth !== "contact"
+  )
+    throw bad("sender")
   if (from.machine !== undefined && !text(from.machine, 32)) throw bad("sender")
   if (from.harness !== undefined && from.harness !== null && !text(from.harness, 32)) throw bad("sender")
   if (typeof value.to !== "string" || !TARGET.test(value.to)) throw bad("to")
@@ -281,7 +296,15 @@ export function parseXMessage(value: unknown): XMessage & { kind: MessageKind } 
   const rel = typeof from.rel === "string" ? from.rel.slice(0, 128) : `contact:${from.account}`
   return {
     id: value.id,
-    from: { account: from.account, address: from.address, human: from.human, auth: "contact", rel, ...(from.machine !== undefined ? { machine: from.machine as string } : {}), harness: (from.harness as string | null | undefined) ?? null },
+    from: {
+      account: from.account,
+      address: from.address,
+      human: from.human,
+      auth: "contact",
+      rel,
+      ...(from.machine !== undefined ? { machine: from.machine as string } : {}),
+      harness: (from.harness as string | null | undefined) ?? null,
+    },
     to: value.to,
     body: value.body,
     kind: value.kind as MessageKind,
@@ -341,8 +364,10 @@ export class XCounters {
     const now = this.now()
     const pair = this.pair(`${sender} ${target}`, now)
     const { perMinute, perHour, perDay } = xlimits(contact.limits, undefined, this.caps)
-    if (pair.minute.n >= perMinute) throw new RelayError("rate_limited", `${perMinute} messages to ${target} a minute`, Math.max(1, Math.ceil((pair.minute.at + 60_000 - now) / 1000)))
-    if (pair.hour.n >= perHour) throw new RelayError("rate_limited", `${perHour} messages to ${target} an hour`, Math.max(1, Math.ceil((pair.hour.at + 3_600_000 - now) / 1000)))
+    if (pair.minute.n >= perMinute)
+      throw new RelayError("rate_limited", `${perMinute} messages to ${target} a minute`, Math.max(1, Math.ceil((pair.minute.at + 60_000 - now) / 1000)))
+    if (pair.hour.n >= perHour)
+      throw new RelayError("rate_limited", `${perHour} messages to ${target} an hour`, Math.max(1, Math.ceil((pair.hour.at + 3_600_000 - now) / 1000)))
     if (this.today(contact.peerId, now) >= perDay) throw new RelayError("rate_limited", `${perDay} messages to ${contact.peerHandle} today`, untilTomorrow(now))
     const inThread = this.window(this.threads, thread, now, 86_400_000)
     if (inThread.n >= this.caps.threadMax) throw new RelayError("loop_guard", `thread ${thread} reached ${this.caps.threadMax} messages across accounts`)
@@ -363,7 +388,10 @@ export class XCounters {
     const days = this.loaded()
     const day = dayStart(now)
     let count = days.get(contact.peerId)
-    if (!count) days.set(contact.peerId, (count = { day, count: 0, reserved: 0, recent: [], last: 0, wrote: 0 }))
+    if (!count) {
+      count = { day, count: 0, reserved: 0, recent: [], last: 0, wrote: 0 }
+      days.set(contact.peerId, count)
+    }
     if (count.day !== day) Object.assign(count, { day, count: 0, reserved: 0, recent: [] })
     count.recent = count.recent.filter((at) => now - at < 60_000).slice(-this.caps.reserveMax)
     if (count.count + 1 > count.reserved) this.write(contact.peerId, count, count.count + Math.min(this.caps.reserveMax, 1 + count.recent.length), now)
@@ -385,7 +413,8 @@ export class XCounters {
   trueUp(skip?: string): void {
     if (!this.days) return
     const now = this.now()
-    for (const [contact, count] of this.days) if (contact !== skip && (this.due(count, now) ?? Number.POSITIVE_INFINITY) <= now) this.write(contact, count, count.count, now)
+    for (const [contact, count] of this.days)
+      if (contact !== skip && (this.due(count, now) ?? Number.POSITIVE_INFINITY) <= now) this.write(contact, count, count.count, now)
   }
 
   /** when the next true-up is due, or null when no reservation is left over */
@@ -406,7 +435,13 @@ export class XCounters {
   }
 
   private write(contact: string, count: Day, reserved: number, now: number): void {
-    this.sql.all(`INSERT INTO xcounters (contact, day, sent, at) VALUES (?, ?, ?, ?) ON CONFLICT (contact) DO UPDATE SET day = excluded.day, sent = excluded.sent, at = excluded.at`, contact, count.day, reserved, now)
+    this.sql.all(
+      `INSERT INTO xcounters (contact, day, sent, at) VALUES (?, ?, ?, ?) ON CONFLICT (contact) DO UPDATE SET day = excluded.day, sent = excluded.sent, at = excluded.at`,
+      contact,
+      count.day,
+      reserved,
+      now,
+    )
     count.reserved = reserved
     count.wrote = now
   }
@@ -426,7 +461,10 @@ export class XCounters {
 
   private pair(key: string, now: number): { minute: Window; hour: Window } {
     let pair = this.pairs.get(key)
-    if (!pair) this.pairs.set(key, (pair = { minute: { at: now, n: 0 }, hour: { at: now, n: 0 } }))
+    if (!pair) {
+      pair = { minute: { at: now, n: 0 }, hour: { at: now, n: 0 } }
+      this.pairs.set(key, pair)
+    }
     if (now - pair.minute.at >= 60_000) pair.minute = { at: now, n: 0 }
     if (now - pair.hour.at >= 3_600_000) pair.hour = { at: now, n: 0 }
     return pair
@@ -434,7 +472,10 @@ export class XCounters {
 
   private window(map: Map<string, Window>, key: string, now: number, ms: number): Window {
     let window = map.get(key)
-    if (!window || now - window.at >= ms) map.set(key, (window = { at: now, n: 0 }))
+    if (!window || now - window.at >= ms) {
+      window = { at: now, n: 0 }
+      map.set(key, window)
+    }
     return window
   }
 

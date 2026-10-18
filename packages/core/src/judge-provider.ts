@@ -40,7 +40,10 @@ export interface HttpJudgeOptions {
 }
 
 /** the provider and model name of `provider/name`, or a thrown error for a provider not in `providers` */
-export function judgeModel(id: string, providers: Readonly<Record<string, JudgeProvider>> = JUDGE_PROVIDERS): { provider: string; name: string; endpoint: JudgeProvider } {
+export function judgeModel(
+  id: string,
+  providers: Readonly<Record<string, JudgeProvider>> = JUDGE_PROVIDERS,
+): { provider: string; name: string; endpoint: JudgeProvider } {
   const slash = id.indexOf("/")
   const provider = slash === -1 ? "" : id.slice(0, slash)
   const name = id.slice(slash + 1)
@@ -96,7 +99,9 @@ export class HttpJudgeClient implements JudgeClient {
         ? { model: this.name, max_tokens: JUDGE_MAX_OUTPUT_TOKENS, messages: message, output_config: { effort: this.effort } }
         : { model: this.name, messages: message, reasoning_effort: this.effort, [cap ?? "max_tokens"]: JUDGE_MAX_OUTPUT_TOKENS }
     const headers: Record<string, string> =
-      shape === "anthropic" ? { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" } : { "content-type": "application/json", authorization: `Bearer ${key}` }
+      shape === "anthropic"
+        ? { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" }
+        : { "content-type": "application/json", authorization: `Bearer ${key}` }
     const signal = this.options.timeoutMs ? AbortSignal.any([opts.signal, AbortSignal.timeout(this.options.timeoutMs)]) : opts.signal
     let response: Response
     try {
@@ -128,7 +133,8 @@ export class HttpJudgeClient implements JudgeClient {
 function openaiText(parsed: Record<string, unknown>): string | undefined {
   const content = (parsed.choices as { message?: { content?: unknown } }[] | undefined)?.[0]?.message?.content
   if (typeof content === "string") return content
-  if (Array.isArray(content)) return content.map((part: { type?: string; text?: unknown }) => (part?.type === "text" && typeof part.text === "string" ? part.text : "")).join("")
+  if (Array.isArray(content))
+    return content.map((part: { type?: string; text?: unknown }) => (part?.type === "text" && typeof part.text === "string" ? part.text : "")).join("")
   return undefined
 }
 

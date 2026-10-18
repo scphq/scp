@@ -58,7 +58,8 @@ const CUES = [
 const FENCE_OR_DIFF = /```|^(?:---|\+\+\+|@@) /m
 const CODE_LINE = /[;{}=]\s*$|^\s*(?:import|export|const|let|var|function|def|class|return|if|for|while|#include|package|fn|pub|func)\b|=>|\)\s*\{/
 
-const sortCategories = (list: Iterable<JudgeCategory>): JudgeCategory[] => [...new Set(list)].sort((a, b) => JUDGE_CATEGORIES.indexOf(a) - JUDGE_CATEGORIES.indexOf(b))
+const sortCategories = (list: Iterable<JudgeCategory>): JudgeCategory[] =>
+  [...new Set(list)].sort((a, b) => JUDGE_CATEGORIES.indexOf(a) - JUDGE_CATEGORIES.indexOf(b))
 
 function codeShaped(body: string): boolean {
   if (FENCE_OR_DIFF.test(body)) return true
@@ -69,7 +70,8 @@ function codeShaped(body: string): boolean {
 /** the deterministic checks before any model: a credential refuses, personal data becomes redactions, markup and cues set suspect; no IO */
 export function prefilter(body: string): Prefiltered {
   const secret = findSecret(body)
-  if (secret) return { verdict: "refuse", reason: `the message carries a credential (${secret})`, redactions: [], suspect: false, categories: ["secret"], code: false }
+  if (secret)
+    return { verdict: "refuse", reason: `the message carries a credential (${secret})`, redactions: [], suspect: false, categories: ["secret"], code: false }
   const redactions = findPii(body).map(({ quote, kind }) => ({ quote, kind }))
   const suspect = FORGED.test(body) || stripControl(body) !== body || CUES.some((cue) => cue.test(body))
   const code = codeShaped(body)
@@ -193,7 +195,8 @@ export function applyRedactions(body: string, redactions: readonly Redaction[]):
   const byQuote = new Map<string, RedactionKind>()
   for (const r of redactions) if (r.quote && !byQuote.has(r.quote)) byQuote.set(r.quote, redactionKind(r.kind))
   const spans: { start: number; end: number; kind: RedactionKind }[] = []
-  for (const [quote, kind] of byQuote) for (let i = body.indexOf(quote); i !== -1; i = body.indexOf(quote, i + 1)) spans.push({ start: i, end: i + quote.length, kind })
+  for (const [quote, kind] of byQuote)
+    for (let i = body.indexOf(quote); i !== -1; i = body.indexOf(quote, i + 1)) spans.push({ start: i, end: i + quote.length, kind })
   if (!spans.length) return { text: body, n: 0, kinds: [] }
   spans.sort((a, b) => a.start - b.start || b.end - a.end)
   const merged: { start: number; end: number; kind: RedactionKind; longest: number }[] = []
@@ -255,7 +258,8 @@ export class VerdictCache {
   }
 }
 
-const cacheKey = (parts: CacheParts): string => sha256Hex(JSON.stringify([parts.side, parts.configVersion, JUDGE_PROMPT_VERSION, parts.boundary, parts.body, parts.from, parts.to]))
+const cacheKey = (parts: CacheParts): string =>
+  sha256Hex(JSON.stringify([parts.side, parts.configVersion, JUDGE_PROMPT_VERSION, parts.boundary, parts.body, parts.from, parts.to]))
 
 export interface JudgeClient {
   judge(prompt: string, opts: { signal: AbortSignal }): Promise<{ text: string; usage?: { input: number; output: number } }>
@@ -277,7 +281,14 @@ export class FakeJudgeClient implements JudgeClient {
     if (this.options.delayMs) {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, this.options.delayMs)
-        opts.signal.addEventListener("abort", () => (clearTimeout(timer), reject(new Error("aborted"))), { once: true })
+        opts.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer)
+            reject(new Error("aborted"))
+          },
+          { once: true },
+        )
       })
     }
     if (next === undefined) throw new Error("no scripted answer")
@@ -341,7 +352,16 @@ export async function runJudge(input: RunJudgeInput): Promise<Verdict> {
   const started = now()
   const base = { prompt_version: JUDGE_PROMPT_VERSION, ...(input.model ? { model: input.model } : {}) }
   const pre = prefilter(input.body)
-  if (pre.verdict === "refuse") return { verdict: "refuse", categories: pre.categories, reason: pre.reason!, redactions: [], source: "prefilter", prompt_version: JUDGE_PROMPT_VERSION, ms: now() - started }
+  if (pre.verdict === "refuse")
+    return {
+      verdict: "refuse",
+      categories: pre.categories,
+      reason: pre.reason!,
+      redactions: [],
+      source: "prefilter",
+      prompt_version: JUDGE_PROMPT_VERSION,
+      ms: now() - started,
+    }
   const from = input.from ?? "unknown"
   const to = input.to ?? []
   const parts: CacheParts = { side: input.side, configVersion: input.configVersion, boundary: input.boundary, body: input.body, from, to }
@@ -400,7 +420,8 @@ export async function runJudge(input: RunJudgeInput): Promise<Verdict> {
   } catch (error) {
     if (input.stats) input.stats.errors++
     if (!answeredAtAll && (timedOut || (error instanceof JudgeProviderError && error.kind === "outage"))) outcome = "outage"
-    if (input.failMode === "prefilter" && !answeredAtAll && error instanceof JudgeProviderError && error.kind === "no_key") return byPrefilter(JUDGE_FALLBACK_NOTE)
+    if (input.failMode === "prefilter" && !answeredAtAll && error instanceof JudgeProviderError && error.kind === "no_key")
+      return byPrefilter(JUDGE_FALLBACK_NOTE)
     return {
       verdict: input.failMode === "open" ? (pre.redactions.length ? "redact" : "pass") : "hold",
       categories: pre.categories,
@@ -423,7 +444,11 @@ const RANK: Record<JudgeVerdict, number> = { pass: 0, redact: 1, hold: 2, refuse
 /** one verdict for a send judged at several boundaries: the strictest, with every category and redaction */
 export function mergeVerdicts(verdicts: readonly Verdict[]): Verdict {
   const strictest = verdicts.reduce((a, b) => (RANK[b.verdict] > RANK[a.verdict] ? b : a))
-  return { ...strictest, categories: sortCategories(verdicts.flatMap((v) => v.categories)), redactions: uniqueRedactions(verdicts.flatMap((v) => v.redactions)) }
+  return {
+    ...strictest,
+    categories: sortCategories(verdicts.flatMap((v) => v.categories)),
+    redactions: uniqueRedactions(verdicts.flatMap((v) => v.redactions)),
+  }
 }
 
 export type JudgeAuditEvent = "judge_refuse" | "judge_hold" | "judge_redact" | "judge_override" | "judge_expire" | "judge_skipped" | "judge_shadow"
