@@ -247,7 +247,6 @@ table.activity td:last-child{grid-column:1/-1;white-space:normal!important}}
 .strip-who .hicon{flex:none;margin-right:0}
 .strip-who .mini{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .strip-name{flex:0 0 auto;max-width:7.5rem;overflow:hidden;text-overflow:ellipsis}
-.strip details.offline{margin-top:0}
 .cells{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
 .cell{display:inline-block;width:10px;height:10px;border:1px solid var(--faint);background:transparent}
 .cell.online{border-color:var(--acc);background:var(--acc)}
