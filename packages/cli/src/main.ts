@@ -540,6 +540,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     }
     return spawnCommand(rest, cwd)
   }
+  if (verb === "mesh") return (await import("./mesh")).meshCommand(rest)
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
@@ -1445,7 +1446,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
     const bridge = await daemonBridge()
     broker = await startBroker({
       dir: relayDir(),
-      ...(bridge ? { bridge } : {}),
+      ...(bridge ? { bridge } : await (await import("./mesh")).meshBrokerOptions()),
       bridgeConfig: () => daemonBridge(),
       ...(idleMs !== undefined ? { idleMs } : {}),
       ...(policyFile ? { policyPath: resolve(policyFile) } : {}),

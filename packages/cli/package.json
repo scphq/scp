@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@openai/codex": "0.159.0",
+    "@scp-dev/mesh": "workspace:*",
     "opencode-ai": "1.18.34",
     "tsup": "^8.5.1"
   },

@@ -26,7 +26,7 @@ import {
   stripControl,
 } from "@scp-dev/core"
 import { FederatedCore } from "@scp-dev/hub"
-import { type Bridge, type BridgeConfig, remoteSend, startBridge } from "./bridge"
+import { type Bridge, type BridgeConfig, type BridgeHooks, remoteSend, startBridge } from "./bridge"
 import { type Deliver, type JudgeClientFactory, JudgeGate } from "./judge-gate"
 import { releaseBrokerLock, takeBrokerLock } from "./lock"
 import { encodeLine, LineReader, LineWriter, MAX_LINE } from "./ndjson"
@@ -60,6 +60,8 @@ export interface BrokerOptions {
   bridge?: BridgeConfig | undefined
   /** reads the bridge configuration again for bridge_relink; one that appeared or names another hub or machine restarts the broker */
   bridgeConfig?: (() => Promise<BridgeConfig | undefined>) | undefined
+  /** experimental: another link to other machines in place of the hub's, started only when `bridge` is unset */
+  link?: LinkFactory | undefined
   /** how often presence that decays without a request (a hook-only endpoint) is checked for changes (default 60 s) */
   presenceEveryMs?: number | undefined
   /** where a judge model's key_env is read (default the broker's environment) */
@@ -67,6 +69,15 @@ export interface BrokerOptions {
   /** the judge model client for a policy's `judge.model` (default the provider's HTTP API) */
   judgeClient?: JudgeClientFactory | undefined
 }
+
+/** what a link gets from the broker: its core, the remote hooks a bridge gets, and a send as a local endpoint or a mirrored one through the judge */
+export interface LinkContext {
+  core: FederatedCore
+  hooks: BridgeHooks
+  send: Deliver
+}
+
+export type LinkFactory = (context: LinkContext) => Bridge
 
 export interface Broker {
   socket: string
@@ -269,21 +280,17 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }
     for (const id of known.keys()) if (!live.has(id)) known.delete(id)
   }, options.presenceEveryMs ?? PRESENCE_MS)
-  if (options.bridge) {
-    bridge = startBridge({
-      ...options.bridge,
-      core,
-      onRemote: {
-        wake,
-        fleet: notifyFleet,
-        policyError: () => {
-          loadPolicy()
-          return policyError
-        },
-        log,
-      },
-    })
+  const remoteHooks: BridgeHooks = {
+    wake,
+    fleet: notifyFleet,
+    policyError: () => {
+      loadPolicy()
+      return policyError
+    },
+    log,
   }
+  if (options.bridge) bridge = startBridge({ ...options.bridge, core, onRemote: remoteHooks })
+  else if (options.link) bridge = options.link({ core, hooks: remoteHooks, send: (from, params, origin) => judge.send(from, params, origin, deliver) })
 
   /** links the bridge again with the credential on disk; a configuration this broker cannot take without a restart stops it */
   async function relink(): Promise<object> {

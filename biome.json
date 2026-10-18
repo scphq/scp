@@ -18,7 +18,7 @@
     }
   },
   "overrides": [
-    { "includes": ["packages/core/**", "packages/hub/**", "packages/broker/**", "packages/mcp/**", "packages/cli/**", "packages/pi/**"], "javascript": { "formatter": { "semicolons": "asNeeded" } } },
+    { "includes": ["packages/core/**", "packages/hub/**", "packages/broker/**", "packages/mcp/**", "packages/cli/**", "packages/pi/**", "packages/mesh/**"], "javascript": { "formatter": { "semicolons": "asNeeded" } } },
     {
       "includes": ["packages/core/src/**", "packages/hub/src/**", "!**/*.test.ts"],
       "linter": {

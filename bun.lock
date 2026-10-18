@@ -71,6 +71,7 @@
       },
       "devDependencies": {
         "@openai/codex": "0.159.0",
+        "@scp-dev/mesh": "workspace:*",
         "opencode-ai": "1.18.34",
         "tsup": "^8.5.1",
       },
@@ -100,6 +101,20 @@
         "@scp-dev/core": "workspace:*",
       },
       "devDependencies": {
+        "tsup": "^8.5.1",
+      },
+    },
+    "packages/mesh": {
+      "name": "@scp-dev/mesh",
+      "version": "0.0.0",
+      "dependencies": {
+        "@scp-dev/broker": "workspace:*",
+        "@scp-dev/core": "workspace:*",
+        "@scp-dev/hub": "workspace:*",
+        "ws": "8.21.0",
+      },
+      "devDependencies": {
+        "@types/ws": "8.18.1",
         "tsup": "^8.5.1",
       },
     },
@@ -619,6 +634,8 @@
 
     "@scp-dev/mcp": ["@scp-dev/mcp@workspace:packages/mcp"],
 
+    "@scp-dev/mesh": ["@scp-dev/mesh@workspace:packages/mesh"],
+
     "@scp-dev/pi": ["@scp-dev/pi@workspace:packages/pi"],
 
     "@scp-dev/relay": ["@scp-dev/relay@workspace:apps/relay"],
@@ -732,6 +749,8 @@
     "@types/react-dom": ["@types/react-dom@19.3.0", "", { "peerDependencies": { "@types/react": "^19.3.0" } }, "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q=="],
 
     "@types/retry": ["@types/retry@0.12.0", "", {}, "sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA=="],
+
+    "@types/ws": ["@types/ws@8.18.1", "", { "dependencies": { "@types/node": "*" } }, "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg=="],
 
     "@types/yauzl": ["@types/yauzl@2.10.3", "", { "dependencies": { "@types/node": "*" } }, "sha512-oJoftv0LSuaDZE3Le4DbKX+KS9G36NzOeSap90UIK0yMA/NhKJhqlSGtNDORNRaIbQfzjXDrQa0ytJ6mNRGz/Q=="],
 

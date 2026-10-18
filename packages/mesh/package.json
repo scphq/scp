@@ -1,0 +1,45 @@
+{
+  "name": "@scp-dev/mesh",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Swarm Communication Protocol experimental mesh: brokers of one account linked peer to peer, with no hub.",
+  "license": "Apache-2.0",
+  "homepage": "https://scp.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scphq/scp.git",
+    "directory": "packages/mesh"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --external bun:sqlite",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@scp-dev/broker": "workspace:*",
+    "@scp-dev/core": "workspace:*",
+    "@scp-dev/hub": "workspace:*",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1",
+    "tsup": "^8.5.1"
+  }
+}
