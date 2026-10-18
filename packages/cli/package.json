@@ -27,6 +27,7 @@
   "dependencies": {
     "@scp-dev/core": "workspace:*",
     "@scp-dev/broker": "workspace:*",
+    "@scp-dev/hub": "workspace:*",
     "@scp-dev/mcp": "workspace:*",
     "smol-toml": "^1.9.1"
   },

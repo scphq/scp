@@ -5,10 +5,16 @@ import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
 import { type BrokerInfo, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
 import { harnessLineage, hiddenHarness, labelsFor, lineage, readPsTable } from "./identity"
 import { parseSeconds, SELF } from "./term"
+import type { RelayTransport } from "./remote"
 
 export class RelayUsage extends Error {}
 
 export const OPTIONS = {
+  cloud: { type: "boolean" },
+  machine: { type: "string" },
+  token: { type: "string" },
+  label: { type: "string" },
+  "no-browser": { type: "boolean" },
   json: { type: "boolean" },
   channels: { type: "boolean" },
   write: { type: "boolean" },
@@ -86,10 +92,41 @@ export const SPAWN_OPTIONS: Option[] = [
   "fg",
 ]
 
-export const OBSERVE = new Set(["list", "status", "watch", "log", "policy", "rules", "group", "admin", "spawn-env", "spawn", "why", "peek", "set-peek"])
+export const OBSERVE = new Set([
+  "list",
+  "status",
+  "watch",
+  "log",
+  "policy",
+  "machines",
+  "rules",
+  "group",
+  "admin",
+  "spawn-env",
+  "spawn",
+  "why",
+  "peek",
+  "set-peek",
+])
+export const CLOUD_OBSERVE = new Set(["list", "status", "watch", "log", "machines"])
 export const GRANT_TOKEN = /^krt_[0-9a-f]{64}$/
 
-const DAEMON_ENV = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "USER", "LOGNAME", "SCP_IDLE", "HOME", "XDG_CONFIG_HOME"]
+const DAEMON_ENV = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "TMPDIR",
+  "USER",
+  "LOGNAME",
+  "SCP_IDLE",
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "SCP_TOKEN",
+  "SCP_RELAY",
+  "SCP_MACHINE",
+]
 const LOG_MAX_BYTES = 1024 * 1024
 
 /** the broker for `dir`, detached, with a fixed environment and its stderr in broker.log */
@@ -113,7 +150,13 @@ export function startDaemon(dir: string): void {
   }
 }
 
-export type Identity = { as?: string | undefined; harness?: string | undefined; human?: boolean | undefined }
+export type Identity = {
+  as?: string | undefined
+  harness?: string | undefined
+  human?: boolean | undefined
+  cloud?: boolean | undefined
+  machine?: string | undefined
+}
 
 type Streams = Record<"stdin" | "stdout" | "stderr", { isTTY?: boolean }>
 
@@ -126,7 +169,14 @@ export function terminalAttached(streams: Streams, bodyFromStdin: boolean): bool
 /** how a command came to act as an endpoint: `--as` (or $SCP_NAME), the lineage of this shell's harness process, or the human inbox */
 export type Bound = "as" | "lineage" | "human"
 
-export type Opened = { client: RelayClient; me: EndpointView | null; broker: BrokerInfo; where: string; bound: Bound | null; harnessPid?: number | undefined }
+export type Opened = {
+  client: RelayTransport
+  me: EndpointView | null
+  broker: BrokerInfo | null
+  where: string
+  bound: Bound | null
+  harnessPid?: number | undefined
+}
 
 /** an --as handle: a local handle, with a leading `me/` dropped */
 export function localHandle(raw: string): string {
@@ -149,6 +199,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
   const tty = terminalAttached(process, bodyFromStdin)
   if (named && values.human) throw new RelayUsage("--human and --as (or $SCP_NAME) name two identities; pick one")
   const grant = process.env.SCP_GRANT || undefined
+  const cloud = values.cloud || process.env.SCP_TRANSPORT === "cloud" || verb === "machines"
   if (grant !== undefined) {
     if (!GRANT_TOKEN.test(grant)) {
       throw new RelayUsage(
@@ -156,7 +207,39 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
       )
     }
     if (values.human) throw new RelayUsage("--human and $SCP_GRANT name two identities: unset the grant to act as me/")
+    if (cloud) throw new RelayUsage("a spawn-env grant is for this machine's relay broker, not the cloud transport")
   }
+  if (cloud) {
+    if (!named && !values.human && !tty && !OBSERVE.has(verb)) {
+      throw new RelayUsage(
+        `${CLI_NAME} ${verb} needs an identity: --as HANDLE (or $SCP_NAME) for an agent, or --human for your own inbox me/ (no terminal is attached, so me/ is not assumed)`,
+      )
+    }
+    const { machineName, openCloud } = await import("./remote")
+    const handle = named ? localHandle(named) : undefined
+    const claim = handle
+      ? {
+          handle,
+          harness: values.harness ?? process.env.SCP_HARNESS ?? "cli",
+          cwd,
+          ...(process.env.SCP_PARENT ? { parent: process.env.SCP_PARENT } : {}),
+          labels: labelsFor(process.env, machineName(values.machine)),
+        }
+      : undefined
+    const observe = !handle && !values.human && CLOUD_OBSERVE.has(verb)
+    return {
+      ...(await openCloud({
+        ...(values.machine !== undefined ? { machine: values.machine } : {}),
+        ...(handle ? { handle } : {}),
+        ...(claim ? { claim } : {}),
+        tty,
+        observe,
+      })),
+      broker: null,
+      bound: handle ? "as" : observe ? null : "human",
+    }
+  }
+  if (values.machine !== undefined) throw new RelayUsage("--machine names the machine of the cloud transport: add --cloud")
   const handle = named ? localHandle(named) : undefined
   const { keys, self } = walk ?? walkNow()
   const harnessPid = self.length ? Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]) : undefined
@@ -205,6 +288,11 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
     client.close()
     throw error
   }
+}
+
+export function localClient(client: RelayTransport, broker: BrokerInfo | null, verb: string): RelayClient {
+  if (!broker) throw new RelayUsage(`${CLI_NAME} ${verb} is the local broker's; it has no --cloud form`)
+  return client as RelayClient
 }
 
 export function brokerLine(broker: BrokerInfo): string {

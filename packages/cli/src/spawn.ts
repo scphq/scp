@@ -16,7 +16,20 @@ import {
   steerNote,
   stripControl,
 } from "@scp-dev/core"
-import { type Identity, type Option, OPTIONS, SPAWN_OPTIONS, type Values, type Walk, grantParams, open, RelayUsage, selectorList, walkNow } from "./common"
+import {
+  type Identity,
+  type Option,
+  OPTIONS,
+  SPAWN_OPTIONS,
+  type Values,
+  type Walk,
+  grantParams,
+  localClient,
+  open,
+  RelayUsage,
+  selectorList,
+  walkNow,
+} from "./common"
 import { steerPrompt } from "./hooks"
 import { detectHarness, spawnerKey } from "./identity"
 import { agyRules, agySettingsFile, mcpFile, mountedEntry } from "./setup"
@@ -856,7 +869,9 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   let grant: Record<string, string>
   let steer: { key?: unknown; parent?: unknown } | undefined
   try {
-    const { client, me } = await open("spawn", values as Identity, cwd, false, walk)
+    const opened = await open("spawn", values as Identity, cwd, false, walk)
+    const { me } = opened
+    const client = localClient(opened.client, opened.broker, "spawn")
     try {
       values = spawnDefaults(values, command, undefined, me?.kind === "agent" && me.address.startsWith("me/") ? me.address.slice(3) : undefined)
       const params = { ttl_s: SPAWN_GRANT_TTL_S, ...grantParams(values), ...(bound ? { bind_process: bound } : {}), spawn: true, ...(prompt ? { prompt } : {}) }
@@ -976,7 +991,8 @@ async function spawnSteers(
   take: boolean,
 ): Promise<{ session: string | null; steers: Envelope[]; transcript?: string | null } | undefined> {
   try {
-    const { client } = await open("spawn", values as Identity, cwd, false, walk)
+    const opened = await open("spawn", values as Identity, cwd, false, walk)
+    const client = localClient(opened.client, opened.broker, "spawn")
     try {
       return await client.spawnSteers({ grant: token, take })
     } finally {
@@ -1002,7 +1018,8 @@ async function spawnExit(
   stderr = "",
 ): Promise<void> {
   try {
-    const { client } = await open("spawn", values as Identity, cwd, false, walk)
+    const opened = await open("spawn", values as Identity, cwd, false, walk)
+    const client = localClient(opened.client, opened.broker, "spawn")
     try {
       await client.spawnExit({
         grant: token,
