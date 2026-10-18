@@ -57,7 +57,7 @@ export function csrfToken(ctx: Ctx): Promise<string> {
 /** a cross-site POST carries a foreign Origin; one without Origin must at least be same-origin by Fetch Metadata */
 export function checkOrigin(ctx: Ctx): void {
   const origin = ctx.req.headers.get("origin");
-  if (origin) {
+  if (origin && origin !== "null") {
     if (origin !== ctx.url.origin) throw new HttpError(403, "bad_origin", "This request came from another site.");
     return;
   }
@@ -127,7 +127,7 @@ export function page(ctx: Ctx, chrome: Omit<Chrome, "email" | "csrf">, body: Htm
     "cache-control": "no-store",
     "content-security-policy": CSP,
     "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer",
+    "referrer-policy": "same-origin",
   });
   for (const c of ctx.setCookies) headers.append("set-cookie", c);
   const text = layout({ ...chrome, email: ctx.user?.email ?? null, csrf: ctx.csrf }, body);

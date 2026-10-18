@@ -133,13 +133,14 @@ export class Browser {
     return res;
   }
 
-  async post(path: string, fields: Record<string, string>, opts: { csrf?: string | null; origin?: string | null } = {}): Promise<Response> {
+  async post(path: string, fields: Record<string, string>, opts: { csrf?: string | null; origin?: string | null; fetchSite?: string } = {}): Promise<Response> {
     const body = new URLSearchParams(fields);
     const csrf = opts.csrf === undefined ? this.csrf : opts.csrf;
     if (csrf !== null) body.set("csrf", csrf);
     const headers: Record<string, string> = { cookie: this.cookieHeader(), "content-type": "application/x-www-form-urlencoded" };
     const origin = opts.origin === undefined ? this.relay.origin : opts.origin;
     if (origin !== null) headers.origin = origin;
+    if (opts.fetchSite) headers["sec-fetch-site"] = opts.fetchSite;
     const res = await this.relay.fetch(path, { method: "POST", headers, body: body.toString() });
     this.absorb(res);
     if ((res.headers.get("content-type") ?? "").startsWith("text/html")) {
