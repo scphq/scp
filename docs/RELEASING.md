@@ -1,7 +1,7 @@
 # Releasing
 
-Changesets drive npm releases. `@scp-dev/spec`, `@scp-dev/core` and `@scp-dev/cli` are the publishable packages; `@scp-dev/web` is never published.
-All three are `private: true` today, so `changeset publish` skips them and a release publishes nothing until a package drops that flag.
+Changesets drive npm releases. `@scp-dev/core` and `@scp-dev/cli` are the publishable packages; `@scp-dev/spec` (SPEC.md only) and `@scp-dev/web` are never published.
+Both are `private: true` today, so `changeset publish` skips them and a release publishes nothing until a package drops that flag.
 
 ## Day to day
 
@@ -16,7 +16,7 @@ The release PR is opened with `GITHUB_TOKEN`, so CI does not run on it by itself
 
 ### 1. npm scope
 
-The packages publish under the npm organization `scp-dev`: `@scp-dev/spec`, `@scp-dev/core` and `@scp-dev/cli`.
+The packages publish under the npm organization `scp-dev`: `@scp-dev/core` and `@scp-dev/cli`.
 
 ### 2. GitHub settings
 

@@ -25,9 +25,6 @@
     "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc -p ."
   },
-  "dependencies": {
-    "@scp-dev/spec": "workspace:*"
-  },
   "devDependencies": {
     "tsup": "^8.5.1"
   },
