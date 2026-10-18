@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { CHANNEL_FLAGS, claudeArgv, claudeCommand, claudeLaunchArgs, mountHint } from "./claude"
+import { bgDir, CHANNEL_FLAGS, claudeArgv, claudeCommand, claudeLaunchArgs, mountHint, resumeTarget } from "./claude"
 import { setJoinMode } from "./relay"
 import { CHANNELS_ENV } from "./common"
 import { launchedWithChannels } from "./mcp"
+import { SELF } from "./term"
 
 function fixture(mount?: string[]) {
   const home = mkdtempSync(join(tmpdir(), "scp-claude-"))
@@ -14,7 +15,15 @@ function fixture(mount?: string[]) {
   const record = join(home, "record")
   writeFileSync(
     join(bin, "claude"),
-    `#!/bin/sh\nprintf '%s\\n' "$@" > "${record}.args"\nprintf '%s\\n' "$SCP_NAME" "$${CHANNELS_ENV}" > "${record}.env"\nexit 7\n`,
+    [
+      "#!/bin/sh",
+      `if [ "$1" = agents ]; then cat "${home}/agents.json" 2>/dev/null || echo '[]'; exit 0; fi`,
+      `printf '%s\\n' "$@" > "${record}.args"`,
+      `printf '%s\\n' "$SCP_NAME" "$${CHANNELS_ENV}" "$SCP_GRANT" > "${record}.env"`,
+      `for a in "$@"; do [ "$a" = --bg ] && { echo 'backgrounded · 1a2b3c4d (idle)'; exit 0; }; done`,
+      "exit 7",
+      "",
+    ].join("\n"),
     { mode: 0o755 },
   )
   if (mount) writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { scp: { type: "stdio", command: "swarm", args: mount } } }))
@@ -36,7 +45,7 @@ describe("swarm claude", () => {
     const lines: string[] = []
     expect(await claudeCommand(["--name", "lead", "-c"], f.env, (line) => lines.push(line))).toBe(7)
     expect(f.args()).toBe(`${["-c", ...CHANNEL_FLAGS].join("\n")}\n`)
-    expect(f.vars()).toBe(`lead\n${process.pid}\n`)
+    expect(f.vars()).toBe(`lead\n${process.pid}\n\n`)
     expect(lines).toEqual([])
   })
 
@@ -87,6 +96,83 @@ describe("swarm claude", () => {
     const args = ["--continue", "--model", "opus", "--permission-mode", "plan", "--settings", "s.json", "--plugin-dir", "p", "hello there"]
     expect(await claudeCommand(["--name", "lead", "--", ...args], f.env, () => {})).toBe(7)
     expect(f.args()).toBe(`${[...args, ...CHANNEL_FLAGS].join("\n")}\n`)
+  })
+
+  test("--bg starts claude in the background with an scp mount claiming the name and the caller's grant, and prints its id and address", async () => {
+    const mount = ["mcp", "--harness", "claude", "--channels"]
+    const f = fixture(mount)
+    const env = { ...f.env, SCP_NAME: "bgkid", SCP_GRANT: "krt_grant", SCP_LABELS: "lane=x", [CHANNELS_ENV]: "1" }
+    const lines: string[] = []
+    expect(await claudeCommand(["--bg"], env, () => {}, f.home, { out: (line) => lines.push(line) })).toBe(0)
+    const args = f.args().trimEnd().split("\n")
+    expect(args.slice(0, -1)).toEqual(["--bg", "--name", "bgkid", "--mcp-config"])
+    expect(args.join(" ")).not.toContain(CHANNEL_FLAGS[0]!)
+    expect(f.vars()).toBe("\n\n\n")
+    const file = args.at(-1)!
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      mcpServers: { scp: { type: "stdio", command: "swarm", args: mount, env: { SCP_LABELS: "lane=x", SCP_NAME: "bgkid", SCP_GRANT: "krt_grant" } } },
+    })
+    const link = join(bgDir(env), "1a2b3c4d.json")
+    expect(lstatSync(link).isSymbolicLink() && join(bgDir(env), readlinkSync(link))).toBe(file)
+    expect(lines).toEqual([expect.stringContaining("background session 1a2b3c4d is me/bgkid on SCP")])
+  })
+
+  test("--bg keeps the user's prompt last, needs no mount and never passes a daemon's grant on", async () => {
+    const f = fixture()
+    expect(await claudeCommand(["--bg", "--name", "lead", "--", "fix it"], f.env, () => {}, f.home, { out: () => {} })).toBe(0)
+    const args = f.args().trimEnd().split("\n")
+    expect(args.slice(0, -1)).toEqual(["fix it", "--bg", "--name", "lead", "--mcp-config"])
+    const scp = JSON.parse(readFileSync(args.at(-1)!, "utf8")).mcpServers.scp
+    expect([scp.command, ...scp.args]).toEqual([...SELF, "mcp", "--harness", "claude", "--channels"])
+    expect(scp.env).toEqual({ SCP_NAME: "lead", SCP_GRANT: "" })
+    expect(claudeArgv(["--", "--model", "opus", "--bg"])).toEqual({ bg: true, args: ["--model", "opus", "--bg"] })
+    expect(claudeArgv(["--bg", "--name", "x", "--", "-p", "--", "--bg"])).toEqual({ name: "x", bg: true, args: ["-p", "--", "--bg"] })
+    expect(claudeArgv(["--", "-p", "--", "--bg"])).toEqual({ args: ["-p", "--", "--bg"] })
+  })
+
+  test("attach --name renames the session's endpoint and the name its mount claims on resume, then runs claude attach", async () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const env = { ...f.env, SCP_GRANT: "krt_grant" }
+    await claudeCommand(["--bg", "--name", "bgkid"], env, () => {}, f.home, { out: () => {} })
+    const link = join(bgDir(env), "1a2b3c4d.json")
+    const renamed: string[][] = []
+    const rename = async (from: string, to: string) => {
+      renamed.push([from, to])
+      return to === "taken" ? 1 : 0
+    }
+    expect(await claudeCommand(["attach", "1a2b3c4d", "--name", "lead"], env, () => {}, f.home, { rename })).toBe(7)
+    expect(f.args()).toBe("attach\n1a2b3c4d\n")
+    expect(JSON.parse(readFileSync(link, "utf8")).mcpServers.scp.env).toEqual({ SCP_NAME: "lead", SCP_GRANT: "krt_grant" })
+    writeFileSync(join(f.home, "agents.json"), JSON.stringify([{ id: "1a2b3c4d", name: "lead", state: "working" }]))
+    const lines: string[] = []
+    expect(await claudeCommand(["attach", "lead", "--name=taken"], env, (line) => lines.push(line), f.home, { rename })).toBe(7)
+    expect(f.args()).toBe("attach\nlead\n")
+    expect(renamed).toEqual([
+      ["bgkid", "lead"],
+      ["lead", "taken"],
+    ])
+    expect(JSON.parse(readFileSync(link, "utf8")).mcpServers.scp.env.SCP_NAME).toBe("lead")
+    expect(lines).toEqual(["swarm claude: me/lead keeps its name"])
+    expect(await claudeCommand(["attach", "0f0f0f0f", "--name", "x"], env, (line) => lines.push(line), f.home, { rename })).toBe(7)
+    expect(lines.at(-1)).toContain("was not started by swarm claude --bg --name")
+    expect(existsSync(join(bgDir(env), "0f0f0f0f.json"))).toBe(false)
+    await expect(claudeCommand(["attach"], env, () => {}, f.home)).rejects.toThrow("takes a background session")
+  })
+
+  test("--resume of a live background session attaches to it instead of starting a second claude", async () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const session = "1a2b3c4d-0000-4000-8000-000000000000"
+    writeFileSync(join(f.home, "agents.json"), JSON.stringify([{ id: "1a2b3c4d", sessionId: session, pid: 1, state: "working" }]))
+    const lines: string[] = []
+    expect(await claudeCommand(["--", "--resume", session], f.env, (line) => lines.push(line), f.home)).toBe(7)
+    expect(f.args()).toBe("attach\n1a2b3c4d\n")
+    expect(lines).toEqual([expect.stringContaining("already woken through claude-inbox; attaching to it (claude attach 1a2b3c4d)")])
+    expect(await claudeCommand(["--name", "lead", "-r", "0f0f0f0f-0000-4000-8000-000000000000"], f.env, () => {}, f.home)).toBe(7)
+    expect(f.args()).toBe(`${["-r", "0f0f0f0f-0000-4000-8000-000000000000", ...CHANNEL_FLAGS].join("\n")}\n`)
+    expect(resumeTarget(["--resume=abc"])).toBe("abc")
+    expect(resumeTarget(["--resume", "--model", "x"])).toBeUndefined()
+    expect(resumeTarget(["--", "--resume", "abc"])).toBeUndefined()
   })
 
   test("a shim takes channel pushes only when its harness's parent is the launcher named in the environment", () => {
