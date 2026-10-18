@@ -53,3 +53,15 @@ access to "Require two-factor authentication and disallow tokens".
 The release step always passes `secrets.NPM_TOKEN` to npm as `NODE_AUTH_TOKEN`. npm (11.5.1 or later, from Node 24) tries the OIDC exchange
 first and uses the token only when that fails, so the token is a fallback that applies automatically while the secret exists and does nothing
 once it is deleted. Keep it only for bootstrapping new package names.
+
+## Deploys
+
+`.github/workflows/deploy.yml` deploys on every push to `main`, each app only when its sources changed; a manual run deploys both.
+
+- `web` (scp.dev): on changes under `apps/web/` or `packages/spec/`, runs `bun run deploy` in `apps/web`.
+- `relay` (app.scp.dev): on changes under `apps/relay/`, `packages/core/`, `packages/hub/` or `packages/broker/`, applies the D1
+  migrations to `scp-relay` with `--remote`, then runs `wrangler deploy`.
+
+Each job ends with a smoke check that expects a 200 from `https://scp.dev/` or `https://app.scp.dev/health`.
+Both jobs need two repository secrets: `CLOUDFLARE_API_TOKEN` (a token with Workers Scripts, Workers Routes and D1 edit permission)
+and `CLOUDFLARE_ACCOUNT_ID`.
