@@ -9,7 +9,7 @@ const packages = join(import.meta.dir, "..", "..")
 const node = Bun.which("node")
 const [major = 0, minor = 0] = node ? spawnSync(node, ["-p", "process.versions.node"], { encoding: "utf8" }).stdout.trim().split(".").map(Number) : []
 const supported = major > 22 || (major === 22 && minor >= 13)
-const BUILT = ["core", "hub", "broker", "cli"]
+const BUILT = ["core", "hub", "broker", "mcp", "cli"]
 
 const cleanups: (() => void)[] = []
 afterEach(() => {
