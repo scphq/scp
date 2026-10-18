@@ -261,7 +261,7 @@ export async function cloudMain(
     writePrivateJson(path, file)
     if (values.json) json({ file: path, ...file, token: problem ? "missing" : "found" })
     else {
-      out(`the relay broker links to ${url} as machine ${machine} the next time it starts (${path})`)
+      out(`the relay broker links to ${url} as machine ${machine} (${path})`)
       if (problem) note(problem)
     }
     return 0

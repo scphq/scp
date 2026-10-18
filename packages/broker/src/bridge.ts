@@ -78,6 +78,8 @@ export interface Bridge {
   /** the endpoints of other accounts this account's contacts let it reach */
   contacts(): Promise<XListed[]>
   status(): BridgeStatus
+  /** reads the credential again and reconnects now, also after the hub revoked or replaced this bridge */
+  relink(): void
   stop(): Promise<void>
 }
 
@@ -132,7 +134,9 @@ export function startBridge(options: BridgeOptions): Bridge {
   let connected = false
   /** hello went through on the current socket: deltas may go out */
   let ready = false
+  /** the hub turned this bridge away, or the broker stopped it: no more retries until relink */
   let stopped = false
+  let shutDown = false
   let lastError: string | null = options.token ? null : (options.tokenError ?? "no hub credential; the broker runs local-only")
   let since = new Date().toISOString()
   let attempt = 0
@@ -177,7 +181,7 @@ export function startBridge(options: BridgeOptions): Bridge {
   }
 
   function connect() {
-    if (stopped || !token) return
+    if (stopped || !token || ws) return
     let socket: WebSocket
     try {
       socket = new Socket(relaySocketUrl(options.url), { headers: { Authorization: `Bearer ${token}` } })
@@ -624,8 +628,20 @@ export function startBridge(options: BridgeOptions): Bridge {
     return { enabled: true, machine, url: options.url, connected, last_error: lastError, since }
   }
 
+  function relink() {
+    if (shutDown) return
+    stopped = false
+    attempt = 0
+    clearTimeout(retryTimer)
+    if (ws) return
+    void reconnect().then(() => {
+      if (!token && !ws) setState(false, "no hub credential; log in again")
+    })
+  }
+
   async function stop() {
     stopped = true
+    shutDown = true
     clearTimeout(retryTimer)
     for (const fn of waitingForLink.splice(0)) fn()
     const socket = ws
@@ -638,5 +654,5 @@ export function startBridge(options: BridgeOptions): Bridge {
   }
 
   connect()
-  return { forward, changed, resync, activity, contacts, status, stop }
+  return { forward, changed, resync, activity, contacts, status, relink, stop }
 }

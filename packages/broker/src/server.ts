@@ -57,6 +57,8 @@ export interface BrokerOptions {
   machine?: string | undefined
   /** the link to the hub; without it the broker never opens a network connection */
   bridge?: BridgeConfig | undefined
+  /** reads the bridge configuration again for bridge_relink; one that appeared or names another hub or machine restarts the broker */
+  bridgeConfig?: (() => Promise<BridgeConfig | undefined>) | undefined
   /** how often presence that decays without a request (a hook-only endpoint) is checked for changes (default 60 s) */
   presenceEveryMs?: number | undefined
   /** where a judge model's key_env is read (default the broker's environment) */
@@ -110,7 +112,7 @@ interface Connection {
 
 const SWEEP_MS = 10 * 60_000
 const PRESENCE_MS = 60_000
-const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "policy", "policy_check", "cloud_status"])
+const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "policy", "policy_check", "cloud_status", "bridge_relink"])
 const SCOPE_METHODS = new Set([
   "rules",
   "rules_set",
@@ -279,6 +281,17 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         log,
       },
     })
+  }
+
+  /** links the bridge again with the credential on disk; a configuration this broker cannot take without a restart stops it */
+  async function relink(): Promise<object> {
+    const config = options.bridgeConfig ? await options.bridgeConfig() : options.bridge
+    if (!config || (bridge && config.url === options.bridge?.url && config.machine === options.bridge?.machine)) {
+      bridge?.relink()
+      return bridge?.status() ?? { enabled: false }
+    }
+    setImmediate(() => void stop())
+    return { enabled: false, restarting: true }
   }
 
   function activity() {
@@ -948,6 +961,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "cloud_status":
         return bridge?.status() ?? { enabled: false }
+      case "bridge_relink":
+        return relink()
     }
     throw new RelayError("method_not_found", `no method ${method}`)
   }
