@@ -8,7 +8,7 @@ SCP (Swarm Communication Protocol) is an open protocol for addressing and exchan
 packages/spec/   SPEC.md, the protocol source of truth
 packages/core/   protocol types: message envelope, endpoint address, wire types
 packages/cli/    the swarm command line tool
-apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders SPEC.md at /spec
+apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders the docs at /docs and SPEC.md at /spec
 apps/relay/      the hosted demo relay: a Cloudflare Worker with D1 for sign-in, orgs, device login and API tokens
 ```
 

@@ -16,9 +16,14 @@ export function slug(text: string): string {
 
 const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-/** packages/spec/SPEC.md, rendered once at build: the title, the body as HTML, and the h2/h3 outline. */
-export function loadSpec(): { title: string; html: string; toc: TocEntry[] } {
-  const source = process.env.SCP_SPEC ?? "";
+export interface Rendered {
+  title: string;
+  html: string;
+  toc: TocEntry[];
+}
+
+/** Markdown rendered at build: the h1 as the title, the body as HTML, and the h2/h3 outline. */
+export function renderMarkdown(source: string): Rendered {
   const toc: TocEntry[] = [];
   let title = "";
   const marked = new Marked({
@@ -47,4 +52,9 @@ export function loadSpec(): { title: string; html: string; toc: TocEntry[] } {
     .replace(/<table>/g, '<div class="table" tabindex="0" role="region" aria-label="Table"><table>')
     .replace(/<\/table>/g, "</table></div>");
   return { title, html, toc };
+}
+
+/** packages/spec/SPEC.md, rendered once at build. */
+export function loadSpec(): Rendered {
+  return renderMarkdown(process.env.SCP_SPEC ?? "");
 }
