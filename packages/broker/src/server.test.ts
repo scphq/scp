@@ -263,6 +263,22 @@ describe("broker", () => {
   })
 })
 
+describe("broker, state ownership", () => {
+  test("a broker whose state directory was wiped stops", async () => {
+    const { root, broker } = await setup({ ownershipEveryMs: 20 })
+    rmSync(join(root, "state"), { recursive: true, force: true })
+    expect(await Promise.race([broker.stopped.then(() => "stopped"), Bun.sleep(2000).then(() => "running")])).toBe("stopped")
+  })
+
+  test("a broker whose socket another took over stops and leaves that socket", async () => {
+    const { broker } = await setup({ ownershipEveryMs: 20 })
+    rmSync(broker.socket)
+    writeFileSync(broker.socket, "")
+    expect(await Promise.race([broker.stopped.then(() => "stopped"), Bun.sleep(2000).then(() => "running")])).toBe("stopped")
+    expect(existsSync(broker.socket)).toBe(true)
+  })
+})
+
 describe("broker, framing and connection limits", () => {
   test("large pages of multibyte text cross the socket intact", async () => {
     const { broker } = await setup()

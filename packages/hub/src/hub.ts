@@ -1774,7 +1774,7 @@ export class RelayHub {
       return count
     })
     this.stored = null
-    this.toBridges(name, { machine: name, endpoints: [], full: true })
+    this.toBridges(name, { machine: name, endpoints: [], full: true, released: true })
     this.dash({ type: "endpoints", at: new Date(this.now()).toISOString(), machine: name })
     this.deps.log?.("relay_action", { account: this.account, machine: name, method: "machine_release", code: "ok" })
     return { removed: name, endpoints: dropped }
@@ -1812,7 +1812,7 @@ export class RelayHub {
         core.record("machine_expire", null, name, { machine: name, endpoints: count })
         return count
       })
-      this.toBridges(name, { machine: name, endpoints: [], full: true })
+      this.toBridges(name, { machine: name, endpoints: [], full: true, released: true })
       this.deps.log?.("relay_action", { account: this.account, machine: name, method: "machine_expire", code: "ok", endpoints: dropped })
     }
   }
@@ -1831,7 +1831,7 @@ export class RelayHub {
       for (const name of unbound) this.relay.record("machine_forget", null, name, { machine: name, endpoints: this.relay.dropMachine(name, { queue: true }) })
       return unbound
     })
-    for (const name of forgotten) this.toBridges(name, { machine: name, endpoints: [], full: true })
+    for (const name of forgotten) this.toBridges(name, { machine: name, endpoints: [], full: true, released: true })
   }
 
   /** the hub_state keys (`denied:<tokenId>`) of tokens revoked lately, to when; loaded once per object lifetime */
