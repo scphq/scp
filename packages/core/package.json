@@ -1,8 +1,7 @@
 {
   "name": "@scp-dev/core",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Swarm Communication Protocol types: message envelope, endpoint address, rendering and credential scanning.",
+  "version": "0.1.0",
+  "description": "Swarm Communication Protocol core: wire types, framing, scopes, policy, judge and the relay core.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",
   "repository": {
@@ -20,7 +19,11 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "src", "!src/**/*.test.ts"],
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc -p ."
