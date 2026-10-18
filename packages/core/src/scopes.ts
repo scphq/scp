@@ -1,5 +1,5 @@
 import { matches, type PolicySubject } from "./policy"
-import { RelayError, type ScopeCap, type ScopeDirection, type ScopeEntry, type ScopePreset, validHandle } from "./protocol"
+import { CLI_NAME, RelayError, type ScopeCap, type ScopeDirection, type ScopeEntry, type ScopePreset, validHandle } from "./protocol"
 
 /** an endpoint's own lists, its noise preferences; a direction absent has no own rule */
 export interface ScopeRules {
@@ -259,15 +259,15 @@ function limitText(world: ScopeWorld, e: ScopeNode, list: ScopeList, dir: ScopeD
   const sels = [...new Set(list.entries.map((entry) => effectiveSelector(list, entry)))]
   const to = `${sels.join(",") || "nobody"}${cross ? " only within its own fleet" : ""}`
   const add = selectorFor(x)
-  const widen = `widen with swarm rules widen ${short(e)} --${dir} ${add}`
+  const widen = `widen with ${CLI_NAME} rules widen ${short(e)} --${dir} ${add}`
   if (list.source === "own rules") {
-    const set = `swarm rules set --${dir} ${[...sels, add].join(",")}`
+    const set = `${CLI_NAME} rules set --${dir} ${[...sels, add].join(",")}`
     return you
       ? `your own rules limit ${whose} to ${to}; widen them with ${set}`
       : `${short(e)}'s own rules limit ${whose} to ${to}; ${short(e)} widens them with ${set}`
   }
   if (list.source.startsWith("policy"))
-    return `the ${list.source.replace(/^policy \((.*)\)$/, "policy rule for $1")} limits ${whose} to ${to}; change it in the policy file (swarm policy path)`
+    return `the ${list.source.replace(/^policy \((.*)\)$/, "policy rule for $1")} limits ${whose} to ${to}; change it in the policy file (${CLI_NAME} policy path)`
   if (list.group)
     return `group ${list.group}'s rules (set by ${list.by === "policy" ? "the policy file" : nameOf(world, list.by, e)}) limit ${whose} to ${to}; ${widen}`
   if (list.by === "inherited") {

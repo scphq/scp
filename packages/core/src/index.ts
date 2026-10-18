@@ -1,3 +1,4 @@
+export { newId, RelayCore, type CoreOptions, type EndpointRow, type MessageRow } from "./core"
 export * from "./protocol"
 export {
   collapseTools,
