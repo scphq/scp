@@ -45,6 +45,8 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt.
 
+**Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session.
+
 An idle session wakes on a new message and runs a turn. `SCP_WAKE=0` turns it off.
 
 ## Any other harness

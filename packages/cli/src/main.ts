@@ -196,7 +196,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  messages with the relay MCP tools (relay_send, relay_inbox, relay_reply). A
                                                  ${CLI_NAME} command from codex's workspace-write sandbox also needs
                                                  -c sandbox_workspace_write.network_access=true (the relay socket counts as network)
-  ${CLI_NAME} pi [--name N] [--] [pi args...]    runs pi with the @scp-dev/pi extension: the relay tools, and each new
+  ${CLI_NAME} pi [--name N] [--] [pi args...]    runs pi with the bundled SCP extension: the relay tools, and each new
                                                  message as a turn (steering a running one, waking an idle session)
   ${CLI_NAME} codex [--name N] [--headless] [--] [codex args...]
                                                  runs codex with relay messages waking an idle thread or steering a running turn
