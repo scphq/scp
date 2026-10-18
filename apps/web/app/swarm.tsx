@@ -34,6 +34,7 @@ export interface Pulse {
   color: "fg" | "acc" | "dim";
   holdAt?: number;
   hold?: number;
+  gate?: number;
   done?: () => void;
 }
 
@@ -44,6 +45,7 @@ interface Scene {
   rail: number;
   nodes: N[];
   boxes: Box[];
+  hubBox: Box;
   hub: number;
   gate: number;
 }
@@ -73,7 +75,7 @@ const FLEETS: number[][][] = [
 
 const ROOT_HARNESS: Harness[][] = [
   ["claude", "codex", "opencode"],
-  ["pi", "gemini", "claude"],
+  ["pi", "agy", "claude"],
 ];
 
 const AMBIENT = 2;
@@ -88,8 +90,14 @@ function build(w: number, h: number, labelW: number): Scene {
   const add = (n: Omit<N, "a" | "ring">) => nodes.push({ ...n, a: n.alive ? 1 : 0, ring: 0 }) - 1;
   const rail = w * 0.025;
 
-  const hubPt = wide ? { x: w * 0.5, y: h * 0.15 } : { x: w * 0.5, y: h * 0.06 };
-  const hub = add({ ...hubPt, kind: "hub", parent: -1, alive: true, machine: -1 });
+  const hw = Math.max(w * 0.3, 280);
+  const hubBox: Box = wide
+    ? { x: (w - hw) / 2, y: h * 0.05, w: hw, h: h * 0.18, label: "hub" }
+    : { x: w * 0.07, y: h * 0.015, w: w * 0.86, h: h * 0.105, label: "hub" };
+  const hubY = hubBox.y + hubBox.h * (wide ? 0.6 : 0.66);
+  const hub = add({ x: wide ? w * 0.5 - hw * 0.2 : hubBox.x + hubBox.w * 0.3, y: hubY, kind: "hub", parent: -1, alive: true, machine: -1 });
+  const gatePt = { x: wide ? w * 0.5 + hw * 0.2 : hubBox.x + hubBox.w * 0.72, y: hubY };
+  const gate = add({ ...gatePt, kind: "gate", parent: hub, alive: true, machine: -1 });
 
   let boxes: Box[];
   if (wide) {
@@ -108,14 +116,11 @@ function build(w: number, h: number, labelW: number): Scene {
     const x = w * 0.07;
     const bw = w * 0.86;
     boxes = [
-      { x, y: h * 0.13, w: bw, h: h * 0.3, label: "machine a · account a" },
+      { x, y: h * 0.16, w: bw, h: h * 0.28, label: "machine a · account a" },
       { x, y: h * 0.67, w: bw, h: h * 0.3, label: "machine b · account b" },
-      { x, y: h * 0.48, w: bw, h: h * 0.14, label: AMBIENT_LABEL },
+      { x, y: h * 0.49, w: bw, h: h * 0.13, label: AMBIENT_LABEL },
     ];
   }
-
-  const gatePt = wide ? { x: hubPt.x + (boxes[1].x + boxes[1].w / 2 - hubPt.x) * 0.5, y: hubPt.y } : { x: w - rail, y: hubPt.y };
-  const gate = add({ ...gatePt, kind: "gate", parent: hub, alive: true, machine: -1 });
 
   boxes.slice(0, 2).forEach((box, m) => {
     const corner = wide ? { x: box.x + box.w / 2, y: box.y } : { x: m === 0 ? box.x : box.x + box.w, y: box.y };
@@ -150,7 +155,7 @@ function build(w: number, h: number, labelW: number): Scene {
     add({ x: ab.x + ab.w / 2 + (k - (AMBIENT_WORKERS - 1) / 2) * spacing, y: atop + astep, kind: "worker", parent: root, alive: false, machine: AMBIENT });
   }
 
-  return { w, h, wide, rail, nodes, boxes, hub, gate };
+  return { w, h, wide, rail, nodes, boxes, hubBox, hub, gate };
 }
 
 export function elbow(a: Pt, b: Pt): Pt[] {
@@ -162,8 +167,13 @@ export function elbow(a: Pt, b: Pt): Pt[] {
 function link(scene: Scene, i: number): Pt[] {
   const n = scene.nodes[i];
   const p = scene.nodes[n.parent];
-  if (!scene.wide && p.kind === "gate") return [p, { x: p.x, y: n.y }, n];
+  const edge = scene.w - scene.rail;
+  if (!scene.wide && p.kind === "gate") return [p, { x: edge, y: p.y }, { x: edge, y: n.y }, n];
   if (!scene.wide && p.kind === "hub" && n.kind !== "gate") return [p, { x: scene.rail, y: p.y }, { x: scene.rail, y: n.y }, n];
+  if (scene.wide && (p.kind === "hub" || p.kind === "gate") && n.kind !== "gate") {
+    const bus = (scene.hubBox.y + scene.hubBox.h + scene.boxes[0].y) / 2;
+    return [p, { x: p.x, y: bus }, { x: n.x, y: bus }, n];
+  }
   return elbow(p, n);
 }
 
@@ -219,6 +229,23 @@ export interface Palette {
   bg: string;
   mono: string;
   h: Record<Harness, string>;
+}
+
+export function judge(ctx: CanvasRenderingContext2D, n: Pt & { ring: number }, pal: Palette) {
+  ctx.save();
+  ctx.translate(Math.round(n.x), Math.round(n.y));
+  ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = pal.bg;
+  ctx.fillRect(-5.5, -5.5, 11, 11);
+  ctx.strokeStyle = pal.fg;
+  ctx.strokeRect(-5, -5, 10, 10);
+  if (n.ring > 0) {
+    ctx.globalAlpha = Math.min(1, n.ring * 1.5);
+    ctx.fillStyle = pal.acc;
+    ctx.fillRect(-3, -3, 6, 6);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
 }
 
 export function palette(el: HTMLElement): Palette {
@@ -291,6 +318,7 @@ export function Swarm({ status }: { status: React.RefObject<HTMLSpanElement | nu
       if (k > 0) {
         p.holdAt = p.cum[k];
         p.hold = 0.5 + r() * 0.7;
+        p.gate = scene.gate;
       }
       pulses.push(p);
     };
@@ -387,7 +415,7 @@ export function Swarm({ status }: { status: React.RefObject<HTMLSpanElement | nu
         if (p.holdAt !== undefined && p.d >= p.holdAt && (p.hold ?? 0) > 0) {
           p.d = p.holdAt;
           p.hold! -= dt;
-          scene.nodes[scene.gate].ring = 1;
+          if (p.gate !== undefined) scene.nodes[p.gate].ring = 1;
           continue;
         }
         p.d += p.speed * dt;
@@ -431,6 +459,10 @@ export function Swarm({ status }: { status: React.RefObject<HTMLSpanElement | nu
         for (const p of pts.slice(1)) ctx.lineTo(crisp(p.x), crisp(p.y));
       });
       ctx.stroke();
+
+      ctx.strokeStyle = pal.line;
+      ctx.strokeRect(crisp(scene.hubBox.x), crisp(scene.hubBox.y), Math.round(scene.hubBox.w), Math.round(scene.hubBox.h));
+      label(scene.hubBox.label, scene.hubBox.x + 12, scene.hubBox.y + 16);
 
       boxes.forEach((box, m) => {
         ctx.strokeStyle = pal.line;
@@ -482,34 +514,16 @@ export function Swarm({ status }: { status: React.RefObject<HTMLSpanElement | nu
 
       const hub = nodes[scene.hub];
       ctx.fillStyle = pal.bg;
-      square(hub.x, hub.y, 21);
+      square(hub.x, hub.y, 17);
       ctx.strokeStyle = pal.fg;
-      hollow(hub.x, hub.y, 21);
+      hollow(hub.x, hub.y, 17);
       ctx.fillStyle = pal.fg;
-      square(hub.x, hub.y, 11);
-      label("hub", hub.x + 18, hub.y - 12);
+      square(hub.x, hub.y, 9);
 
       const gate = nodes[scene.gate];
-      ctx.save();
-      ctx.translate(Math.round(gate.x), Math.round(gate.y));
-      ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = pal.bg;
-      ctx.fillRect(-4.5, -4.5, 9, 9);
-      ctx.strokeStyle = pal.fg;
-      ctx.strokeRect(-4, -4, 8, 8);
-      if (gate.ring > 0) {
-        ctx.globalAlpha = Math.min(1, gate.ring * 1.5);
-        ctx.fillStyle = pal.acc;
-        ctx.fillRect(-2.5, -2.5, 5, 5);
-        ctx.globalAlpha = 1;
-      }
-      ctx.restore();
-      if (wide) {
-        label("judge", gate.x, gate.y - 15, "center");
-        label("contact", (hub.x + gate.x) / 2 + 6, hub.y + 12, "center", pal.faint);
-      } else {
-        label("judge", gate.x - 12, gate.y - 12, "right");
-      }
+      judge(ctx, gate, pal);
+      label("judge", gate.x, gate.y - 16, "center");
+      if (wide) label("contact", (hub.x + gate.x) / 2, hub.y + 13, "center", pal.faint);
 
       for (const p of pulses) {
         const head = at(p, p.d);
