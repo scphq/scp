@@ -45,14 +45,14 @@ function tree(x: number, y: number, fan: number[][]): Node {
 }
 
 function graph(): string {
-  const hub: Pt = { x: 985, y: 170 };
+  const hub: Pt = { x: 985, y: 155 };
   const roots = [
-    tree(800, 300, [
+    tree(800, 285, [
       [0, 0],
       [0, 0, 0],
     ]),
-    tree(985, 300, [[0, 0, 0], [0]]),
-    tree(1170, 300, [
+    tree(985, 285, [[0, 0, 0], [0]]),
+    tree(1170, 285, [
       [0, 0],
       [0, 0],
     ]),
@@ -77,7 +77,7 @@ function graph(): string {
   const route = [elbow(via, from), elbow(roots[0], via), elbow(hub, roots[0]), elbow(hub, roots[2]), elbow(roots[2], toVia), elbow(toVia, to)];
   return `<svg class="g" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
     <defs>
-      <radialGradient id="fade" cx="960" cy="330" r="330" gradientUnits="userSpaceOnUse">
+      <radialGradient id="fade" cx="960" cy="315" r="330" gradientUnits="userSpaceOnUse">
         <stop offset="0.45" stop-color="#fff"/><stop offset="1" stop-color="#000"/>
       </radialGradient>
       <mask id="m"><rect width="${W}" height="${H}" fill="url(#fade)"/></mask>
@@ -100,9 +100,9 @@ function html(fonts: { sans: string; mono: string }): string {
 html, body { width: ${W}px; height: ${H}px; overflow: hidden; background: ${C.bg}; color: ${C.fg}; -webkit-font-smoothing: antialiased; }
 body { position: relative; font-family: Geist, sans-serif; }
 svg.g { position: absolute; inset: 0; }
-.brand { position: absolute; left: 96px; top: 80px; display: flex; align-items: center; gap: 16px; font-size: 36px; font-weight: 640; letter-spacing: 0.02em; }
-.title { position: absolute; left: 92px; top: 172px; width: 740px; font-size: 78px; line-height: 1; font-weight: 600; letter-spacing: -0.045em; text-wrap: balance; }
-.marks { position: absolute; left: 98px; top: 388px; display: flex; gap: 28px; align-items: center; }
+.brand { position: absolute; left: 96px; top: 146px; display: flex; align-items: center; gap: 16px; font-size: 36px; font-weight: 640; letter-spacing: 0.02em; }
+.title { position: absolute; left: 92px; top: 238px; width: 740px; font-size: 78px; line-height: 1; font-weight: 600; letter-spacing: -0.045em; text-wrap: balance; }
+.marks { position: absolute; left: 98px; top: 454px; display: flex; gap: 28px; align-items: center; }
 </style></head><body>
 ${graph()}
 <div class="brand"><svg width="38" height="38" viewBox="0 0 32 32" fill="${C.fg}"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>SCP</div>
