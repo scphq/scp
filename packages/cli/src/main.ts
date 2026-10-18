@@ -27,9 +27,11 @@ import {
   type XListed,
   CLI_NAME,
 } from "@scp-dev/core"
-import { type Broker, type BrokerInfo, BrokerRunning, type RelayClient, relayDir, startBroker } from "@scp-dev/broker"
+import { type Broker, type BrokerInfo, BrokerRunning, connectBroker, type RelayClient, relayDir, startBroker } from "@scp-dev/broker"
 import {
   brokerLine,
+  localClient,
+  startDaemon,
   grantParams,
   type Identity,
   open,
@@ -40,13 +42,14 @@ import {
   preset,
   RelayUsage,
   selectorList,
-  startDaemon,
   stamp,
   time,
   type Values,
 } from "./common"
 import { SPAWN_HELP } from "./help-spawn"
 import { shortHostname } from "./identity"
+import type { RelayTransport } from "./remote"
+import type { UpValues } from "./up"
 import { exitFlushed, FAILED, note, parseSeconds, printTable } from "./term"
 
 /** Brief help; {@link RELAY_HELP} is the full reference. */
@@ -213,6 +216,16 @@ agent sessions:
   Grok runs the Claude Code hooks, labelled grok; Muse takes them as a plugin; Codex runs new hooks after /hooks review.
   --channels pushes messages into Claude Code started with --dangerously-load-development-channels server:scp.
 
+relay:
+  ${CLI_NAME} relay use <url> | show            select a relay, or show its source and credential status
+  ${CLI_NAME} login [--no-browser] [--token T] [--label NAME]   sign in through the browser, or save a token checked with the relay
+  ${CLI_NAME} up [--token T] [--machine NAME] [--no-browser]   log in if needed, link the broker to the hub, run setup --write
+  ${CLI_NAME} logout                             remove the stored credential for the active relay
+  ${CLI_NAME} cloud enable [--machine NAME] | disable | status   link the local broker to the hub, or inspect its link
+  ${CLI_NAME} machines [rm NAME]                 list the hub's machines, or release one
+  --cloud (or $SCP_TRANSPORT=cloud) sends messaging commands directly to the hub using the active relay's login.
+  --machine NAME ($SCP_MACHINE, else the short hostname) names this machine on the hub; it requires --cloud.
+
 identity:
   --as HANDLE (or --as=HANDLE, anywhere on the line, or $SCP_NAME, a local handle; a leading me/ is dropped) acts as that agent, with --harness H
   ($SCP_HARNESS, default cli), $SCP_LABELS (role=impl,lane=relay) and $SCP_PARENT. An offline
@@ -271,7 +284,7 @@ const VERB_OPTIONS: Record<string, Record<string, { type: "string" | "boolean" }
   admin: { tree: { type: "string" } },
 }
 
-const IDENTITY: Option[] = ["as", "harness", "human", "json"]
+const IDENTITY: Option[] = ["as", "harness", "human", "json", "cloud", "machine"]
 const VERBS: Record<string, Option[]> = {
   list: [...IDENTITY, "all", "tree", "roots", "contacts"],
   send: [...IDENTITY, "reply-to", "thread", "private", "attach"],
@@ -302,6 +315,12 @@ const VERBS: Record<string, Option[]> = {
   daemon: ["idle", "policy"],
   mcp: ["as", "harness", "human", "channels"],
   hooks: ["harness", "scope", "write", "print", "block-stop-on-unread", "push-wait"],
+  relay: ["json"],
+  login: ["json", "token", "label", "no-browser"],
+  up: ["token", "label", "machine", "no-browser"],
+  logout: ["json"],
+  cloud: ["machine", "json"],
+  machines: IDENTITY,
 }
 
 /** a short message reference: `last`, or a suffix of an id such as its short id; all digits may be a seq too */
@@ -311,9 +330,9 @@ const MESSAGE_REF = /^(last|[0-9a-z]{4,})$/
  * a message delivered to the caller by id, seq, unique suffix (its short id) or `last`, with `member` also another's message in a thread the
  * caller sent or got a message in; an ambiguous reference, or a `last` with a newer unseen message, is a usage error saying why
  */
-async function lookup(client: RelayClient, id: string): Promise<Envelope | null>
-async function lookup(client: RelayClient, id: string, member: true): Promise<Envelope | ThreadMessage | null>
-async function lookup(client: RelayClient, id: string, member = false): Promise<Envelope | ThreadMessage | null> {
+async function lookup(client: RelayTransport, id: string): Promise<Envelope | null>
+async function lookup(client: RelayTransport, id: string, member: true): Promise<Envelope | ThreadMessage | null>
+async function lookup(client: RelayTransport, id: string, member = false): Promise<Envelope | ThreadMessage | null> {
   try {
     return (await client.request<{ message: Envelope | ThreadMessage | null }>("message", { id, ...(member ? { member: true } : {}) })).message
   } catch (error) {
@@ -512,12 +531,30 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     })
   }
 
+  if (verb === "relay") return (await import("./relay")).relayVerb(positionals, values.json === true)
+  if (verb === "up") return (await import("./up")).up(positionals, values as UpValues, cwd, cloudStatus)
+  if (verb === "login")
+    return (await import("./relay")).loginMain(positionals, values as { token?: string; label?: string; "no-browser"?: boolean; json?: boolean })
+  if (verb === "logout") return (await import("./relay")).logoutMain(positionals, values.json === true)
+  if (verb === "cloud") return (await import("./remote")).cloudMain(positionals, values as { machine?: string; json?: boolean }, cloudStatus)
   if (verb === "holds") holdsArgs(values, positionals)
   const bodyFromStdin = (verb === "send" || verb === "ask" || verb === "reply") && (positionals[1] === undefined || positionals[1] === "-")
   const opened = await open(verb, values as Identity, cwd, bodyFromStdin)
   const { client } = opened
   try {
+    if (verb === "machines") return await (await import("./remote")).machinesVerb(client, positionals, values.json === true)
     return await runVerb(opened, verb, values, positionals, cwd)
+  } finally {
+    client.close()
+  }
+}
+
+async function cloudStatus() {
+  const dir = relayDir()
+  const client = await connectBroker(dir, () => startDaemon(dir))
+  try {
+    await client.hello({ observe: true })
+    return await client.request<{ enabled: boolean }>("cloud_status")
   } finally {
     client.close()
   }
@@ -581,13 +618,19 @@ async function runVerb(
       return 0
     }
     case "rules":
-      return rulesCommand(client, values, positionals)
+      return rulesCommand(localClient(client, broker, verb), values, positionals)
     case "group":
-      return groupCommand(client, values, positionals)
+      return groupCommand(localClient(client, broker, verb), values, positionals)
     case "admin": {
       const [action, subject] = positionals
       if (action === "ls" && !subject) {
-        const result = (await client.admin({ action: "ls" })) as { subject: string; tree?: string; group?: string; granted_at: string; stale?: boolean }[]
+        const result = (await localClient(client, broker, verb).admin({ action: "ls" })) as {
+          subject: string
+          tree?: string
+          group?: string
+          granted_at: string
+          stale?: boolean
+        }[]
         if (asJson) json(result)
         else if (!result.length) note("no admins")
         else
@@ -602,19 +645,19 @@ async function runVerb(
       const tree = values.tree as string | undefined
       const group = values.group as string | undefined
       if (!tree === !group) throw new RelayUsage(`${CLI_NAME} admin ${action} takes one of --tree <root> or --group <name>`)
-      const result = await client.admin({ action, subject, ...(tree ? { tree } : { group: group! }) })
+      const result = await localClient(client, broker, verb).admin({ action, subject, ...(tree ? { tree } : { group: group! }) })
       if (asJson) json(result)
       else out(`${subject}: admin ${action === "grant" ? "granted" : "revoked"} over ${tree ? `tree ${tree}` : `group ${group}`}`)
       return 0
     }
     case "spawn-env": {
       if (positionals.length) throw new RelayUsage(`${CLI_NAME} spawn-env takes only flags`)
-      const { env } = await client.grant(grantParams(values))
+      const { env } = await localClient(client, broker, verb).grant(grantParams(values))
       for (const [key, value] of Object.entries(env)) out(`${key}=${value}`)
       return 0
     }
     case "peers": {
-      const listed = await client.peers()
+      const listed = await localClient(client, broker, verb).peers()
       const peers = values.all ? listed : listed.filter((p) => p.kind === "human" || p.presence !== "offline")
       const hidden = listed.length - peers.length
       if (asJson) json({ peers, ...(hidden ? { hidden } : {}) })
@@ -644,13 +687,13 @@ async function runVerb(
       return 0
     }
     case "peek":
-      return (await import("./peek")).peekCommand(client, values, positionals)
+      return (await import("./peek")).peekCommand(localClient(client, broker, verb), values, positionals)
     case "set-peek":
-      return (await import("./peek")).setPeekCommand(client, values, positionals)
+      return (await import("./peek")).setPeekCommand(localClient(client, broker, verb), values, positionals)
     case "why": {
       const [from, to] = positionals
       if (!from || !to || positionals.length > 2) throw new RelayUsage(`${CLI_NAME} why takes <from> <to>`)
-      const result = await client.why(from, to)
+      const result = await localClient(client, broker, verb).why(from, to)
       if (asJson) json(result)
       else {
         out(result.allowed ? `${from} may message ${to}` : `${from} may not message ${to}`)
@@ -861,8 +904,9 @@ async function runVerb(
       return 0
     }
     case "holds":
-      return holdsCommand(client, values, positionals)
+      return holdsCommand(localClient(client, broker, verb), values, positionals)
     case "policy": {
+      if (!broker) throw new RelayUsage(`${CLI_NAME} policy is the local broker's; it has no --cloud form`)
       const [action, from, to] = positionals
       if (action === "path") {
         if (asJson) json({ file: broker.policy.file })
@@ -1249,7 +1293,14 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
   })
   let broker: Broker
   try {
-    broker = await startBroker({ dir: relayDir(), ...(idleMs !== undefined ? { idleMs } : {}), ...(policyFile ? { policyPath: resolve(policyFile) } : {}) })
+    const { daemonBridge } = await import("./remote")
+    const bridge = await daemonBridge()
+    broker = await startBroker({
+      dir: relayDir(),
+      ...(bridge ? { bridge } : {}),
+      ...(idleMs !== undefined ? { idleMs } : {}),
+      ...(policyFile ? { policyPath: resolve(policyFile) } : {}),
+    })
   } catch (error) {
     if (error instanceof BrokerRunning) {
       note(error.message)

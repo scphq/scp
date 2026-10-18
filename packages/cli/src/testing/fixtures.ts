@@ -1,9 +1,11 @@
+import { setTimeout } from "node:timers/promises"
+
 export async function waitFor<T>(check: () => T | undefined | null | false, timeoutMs = 10_000, what = "condition"): Promise<T> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const value = check()
     if (value) return value
-    await Bun.sleep(20)
+    await setTimeout(20)
   }
   throw new Error(`timed out waiting for ${what}`)
 }
