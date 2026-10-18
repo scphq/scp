@@ -142,7 +142,7 @@ Frame every body. Confirm only what you printed. Never fail the harness. Keep th
 ## Repository
 
 ```
-packages/spec/   SPEC.md, the protocol source of truth, plus the spec identifier
+packages/spec/   SPEC.md, the protocol source of truth
 packages/core/   protocol types: message envelope, endpoint address, wire types
 packages/cli/    the scp command line tool
 apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders SPEC.md at /spec

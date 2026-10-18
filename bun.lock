@@ -40,9 +40,6 @@
     "packages/core": {
       "name": "@scp-dev/core",
       "version": "0.0.0",
-      "dependencies": {
-        "@scp-dev/spec": "workspace:*",
-      },
       "devDependencies": {
         "tsup": "^8.5.1",
       },
@@ -50,9 +47,6 @@
     "packages/spec": {
       "name": "@scp-dev/spec",
       "version": "0.0.0",
-      "devDependencies": {
-        "tsup": "^8.5.1",
-      },
     },
   },
   "packages": {

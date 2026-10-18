@@ -571,7 +571,7 @@ A message with relation="parent" is the exception: it comes from the agent that 
 
 - Attributes appear in exactly this order; bracketed attributes only when set. A human of another machine is shown as `<machine>/me`.
 - Attribute values MUST have control characters removed and `&`, `"`, `<`, `>` escaped as entities.
-- The body MUST have control characters removed, `&` escaped as `&amp;`, and `<`, U+FF1C and U+FE64 escaped as `&lt;`. A body therefore cannot close the block or open a forged one.
+- The body MUST have control characters removed, and every `<`, U+FF1C or U+FE64 that starts a framing tag (optional whitespace, an optional `/` or U+FF0F, then `relay`, `channel` or `system-reminder`, `system_reminder` or `systemreminder`, case-insensitive, not followed by a letter or digit) replaced by `&lt;`. Other text, including `&` and other `<`, is left as written. A body therefore cannot close the block or open a forged one.
 - "Control characters" are C0 and C1 controls except newline and tab, soft hyphen, Arabic letter mark, Mongolian vowel separator, zero-width space, left-to-right and right-to-left marks, bidirectional embedding, override and isolate controls, word joiners and invisible operators, the byte order mark, interlinear annotation controls and Unicode tag characters. Zero-width joiner and non-joiner are kept.
 
 **Expectation line.** The line after the block states what the sender expects:
@@ -796,7 +796,7 @@ The spawn operation (reference: `scp spawn [flags] -- <harness command>`) runs a
 `spawn_exit {grant, code, output?}` (code 0 to 255) MAY be called only by the grant's issuer or an ancestor of its spender. It is refused when a revoked grant was spent ("a new spawn holds its endpoint").
 
 - A spent grant's endpoint is set `done` with note `exited <code>` (prefixed to the earlier note, cut to `LIMITS.noteChars`) and its hook session is ended. An unspent grant is revoked.
-- **Output cleaning.** Escape sequences and control characters are removed; each line keeps the text after its last carriage return; the remainder of a cut private key is dropped; credentials are redacted; the last `LIMITS.handbackBytes` (16384) bytes are kept on a character boundary, prefixed by `[...]` when anything was cut. A spawner MAY choose a smaller cap.
+- **Output cleaning.** Escape sequences and control characters are removed; each line keeps the text after its last carriage return; the remainder of a cut private key is dropped; credentials are redacted; the last `LIMITS.handbackBytes` (16384) bytes are kept on a character boundary, prefixed by the line `[earlier output cut]` when anything was cut and the cap has room for it, starting at the first line that begins within the cap (on a character boundary when one line is longer than that). A spawner MAY choose a smaller cap.
 - **Message.** Exactly one handback per grant, of kind `message`, delivered to the issuer without send checks. Its sender is the worker, or the system endpoint when the worker never joined. Its thread is the last thread between the two since the grant, else a stable thread id derived from the grant. Its hop follows the worker's causal hop (section 12.1). No handback is sent when that thread is full.
 - **Body.**
   - `worker <address> finished (exit <code>)`, a blank line, then the cleaned output; or
@@ -857,9 +857,10 @@ The lists of one direction are ANDed; the entries within a list are ORed. A dire
 | `tree:self`, `tree:root`, `tree:parent`, `tree:siblings`, `tree:children` | Relative to the list's owner, within its own local tree. `tree:self` is every member of that tree. |
 | `tree:ancestors[:N]`, `tree:descendants[:N]` | Ancestors or descendants, optionally limited to N levels (1 to 16). |
 | `acct:<account>`, `acct:*` | Endpoints of a contact account. Only these match other accounts. |
+| `org:<org>`, `org:*`, `group:<org>/<name>` | Reserved: accepted in lists, they match no endpoint. |
 
 - A list holds at most 64 selectors. The bare words `open`, `none`, `tree`, `parent`, `self`, `root`, `children`, `descendants`, `ancestors`, `siblings`, `human` and `me` are refused as selectors (`invalid_params`).
-- `*`, `ep:`, `fleet:`, `machine:`, `group:` and `acct:` are leaving selectors: only they can admit an endpoint of another tree. A `group:` entry admits another tree only when set by the human or the policy, naming a policy group, or bound to a pinned group.
+- `*`, `ep:`, `fleet:`, `machine:`, `org:`, `group:` and `acct:` are leaving selectors: only they can admit an endpoint of another tree. A `group:` entry admits another tree only when set by the human or the policy, naming a policy group, or bound to a pinned group.
 
 ### 10.3 Rules, presets and caps
 
@@ -981,7 +982,7 @@ The broker reads an optional policy file (reference: `~/.config/scp/policy.json`
 
 - Absolute selectors exclude the `tree:` forms.
 - `send_to`: every rule whose `match` matches the sender requires the recipient to match one of its entries, with `tree:` anchored on the sender. `accept_from` is the mirror, anchored on the recipient. All rules must pass; the first failure is the reason.
-- `scope` installs a policy cap on every matching endpoint (both directions when symmetric). Nobody can loosen a policy cap.
+- `scope` installs a policy cap on every matching endpoint (both directions when symmetric). A preset is read as its list (`tree` as `tree:parent`, `tree:descendants`; `parent` as `tree:parent`; `none` as the empty list) and `open` as no cap. Nobody can loosen a policy cap.
 - `verify_lineage` accepts `"spike"` (default) or `false`; both leave lineage placement in effect.
 - Group bindings of policy `group:` selectors are resolved at load and kept for the last `LIMITS.policyLoadsKept` (8) distinct policies.
 
@@ -1175,7 +1176,7 @@ The judge reviews message content where it crosses a boundary the owner configur
 | `egress` | The sender's hub | Every cross-account message leaving the account. |
 | `ingress` | The receiver's hub | Every cross-account message entering the account. |
 
-The local judge does not judge cross-account sends (it audits `judge_skipped`); the hub does not judge same-account traffic. Several matching boundaries merge to the strictest verdict.
+The local judge does not judge cross-account sends (it audits `judge_skipped`); the hub does not judge same-account traffic. For each sender and recipient the first matching boundary in the section's list applies. A send whose recipients are judged at different boundaries merges their verdicts to the strictest, with every category and redaction.
 
 ### 15.2 Verdicts
 
@@ -1200,14 +1201,14 @@ A deterministic pre-filter runs first, without any model:
 ### 15.4 Model judge
 
 - The model receives the side, the boundary (`account:<peer>` on hosted sides), the sender's address, the recipients, the pre-filter flags and the body between per-call nonce delimiters `<<<RELAY_DATA_<nonce>>>`.
-- The answer MUST be strict JSON without extra fields: a verdict, categories, a reason of at most 200 characters and at most 64 redactions whose quoted spans occur verbatim in the body. A reason that quotes the body is replaced by "reason withheld: it quoted the message". A model `pass` with pre-filter redactions becomes `redact`.
-- Verdicts are cached in memory (at most 1000) by a hash of side, configuration version, prompt version, boundary and body: `pass` and `redact` for 24 h, `refuse` for 1 h; holds and errors are not cached.
+- The answer MUST be strict JSON without extra fields: a verdict, categories, a reason of at most 200 characters and at most 64 redactions whose quoted spans occur verbatim in the body. A reason that quotes 16 or more characters of the body (whitespace collapsed, case ignored) or carries a credential is replaced by "reason withheld: it quoted the message"; personal data in a reason is replaced by `[redacted <kind>]` whatever its length. A model `pass` with pre-filter redactions becomes `redact`.
+- Verdicts are cached in memory (at most 1000) by a hash of side, configuration version, prompt version, boundary, body, sender and recipients: `pass` and `redact` for 24 h, `refuse` for 1 h; holds and errors are not cached.
 - Without a model credential the judge decides from the pre-filter alone: suspect holds, personal data redacts, everything else passes.
 
 ### 15.5 Failure behaviour
 
 - **Local judge.** On timeout, error or malformed answer the reason is `judge_unavailable` and the configured fail mode applies: `closed` holds; `open` (default) passes, or redacts with the pre-filter's redactions. Mode `shadow` (default) delivers first and audits the verdict (`judge_shadow`); `enforce` applies it; `off` skips the judge.
-- **Hosted judge.** Always fails closed. An unreadable configuration refuses `unavailable`; a model error holds. In `shadow` mode the message passes and is judged afterwards. Over budget, `enforce` refuses `rate_limited` with `retry_after` and `shadow` passes unjudged. A hold that cannot be stored refuses `unavailable`. A retried message finds its earlier hold: still held returns the same hold, released is a duplicate, refused is `judge_refused`.
+- **Hosted judge.** An unreadable configuration refuses `unavailable`. A single model failure holds with reason `judge_unavailable`. Outage-class failures (unreachable, timeout, or any other error status, such as 401, 403, 429 or 5xx) on 3 distinct messages within 60 s open a breaker, per provider and key, for 30 s; while it is open the pre-filter decides (suspect holds, personal data redacts, everything else passes) and the reason ends with ` (judge_unavailable)`. After that, one message probes the model: success closes the breaker, an outage-class failure keeps it open for another 30 s. Without a model credential the pre-filter decides at once. Provider rejections (status 400, 413 or 422, or an empty or malformed answer) always hold and never count toward the breaker. In `shadow` mode the message passes and is judged afterwards. Over budget, `enforce` refuses `rate_limited` with `retry_after` and `shadow` passes unjudged. A hold that cannot be stored refuses `unavailable`. A retried message finds its earlier hold: still held returns the same hold, released is a duplicate, refused is `judge_refused`.
 
 ### 15.6 Configuration and budgets
 
@@ -1335,7 +1336,7 @@ A conforming hub:
 - [ ] Re-checks scope with mirrored rules and caps and applies the hop rule to every sender.
 - [ ] Implements the contact lifecycle, requires a person in the console for every widening, and fails closed when contacts cannot be loaded.
 - [ ] Applies the cross-account checks, envelope rewriting, reply grants, rate limits, reservation and refund rules of sections 14.5 to 14.7.
-- [ ] Runs the egress and ingress judge gates failing closed, and keeps held bodies only until resolution.
+- [ ] Runs the egress and ingress judge gates, holding on a model failure and letting the pre-filter decide only while the outage breaker is open or no credential is set, and keeps held bodies only until resolution.
 
 ### 18.3 Harness integration
 
