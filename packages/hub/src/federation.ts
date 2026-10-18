@@ -1038,6 +1038,22 @@ export class FederatedCore extends RelayCore {
     })
   }
 
+  /**
+   * records that a forwarded message reached mirrored endpoints of other machines, unacknowledged, as a hub's delivery rows would: their
+   * replies then join its thread here. For links that deliver machine to machine; a hub bridge never needs it
+   */
+  recordRemoteDelivery(messageId: string, endpoints: string[]): void {
+    this.tx(() => {
+      const message = one<{ expires_at: number }>(this.sql, `SELECT expires_at FROM messages WHERE id = ?`, messageId)
+      if (!message) return
+      for (const endpoint of endpoints) {
+        if (this.machineOf(endpoint) === null) continue
+        if (one(this.sql, `SELECT 1 FROM deliveries WHERE message_id = ? AND endpoint = ?`, messageId, endpoint)) continue
+        this.insertDelivery(messageId, endpoint, message.expires_at)
+      }
+    })
+  }
+
   /** the earlier result of a forwarded send with this client_id, or null; a different message under the same client_id is refused */
   forwarded(from: string, params: SendParams): SendResult | null {
     const clientId = cleanText(params.client_id, "client_id", 128)

@@ -1206,6 +1206,57 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 - **Refund.** When delivery to the peer fails with an internal error or `unavailable`, the minute, hour, thread and day counts are refunded (the stored reservation stays). A refusal by the peer, a peer hold and a duplicate are not refunded. Egress holds and refusals spend nothing.
 - A peer's error is relayed with its code and `retry_after`; an unreachable peer or an unknown error is `unavailable`.
 
+### 14.8 Mesh (experimental, non-normative)
+
+This section is experimental and non-normative: it describes the phase-1 mesh wire of the reference implementation, may change without notice, and a conforming implementation need not support it.
+
+**Scope.** Brokers of one account link directly over WebSocket (`ws://`) to a static peer list (for example hostnames and ports on a private network or tailnet), with no hub. The mesh is off until `swarm mesh init`; the broker opens no port and dials nothing before that. Phase 1 has no NAT traversal, rendezvous, offline store, cross-account contacts or revocation. The mesh does not encrypt frames itself: peers belong on a trusted network.
+
+**Keys and trust.**
+
+- Every machine of the account holds the same Ed25519 account key (`account.key`: `{v: 1, account, public, private}`, 43-character base64url JWK `x` and `d`). The account id is `acct_` followed by 32 hex characters of the SHA-256 of `public`.
+- Each machine has its own Ed25519 machine key (`machine.key`: `{v: 1, public, private}`). Its certificate `{v: 1, acct, account, machine, key, sig}` binds `machine` and `key` (`public`) to `acct` and `account`, signed by the account key.
+- Signatures are base64url Ed25519 over a domain string, a newline, and the canonical JSON (keys sorted at every level, `undefined` members omitted) of the payload without `sig`. The signing domains are `scp/1 mesh cert`, `scp/1 mesh record` and `scp/1 mesh auth`.
+- Files live under `<state dir>/mesh` (directory mode 0700): `mesh.json` (`{v: 1, enabled, account, machine, listen, peers}`), `account.key` and `machine.key`, mode 0600.
+
+**Transport and handshake.**
+
+- Peers connect on WebSocket path `/scp/mesh` and exchange JSON-RPC 2.0 text frames of at most 262144 bytes.
+- On open, both sides send the notification `mesh_hello {protocol: "scp/1", acct, cert, nonce}` (`nonce` is 32 random bytes as 43 base64url characters). Each side verifies `protocol`, `acct`, `cert` (for the same `account` and a different `machine`) and `nonce`, then sends the notification `mesh_auth {sig}` signed by its machine key over `{acct, from: <own machine>, to: <peer machine>, peer_nonce: <peer nonce>, nonce: <own nonce>}`.
+- Refusals close the socket with 1008; no authentication within 10 s closes the link with 1008; any binary or oversize frame, request (`id` present) or other frame before authentication closes with 1008.
+
+**Machine records and presence.**
+
+- A machine signs `MachineRecord {v: 1, acct, machine, epoch, seq, endpoints, cert, sig}` with its machine key. `endpoints` are the local non-system endpoints matching `*`, carrying the fields section 14.2 mirrors, unredacted, at most 512.
+- Records are ordered by `(epoch, seq)`, where `epoch` is the broker start in ms and `seq` starts at 1 and increments when `endpoints` change. A valid record replaces a stored one only when newer.
+- On authentication each side sends `records {records}` with its own record and the third-party records it holds; accepted records are mirrored into the broker and passed on in `records {records}` to the other authenticated links, so a machine learns of machines it is not directly linked to.
+- Presence is capped by link liveness: endpoints of a machine with no live direct link show `offline`, and a stored record is re-applied when a direct link authenticates.
+- Authenticated links send `ping {}` every 15 s; a link silent for 3 heartbeats (45 s) is closed (1000). Peers are dialed with jittered exponential backoff from 1 s to 30 s; the peer list in `mesh.json` is re-read every 5 s.
+
+**Forwarding.**
+
+- The sending broker runs the sender checks of section 14.2 Forwarding (local scope and policy, string body, credential scan, idempotency, sender mirrored; the human handle is `""`), plus: all recipients must be on one other machine (`invalid_params` otherwise), other accounts are `not_found`, and `private` data is always refused (`data_class_refused`).
+- No live link to the target machine is `unavailable` with `retry_after` 5; an answer later than 30 s (or link close) is `unavailable`.
+- The broker sends the request `forward {from: <handle>, params, hop_floor, tty?}` (with `to` rewritten to `<machine>/<handle>` and `attachments` and `wait_s` removed); the answer is the `SendResult` or an error carrying `data.code` and `retry_after`. After a non-duplicate success with deliveries, the sender records the message and its delivery to the mirrored recipients, so replies join the thread.
+
+**Receiver authority.**
+
+- The receiving broker does what the hub does in section 14.2, then runs its own send path: at most 600 forwards per minute per link (`rate_limited`), an unusable local policy is `policy_refused`, `hop_floor` outside 0..1000 or any server-set field is `invalid_params`, the sender must be in the peer's stored record (`not_found`), every recipient must be on the receiving machine (`not_found`, no multi-hop), and `hop_floor` is capped at `LIMITS.hopMax + 1`.
+- Scope with both sides' rules and caps, loop guards, policy, inbox cap and the local judge (section 15) then run exactly as for a local send. `from.auth` is `account+bridge` in this phase.
+
+**CLI.** `swarm mesh <verb>`:
+
+| Verb | Effect |
+| --- | --- |
+| `init --account <handle> [--machine] [--listen host:port] [--account-key <file>] [--force]` | Creates or imports `account.key`, ensures `machine.key` and writes `mesh.json` (`enabled: true`). |
+| `add-peer <host:port>` | Adds a peer to `mesh.json`. |
+| `rm-peer <host:port>` | Removes a peer from `mesh.json`. |
+| `listen <host:port\|off>` | Sets or clears `listen` in `mesh.json`. |
+| `on`, `off` | Enables or disables the mesh in `mesh.json`. |
+| `status [--json]` | Shows `mesh.json` and live state from `cloud_status`, which gains `mesh {account, acct, listen, peers, links, machines}`. |
+
+Changes take effect when the broker restarts, except peers, which are re-read every 5 s.
+
 ---
 
 ## 15. Judging

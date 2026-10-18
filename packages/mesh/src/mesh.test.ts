@@ -1,0 +1,431 @@
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { type Broker, type BrokerOptions, RelayClient, startBroker } from "@scp-dev/broker"
+import { type EndpointView, type Envelope, FakeJudgeClient, LIMITS, RelayError, type SendResult, SERVER_FIELDS } from "@scp-dev/core"
+import { WebSocket } from "ws"
+import type { AccountKey, MeshConfig } from "./config"
+import { accountId, canonicalJson, generateKeyPair, newNonce, SIGN_DOMAIN, signPayload, verifyPayload } from "./keys"
+import { type MeshLink, type MeshOptions, type MeshStatus, startMesh } from "./link"
+import { issueCert, type MachineCert, MESH_FRAME_BYTES, MESH_PATH, signRecord, verifyCert, verifyRecord } from "./wire"
+
+setDefaultTimeout(15_000)
+const MODEL = { id: "openai/test-judge", key_env: "JUDGE_TEST_KEY" }
+const answer = (fields: Record<string, unknown>) => JSON.stringify({ verdict: "pass", categories: [], reason: "fine", redactions: [], ...fields })
+const cleanups: (() => Promise<void> | void)[] = []
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+})
+
+async function waitFor<T>(fn: () => T | Promise<T>, what: string, ms = 5000): Promise<NonNullable<T>> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const value = await fn()
+    if (value) return value as NonNullable<T>
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await Bun.sleep(20)
+  }
+}
+
+function accountKey(): AccountKey {
+  return { ...generateKeyPair(), v: 1, account: "team" }
+}
+
+async function machine(
+  account: AccountKey,
+  name: string,
+  config: Partial<MeshConfig> = {},
+  options: Partial<Pick<MeshOptions, "reloadConfig" | "reloadMs" | "forwardTimeoutMs" | "heartbeatMs">> = {},
+  brokerOptions: Partial<Pick<BrokerOptions, "policyPath" | "env" | "judgeClient">> = {},
+) {
+  const root = mkdtempSync(join(tmpdir(), "mesh-test-"))
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+  const policyPath = brokerOptions.policyPath ?? join(root, "policy.json")
+  const broker = await startBroker({
+    ...brokerOptions,
+    dir: join(root, "state"),
+    policyPath,
+    idleMs: 0,
+    log: () => {},
+    machine: name,
+    link: (ctx) =>
+      startMesh({
+        ...ctx,
+        config: { v: 1, enabled: true, account: account.account, machine: name, listen: "127.0.0.1:0", peers: [], ...config },
+        account,
+        machineKey: generateKeyPair(),
+        backoff: { minMs: 20, maxMs: 200 },
+        heartbeatMs: 1000,
+        ...options,
+      }),
+  })
+  cleanups.push(() => broker.stop())
+  const mesh = broker.bridge as MeshLink
+  const bound = await mesh.listening()
+  return { broker, mesh, policyPath, addr: bound ? `127.0.0.1:${bound.port}` : null }
+}
+
+type Machine = Awaited<ReturnType<typeof machine>>
+type Inbox = { messages: Envelope[] }
+
+async function agent(broker: Broker, handle: string) {
+  const client = await RelayClient.connect(broker.socket)
+  cleanups.push(() => client.close())
+  await client.hello({ claim: { handle, harness: "test" } })
+  return client
+}
+
+async function code(promise: Promise<unknown>) {
+  try {
+    await promise
+    return undefined
+  } catch (error) {
+    if (error instanceof RelayError) return error.code
+    throw error
+  }
+}
+
+async function listed(client: RelayClient, address: string) {
+  const { endpoints } = await client.request<{ endpoints: EndpointView[] }>("list", { all: true })
+  return endpoints.find((view) => view.address === address)
+}
+
+type Frame = {
+  jsonrpc: string
+  id?: number
+  method?: string
+  params?: Record<string, unknown>
+  result?: unknown
+  error?: { code: number; message: string; data: { code: string; retry_after?: number } }
+}
+
+async function rawPeer(target: Machine, account: AccountKey, name = "c", options: { badAuth?: boolean; silent?: boolean } = {}) {
+  const key = generateKeyPair()
+  const cert = issueCert(account, name, key)
+  const acct = accountId(account.public)
+  const nonce = newNonce()
+  const socket = new WebSocket(`ws://${target.addr}${MESH_PATH}`, { maxPayload: MESH_FRAME_BYTES })
+  const frames: Frame[] = []
+  const pending = new Map<number, (frame: Frame) => void>()
+  let authenticated = false
+  let closeCode: number | undefined
+  let remoteNonce = ""
+  let remoteCert: MachineCert | undefined
+  let nextId = 1
+  let seq = 0
+  const epoch = Date.now()
+  const notify = (method: string, params: object) => socket.send(JSON.stringify({ jsonrpc: "2.0", method, params }))
+  const closed = new Promise<void>((resolve) =>
+    socket.once("close", (code) => {
+      closeCode = code
+      resolve()
+    }),
+  )
+  cleanups.push(async () => {
+    socket.terminate()
+    await closed
+  })
+  socket.on("error", () => {})
+  socket.on("message", (data) => {
+    const frame = JSON.parse(data.toString()) as Frame
+    frames.push(frame)
+    if (frame.method === "mesh_hello") {
+      remoteNonce = frame.params!.nonce as string
+      remoteCert = frame.params!.cert as MachineCert
+      const payload = { acct, from: name, to: remoteCert.machine, peer_nonce: remoteNonce, nonce }
+      notify("mesh_auth", { sig: signPayload(options.badAuth ? generateKeyPair() : key, SIGN_DOMAIN.auth, payload) })
+    } else if (frame.method === "mesh_auth") {
+      const payload = { acct, from: remoteCert!.machine, to: name, peer_nonce: nonce, nonce: remoteNonce }
+      authenticated = verifyPayload(remoteCert!.key, SIGN_DOMAIN.auth, payload, frame.params!.sig)
+    } else if (frame.method === "ping" && !options.silent) {
+      notify("ping", {})
+    }
+    if (frame.id !== undefined) {
+      pending.get(frame.id)?.(frame)
+      pending.delete(frame.id)
+    }
+  })
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", () => {
+      notify("mesh_hello", { protocol: "scp/1", acct, cert, nonce })
+      resolve()
+    })
+    socket.once("error", reject)
+  })
+  return {
+    socket,
+    frames,
+    cert,
+    key,
+    notify,
+    authenticated: () => authenticated,
+    closeCode: () => closeCode,
+    ready: () => waitFor(() => frames.some((frame) => frame.method === "records"), "raw peer authentication"),
+    record(endpoints: unknown[] = [{ address: "me/source", kind: "agent", harness: "test", presence: "online" }]) {
+      const record = signRecord(key, { v: 1, acct, machine: name, epoch, seq: ++seq, endpoints, cert })
+      notify("records", { records: [record] })
+      return record
+    },
+    request(params: unknown): Promise<Frame> {
+      const id = nextId++
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id)
+          reject(new Error("raw request timed out"))
+        }, 3000)
+        pending.set(id, (frame) => {
+          clearTimeout(timer)
+          resolve(frame)
+        })
+        socket.send(JSON.stringify({ jsonrpc: "2.0", id, method: "forward", params }))
+      })
+    },
+  }
+}
+
+async function carried(target: Machine, peer: Awaited<ReturnType<typeof rawPeer>>, name = "c") {
+  await peer.ready()
+  const record = peer.record()
+  await waitFor(() => target.mesh.status().mesh.machines.some((row) => row.machine === name && row.seq === record.seq), "peer record")
+}
+
+describe("mesh wire", () => {
+  test("canonical JSON sorts nested keys and signatures bind certificates and records", () => {
+    expect(canonicalJson({ z: [{ b: 2, a: 1 }], a: true })).toBe('{"a":true,"z":[{"a":1,"b":2}]}')
+    const account = accountKey()
+    const key = generateKeyPair()
+    const trust = { acct: accountId(account.public), public: account.public }
+    const cert = issueCert(account, "a", key)
+    expect(verifyCert(cert, trust)).toBe(true)
+    const payload = { v: 1 as const, acct: trust.acct, machine: "a", epoch: 1, seq: 1, endpoints: [], cert }
+    const record = signRecord(key, payload)
+    expect(verifyRecord(record, trust)).toBe(true)
+    expect(verifyRecord(signRecord(key, { ...record, seq: 2 }), trust)).toBe(true)
+    expect(verifyRecord({ ...record, seq: 2 }, trust)).toBe(false)
+    expect(verifyRecord(signRecord(generateKeyPair(), payload), trust)).toBe(false)
+    expect(verifyCert(issueCert(accountKey(), "a", key), trust)).toBe(false)
+    expect(verifyCert({ ...cert, account: "other" }, trust)).toBe(false)
+    for (const changes of [{ epoch: -1 }, { seq: 0.5 }, { machine: "b" }, { endpoints: Array(513).fill(null) }]) {
+      expect(verifyRecord(signRecord(key, { ...payload, ...changes }), trust)).toBe(false)
+    }
+    for (const value of [null, [], {}, "record"]) {
+      expect(verifyCert(value, trust)).toBe(false)
+      expect(verifyRecord(value, trust)).toBe(false)
+    }
+  })
+})
+
+describe("mesh brokers", () => {
+  test("two machines deliver messages and replies without a hub", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const a = await machine(account, "a", { peers: [b.addr!], listen: null })
+    expect(await a.mesh.listening()).toBeNull()
+    const impl = await agent(a.broker, "impl")
+    const review = await agent(b.broker, "review")
+    await waitFor(() => listed(impl, "me/b/review"), "remote review")
+    await waitFor(() => listed(review, "me/a/impl"), "remote sender")
+    const sent = await impl.request<SendResult>("send", { to: "b/review", body: "first message", client_id: "first" })
+    expect(sent.deliveries.map((delivery) => delivery.address)).toEqual(["me/b/review"])
+    const inbox = await review.request<Inbox>("inbox", { wait_s: 2 })
+    expect(inbox.messages[0]).toMatchObject({ from: { machine: "a", auth: "account+bridge" }, body: { text: "first message" } })
+    await review.request("ack", { seqs: inbox.messages.map((row) => row.seq) })
+    const asking = impl.request<{ reply?: Envelope }>("ask", { to: "me/b/review", body: "please review", wait_s: 5 })
+    const request = await review.request<Inbox>("inbox", { wait_s: 2 })
+    const question = request.messages.find((row) => row.kind === "request")!
+    expect(question.body.text).toBe("please review")
+    await review.request("send", { to: "a/impl", body: "review complete", kind: "reply", reply_to: question.id })
+    expect((await asking).reply).toMatchObject({ body: { text: "review complete" }, from: { address: "me/b/review" } })
+    const observer = await RelayClient.connect(a.broker.socket)
+    cleanups.push(() => observer.close())
+    await observer.hello({ observe: true })
+    const status = await observer.request<MeshStatus>("cloud_status")
+    expect(status.connected).toBe(true)
+    expect(status.mesh.machines).toContainEqual(expect.objectContaining({ machine: "b", linked: true }))
+    expect(await code(a.mesh.contacts())).toBe("unavailable")
+    expect(await code(impl.request("send", { to: "b/review", body: "local", data_class: "private" }))).toBe("data_class_refused")
+    expect(await code(impl.request("send", { to: "other/b/review", body: "outside" }))).toBe("not_found")
+    expect(await code(impl.request("send", { to: ["b/review", "c/review"], body: "split" }))).toBe("invalid_params")
+  })
+
+  test("the receiving broker's judge gates messages from other machines", async () => {
+    const account = accountKey()
+    const root = mkdtempSync(join(tmpdir(), "mesh-judge-"))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const policyPath = join(root, "policy.json")
+    writeFileSync(policyPath, JSON.stringify({ rules: [], judge: { mode: "enforce", model: MODEL, boundaries: [{}] } }))
+    const fake = new FakeJudgeClient([answer({ verdict: "refuse", categories: ["private"], reason: "internal only" }), answer({ verdict: "pass" })])
+    const b = await machine(account, "b", {}, {}, { policyPath, env: { JUDGE_TEST_KEY: "k-test" }, judgeClient: () => fake })
+    const a = await machine(account, "a", { peers: [b.addr!], listen: null })
+    const impl = await agent(a.broker, "impl")
+    const review = await agent(b.broker, "review")
+    await waitFor(() => listed(impl, "me/b/review"), "remote review")
+    await waitFor(() => listed(review, "me/a/impl"), "remote sender")
+
+    expect(await code(impl.request("send", { to: "b/review", body: "internal note" }))).toBe("judge_refused")
+    expect((await review.request<Inbox>("inbox")).messages).toEqual([])
+    expect(fake.calls).toBe(1)
+
+    await impl.request("send", { to: "b/review", body: "public note" })
+    expect((await review.request<Inbox>("inbox")).messages.map((row) => row.body.text)).toEqual(["public note"])
+    expect(fake.calls).toBe(2)
+  })
+
+  test("the receiving broker enforces rules, hop limits, routing and policy for raw peers", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const review = await agent(b.broker, "review")
+    const peer = await rawPeer(b, account)
+    await carried(b, peer)
+    const forward = (params: object, extra: object = {}) => peer.request({ from: "source", params: { to: "b/review", body: "raw", ...params }, ...extra })
+    await review.request("rules_set", { in: ["tree:descendants"] })
+    expect((await forward({})).error?.data.code).toBe("not_found")
+    await review.request("rules_set", { in: ["*"] })
+    expect((await forward({ to: "a/impl" })).error?.data.code).toBe("not_found")
+    expect((await forward({ to: "other/b/review" })).error?.data.code).toBe("not_found")
+    for (const field of SERVER_FIELDS) expect((await forward({ [field]: "forged" })).error?.data.code).toBe("invalid_params")
+    for (const hop_floor of [-1, 1001, 1.5, null]) expect((await forward({}, { hop_floor })).error?.data.code).toBe("invalid_params")
+    expect((await peer.request({ from: "source", params: [] })).error?.data.code).toBe("invalid_params")
+    expect((await peer.request({ from: "unknown", params: { to: "b/review", body: "raw" } })).error?.data.code).toBe("not_found")
+    writeFileSync(b.policyPath, JSON.stringify({ rules: [{ match: "harness:test", send_to: ["kind:human"] }] }))
+    expect((await forward({})).error?.data.code).toBe("policy_refused")
+    writeFileSync(b.policyPath, "{ invalid")
+    expect((await forward({})).error?.data.code).toBe("policy_refused")
+    writeFileSync(b.policyPath, JSON.stringify({ rules: [] }))
+    expect((await forward({ body: "allowed", attachments: [{ path: "/missing" }], wait_s: 100 })).error).toBeUndefined()
+    expect((await review.request<Inbox>("inbox")).messages.map((row) => row.body.text)).toEqual(["allowed"])
+    expect((await forward({}, { hop_floor: LIMITS.hopMax + 1 })).error?.data.code).toBe("loop_guard")
+  })
+
+  test("another account and an invalid authentication signature close with policy errors", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const foreign = await rawPeer(b, accountKey())
+    await waitFor(() => foreign.closeCode(), "foreign peer close")
+    expect(foreign.closeCode()).toBe(1008)
+    expect(foreign.authenticated()).toBe(false)
+    const bad = await rawPeer(b, account, "c", { badAuth: true })
+    await waitFor(() => bad.closeCode(), "bad signature close")
+    expect(bad.closeCode()).toBe(1008)
+    expect(bad.frames.some((frame) => frame.method === "records")).toBe(false)
+    expect(b.mesh.status().connected).toBe(false)
+  })
+
+  test("records propagate through a peer, while indirect machines remain offline", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const a = await machine(account, "a", { peers: [b.addr!] })
+    const impl = await agent(a.broker, "impl")
+    await waitFor(() => b.mesh.status().mesh.machines.some((row) => row.machine === "a" && row.seq > 1), "record at middle peer")
+    const c = await machine(account, "c", { peers: [b.addr!] })
+    const observer = await agent(c.broker, "observer")
+    const view = await waitFor(() => listed(observer, "me/a/impl"), "propagated endpoint")
+    expect(view.presence).toBe("offline")
+    const before = c.mesh.status().mesh.machines.find((row) => row.machine === "a")!
+    expect(before.linked).toBe(false)
+    await agent(a.broker, "extra")
+    await waitFor(() => listed(observer, "me/a/extra"), "record update")
+    expect(c.mesh.status().mesh.machines.find((row) => row.machine === "a")!.seq).toBeGreaterThan(before.seq)
+    expect(await code(observer.request("send", { to: "a/impl", body: "no route" }))).toBe("unavailable")
+    expect(await waitFor(() => listed(impl, "me/c/observer"), "reverse propagation")).toMatchObject({ presence: "offline" })
+  })
+
+  test("losing the last link marks remote endpoints offline and makes sends unavailable", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const a = await machine(account, "a", { peers: [b.addr!] })
+    const impl = await agent(a.broker, "impl")
+    await agent(b.broker, "review")
+    await waitFor(() => listed(impl, "me/b/review"), "remote review")
+    await b.broker.stop()
+    await waitFor(async () => (await listed(impl, "me/b/review"))?.presence === "offline", "offline review")
+    expect(await code(impl.request("send", { to: "b/review", body: "disconnected" }))).toBe("unavailable")
+    expect(a.mesh.status().connected).toBe(false)
+  })
+
+  test("reloading peers adds and removes dials and restores stored presence", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const review = await agent(b.broker, "review")
+    let peers: string[] = []
+    const a = await machine(
+      account,
+      "a",
+      { listen: null },
+      {
+        reloadMs: 30,
+        reloadConfig: () => ({ v: 1, enabled: true, account: account.account, machine: "a", listen: null, peers }),
+      },
+    )
+    const impl = await agent(a.broker, "impl")
+    peers = [b.addr!]
+    await waitFor(async () => (await listed(impl, "me/b/review"))?.presence === "online", "added peer")
+    peers = []
+    await waitFor(async () => (await listed(impl, "me/b/review"))?.presence === "offline", "removed peer")
+    expect(a.mesh.status().mesh.peers).toEqual([])
+    peers = [b.addr!]
+    await waitFor(async () => (await listed(impl, "me/b/review"))?.presence === "online", "restored peer")
+    await waitFor(() => listed(review, "me/a/impl"), "restored sender")
+    await impl.request("send", { to: "b/review", body: "restored" })
+    expect((await review.request<Inbox>("inbox")).messages[0]!.body.text).toBe("restored")
+  })
+
+  test("duplicate links keep presence until the last closes and forwards use the latest", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b", {}, { forwardTimeoutMs: 80 })
+    const review = await agent(b.broker, "review")
+    const first = await rawPeer(b, account)
+    await carried(b, first)
+    const second = await rawPeer(b, account)
+    await second.ready()
+    await waitFor(() => b.mesh.status().mesh.links.length === 2, "both links")
+    const sending = code(review.request("send", { to: "c/source", body: "latest" }))
+    await waitFor(() => second.frames.some((frame) => frame.method === "forward"), "latest link forward")
+    expect(first.frames.some((frame) => frame.method === "forward")).toBe(false)
+    expect(await sending).toBe("unavailable")
+    first.socket.close()
+    await waitFor(() => b.mesh.status().mesh.links.length === 1, "first link close")
+    expect((await listed(review, "me/c/source"))?.presence).toBe("online")
+    const pending = code(review.request("send", { to: "c/source", body: "closing" }))
+    await waitFor(() => second.frames.filter((frame) => frame.method === "forward").length === 2, "pending forward")
+    second.socket.close()
+    expect(await pending).toBe("unavailable")
+    await waitFor(async () => (await listed(review, "me/c/source"))?.presence === "offline", "last link close")
+  })
+
+  test("stale and tampered records do not replace accepted records", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const peer = await rawPeer(b, account)
+    await peer.ready()
+    const first = peer.record()
+    await waitFor(() => b.mesh.status().mesh.machines.some((row) => row.machine === "c"), "initial record")
+    const second = peer.record([])
+    await waitFor(() => b.mesh.status().mesh.machines.find((row) => row.machine === "c")?.seq === second.seq, "new record")
+    peer.notify("records", { records: [first, { ...second, seq: second.seq + 1, endpoints: first.endpoints }] })
+    const result = await peer.request({ from: "source", params: { to: "b/me", body: "removed sender" } })
+    expect(result.error?.data.code).toBe("not_found")
+    expect(b.mesh.status().mesh.machines.find((row) => row.machine === "c")).toMatchObject({ seq: second.seq, endpoints: 0 })
+  })
+
+  test("a silent authenticated peer is closed after three heartbeats", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b", {}, { heartbeatMs: 40 })
+    const peer = await rawPeer(b, account, "c", { silent: true })
+    await carried(b, peer)
+    await waitFor(() => peer.closeCode(), "heartbeat close")
+    expect(b.mesh.status().connected).toBe(false)
+  })
+
+  test("forwards are limited per link", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const peer = await rawPeer(b, account)
+    await carried(b, peer)
+    for (let i = 0; i < 600; i++) expect((await peer.request({})).error?.data.code).toBe("invalid_params")
+    const limited = await peer.request({})
+    expect(limited.error?.data.code).toBe("rate_limited")
+    expect(limited.error?.data.retry_after).toBeGreaterThan(0)
+  })
+})
