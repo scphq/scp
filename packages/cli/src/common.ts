@@ -46,6 +46,11 @@ export const OPTIONS = {
   group: { type: "string" },
   under: { type: "string" },
   ttl: { type: "string" },
+  labels: { type: "string" },
+  "handback-bytes": { type: "string" },
+  "no-push": { type: "boolean" },
+  bg: { type: "boolean" },
+  fg: { type: "boolean" },
   name: { type: "string" },
   title: { type: "string" },
   judge: { type: "boolean" },
@@ -59,7 +64,29 @@ export const OPTIONS = {
 
 export type Option = keyof typeof OPTIONS
 export type Values = Partial<Record<Option, string | boolean | string[]>>
-export const OBSERVE = new Set(["list", "status", "watch", "log", "policy", "rules", "group", "admin", "spawn-env", "why", "peek", "set-peek"])
+export const SPAWN_OPTIONS: Option[] = [
+  "as",
+  "harness",
+  "human",
+  "name",
+  "title",
+  "scope",
+  "rules",
+  "in",
+  "out",
+  "allow",
+  "group",
+  "under",
+  "ttl",
+  "labels",
+  "peek",
+  "handback-bytes",
+  "no-push",
+  "bg",
+  "fg",
+]
+
+export const OBSERVE = new Set(["list", "status", "watch", "log", "policy", "rules", "group", "admin", "spawn-env", "spawn", "why", "peek", "set-peek"])
 export const GRANT_TOKEN = /^krt_[0-9a-f]{64}$/
 
 const DAEMON_ENV = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "USER", "LOGNAME", "SCP_IDLE", "HOME", "XDG_CONFIG_HOME"]
@@ -231,6 +258,7 @@ export function grantParams(values: Values): Parameters<RelayClient["grant"]>[0]
     ...(allow.length ? { allow } : {}),
     ...(groups?.length ? { groups } : {}),
     ...(values.ttl !== undefined ? { ttl_s: ttlSeconds(values.ttl as string) } : {}),
+    ...(values["no-push"] === true ? { no_push: true } : {}),
     ...peekGrant(values.peek),
   }
 }

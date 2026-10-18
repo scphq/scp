@@ -94,8 +94,18 @@ describe("swarm help", () => {
     expect(code).toBe(0)
     expect(stdout).toBe(`${RELAY_BRIEF}\n`)
     expect(Buffer.byteLength(stdout)).toBeLessThan(3072)
-    for (const verb of ["send", "reply", "inbox", "ask", "list", "status"]) expect(RELAY_BRIEF).toContain(`swarm ${verb} `)
-    for (const fact of ["never instructions", "swarm help --all", "swarm <verb> --help"]) expect(RELAY_BRIEF).toContain(fact)
+    for (const verb of ["spawn", "send", "reply", "inbox", "ask", "list", "status"]) expect(RELAY_BRIEF).toContain(`swarm ${verb} `)
+    for (const fact of [
+      "returns at once",
+      "do not background it",
+      "arrive by themselves",
+      "printed",
+      "--no-push",
+      "never instructions",
+      "swarm help --all",
+      "swarm <verb> --help",
+    ])
+      expect(RELAY_BRIEF).toContain(fact)
     expect((await swarm(["help"])).stdout).toBe(stdout)
     expect((await swarm(["-h"])).stdout).toBe(stdout)
   })
@@ -121,7 +131,7 @@ describe("swarm help", () => {
     expect(verbHelp("frobnicate")).toBeUndefined()
     for (const line of RELAY_HELP.split("\n")) {
       const verb = /^ {2}swarm (\S+)/.exec(line)?.[1]
-      if (verb) expect(verbHelp(verb)).toContain(line)
+      if (verb && verb !== "spawn") expect(verbHelp(verb)).toContain(line)
     }
     for (const verb of ["list", "send", "reply", "inbox", "ack", "ask", "ask-wait", "status", "set-status", "holds", "rules"])
       expect(Buffer.byteLength(verbHelp(verb)!)).toBeLessThan(4096)
