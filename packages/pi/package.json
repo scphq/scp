@@ -1,0 +1,29 @@
+{
+  "name": "@scp-dev/pi",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A pi extension that joins the session to SCP: the relay's tools, and incoming messages as turns, waking an idle session.",
+  "license": "Apache-2.0",
+  "homepage": "https://scp.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scphq/scp.git",
+    "directory": "packages/pi"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "files": ["src", "!src/**/*.test.ts"],
+  "scripts": {
+    "build": "true",
+    "typecheck": "tsc -p ."
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.73.1"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "0.73.1"
+  }
+}
