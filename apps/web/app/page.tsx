@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import Link from "next/link";
+import { ArchitectureCard } from "./architecture/card";
 import { Header } from "./chrome";
 import { CopyButton } from "./copy-button";
 import { Showcase } from "./showcase";
@@ -107,6 +108,7 @@ export default function Home() {
                 </li>
               ))}
             </ol>
+            <ArchitectureCard />
           </div>
         </section>
 

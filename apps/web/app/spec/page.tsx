@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Header } from "../chrome";
 import { loadSpec } from "../../lib/spec";
+import { MermaidBlocks } from "../mermaid";
 import { shareMetadata } from "../share";
 import { Toc } from "./toc";
 
@@ -44,6 +45,7 @@ export default function SpecPage() {
             <div dangerouslySetInnerHTML={{ __html: spec.html }} />
           </article>
         </div>
+        <MermaidBlocks />
       </main>
     </>
   );

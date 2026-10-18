@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Header } from "../chrome";
 import { DOCS, docHref, loadDoc } from "../../lib/docs";
+import { MermaidBlocks } from "../mermaid";
 import { shareMetadata } from "../share";
 
 export function docMetadata(slug: string): Metadata {
@@ -52,6 +53,7 @@ export function DocPage({ slug }: { slug: string }) {
             <div dangerouslySetInnerHTML={{ __html: doc.html }} />
           </article>
         </div>
+        <MermaidBlocks />
       </main>
     </>
   );

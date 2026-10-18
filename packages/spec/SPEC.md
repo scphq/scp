@@ -117,31 +117,25 @@ The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RE
 
 ### 4.2 Diagram
 
-```
- machine A (user u)                                     machine B (user u, same account)
- +-----------------------------------------+            +------------------------------+
- | harness 1        harness 2              |            | harness 3                    |
- |  hooks, MCP       hooks, MCP, CLI       |            |  plugin, MCP                 |
- |     |               |                   |            |     |                        |
- |     v               v                   |            |     v                        |
- |  +-----------------------------------+  |            |  +------------------------+  |
- |  | broker   (local socket, NDJSON)   |  |            |  | broker                 |  |
- |  | endpoints, inboxes, scopes, audit |  |            |  |                        |  |
- |  | local judge (optional)            |  |            |  +-----------+------------+  |
- |  +-----------------+-----------------+  |            |              | bridge        |
- |                    | bridge             |            +--------------|---------------+
- +--------------------|--------------------+                           |
-                      v                                                v
-          +--------------------------------------------------------------------+
-          | hub of account X                                                   |
-          |   machines, mirrored endpoints, deliveries, contacts               |
-          |   hosted judge, hold queue                                         |
-          +-----------------------------------+--------------------------------+
-                                              | hub to hub (contact only)
-                                              v
-          +--------------------------------------------------------------------+
-          | hub of account Y                                                   |
-          +--------------------------------------------------------------------+
+```mermaid
+flowchart TB
+  subgraph machineA["machine A (user u)"]
+    h1["harness 1<br/>hooks, MCP"]
+    h2["harness 2<br/>hooks, MCP, CLI"]
+    brokerA["broker (local socket, NDJSON)<br/>endpoints, inboxes, scopes, audit<br/>local judge (optional)"]
+    h1 --> brokerA
+    h2 --> brokerA
+  end
+  subgraph machineB["machine B (user u, same account)"]
+    h3["harness 3<br/>plugin, MCP"]
+    brokerB["broker"]
+    h3 --> brokerB
+  end
+  hubX["hub of account X<br/>machines, mirrored endpoints, deliveries, contacts<br/>hosted judge, hold queue"]
+  hubY["hub of account Y"]
+  brokerA -->|bridge| hubX
+  brokerB -->|bridge| hubX
+  hubX -->|"hub to hub (contact only)"| hubY
 ```
 
 ### 4.3 Trust boundaries

@@ -19,9 +19,9 @@
 
 </div>
 
-SCP lets agents in different harnesses (Claude Code, Codex, Gemini and others) message each other and their human, at the turn boundaries each harness already has. Messages enter the model's context after a tool call, on a prompt or at a stop. No polling, no human relaying.
+SCP is a message layer for heterogeneous agent swarms. Claude Code, Codex, opencode, pi, Muse, agy and Grok sessions message each other and their humans, on one machine, across your machines, across an org, and with other accounts through contacts. Messages land at the turn boundaries each harness already has: after a tool call, on a prompt, at a stop, or by waking an idle session. Reach follows the process tree, crossing an account takes consent on both sides, and an optional judge reviews what crosses a boundary.
 
-Replies are optional by default: a message is information, and a request is a question the recipient may answer. Only a sender that sets `require_reply` holds the recipient's stop, at most three times.
+An orchestrator spawns workers in any harness, steers them while they run, and gets their results back as a handback, the way native subagents work, but across harnesses and machines. Replies are optional by default: only a sender that sets `require_reply` holds the recipient's stop, at most three times.
 
 ## Example
 
@@ -54,6 +54,48 @@ All 14 parser tests pass.
 [from your worker me/parser: for your information; reply only if useful]
 ```
 
+## Quickstart
+
+```sh
+npm i -g @scp-dev/cli          # or: bun add -g @scp-dev/cli
+swarm up                       # sign in, link this machine to your org's hub, install hooks and MCP
+swarm claude --name orch       # Claude Code as a named orchestrator that wakes on messages
+```
+
+From the orchestrator's session:
+
+```sh
+swarm spawn --name parser -- claude -p "Fix the parser tests"
+swarm spawn --name docs -- codex exec "Update the CLI reference"
+swarm send parser "Also cover the empty-input case."
+swarm list --tree
+```
+
+Agents get the same surface as MCP tools from `swarm mcp`, mounted as the server `scp` (`relay_spawn`, `relay_send`, `relay_reply`, `relay_inbox`, `relay_ask` and more). `swarm help --all` lists every verb, and [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) specifies them.
+
+## What it does
+
+**Bring sessions you already have.** `swarm join lead` puts the session running in this shell on the relay under a name, and `swarm leave` takes it off. `swarm join --under lead` links a session below an orchestrator as if it had been spawned, and `swarm adopt <child> --parent <p>` moves a hand-made tree under a parent from a terminal.
+
+**Wake idle sessions.** Hooks deliver at turn boundaries, and these launchers also push into a session that is waiting for input:
+
+| Harness | Wake |
+| --- | --- |
+| Claude Code | `swarm claude [--name N]` loads the `scp` channel |
+| Codex | `swarm codex [--name N] [--headless]` runs the app-server, starting or steering turns |
+| pi | `swarm pi [--name N]` runs pi with the bundled SCP extension |
+| opencode | the plugin installed by `swarm up` submits new messages as a prompt |
+
+**Ambient swarms.** A CI runner, cron job or cloud box joins with an org API token: `swarm up --token "$SCP_TOKEN" --machine runner-1`, then spawns workers that any linked machine reaches as `runner-1/<agent>`. A job with no broker sends straight to the hub with `swarm send --cloud`. See [ambient agents](https://scp.dev/docs/ambient).
+
+**The hosted relay.** [app.scp.dev](https://app.scp.dev) is the hosted demo hub: email sign-in, orgs and invites, device login for `swarm login`, API tokens, and a dashboard per org with its machines and agents, a live graph of spawn and message links, and recent activity. An org can turn on the [judge](https://scp.dev/docs/judge), which reviews messages between its machines before delivery.
+
+**Addresses across machines and orgs.** `parser` or `me/parser` on this machine, `me/<machine>/<agent>` on another of your devices, `<org>/<machine>/<agent>` on a device another member of your org linked, and `<account>/<machine>/<agent>` through a contact.
+
+**Hubless mesh (experimental).** `swarm mesh init` and `swarm mesh add-peer <host:port>` link the brokers of one account peer to peer, for example over a tailnet, with signed machine records and no hub. See [mesh](https://scp.dev/docs/mesh).
+
+**Self-host.** `swarm relay use <url>` points the CLI at your own relay, which deploys to your own Cloudflare account from `apps/relay`. See [self-host a relay](https://scp.dev/docs/self-host).
+
 ## Why SCP
 
 - **Turn-boundary delivery.** Hooks inject messages after tool calls, on prompts and at stops, within a fixed budget per injection. A session that spawned workers can wait at its stop for their messages instead of ending its turn.
@@ -65,75 +107,111 @@ All 14 parser tests pass.
 
 Hop limits, pair and tree rate limits and ping-pong pauses stop runaway loops. Credentials are refused at send time, and message bodies never reach the audit log.
 
-## How it works
+## Architecture
+
+Harnesses connect to a local broker on their machine, the broker links to its org's hub over a bridge, and the hub forwards between machines. The diagrams are also at [scp.dev/architecture](https://scp.dev/architecture), and [section 4 of the spec](https://scp.dev/spec#4-architecture) is the normative description.
 
 ```mermaid
-flowchart LR
-  subgraph machine["machine"]
+flowchart TB
+  subgraph machine["Your machine"]
     direction TB
-    claude["Claude Code"]
-    codex["Codex"]
-    gemini["Gemini"]
-    hooks["hooks and MCP"]
-    broker["local broker<br/>endpoints, inboxes, scopes, audit"]
-    claude --> hooks
-    codex --> hooks
-    gemini --> hooks
-    hooks <--> broker
+    subgraph harnesses["Harnesses"]
+      direction TB
+      claude["Claude Code"]
+      codex["Codex"]
+      opencode["opencode"]
+      pi["pi"]
+      muse["Muse"]
+      agy["agy"]
+      grok["Grok"]
+    end
+    subgraph integration["Harness integration"]
+      direction TB
+      hooks["turn-boundary hooks<br/>swarm hook"]
+      mcp["scp MCP server<br/>swarm mcp"]
+      wake["wakers for idle sessions<br/>Claude channels<br/>pi extension<br/>opencode plugin<br/>Codex app-server"]
+      cli["swarm CLI"]
+    end
+    subgraph broker["Local broker, one per user"]
+      direction LR
+      sock["unix socket<br/>relay.sock"]
+      core["SQLite core<br/>endpoints, inboxes, scopes, audit"]
+      policy["policy.json<br/>scopes, rules, groups"]
+      ljudge["local judge<br/>optional"]
+      sock --> core
+      policy --> core
+      core --> ljudge
+    end
+    harnesses --> integration
+    integration --> broker
   end
-  subgraph acct["account hub"]
-    hub["hub<br/>machines, mirrored endpoints, judge"]
+
+  subgraph relay["Hosted relay, app.scp.dev"]
+    direction LR
+    worker["Cloudflare Worker<br/>sign-in, device login, API"]
+    d1[("D1<br/>accounts, orgs, devices, tokens")]
+    hub["OrgHub Durable Object<br/>one per org: machines,<br/>mirrored endpoints, deliveries"]
+    hjudge["hub judge<br/>optional, OpenRouter"]
+    dash["dashboard<br/>overview, live graph, activity"]
+    worker --> d1
+    worker --> hub
+    worker --> dash
+    hub --> hjudge
   end
-  subgraph other["contact account"]
-    peer["peer hub"]
+
+  subgraph remote["Elsewhere"]
+    direction TB
+    other["another machine<br/>or org member's broker"]
+    peer["another account's hub"]
+    meshpeer["mesh peer broker<br/>authoritative receiver"]
   end
-  broker <-->|bridge| hub
-  hub <-->|"contact, both consent"| peer
+
+  broker <-->|"bridge, WebSocket"| relay
+  relay <-->|bridge| other
+  relay -.->|"contact, both consent"| peer
+  broker <-.->|"mesh, experimental:<br/>signed records"| meshpeer
 ```
 
-- **Harness integration.** Hooks, an MCP server and a CLI connect a harness to the broker and render messages into the model's context. Pull (tools) suffices to join; hooks add push.
-- **Broker.** One daemon per user on each machine, on a local socket. It holds endpoints, inboxes, scopes, grants and audit, and checks scope, policy, loop guards and rate limits on every send.
-- **Bridge.** The broker's authenticated link to its account's hub. It mirrors endpoints and forwards sends between machines.
-- **Hub.** One per account. It re-checks scope against mirrored rules, queues deliveries for offline machines, and holds contacts and the hosted judge with its hold queue.
-- **Contact hub.** Another account's hub, reached only through an accepted contact, after an egress gate on the sender's side and an ingress gate on the receiver's.
+- **Harness integration.** Turn-boundary hooks (`swarm hook <harness>`) inject messages after a tool call, on a prompt or at a stop, and the MCP server `scp` (`swarm mcp`) sends, replies and reads the inbox. Wakers push into idle sessions.
+- **Local broker.** One daemon per user on each machine, on a unix socket (`relay.sock`). It keeps endpoints, inboxes, scopes, grants and audit in SQLite, reads `~/.config/scp/policy.json` on every send, checks scope, policy, loop guards and rate limits, and can run a local judge.
+- **Bridge.** The broker's authenticated WebSocket to its org's hub. It mirrors endpoints and forwards sends to other machines.
+- **Hub.** One per org. On app.scp.dev it is an `OrgHub` Durable Object behind a Cloudflare Worker, with D1 for accounts, orgs, devices and tokens. It re-checks scope against mirrored rules, queues deliveries for offline machines, and runs the hub judge when the org turns it on.
+- **Contacts.** Two accounts' hubs talk only through a contact both accepted, with a per-side allowlist, after an egress gate on the sender's side and an ingress gate on the receiver's.
+- **Mesh.** Brokers of one account peer directly, each the authority for its own endpoints.
 
-Addresses follow the same layers: `parser`, `me/parser` or `local/parser` on this machine; `me/<machine>/<handle>` on another of your own devices; `<org>/<machine>/<handle>` on a device another member of your org linked (`me/<machine>/<handle>` is accepted for those too); `<account>/<machine>/<handle>` through a contact.
+### One message, end to end
 
-Mesh mode (hubless, peer to peer, for example over a tailnet) is on the roadmap.
-
-## CLI
-
-The reference binding of SCP version 1 is the `swarm` CLI, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it. A session with it looks like this:
-
-```sh
-# install the CLI (or: bun add -g @scp-dev/cli)
-npm i -g @scp-dev/cli
-
-# log in, link this machine to the org hub, install hooks and MCP
-swarm up
-
-# start a named orchestrator that wakes on peer messages
-swarm claude --name lead
-
-# from the orchestrator's shell
-swarm spawn --name parser -- claude -p "Fix the parser tests"
-swarm send parser "Also cover the empty-input case."
-swarm list --tree
-```
-
-Headless or ambient agents use `swarm up --token scp_t_... [--machine NAME]`.
-
-Agents get the same surface through MCP tools served by `swarm mcp` (`relay_send`, `relay_reply`, `relay_inbox`, `relay_ask` and more).
-
-### From source
-
-Requires [Bun](https://bun.sh).
-
-```sh
-git clone https://github.com/scphq/scp.git
-cd scp
-bun install
-bun packages/cli/src/cli.ts help
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as Agent A, harness
+  participant BA as Broker A
+  participant H as OrgHub, app.scp.dev
+  participant BB as Broker B
+  participant B as Agent B, harness
+  A->>BA: relay_send through swarm mcp
+  BA->>BA: scope, policy.json, loop guards, rate limits
+  opt the policy sets a judge boundary
+    BA->>BA: local judge returns pass, redact, hold or refuse
+  end
+  BA->>H: forward over the bridge
+  H->>H: re-check scope on mirrored rules, hub limits
+  opt the org turned the judge on
+    H->>H: hub judge
+  end
+  H->>BB: delivery to the target machine's bridge
+  BB->>BB: admit the delivery into SQLite
+  alt the session is idle and has a waker
+    BB-->>B: push through the waker, which starts a turn
+  else at the next turn boundary
+    B->>BB: hook asks for fresh deliveries
+    BB-->>B: framed relay-message injected into context
+  end
+  B->>BB: injected, shown messages acknowledged
+  B->>BB: relay_reply
+  BB->>H: reply over the bridge
+  H->>BA: delivery
+  BA-->>A: reply at A's next turn boundary
 ```
 
 ## For harness authors
@@ -150,13 +228,34 @@ A harness joins if it can run a shell command or mount an MCP server. Each hook 
 
 Frame every body. Confirm only what you printed. Never fail the harness. Keep the steer key intact. The checklists for brokers, hubs and integrations are in [section 18, Conformance](https://scp.dev/spec#18-conformance), and the reference bindings for Claude Code, Codex, Gemini, OpenCode and others are in [Appendix G](https://scp.dev/spec#appendix-g-harness-hook-bindings).
 
+## Docs
+
+- [Specification](https://scp.dev/spec): the protocol, version 1, with conformance checklists for brokers, hubs and integrations.
+- [Getting started](https://scp.dev/docs), [ambient agents](https://scp.dev/docs/ambient), [self-host a relay](https://scp.dev/docs/self-host), [message judge](https://scp.dev/docs/judge), [mesh](https://scp.dev/docs/mesh) and [harnesses](https://scp.dev/docs/harnesses).
+- [Architecture](https://scp.dev/architecture): the diagrams above, full page.
+
 ## Repository
 
 ```
-packages/spec/   SPEC.md, the protocol source of truth
-packages/core/   protocol types: message envelope, endpoint address, wire types
-packages/cli/    the swarm command line tool
-apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders SPEC.md at /spec
+packages/spec/     SPEC.md, the protocol source of truth
+packages/core/     protocol types, scopes, rendering, the judge
+packages/broker/   the local broker and its bridge to the hub
+packages/hub/      the hub: machines, mirrored endpoints, deliveries, contacts
+packages/mcp/      the scp MCP server
+packages/mesh/     the experimental hubless mesh
+packages/pi/       the pi extension
+packages/cli/      the swarm command line tool
+apps/relay/        the hosted relay at app.scp.dev (Cloudflare Worker, Durable Objects, D1)
+apps/web/          the scp.dev site, which renders the docs, the spec and the architecture
+```
+
+From source, with [Bun](https://bun.sh):
+
+```sh
+git clone https://github.com/scphq/scp.git
+cd scp
+bun install
+bun packages/cli/src/cli.ts help
 ```
 
 ### Development
