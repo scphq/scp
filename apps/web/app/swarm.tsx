@@ -95,8 +95,8 @@ function build(w: number, h: number, labelW: number): Scene {
     ? { x: (w - hw) / 2, y: h * 0.05, w: hw, h: h * 0.18, label: "hub" }
     : { x: w * 0.07, y: h * 0.015, w: w * 0.86, h: h * 0.105, label: "hub" };
   const hubY = hubBox.y + hubBox.h * (wide ? 0.6 : 0.66);
-  const hub = add({ x: wide ? w * 0.5 - hw * 0.2 : hubBox.x + hubBox.w * 0.3, y: hubY, kind: "hub", parent: -1, alive: true, machine: -1 });
-  const gatePt = { x: wide ? w * 0.5 + hw * 0.2 : hubBox.x + hubBox.w * 0.72, y: hubY };
+  const hub = add({ x: wide ? w * 0.5 : hubBox.x + hubBox.w * 0.3, y: hubY, kind: "hub", parent: -1, alive: true, machine: -1 });
+  const gatePt = { x: wide ? w * 0.5 + hw * 0.3 : hubBox.x + hubBox.w * 0.72, y: hubY };
   const gate = add({ ...gatePt, kind: "gate", parent: hub, alive: true, machine: -1 });
 
   let boxes: Box[];
@@ -123,7 +123,7 @@ function build(w: number, h: number, labelW: number): Scene {
   }
 
   boxes.slice(0, 2).forEach((box, m) => {
-    const corner = wide ? { x: box.x + box.w / 2, y: box.y } : { x: m === 0 ? box.x : box.x + box.w, y: box.y };
+    const corner = wide ? { x: box.x + box.w / 2, y: box.y } : { x: m === 0 ? nodes[hub].x : box.x + box.w, y: box.y };
     const broker = add({ ...corner, kind: "broker", parent: m === 0 ? hub : gate, alive: true, machine: m });
     const fleets = FLEETS[m];
     const slot = box.w / fleets.length;
@@ -149,7 +149,8 @@ function build(w: number, h: number, labelW: number): Scene {
   const ab = boxes[AMBIENT];
   const atop = wide ? ab.y + ab.h * 0.24 : ab.y + ab.h * 0.42;
   const astep = wide ? Math.min(ab.h * 0.32, 84) : ab.h * 0.4;
-  const root = add({ x: ab.x + ab.w / 2, y: atop, kind: "root", parent: hub, alive: true, machine: AMBIENT, harness: "codex" });
+  const ambient = add({ x: wide ? ab.x + ab.w / 2 : ab.x, y: ab.y, kind: "broker", parent: hub, alive: true, machine: AMBIENT });
+  const root = add({ x: ab.x + ab.w / 2, y: atop, kind: "root", parent: ambient, alive: true, machine: AMBIENT, harness: "codex" });
   const spacing = Math.min((ab.w * 0.8) / AMBIENT_WORKERS, 26);
   for (let k = 0; k < AMBIENT_WORKERS; k++) {
     add({ x: ab.x + ab.w / 2 + (k - (AMBIENT_WORKERS - 1) / 2) * spacing, y: atop + astep, kind: "worker", parent: root, alive: false, machine: AMBIENT });
@@ -167,14 +168,12 @@ export function elbow(a: Pt, b: Pt): Pt[] {
 function link(scene: Scene, i: number): Pt[] {
   const n = scene.nodes[i];
   const p = scene.nodes[n.parent];
+  if (n.kind !== "broker" || p.x === n.x) return elbow(p, n);
+  if (scene.wide) return p.kind === "gate" ? elbow(p, n) : [p, { x: n.x, y: p.y }, n];
+  if (p.kind === "hub") return [p, { x: scene.rail, y: p.y }, { x: scene.rail, y: n.y }, n];
+  const lane = (scene.hubBox.y + scene.hubBox.h + scene.boxes[0].y) / 2;
   const edge = scene.w - scene.rail;
-  if (!scene.wide && p.kind === "gate") return [p, { x: edge, y: p.y }, { x: edge, y: n.y }, n];
-  if (!scene.wide && p.kind === "hub" && n.kind !== "gate") return [p, { x: scene.rail, y: p.y }, { x: scene.rail, y: n.y }, n];
-  if (scene.wide && (p.kind === "hub" || p.kind === "gate") && n.kind !== "gate") {
-    const bus = (scene.hubBox.y + scene.hubBox.h + scene.boxes[0].y) / 2;
-    return [p, { x: p.x, y: bus }, { x: n.x, y: bus }, n];
-  }
-  return elbow(p, n);
+  return [p, { x: p.x, y: lane }, { x: edge, y: lane }, { x: edge, y: n.y }, n];
 }
 
 function ancestors(nodes: N[], i: number): number[] {
@@ -467,6 +466,8 @@ export function Swarm({ status }: { status: React.RefObject<HTMLSpanElement | nu
       boxes.forEach((box, m) => {
         ctx.strokeStyle = pal.line;
         ctx.strokeRect(crisp(box.x), crisp(box.y), Math.round(box.w), Math.round(box.h));
+        ctx.fillStyle = pal.bg;
+        ctx.fillRect(box.x + 6, box.y + 9, ctx.measureText(box.label.toUpperCase()).width + 12, 14);
         label(box.label, box.x + 12, box.y + 16);
         const alive = nodes.filter((n) => n.machine === m && n.kind !== "broker" && n.alive).length;
         const text = m === AMBIENT ? `${alive - 1} of ${AMBIENT_WORKERS} awake` : `${FLEETS[m].length} fleets, ${alive} agents`;
