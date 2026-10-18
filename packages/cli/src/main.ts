@@ -252,12 +252,16 @@ agent sessions:
                                                  and title stay; a handle another endpoint holds, live or offline, is refused;
                                                  a spawned worker is named by its spawner (policy defaults.rename: self lets it);
                                                  --endpoint renames another agent, for the human at a terminal
-  ${CLI_NAME} join [<handle>] --under <parent>   link the session under the agent <parent> (local, one it may message), as if
+  ${CLI_NAME} join [<handle>] --under <parent>   link the session under the agent <parent> (one it may message), as if
                                                  <parent> had spawned it: it shows under <parent> in list --tree, the dashboard
                                                  and the graph, and takes on a worker's scope (the policy's child_default: by
-                                                 default it reaches only what <parent> reaches). Narrowing, so always allowed
+                                                 default it reaches only what <parent> reaches). Narrowing, so always allowed.
+                                                 <parent> may be on another machine of the account (me/<machine>/<handle>):
+                                                 the session stays a root there, takes no child scope, and the two reach
+                                                 each other both ways
   ${CLI_NAME} adopt <child> [--parent <p>]      link a local root agent and its subtree under <p>, for the human at a terminal;
-                                                 from an agent's shell with a terminal attached <p> defaults to that agent.
+                                                 <p> may be on another machine of the account (me/<machine>/<handle>).
+                                                 From an agent's shell with a terminal attached <p> defaults to that agent.
                                                  An agent without a terminal is refused: the session joins with --under itself
   ${CLI_NAME} unlink [<child>]                  put a linked agent back at the root, its subtree along and the child scope off;
                                                  widening, so the human at a terminal only (policy defaults.unlink: self lets

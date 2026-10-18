@@ -134,6 +134,13 @@ describe("adopt", () => {
     expect(failure(() => core.adopt(HUMAN, { endpoint: "lead", parent: "peer" })).message).toContain("its own descendant")
     expect(failure(() => core.adopt(HUMAN, { endpoint: "lead", parent: "lead" })).message).toContain("its own descendant")
   })
+
+  test("a relay of one machine finds no parent on another machine and links nothing", () => {
+    const { core, claim } = setup()
+    expect(failure(() => core.adopt(HUMAN, { endpoint: "peer", parent: "me/desk/lead" })).code).toBe("not_found")
+    expect(failure(() => core.joinSession(claim("app", 20), undefined, "me/desk/lead")).code).toBe("not_found")
+    expect(core.list({ all: true }).map((v) => v.parent ?? null)).toEqual([null, null, null])
+  })
 })
 
 describe("unlink", () => {

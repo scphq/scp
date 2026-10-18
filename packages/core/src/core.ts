@@ -243,6 +243,8 @@ export interface EndpointRow {
   /** the root endpoint's id; null for a root */
   tree: string | null
   parent_ep: string | null
+  /** a parent on another machine of the account, `<machine>/<handle>`: the row stays a root of its own tree */
+  parent_addr: string | null
   depth: number | null
   /** JSON {@link ScopeRules} */
   rules: string | null
@@ -533,6 +535,7 @@ export class RelayCore {
     for (const [column, type] of [
       ["tree", "TEXT"],
       ["parent_ep", "TEXT"],
+      ["parent_addr", "TEXT"],
       ["depth", "INTEGER"],
       ["rules", "TEXT"],
       ["caps", "TEXT"],
@@ -1203,7 +1206,7 @@ export class RelayCore {
     }
     caps.caps.push(...this.capsOf(row).caps)
     this.sql.all(
-      `UPDATE endpoints SET tree = ?, parent_ep = ?, depth = ?, rules = ?, caps = ? WHERE id = ?`,
+      `UPDATE endpoints SET tree = ?, parent_ep = ?, parent_addr = NULL, depth = ?, rules = ?, caps = ? WHERE id = ?`,
       parent ? (parent.tree ?? parent.id) : null,
       parent?.id ?? null,
       depth,
@@ -1628,7 +1631,8 @@ export class RelayCore {
       const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
       if (actor.kind !== "human" && target.id !== me.id) throw new RelayError("scope_refused", "an agent unlinks only itself")
       if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be unlinked")
-      if (target.parent_ep === null) throw new RelayError("invalid_params", `${this.address(target)} is a root: it has no parent`)
+      if (target.parent_ep === null && target.parent_addr === null)
+        throw new RelayError("invalid_params", `${this.address(target)} is a root: it has no parent`)
       if (actor.kind !== "human" && this.policy?.defaults?.unlink !== "self")
         throw this.scopeRefused(
           actor,
@@ -1636,6 +1640,14 @@ export class RelayCore {
           { target: this.address(target), reason: "unlink" },
           "unlinking widens a worker's scope: only the human at a terminal unlinks it (policy defaults.unlink: self lets it)",
         )
+      if (target.parent_ep === null) {
+        const from = this.linkedParent(target) ?? target.parent_addr!
+        this.sql.all(`UPDATE endpoints SET parent_addr = NULL, linked = NULL WHERE id = ?`, target.id)
+        this.scopeMemo?.ancestors.clear()
+        this.scopeMemo?.limited.clear()
+        this.audit("unlink", target.id, null, { ...this.actorDetail(actor, me), target: this.address(target), parent: from })
+        return { endpoint: this.whoami(target.id), parent: from }
+      }
       const parent = this.byId(target.parent_ep)
       const from = parent ? this.address(parent) : target.parent_ep
       const shift = target.depth ?? 0
@@ -1660,16 +1672,26 @@ export class RelayCore {
     })
   }
 
-  /** `row`, a root, and its subtree moved under `parent`, a local agent that is neither `row` nor one of its descendants */
+  /**
+   * `row`, a root, and its subtree moved under `parent`, a local agent that is neither `row` nor one of its descendants; a parent on another
+   * machine goes to {@link linkAcross}
+   */
   private link(row: EndpointRow, parent: EndpointRow, by: { by: string; auth: string }): void {
-    if (parent.kind !== "agent" || !this.localRow(parent)) throw new RelayError("invalid_params", "the parent is a local agent endpoint")
+    if (!this.localRow(parent)) {
+      const key = this.linkAcross(row, parent)
+      if (row.parent_addr === key) return
+      if (row.parent_ep !== null || row.parent_addr !== null) throw this.alreadyLinked(row)
+      this.sql.all(`UPDATE endpoints SET parent_addr = ?, linked = ? WHERE id = ?`, key, this.now(), row.id)
+      this.scopeMemo?.ancestors.clear()
+      this.scopeMemo?.limited.clear()
+      this.audit("adopt", row.id, null, { ...by, target: this.address(row), parent: this.address(parent) })
+      return
+    }
+    if (parent.kind !== "agent") throw new RelayError("invalid_params", "the parent is an agent endpoint")
     if (row.parent_ep === parent.id) return
     if (parent.id === row.id || this.ancestorsOf(parent).includes(row.id))
       throw new RelayError("scope_refused", `${this.address(parent)} sits under ${this.address(row)}: a session cannot go under its own descendant`)
-    if (row.parent_ep !== null) {
-      const now = this.byId(row.parent_ep)
-      throw new RelayError("scope_refused", `${this.address(row)} already sits under ${now ? this.address(now) : "another agent"}; unlink it first`)
-    }
+    if (row.parent_ep !== null || row.parent_addr !== null) throw this.alreadyLinked(row)
     const depth = (parent.depth ?? 0) + 1
     const deepest = one<{ d: number | null }>(this.sql, `SELECT MAX(depth) AS d FROM endpoints WHERE tree = ?`, row.id)?.d ?? 0
     if (deepest + depth > LIMITS.depthMax)
@@ -1692,6 +1714,31 @@ export class RelayCore {
     this.scopeMemo?.ancestors.clear()
     this.scopeMemo?.limited.clear()
     this.audit("adopt", row.id, null, { ...by, target: this.address(row), parent: this.address(parent) })
+  }
+
+  /** a link of `row`, which already sits under a parent, to another one */
+  private alreadyLinked(row: EndpointRow): RelayError {
+    const local = row.parent_ep ? this.byId(row.parent_ep) : undefined
+    const now = local ? this.address(local) : row.parent_addr !== null ? (this.linkedParent(row) ?? row.parent_addr) : "another agent"
+    return new RelayError("scope_refused", `${this.address(row)} already sits under ${now}; unlink it first`)
+  }
+
+  /**
+   * the key `<machine>/<handle>` that links `row`, a local agent, under `parent`, an agent on another machine, once the parent is checked; no
+   * inherited or child-default caps come with it. A relay of one machine has no such parent
+   */
+  protected linkAcross(_row: EndpointRow, _parent: EndpointRow): string {
+    throw new RelayError("invalid_params", "the parent is a local agent endpoint")
+  }
+
+  /** whether `a` and `b` are a parent and its child on different machines */
+  protected linkedAcross(_a: EndpointRow, _b: EndpointRow): boolean {
+    return false
+  }
+
+  /** the address of `row`'s parent on another machine, null when it has none; with `shown`, null for a parent outside it */
+  protected linkedParent(_row: EndpointRow, _shown?: Set<string>): string | null {
+    return null
   }
 
   /**
@@ -1742,8 +1789,12 @@ export class RelayCore {
       ] as const)
         this.sql.all(`UPDATE ${table} SET ${column} = REPLACE(${column}, ?, ?) WHERE instr(${column}, ?) > 0`, a, b, a)
     }
+    this.renamedHandle(from, handle)
     this.audit("rename", row.id, null, { from, to: handle })
   }
+
+  /** a local agent's handle moved from `from` to `to`: a subclass updates what names it on another machine's rows */
+  protected renamedHandle(_from: string, _to: string): void {}
 
   /**
    * a session leaves: it lets go of its session and token and shows offline, its mail kept; a later join takes it back. An agent leaves only
@@ -4329,6 +4380,7 @@ export class RelayCore {
     return scopeDecision(world, world.node(a.id) ?? this.scopeNode(a), world.node(b.id) ?? this.scopeNode(b), {
       humanAlways: this.defaults().humanAlways,
       solicited,
+      linked: a.id !== b.id && this.linkedAcross(a, b),
       unverified,
       strict,
     })
@@ -5158,7 +5210,8 @@ export class RelayCore {
 
   private placeView(row: EndpointRow, shown?: Set<string>): Pick<EndpointView, "parent" | "depth" | "scope"> {
     const parent = row.parent_ep && (!shown || shown.has(row.parent_ep)) ? this.byId(row.parent_ep) : undefined
-    return { parent: parent ? this.address(parent) : null, depth: row.depth ?? 0, scope: presetOf(this.scopeNode(row), this.defaults().symmetric) }
+    const across = !parent && row.parent_ep === null && row.parent_addr ? this.linkedParent(row, shown) : null
+    return { parent: parent ? this.address(parent) : across, depth: row.depth ?? 0, scope: presetOf(this.scopeNode(row), this.defaults().symmetric) }
   }
 
   /** `recipient` names the delivery's endpoint when there is no `seq`: a send to several addresses shows each recipient only itself */

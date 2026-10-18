@@ -628,3 +628,76 @@ describe("mirrored scope fields", () => {
     expect(code(() => hub.within("desk", () => hub.send(review, { to: "me", body: "x" })))).toBe("not_found")
   })
 })
+
+describe("links across machines", () => {
+  const HUMAN = { kind: "human" as const, tty: true }
+  const byAddress = (core: FederatedCore, address: string) => core.list({ all: true }).find((v) => v.address === address)!
+
+  test("a mirrored parent_addr shows as the parent's address, and parent and child reach each other though both are scoped", () => {
+    const { hub } = pair()
+    const none = { in: [], out: [] }
+    hub.mirror("laptop", [view("me/lead", { parent_ep: null, depth: 0, rules: none })])
+    hub.mirror("desk", [view("me/app", { parent_ep: null, depth: 0, parent_addr: "laptop/lead", rules: none }), view("me/other", { rules: none })])
+    expect(byAddress(hub, "ada/desk/app")).toMatchObject({ parent: "ada/laptop/lead", depth: 0 })
+    expect(hub.remoteRowsOf("desk").find((v) => v.address === "ada/desk/app")?.parent_addr).toBe("laptop/lead")
+    const [app, lead, other] = ["ada/desk/app", "ada/laptop/lead", "ada/desk/other"].map((a) => byAddress(hub, a).id)
+    expect(hub.send(app!, { to: "laptop/lead", body: "up" }).deliveries.length).toBe(1)
+    expect(hub.send(lead!, { to: "desk/app", body: "down" }).deliveries.length).toBe(1)
+    expect(code(() => hub.send(other!, { to: "laptop/lead", body: "x" }))).toBe("not_found")
+    hub.mirror("desk", [view("me/app", { parent_addr: null })])
+    expect(byAddress(hub, "ada/desk/app").parent ?? null).toBeNull()
+    expect(code(() => hub.send(app!, { to: "laptop/lead", body: "x" }))).toBe("not_found")
+  })
+
+  test("a mirror whose link closes a cycle is stored without parent_addr, and a malformed one is refused", () => {
+    const { hub } = pair()
+    hub.mirror("desk", [view("me/app", { parent_ep: null, depth: 0, parent_addr: "laptop/lead" })])
+    hub.mirror("laptop", [view("me/lead", { parent_ep: null, depth: 0, parent_addr: "desk/app" })])
+    expect(byAddress(hub, "ada/laptop/lead").parent ?? null).toBeNull()
+    expect(byAddress(hub, "ada/desk/app").parent).toBe("ada/laptop/lead")
+    expect(code(() => hub.mirror("desk", [view("me/app", { parent_addr: "NOT A KEY" })]))).toBe("invalid_params")
+  })
+
+  test("a broker links a local root under another machine's agent, mirrors it, refuses a cycle and unlinks it", () => {
+    const { broker } = pair()
+    broker.mirror("desk", [
+      view("ada/desk/lead", { parent_ep: null, depth: 0 }),
+      view("ada/desk/kid", { tree: "lead", parent_ep: "lead", depth: 1 }),
+      { address: "ada/desk/", kind: "human", presence: "online" },
+    ])
+    const app = broker.claim({ handle: "app", harness: "claude-code" }).endpoint
+    broker.rulesSet(HUMAN, { endpoint: "app", in: [], out: [] })
+    expect(broker.adopt(HUMAN, { endpoint: "app", parent: "desk/lead" })).toMatchObject({
+      parent: "me/desk/lead",
+      endpoint: { parent: "me/desk/lead", depth: 0 },
+    })
+    expect(broker.mirrorScope(app.id)).toMatchObject({ parent_ep: null, depth: 0, parent_addr: "desk/lead" })
+    expect(broker.adopt(HUMAN, { endpoint: "app", parent: "desk/lead" }).parent).toBe("me/desk/lead")
+    expect(code(() => broker.adopt(HUMAN, { endpoint: "app", parent: "desk/kid" }))).toBe("scope_refused")
+    expect(broker.send(app.id, { to: "desk/lead", body: "up" }).deliveries.length).toBe(1)
+    expect(code(() => broker.send(app.id, { to: "desk/kid", body: "x" }))).toBe("not_found")
+    const lead = byAddress(broker, "me/desk/lead").id
+    expect(broker.send(lead, { to: "app", body: "down" }).deliveries.length).toBe(1)
+    expect(code(() => broker.adopt(HUMAN, { endpoint: "app", parent: "me/desk/" }))).toBe("invalid_params")
+
+    const solo = broker.claim({ handle: "solo", harness: "claude-code" }).endpoint
+    broker.mirror("desk", [view("ada/desk/kid", { parent_addr: "laptop/solo" }), view("ada/desk/lead", { parent_addr: "laptop/solo" })])
+    expect(byAddress(broker, "me/desk/kid").parent).toBe("me/desk/lead")
+    expect(byAddress(broker, "me/desk/lead").parent).toBe("me/solo")
+    expect(code(() => broker.adopt(HUMAN, { endpoint: "solo", parent: "desk/kid" }))).toBe("scope_refused")
+    expect(broker.whoami(solo.id).parent ?? null).toBeNull()
+
+    expect(broker.unlink(HUMAN, { endpoint: "app" })).toMatchObject({ parent: "me/desk/lead", endpoint: { parent: null } })
+    expect(broker.mirrorScope(app.id).parent_addr).toBeNull()
+    expect(code(() => broker.send(app.id, { to: "desk/lead", body: "x" }))).toBe("not_found")
+    expect(
+      broker
+        .log({})
+        .filter((row) => row.event === "adopt" || row.event === "unlink")
+        .map((row) => [row.event, row.detail?.parent]),
+    ).toEqual([
+      ["adopt", "me/desk/lead"],
+      ["unlink", "me/desk/lead"],
+    ])
+  })
+})
