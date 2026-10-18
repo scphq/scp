@@ -51,6 +51,7 @@ const trails = html`<span class="trails" role="group" aria-label="Message trail 
   (v) => html`<button type="button" data-trail="${v}" aria-pressed="${v === "1" ? "true" : "false"}">${v}x</button>`,
 )}</span></span>`;
 
+const filters = html`<label class="mini"><input type="checkbox" data-graph-nextturn> show next-turn idle</label><label class="mini"><input type="checkbox" data-graph-offline> show offline</label>`;
 const legend = html`<p class="mini graph-legend"><span class="key spawn" aria-hidden="true"></span>spawned <span class="key msg" aria-hidden="true"></span>messages, last <span data-graph-minutes>15</span> min</p>`;
 
 /** the stamped script and stylesheet tags a graph page loads */
@@ -69,7 +70,7 @@ export function graphFull(org: { handle: string; name: string }, g: IdentifiedGr
       </header>
       <div class="g-over g-right">
         ${legend}
-        <label class="mini"><input type="checkbox" data-graph-offline> show offline</label>
+        ${filters}
         <span class="mini">${trails}</span>
       </div>
       <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
@@ -99,7 +100,7 @@ export async function graphTabPage(ctx: Ctx, user: User, handle: string): Promis
         </div>
         <div class="g-over g-right">
           ${legend}
-          <span class="g-acts"><label class="mini"><input type="checkbox" data-graph-offline> show offline</label><a class="mini-link" href="/orgs/${m.org.handle}/graph/full">Full screen</a></span>
+          <span class="g-acts">${filters}<a class="mini-link" href="/orgs/${m.org.handle}/graph/full">Full screen</a></span>
           <span class="mini">${trails}</span>
         </div>
         <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
@@ -138,14 +139,10 @@ export const GRAPH_CSS = `
 .graph-svg .hull{fill:var(--surface);stroke:var(--surface);stroke-linejoin:round;stroke-linecap:round}
 .graph-svg .hull-rim{fill:none;stroke:var(--line-soft);stroke-linejoin:round;stroke-linecap:round}
 .graph-svg .region.ided .hull-rim{stroke:color-mix(in srgb,var(--id) 30%,var(--line-soft))}
-.graph-svg .band-box{fill:color-mix(in srgb,var(--id) 4%,transparent);stroke:color-mix(in srgb,var(--id) 22%,transparent);stroke-width:1}
-.graph-svg .avatar{fill:color-mix(in srgb,var(--id) 16%,var(--bg));stroke:var(--id);stroke-width:1.25}
-.graph-svg .initials{font-size:9.5px;font-weight:600;fill:var(--id);text-anchor:middle;letter-spacing:.02em}
-.graph-svg .blabel{font-size:11.5px;font-weight:600;fill:var(--fg);paint-order:stroke;stroke:var(--bg);stroke-width:5px;stroke-linejoin:round}
-.graph-svg .blabel .n{fill:var(--dim);font-weight:400}
 .graph-svg .region.offline,.graph-svg .region-head.offline{opacity:.55}
 .graph-svg .mlabel{font-size:11px;font-weight:500;fill:var(--fg);paint-order:stroke;stroke:var(--surface);stroke-width:5px;stroke-linejoin:round}
 .graph-svg .mlabel .n{fill:var(--dim);font-weight:400}
+.graph-svg .mlabel .idn{fill:color-mix(in srgb,var(--id) 40%,var(--dim));font-weight:400}
 .graph-svg .mdot{fill:var(--bg);stroke:var(--faint)}
 .graph-svg .mdot.online{fill:var(--acc);stroke:var(--acc)}
 .graph-svg .empty-note{font-size:10.5px;fill:var(--faint)}
@@ -212,6 +209,13 @@ body.bare{overflow:hidden;height:100dvh;min-height:0}
  * under a badge strip, bands wrap into rows near the `aspect` the view wants, and with `hub` set the hub sits above a
  * single row or between the middle rows. Returns each machine's top left, each band's rect and the hub point
  */
+/** whether a node is drawn: online and wakeable idle always, next-turn idle and offline only when asked; an offline human stays while it talks */
+export const DRAWN_JS = `function drawn(n, o, talks) {
+  if (n.presence === "offline") return o.offline || (n.kind === "human" && talks.has(n.address));
+  if (n.presence === "idle" && n.kind === "agent" && !n.wake) return o.nextTurn;
+  return true;
+}`;
+
 export const BANDS_JS = `function bands(items, o) {
   const byKey = new Map();
   for (const it of items) { if (!byKey.has(it.key)) byKey.set(it.key, { key: it.key, items: [] }); byKey.get(it.key).items.push(it); }
@@ -266,13 +270,15 @@ const ICONS = ${JSON.stringify({ ...ICON_PATHS, human: HUMAN_ICON })};
 const MARK = ${JSON.stringify(MARK)};
 const COLORED = new Set(${JSON.stringify(COLORED)});
 const BOLT = "M9.5 1 3 9h4.5L6.5 15 13 7H8.5z";
-const R = 16, PAD = 20, HEAD = 26, GAP = 26, BAND_GAP = 52, BAND_PAD = 14, BADGE = 30, LABEL_MAX = 132, CAP = 1.6;
+const R = 16, PAD = 20, HEAD = 26, GAP = 26, BAND_GAP = 44, LABEL_MAX = 132, CAP = 1.6;
 const TRAILS = [1, 0.5, 0.25];
 ${BANDS_JS}
+${DRAWN_JS}
 const svg = root.querySelector(".graph-svg");
 const canvas = root.querySelector(".graph-canvas");
 const tip = root.querySelector(".graph-tip");
 const offline = document.querySelector("[data-graph-offline]");
+const nextTurn = document.querySelector("[data-graph-nextturn]");
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const load = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -286,7 +292,7 @@ const machineOf = (a) => { const p = a.split("/"); return p.length >= 3 ? p[1] :
 const defs = el("defs", {}, svg);
 el("path", { d: "M0 0L7 3.5L0 7z", class: "arrow" }, el("marker", { id: "graph-arrow", viewBox: "0 0 7 7", refX: "1", refY: "3.5", markerWidth: "6", markerHeight: "6", markerUnits: "userSpaceOnUse", orient: "auto" }, defs));
 const layers = {};
-for (const k of ["bands", "regions", "edges", "hub", "labels", "pulses", "nodes"]) layers[k] = el("g", { class: "layer-" + k }, svg);
+for (const k of ["regions", "edges", "hub", "labels", "pulses", "nodes"]) layers[k] = el("g", { class: "layer-" + k }, svg);
 
 let data = null;
 let focus = null;
@@ -298,7 +304,6 @@ const shown = new Map();
 const nodeEls = new Map();
 const edgeEls = new Map();
 const regionEls = new Map();
-const bandEls = new Map();
 let place = new Map();
 let hubAt = null;
 let hubEl = null;
@@ -338,10 +343,10 @@ function setView(v) {
 }
 
 function visible(g) {
-  const all = offline && offline.checked;
+  const o = { offline: !!(offline && offline.checked), nextTurn: !!(nextTurn && nextTurn.checked) };
   const talks = new Set();
   for (const e of g.edges) if (e.kind === "message") { talks.add(e.from); talks.add(e.to); }
-  const nodes = g.nodes.filter((n) => all || n.presence !== "offline" || (n.kind === "human" && talks.has(n.address)));
+  const nodes = g.nodes.filter((n) => drawn(n, o, talks));
   const on = new Set(nodes.map((n) => n.address));
   const edges = g.edges.filter((e) => on.has(e.from) && on.has(e.to));
   const byName = new Map();
@@ -435,8 +440,9 @@ function collide(P, B, mob) {
 
 function headOf(g) {
   const name = g.name || "org";
+  const id = g.identity ? " · identity: " + g.identity.name : "";
   const count = g.nodes.length + (g.nodes.length === 1 ? " agent" : " agents") + (g.online ? "" : ", offline");
-  return { name, count, w: textWidth(name, 500) + textWidth(count, 400) + 34 };
+  return { name, id, count, w: textWidth(name, 500) + textWidth(id, 400) + textWidth(count, 400) + 34 };
 }
 
 /** a region's extent around its own origin */
@@ -450,13 +456,13 @@ function extent(g) {
   return { x0, x1: Math.max(x1, x0 + headOf(g).w), y0: y0 - HEAD, y1 };
 }
 
-/** regions in identity bands, wrapped to the window's shape; the hub sits above a single row, else between the middle rows */
+/** regions with one identity's machines side by side, wrapped to the window's shape; the hub sits above a single row, else between the middle rows */
 function pack(list) {
   const cw = Math.max(280, canvas.clientWidth), ch = full ? Math.max(240, canvas.clientHeight) : 0;
   const aspect = full ? cw / ch : Math.max(1.4, cw / 560);
   const ext = list.map(extent);
   const items = list.map((g, i) => ({ name: g.name, key: g.identity ? g.identity.name : "", w: ext[i].x1 - ext[i].x0 + 2 * PAD, h: ext[i].y1 - ext[i].y0 + 2 * PAD }));
-  const L = bands(items, { gap: GAP, groupGap: BAND_GAP, pad: BAND_PAD, badge: BADGE, hub: list.length > 1 ? 96 : 0, aspect: aspect * 1.15 });
+  const L = bands(items, { gap: GAP, groupGap: BAND_GAP, pad: 0, badge: 0, hub: list.length > 1 ? 96 : 0, aspect: aspect * 1.15 });
   const out = new Map();
   list.forEach((g, i) => {
     const p = L.places.get(g.name), e = ext[i];
@@ -483,12 +489,12 @@ function pack(list) {
   return out;
 }
 
-function counts() {
+function counts(v) {
   const out = document.querySelector("[data-graph-counts]");
-  if (!out || !data) return;
-  const agents = data.nodes.filter((n) => n.kind === "agent");
+  if (!out) return;
+  const agents = v.nodes.filter((n) => n.kind === "agent");
   const on = agents.filter((n) => n.presence === "online").length;
-  const m = data.machines.length;
+  const m = v.groups.filter((g) => g.name).length;
   out.textContent = m + (m === 1 ? " machine, " : " machines, ") + agents.length + (agents.length === 1 ? " agent, " : " agents, ") + on + " online";
 }
 
@@ -501,8 +507,8 @@ function apply() {
   if (bar && !document.documentElement.hasAttribute("data-view")) return setView(load("scp.overview.view") === "table" ? "table" : "graph");
   if (bar && document.documentElement.getAttribute("data-view") !== "graph") return;
   for (const m of root.querySelectorAll("[data-graph-minutes]")) m.textContent = String(data.minutes);
-  counts();
   const v = visible(data);
+  counts(v);
   for (const g of v.groups) settle(g, v.edges);
   place = pack(v.groups);
   sync(v);
@@ -525,6 +531,7 @@ function sync(v) {
       const head = el("g", { class: "region-head" }, layers.labels);
       r = { g: gr, head, rim: el("path", { class: "hull-rim" }, gr), hull: el("path", { class: "hull" }, gr), dot: el("circle", { class: "mdot", r: "3" }, head), label: el("text", { class: "mlabel" }, head), note: el("text", { class: "empty-note" }, gr) };
       r.name = el("tspan", {}, r.label);
+      r.id = el("tspan", { class: "idn" }, r.label);
       r.n = el("tspan", { class: "n", dx: "8" }, r.label);
       regionEls.set(g.name, r);
     }
@@ -533,40 +540,16 @@ function sync(v) {
     r.head.classList.toggle("offline", !g.online);
     r.dot.setAttribute("class", "mdot" + (g.online ? " online" : ""));
     r.name.textContent = head.name;
+    r.id.textContent = head.id;
     r.n.textContent = head.count;
     r.note.textContent = g.nodes.length ? "" : "no agents";
     r.g.classList.toggle("ided", !!g.identity);
     r.g.style.setProperty("--id", g.identity ? "var(--id-" + g.identity.tone + ")" : "");
+    r.head.style.setProperty("--id", g.identity ? "var(--id-" + g.identity.tone + ")" : "");
     r.group = g;
   }
   for (const [k, r] of regionEls) if (!keep.has(k)) { r.g.remove(); r.head.remove(); regionEls.delete(k); }
 
-  const ids = new Map();
-  for (const g of v.groups) if (g.identity) {
-    if (!ids.has(g.identity.name)) ids.set(g.identity.name, { identity: g.identity, names: [] });
-    ids.get(g.identity.name).names.push(g.name);
-  }
-  for (const [k, b] of ids) {
-    let e = bandEls.get(k);
-    if (!e) {
-      e = { g: el("g", { class: "band" }, layers.bands), badge: el("g", { class: "badge" }, layers.labels) };
-      e.box = el("rect", { class: "band-box", rx: "18" }, e.g);
-      e.av = el("circle", { class: "avatar", r: "10" }, e.badge);
-      e.ini = el("text", { class: "initials" }, e.badge);
-      e.label = el("text", { class: "blabel" }, e.badge);
-      e.name = el("tspan", {}, e.label);
-      e.n = el("tspan", { class: "n" }, e.label);
-      bandEls.set(k, e);
-    }
-    const n = b.names.length, tone = "var(--id-" + b.identity.tone + ")";
-    e.names = b.names;
-    e.g.style.setProperty("--id", tone);
-    e.badge.style.setProperty("--id", tone);
-    e.ini.textContent = b.identity.initials;
-    e.name.textContent = b.identity.name;
-    e.n.textContent = " · " + n + (n === 1 ? " machine" : " machines");
-  }
-  for (const [k, e] of bandEls) if (!ids.has(k)) { e.g.remove(); e.badge.remove(); bandEls.delete(k); }
 
   const on = new Set();
   for (const n of v.nodes) {
@@ -703,7 +686,8 @@ function draw() {
       pts.push([p.x - b.hw + 6, p.y - b.up + 6], [p.x + b.hw - 6, p.y - b.up + 6], [p.x - b.hw + 6, p.y + b.down - 6], [p.x + b.hw - 6, p.y + b.down - 6]);
     }
     if (!pts.length) { x0 = o.x + PAD; y0 = o.y + PAD + HEAD; x1 = o.x + o.w - PAD; y1 = o.y + o.h - PAD; pts.push([x0, y0], [x1, y0], [x0, y1], [x1, y1]); }
-    x1 = Math.max(x1, x0 + headOf(g).w);
+    const hw = x0 + headOf(g).w;
+    if (hw > x1) { x1 = hw; pts.push([x1, y1]); }
     pts.push([x0, y0 - HEAD], [x1, y0 - HEAD]);
     const d = "M" + hullOf(pts).map((q) => r1(q[0]) + " " + r1(q[1])).join("L") + "Z";
     r.hull.setAttribute("d", d);
@@ -718,26 +702,6 @@ function draw() {
     r.note.setAttribute("x", r1(lx));
     r.note.setAttribute("y", r1(ly + 30));
     r.box = { x0: x0 - PAD, y0: y0 - HEAD - PAD, x1: x1 + PAD, y1: y1 + PAD };
-  }
-  for (const [, e] of bandEls) {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const name of e.names) {
-      const b = regionEls.get(name)?.box;
-      if (b) { x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1); }
-    }
-    if (x0 === Infinity) continue;
-    const bx = x0 - BAND_PAD, by = y0 - BAND_PAD - BADGE;
-    e.box.setAttribute("x", r1(bx));
-    e.box.setAttribute("y", r1(by));
-    e.box.setAttribute("width", r1(x1 - x0 + 2 * BAND_PAD));
-    e.box.setAttribute("height", r1(y1 - by + BAND_PAD));
-    const ax = bx + BAND_PAD + 10, ay = by + BAND_PAD + 8;
-    e.av.setAttribute("cx", r1(ax));
-    e.av.setAttribute("cy", r1(ay));
-    e.ini.setAttribute("x", r1(ax));
-    e.ini.setAttribute("y", r1(ay + 3.5));
-    e.label.setAttribute("x", r1(ax + 17));
-    e.label.setAttribute("y", r1(ay + 4));
   }
   if (hubEl && hubAt) hubEl.setAttribute("transform", "translate(" + r1(hubAt.x) + " " + r1(hubAt.y) + ")");
   if (viewShown) {
@@ -928,9 +892,10 @@ function paintTrail() {
 for (const b of trailButtons) b.addEventListener("click", () => { trail = Number(b.getAttribute("data-trail")); save("scp.graph.trails", String(trail)); paintTrail(); });
 paintTrail();
 if (bar) for (const b of bar.querySelectorAll("[data-view-set]")) b.addEventListener("click", () => setView(b.getAttribute("data-view-set")));
-if (offline) {
-  offline.checked = load("scp.overview.offline") === "1";
-  offline.addEventListener("change", () => { save("scp.overview.offline", offline.checked ? "1" : "0"); apply(); });
+for (const [input, key] of [[offline, "scp.overview.offline"], [nextTurn, "scp.graph.nextturn"]]) {
+  if (!input) continue;
+  input.checked = load(key) === "1";
+  input.addEventListener("change", () => { save(key, input.checked ? "1" : "0"); apply(); });
 }
 let size = "";
 new ResizeObserver(() => { const s = canvas.clientWidth + "x" + (full ? canvas.clientHeight : 0); if (canvas.clientWidth && s !== size) { size = s; apply(); } }).observe(canvas);
