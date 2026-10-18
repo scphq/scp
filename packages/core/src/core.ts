@@ -13,6 +13,7 @@ import {
   LIMITS,
   MESSAGE_KINDS,
   type MessageKind,
+  type MessageReceipts,
   type PeekLevel,
   type PeekResult,
   type PeekSeen,
@@ -42,7 +43,7 @@ import {
   type WhyResult,
 } from "./protocol"
 import { digestText, PEEK, peekLevel, readText } from "./peek"
-import { shortId, stripControl, wrapMessage } from "./render"
+import { clock, shortId, stripControl, wrapMessage } from "./render"
 import {
   clipped,
   expandRules,
@@ -125,7 +126,9 @@ const MIGRATION = [
     offered_until INTEGER,
     offered_hold TEXT,
     injected_at INTEGER,
-    nudged_at INTEGER
+    nudged_at INTEGER,
+    deferred_at INTEGER,
+    deferred_ack INTEGER
   )`,
   `CREATE INDEX IF NOT EXISTS deliveries_inbox ON deliveries (endpoint, acked_at, seq)`,
   `CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries (message_id)`,
@@ -521,6 +524,8 @@ export class RelayCore {
     if (!deliveryColumns.includes("injected_at")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN injected_at INTEGER`)
     if (!deliveryColumns.includes("nudged_at")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN nudged_at INTEGER`)
     if (!deliveryColumns.includes("restated_at")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN restated_at INTEGER`)
+    if (!deliveryColumns.includes("deferred_at")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN deferred_at INTEGER`)
+    if (!deliveryColumns.includes("deferred_ack")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN deferred_ack INTEGER`)
     const activityColumns = this.sql.all<{ name: string }>(`PRAGMA table_info(activity)`).map((c) => c.name)
     if (!activityColumns.includes("agent")) this.sql.all(`ALTER TABLE activity ADD COLUMN agent TEXT`)
     if (!this.byHandle(SYSTEM_HANDLE)) {
@@ -1749,21 +1754,29 @@ export class RelayCore {
     }
   }
 
-  /** the oldest unacked deliveries after the cursor; reading counts as receiving for the causal hop */
+  /**
+   * the oldest unacked deliveries after the cursor, and those a background hook showed in the last ${LIMITS.deferredShowS} s whose showing has
+   * not settled ({@link injected}), with `shown_at`: the harness may hand the agent that hook's text only after this call; reading counts as
+   * receiving for the causal hop
+   */
   inbox(endpoint: string, options: { after?: number | undefined; limit?: number | undefined } = {}): Envelope[] {
     const now = this.now()
     const limit = Math.min(Math.max(1, Math.floor(options.limit ?? LIMITS.inboxPage)), LIMITS.inboxPage)
-    const rows = this.sql.all<MessageRow & { seq: number }>(
-      `SELECT m.*, d.seq AS seq FROM deliveries d JOIN messages m ON m.id = d.message_id
-       WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ? AND d.seq > ?
+    const rows = this.sql.all<MessageRow & { seq: number; deferred_at: number | null; acked_at: number | null }>(
+      `SELECT m.*, d.seq AS seq, d.deferred_at AS deferred_at, d.acked_at AS acked_at FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.endpoint = ? AND (d.acked_at IS NULL OR d.deferred_at > ?) AND d.expires_at > ? AND d.seq > ?
        ORDER BY d.seq LIMIT ?`,
       endpoint,
+      now - LIMITS.deferredShowS * 1000,
       now,
       Math.max(0, Math.floor(options.after ?? 0)),
       limit,
     )
     this.received(endpoint, rows, now)
-    return rows.map((row) => this.envelope(row, row.seq))
+    return rows.map((row) => {
+      const envelope = this.envelope(row, row.seq)
+      return row.acked_at !== null && row.deferred_at !== null ? { ...envelope, shown_at: new Date(row.deferred_at).toISOString() } : envelope
+    })
   }
 
   /**
@@ -1984,13 +1997,15 @@ export class RelayCore {
    * messages no hook has shown or holds follow theirs ({@link pushOthers}), `others_shown` of them, held with them; `others` counts the other
    * unread ones left. A live worker's messages wait ${LIMITS.pushGapS} s after a push showed one of its own ({@link pushed}), and with no
    * push left since the last prompt nothing is shown. `prompted` says a prompt came since inject handed out the `prompts` mark. A hook of
-   * another process than the one holding the endpoint gets nothing.
+   * another process than the one holding the endpoint gets nothing. `peek`: the same answer, nothing held (`hold` null) or marked received.
    */
-  stopWait(endpoint: string, options: { transient?: boolean; process?: string; prompts?: number } = {}): StopWaitResult {
+  stopWait(endpoint: string, options: { transient?: boolean; process?: string; prompts?: number; peek?: boolean } = {}): StopWaitResult {
     const now = this.now()
     const me = this.mustEndpoint(endpoint)
     if (!this.holds(me, options)) return { messages: [], offered: [], hold: null, more: 0, workers: [], starting: 0, others: 0, pushes_left: 0 }
     const { workers, starting, paced } = this.liveWorkers(me, now)
+    const live = this.liveWorkers(me, now, true)
+    const background = [...live.workers.map((row) => this.address(row)), ...live.unjoined.filter(Boolean).map((name) => `me/${name}`)]
     const left = this.pushesLeft(me)
     const { where, params } = this.workerMessages(me, now, true, paced)
     const rows = left ? this.sql.all<MessageRow & { seq: number }>(`SELECT m.*, d.seq AS seq ${where} ORDER BY d.seq LIMIT ?`, ...params, LIMITS.inboxPage) : []
@@ -2004,8 +2019,8 @@ export class RelayCore {
     const { shown, offered } = this.budget(rows, LIMITS.pushBytes)
     const used = shown.reduce((sum, row) => sum + utf8Bytes(wrapMessage(this.envelope(row, row.seq))), 0)
     const others = rows.length ? this.pushOthers(me, now, LIMITS.pushBytes - used) : []
-    const hold = this.hold([...offered, ...others.map((row) => row.seq)], now)
-    this.received(endpoint, [...shown, ...others], now)
+    const hold = options.peek ? null : this.hold([...offered, ...others.map((row) => row.seq)], now)
+    if (!options.peek) this.received(endpoint, [...shown, ...others], now)
     return {
       messages: [...shown, ...others].map((row) => this.envelope(row, row.seq)),
       offered: [...offered, ...others.map((row) => row.seq)],
@@ -2013,6 +2028,7 @@ export class RelayCore {
       more: waiting - shown.length,
       workers: workers.map((row) => this.address(row)),
       starting,
+      ...(background.length ? { background } : {}),
       others: unread - this.workerUnread(me, now, false) - others.length,
       ...(others.length ? { others_shown: others.length } : {}),
       pushes_left: left,
@@ -2080,7 +2096,17 @@ export class RelayCore {
   prompted(endpoint: string, options: { transient?: boolean; process?: string } = {}): boolean {
     if (!this.holds(this.mustEndpoint(endpoint), options)) return false
     this.sql.all(`UPDATE endpoints SET prompts = COALESCE(prompts, 0) + 1, pushes = 0 WHERE id = ?`, endpoint)
+    this.settle(endpoint)
     return true
+  }
+
+  /** the background hooks' showings ({@link injected}) older than ${LIMITS.deferredSettleMs} ms reached the agent: inbox no longer lists them */
+  private settle(endpoint: string): void {
+    this.sql.all(
+      `UPDATE deliveries SET deferred_at = NULL WHERE endpoint = ? AND deferred_at IS NOT NULL AND deferred_at <= ?`,
+      endpoint,
+      this.now() - LIMITS.deferredSettleMs,
+    )
   }
 
   /**
@@ -2091,22 +2117,22 @@ export class RelayCore {
    * spender done and revokes an unspent grant, so a worker goes when its harness exits, else when its presence lapses or its grant expires; an
    * unspent grant whose `swarm spawn` process is gone (killed before it could report the exit) is revoked here.
    */
-  private liveWorkers(me: EndpointRow, now: number): { workers: EndpointRow[]; starting: number; paced: string[] } {
-    const grants = this.sql.all<Pick<GrantRow, "token_hash" | "used_by" | "bound_process" | "pushed_at" | "handback">>(
-      `SELECT token_hash, used_by, bound_process, pushed_at, handback FROM grants WHERE issuer = ? AND spawn = 1 AND no_push IS NULL AND revoked_at IS NULL AND created_at >= ? AND (used_by IS NOT NULL OR expires_at > ?) ORDER BY created_at`,
+  private liveWorkers(me: EndpointRow, now: number, noPush = false): { workers: EndpointRow[]; starting: number; paced: string[]; unjoined: string[] } {
+    const grants = this.sql.all<Pick<GrantRow, "token_hash" | "used_by" | "bound_process" | "pushed_at" | "handback" | "name">>(
+      `SELECT token_hash, used_by, bound_process, pushed_at, handback, name FROM grants WHERE issuer = ? AND spawn = 1 AND no_push IS ${noPush ? "NOT NULL" : "NULL"} AND revoked_at IS NULL AND created_at >= ? AND (used_by IS NOT NULL OR expires_at > ?) ORDER BY created_at`,
       me.id,
       me.spawned_at ?? 0,
       now,
     )
     const workers = new Map<string, EndpointRow>()
     const paced = new Set<string>()
-    let starting = 0
+    const unjoined: string[] = []
     for (const grant of grants) {
       const pid = Number(/^pid:(\d+):/.exec(grant.bound_process ?? "")?.[1])
       if (grant.used_by === null) {
         if (pid && !this.alive(pid))
           this.sql.all(`UPDATE grants SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL AND used_by IS NULL`, now, grant.token_hash)
-        else starting++
+        else unjoined.push(grant.name ?? "")
         continue
       }
       const row = this.byId(grant.used_by)
@@ -2114,7 +2140,7 @@ export class RelayCore {
       workers.set(row.id, row)
       if (grant.pushed_at !== null && grant.pushed_at > now - LIMITS.pushGapS * 1000) paced.add(row.id)
     }
-    return { workers: [...workers.values()], starting, paced: [...paced] }
+    return { workers: [...workers.values()], starting: unjoined.length, paced: [...paced], unjoined }
   }
 
   /**
@@ -2216,9 +2242,11 @@ export class RelayCore {
 
   /**
    * a hook or channel showed these deliveries, offered to it under `hold`: no hook offers them again; those of them it marked that are `read`
-   * (printed in full) and delivered to `endpoint` are acked; how many it marked
+   * (printed in full) and delivered to `endpoint` are acked, and with `deferred` (a background hook, whose text the harness hands the agent
+   * later) still listed by {@link inbox} until that settles ({@link settle}) and marked delivered rather than read ({@link receipts}) until
+   * the agent acks it itself; how many it marked
    */
-  injected(seqs: unknown, hold: unknown, options: { endpoint?: string; read?: unknown } = {}): number {
+  injected(seqs: unknown, hold: unknown, options: { endpoint?: string; read?: unknown; deferred?: boolean } = {}): number {
     const list = seqList(seqs)
     if (typeof hold !== "string") return 0
     const read = new Set(options.read === undefined || options.endpoint === undefined ? [] : seqList(options.read))
@@ -2233,13 +2261,17 @@ export class RelayCore {
         hold,
       ).length
       marked += hit
-      if (hit && read.has(seq))
+      if (hit && read.has(seq)) {
+        const deferred = options.deferred === true ? now : null
         acked += this.sql.all(
-          `UPDATE deliveries SET acked_at = ? WHERE seq = ? AND endpoint = ? AND acked_at IS NULL RETURNING seq`,
+          `UPDATE deliveries SET acked_at = ?, deferred_at = ?, deferred_ack = ? WHERE seq = ? AND endpoint = ? AND acked_at IS NULL RETURNING seq`,
           now,
+          deferred,
+          deferred && 1,
           seq,
           options.endpoint!,
         ).length
+      }
     }
     if (acked) this.audit("ack", options.endpoint!, null, { count: acked, via: "inject" })
     return marked
@@ -2303,6 +2335,51 @@ export class RelayCore {
     if (seq && rows[0] && seq.id !== rows[0].id)
       throw new RelayError("invalid_params", `${id} is the seq of one message and the short id of another (${shortId(rows[0].id)}); give the full id`)
     return envelope(seq ?? rows[0])
+  }
+
+  /**
+   * a message `endpoint` sent, by its id, a unique suffix of at least ${MESSAGE_SUFFIX_MIN} characters such as its {@link shortId}, or `last`
+   * (the newest it sent), with when each recipient read it (acked), or when a background hook delivered it (acked by that showing, the agent
+   * gets it with its next request, `delivered_at` and no `read_at`), and when a hook or channel showed it; a recipient still waiting for a
+   * `swarm spawn` to join is named by the spawn's address. not_found when it sent no such message; invalid_params when a suffix names more
+   * than one
+   */
+  receipts(endpoint: string, id: unknown): MessageReceipts {
+    if (typeof id !== "string" || !id.trim()) throw new RelayError("invalid_params", "id is a message id")
+    type Row = { id: string; thread: string }
+    const sent = `SELECT id, thread FROM messages WHERE from_ep = ?`
+    let rows =
+      id === "last" ? this.sql.all<Row>(`${sent} ORDER BY created_at DESC, id DESC LIMIT 1`, endpoint) : this.sql.all<Row>(`${sent} AND id = ?`, endpoint, id)
+    if (!rows.length && MESSAGE_SUFFIX.test(id))
+      rows = this.sql.all<Row>(`${sent} AND substr(id, -?) = ? ORDER BY created_at DESC LIMIT 6`, endpoint, id.length, id)
+    if (rows.length > 1) {
+      const named = rows.slice(0, 5).map((row) => `${shortId(row.id)} (${row.id})`)
+      throw new RelayError(
+        "invalid_params",
+        `${id} matches more than one message you sent, newest first: ${named.join(", ")}${rows.length > 5 ? ", ..." : ""}; give more of the id`,
+      )
+    }
+    const message = rows[0]
+    if (!message) throw new RelayError("not_found", `no message ${id} that you sent`)
+    const deliveries = this.sql.all<{ endpoint: string; acked_at: number | null; injected_at: number | null; deferred_ack: number | null }>(
+      `SELECT endpoint, acked_at, injected_at, deferred_ack FROM deliveries WHERE message_id = ? ORDER BY seq`,
+      message.id,
+    )
+    const address = (key: string) => {
+      const pending = key.startsWith(pendingKey(""))
+        ? one<{ name: string | null }>(this.sql, `SELECT name FROM grants WHERE token_hash = ?`, key.slice(pendingKey("").length))
+        : undefined
+      return pending?.name ? `${this.user}/${pending.name}` : this.addressOf(key)
+    }
+    return {
+      id: message.id,
+      thread: message.thread,
+      recipients: deliveries.map((d) => ({
+        address: address(d.endpoint),
+        ...(d.deferred_ack ? { read_at: null, delivered_at: iso(d.acked_at) } : { read_at: iso(d.acked_at) }),
+        shown_at: iso(d.injected_at),
+      })),
+    }
   }
 
   /**
@@ -2399,6 +2476,7 @@ export class RelayCore {
     )
   }
 
+  /** marks these deliveries to `endpoint` read, one a background hook's showing acked ({@link injected}) read now too; how many were unread */
   ack(endpoint: string, seqs: unknown): number {
     let acked = 0
     for (const seq of seqList(seqs)) {
@@ -2408,6 +2486,13 @@ export class RelayCore {
         seq,
         endpoint,
       ).length
+      this.sql.all(
+        `UPDATE deliveries SET acked_at = ?, deferred_ack = NULL WHERE seq = ? AND endpoint = ? AND deferred_ack IS NOT NULL`,
+        this.now(),
+        seq,
+        endpoint,
+      )
+      this.sql.all(`UPDATE deliveries SET deferred_at = NULL WHERE seq = ? AND endpoint = ? AND deferred_at IS NOT NULL`, seq, endpoint)
     }
     if (acked) this.audit("ack", endpoint, null, { count: acked })
     return acked
@@ -2595,6 +2680,7 @@ export class RelayCore {
     )!
     this.sql.all(`DELETE FROM activity WHERE id <= ?`, row.id - LIMITS.activityKeep)
     const own = this.holds(this.mustEndpoint(endpoint), options)
+    if (own && !agent && params.kind === "tool") this.settle(endpoint)
     if (own && !agent && typeof params.session_id === "string" && HARNESS_SESSION.test(params.session_id)) {
       this.sql.all(
         `UPDATE endpoints SET harness_session = ?, harness_transcript = ? WHERE id = ?`,
@@ -2997,6 +3083,20 @@ export class RelayCore {
     })
   }
 
+  /** the grant issuer's messages to the endpoint that spent it, sent since the grant, that it read, all but those among `unapplied`, oldest first */
+  private readSteers(grant: GrantRow, spender: EndpointRow, unapplied: string[]): { id: string; acked_at: number; deferred_ack: number | null }[] {
+    return this.sql.all<{ id: string; acked_at: number; deferred_ack: number | null }>(
+      `SELECT m.id, d.acked_at, d.deferred_ack FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.endpoint = ? AND m.from_ep = ? AND m.created_at >= ? AND d.acked_at IS NOT NULL
+       ${unapplied.length ? `AND m.id NOT IN (${unapplied.map(() => "?").join(", ")})` : ""} ORDER BY d.seq LIMIT ?`,
+      spender.id,
+      grant.issuer,
+      grant.created_at,
+      ...unapplied,
+      LIMITS.inboxPage,
+    )
+  }
+
   /**
    * a message needs both ends: for each `ep:` selector `widen` added on `target`, the other end's side is widened to admit `target` too when
    * `me` has authority over it, audited as its own widening; when that side still refuses, the change names it and the command that would fix it.
@@ -3370,8 +3470,9 @@ export class RelayCore {
   /**
    * a spawn's handback to its spawner `me`, the grant's issuer, from the worker (the relay when it never joined): past scopes, pair limits and
    * the judge, since the spawner minted the grant and is the recipient. One per grant (null once sent), in the thread the two last wrote in,
-   * else one derived from the grant, naming by short id the spawner's messages the worker left unread; its hop follows the worker's causal
-   * hop, capped, and a full thread drops it (null). A worker that never joined or exited non-zero gets its `stderr` last, labelled, its
+   * else one derived from the grant, naming by short id the spawner's messages the worker read, with when (one a background hook showed only
+   * delivered, unless the worker then exited 0: its model had the next request), and those it left unread; its hop follows the worker's
+   * causal hop, capped, and a full thread drops it (null). A worker that never joined or exited non-zero gets its `stderr` last, labelled, its
    * output cut from the front so both stay within ${LIMITS.handbackBytes} bytes
    */
   private handback(
@@ -3435,7 +3536,13 @@ export class RelayCore {
         ]
     if (spender) {
       const unapplied = this.steersOf(grant, spender, now, taken)
-      if (unapplied.length) body.push(this.unappliedLines(spender, grant, unapplied, now, exits).join("\n"))
+      const steers = [
+        ...this.readSteers(grant, spender, taken).map(
+          (row) => `your steer ${shortId(row.id)} was ${row.deferred_ack && code !== 0 ? "delivered" : "read"} at ${clock(row.acked_at)}`,
+        ),
+        ...(unapplied.length ? this.unappliedLines(spender, grant, unapplied, now, exits) : []),
+      ]
+      if (steers.length) body.push(steers.join("\n"))
     }
     const causal = spender && spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
     const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, LIMITS.hopMax) : 0

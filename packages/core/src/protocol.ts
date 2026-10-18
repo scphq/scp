@@ -40,10 +40,18 @@ export const LIMITS = {
   pushes: 20,
   /** how long a live worker's next message waits after a push showed one of its own */
   pushGapS: 30,
+  /** with other workers still running, how long a stop's push waits for one more worker result before it goes */
+  pushQuietS: 3,
+  /** the longest a stop's push gathers worker results, from the first it has to show */
+  pushGraceS: 6,
   stopBlocks: 3,
   /** the stops a session's late parent directives may hold */
   directiveHolds: 5,
   injectHoldS: 10,
+  /** how long inbox still lists a message a background hook showed, whose text the harness may hand the agent only after its next tool call */
+  deferredShowS: 600,
+  /** a deferred showing older than this settles at the session's next tool event or prompt: the harness has handed it over by then */
+  deferredSettleMs: 2000,
   listOfflineWithinS: 86_400,
   handleBoundS: 30 * 86_400,
   idempotencyS: 86_400,
@@ -326,6 +334,8 @@ export interface Envelope {
   expires_at: string
   /** a request whose sender holds the recipient's stop until it replies */
   require_reply?: true
+  /** set by inbox on a message a background hook already showed (and marked read), whose text may reach the agent only after this call */
+  shown_at?: string
   /**
    * the sender as the local broker sees it from the recipient, never from anything the sender claims: `parent` when it issued the grant the
    * recipient's current incarnation spent or is its ancestor, `child` when it is the recipient's descendant; unset for humans and other machines.
@@ -353,6 +363,8 @@ export interface StopWaitResult {
   more: number
   workers: string[]
   starting: number
+  /** the live --no-push workers it spawned, which no stop waits on, by address */
+  background?: string[]
   others: number
   others_shown?: number
   pushes_left: number
@@ -420,6 +432,16 @@ export interface SendResult {
   duplicate?: boolean
   held?: JudgeHeld
   redacted?: JudgeRedacted
+}
+
+/**
+ * a message the caller sent and, per recipient, when it read the message (acked), or when a background hook delivered it (acked by that
+ * showing; the agent gets it with its next request), and when a hook or channel showed it: ISO times, or null
+ */
+export interface MessageReceipts {
+  id: string
+  thread: string
+  recipients: { address: string; read_at: string | null; delivered_at?: string | null; shown_at: string | null }[]
 }
 
 export interface AuditRow {

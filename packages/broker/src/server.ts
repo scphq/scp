@@ -135,6 +135,17 @@ const STOP_RECHECK_MS = 1000
 const TRANSIENT_METHODS = new Set(["event", "status", "whoami", "inject", "injected", "peek_turn", "stop_wait", "prompted"])
 const GRANT_UNBOUND = `a spawn-env grant binds only a new harness process: run the harness with it, or name the child (${CLI_NAME} spawn-env --name / --as)`
 
+/** the workers' messages and handbacks a stop's push would show, and those of theirs left unread past it */
+function workerResults(result: StopWaitResult): number {
+  return result.messages.length - (result.others_shown ?? 0) + result.more
+}
+
+/** the workers still running that sent none of the messages a stop's push would show, and those not joined yet */
+function othersRunning(result: StopWaitResult): number {
+  const senders = new Set(result.messages.slice(0, result.messages.length - (result.others_shown ?? 0)).map((m) => m.from.address))
+  return result.workers.filter((address) => !senders.has(address)).length + result.starting
+}
+
 type Request = { jsonrpc?: string; id?: string | number | null; method?: unknown; params?: unknown }
 
 /** whether a process runs (one of another user's counts too) */
@@ -459,6 +470,32 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       set.add(done)
       if (s.data.closed) done()
     })
+  }
+
+  /**
+   * a stop's push with worker results to show while other workers still run: waits on, peeking, for more of theirs to show with them until
+   * none came for ${LIMITS.pushQuietS} s, ${LIMITS.pushGraceS} s after it began (which may run past the stop's wait), the push budget is
+   * full (`more`), no other worker runs ({@link othersRunning}), a prompt came or the connection closed
+   */
+  async function gather(
+    me: string,
+    result: StopWaitResult,
+    peek: ReturnType<typeof hookOf> & { prompts?: number; peek: boolean },
+    s: Conn<Connection>,
+  ): Promise<void> {
+    const gathering = (r: StopWaitResult) => workerResults(r) > 0 && !r.more && !r.prompted && othersRunning(r) > 0
+    const cap = Date.now() + LIMITS.pushGraceS * 1000
+    let quiet = Date.now() + LIMITS.pushQuietS * 1000
+    let results = workerResults(result)
+    while (gathering(result) && !s.data.closed && Date.now() < Math.min(quiet, cap)) {
+      await waitFor(me, Math.min(quiet, cap) - Date.now(), s)
+      if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
+      result = core.stopWait(me, peek)
+      if (workerResults(result) > results) {
+        results = workerResults(result)
+        quiet = Date.now() + LIMITS.pushQuietS * 1000
+      }
+    }
   }
 
   function onData(s: Conn<Connection>, chunk: Uint8Array) {
@@ -796,22 +833,28 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           ...hookOf(s),
         })
       case "stop_wait": {
-        const deadline = Date.now() + waitSeconds(params.wait_s)
+        const waitMs = waitSeconds(params.wait_s)
+        const deadline = Date.now() + waitMs
         const options = { ...hookOf(s), ...(typeof params.prompts === "number" ? { prompts: params.prompts } : {}) }
-        let result = core.stopWait(me, options)
+        const peek = { ...options, peek: true }
+        let result = core.stopWait(me, peek)
         const idle = (r: StopWaitResult) => !r.messages.length && !r.more && r.workers.length + r.starting > 0 && r.pushes_left > 0 && !r.prompted
         while (idle(result) && !s.data.closed && Date.now() < deadline) {
           await waitFor(me, Math.min(STOP_RECHECK_MS, deadline - Date.now()), s)
           if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
-          result = core.stopWait(me, options)
+          result = core.stopWait(me, peek)
         }
-        return result
+        if (waitMs > 0) await gather(me, result, peek, s)
+        return core.stopWait(me, options)
       }
-      case "prompted":
-        return { prompted: core.prompted(me, hookOf(s)) }
+      case "prompted": {
+        const prompted = core.prompted(me, hookOf(s))
+        if (prompted) wake(me)
+        return { prompted }
+      }
       case "injected":
         return {
-          injected: core.injected(params.seqs, params.hold, { endpoint: me, read: params.read }),
+          injected: core.injected(params.seqs, params.hold, { endpoint: me, read: params.read, deferred: params.deferred === true }),
           ...(params.stop === true ? { held: core.stopHeld(me, hookOf(s)) } : {}),
           ...(params.push === true ? { pushed: core.pushed(me, params.read, hookOf(s)) } : {}),
           ...(params.nudged !== undefined ? { nudged: core.nudged(me, params.nudged, hookOf(s)) } : {}),
@@ -821,6 +864,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         }
       case "message":
         return { message: core.delivered(me, params.id) ?? (params.member === true ? core.threadMessage(me, params.id) : null) }
+      case "receipts":
+        return core.receipts(me, params.id)
     }
     throw new RelayError("method_not_found", `no method ${method}`)
   }

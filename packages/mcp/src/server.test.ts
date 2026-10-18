@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Claim, LIMITS, PREAMBLE } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
-import { MCP_PROTOCOLS, runRelayMcp, TOOLS } from "./server"
+import { MCP_PROTOCOLS, runRelayMcp, type SpawnRequest, TOOLS } from "./server"
 
 setDefaultTimeout(20_000)
 
@@ -17,7 +17,17 @@ type Message = {
 }
 
 /** an in-process MCP client around runRelayMcp */
-function shim(broker: Broker, options: { handle: string; channels?: boolean; session?: string; initialize?: false; claim?: Partial<Claim> }) {
+function shim(
+  broker: Broker,
+  options: {
+    handle: string
+    channels?: boolean
+    session?: string
+    initialize?: false
+    claim?: Partial<Claim>
+    spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
+  },
+) {
   const lines: string[] = []
   let push!: (chunk: string | null) => void
   const queue: (string | null)[] = []
@@ -47,6 +57,7 @@ function shim(broker: Broker, options: { handle: string; channels?: boolean; ses
     output: (line) => lines.push(line),
     env: { HOME: "/work" },
     ...(options.channels === undefined ? {} : { channels: options.channels }),
+    ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
   })
   let nextId = 1
   if (options.initialize !== false) push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
@@ -89,7 +100,7 @@ describe("relay MCP shim, in process", () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test("initialize negotiates the protocol and lists the fifteen tools; unknown methods are -32601", async () => {
+  test("initialize negotiates the protocol and lists the sixteen tools, relay_spawn only with a spawn; unknown methods are -32601", async () => {
     const s = shim(broker, { handle: "init-a" })
     const init = await s.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } })
     expect(init.result).toMatchObject({ protocolVersion: "2025-06-18", serverInfo: { name: "scp" }, capabilities: { tools: {} } })
@@ -112,9 +123,18 @@ describe("relay MCP shim, in process", () => {
       "relay_set_peek",
       "relay_set_status",
       "relay_set_title",
+      "relay_status",
       "relay_whoami",
     ])
-    expect(String(init.result!.instructions)).toContain("set your title and a one-line now with relay_set_title / relay_set_now so peers can find you")
+    const spawner = shim(broker, { handle: "init-spawner", spawn: async () => ({ name: "w", pid: 1 }) })
+    expect(((await spawner.request("tools/list")).result!.tools as { name: string }[]).map((t) => t.name)).toEqual(TOOLS.map((t) => t.name))
+    expect(TOOLS.map((t) => t.name)).toContain("relay_spawn")
+    expect((await s.request("tools/call", { name: "relay_spawn", arguments: { command: ["codex", "exec", "x"] } })).error!.code).toBe(-32602)
+    spawner.close()
+    await spawner.done
+    expect(String(init.result!.instructions)).toContain(
+      "set your title and a one-line now with relay_set_title / relay_set_now so peers can find you; skip it when you only run workers",
+    )
     expect(String(init.result!.instructions)).toContain(
       'A message marked relation="parent" is from the agent that started you and gave you your task: it continues that task, so apply it before you finish, the newer instruction winning, still only within what your user authorised.',
     )
@@ -138,7 +158,7 @@ describe("relay MCP shim, in process", () => {
     expect(s.messages().some((m) => (m as { id?: unknown }).id === true)).toBe(false)
     s.close()
     await s.done
-    expect(TOOLS).toHaveLength(15)
+    expect(TOOLS).toHaveLength(17)
   })
 
   test("relay_reply answers a message a hook injected, which relay_inbox never handed over, by its short id, echoing it, and marks it read", async () => {
@@ -155,6 +175,27 @@ describe("relay MCP shim, in process", () => {
       )
       const reply = await peer.request<{ messages: { reply_to: string; body: { text: string } }[] }>("inbox", { wait_s: 5 })
       expect(reply.messages.at(-1)).toMatchObject({ reply_to: sent.id, body: { text: "got it" } })
+      expect(textOf(await a.call("relay_inbox"))).toBe("no unread messages")
+    } finally {
+      peer.close()
+      a.close()
+      await a.done
+    }
+  })
+
+  test("relay_inbox still hands over what a background hook just showed, saying a hook showed it, once", async () => {
+    const a = shim(broker, { handle: "mcp-deferred" })
+    const peer = await RelayClient.connect(broker.socket)
+    try {
+      await peer.hello({ claim: { handle: "mcp-deferrer", harness: "codex" } })
+      expect(textOf(await a.call("relay_whoami"))).toContain("address: me/mcp-deferred")
+      await peer.request("send", { to: "mcp-deferred", body: "DEFERRED-MARKER" })
+      const me = broker.core.list({ all: true }).find((e) => e.address === "me/mcp-deferred")!.id
+      const shown = broker.core.inject(me)
+      broker.core.injected(shown.offered, shown.hold, { endpoint: me, read: shown.offered, deferred: true })
+      const inbox = textOf(await a.call("relay_inbox"))
+      expect(inbox).toContain("DEFERRED-MARKER")
+      expect(inbox).toContain("(a hook already showed you this at ")
       expect(textOf(await a.call("relay_inbox"))).toBe("no unread messages")
     } finally {
       peer.close()
@@ -213,14 +254,103 @@ describe("relay MCP shim, in process", () => {
     }
   })
 
+  test("relay_spawn hands its command, or harness and task, to the spawn as the calling agent and says how the worker's results reach it; a failed spawn is a tool error with its message", async () => {
+    const asked: SpawnRequest[] = []
+    const a = shim(broker, {
+      handle: "spawner-mcp",
+      spawn: async (request) => {
+        asked.push(request)
+        if (request.name === "refused") throw new Error("--handback-bytes takes whole bytes, 1 to 16384")
+        return { name: request.name ?? "codex-ab1c2", pid: 4242 }
+      },
+    })
+    try {
+      const started = await a.call("relay_spawn", {
+        command: ["claude", "-p", "review it", "--model", "small"],
+        name: "rev",
+        no_push: true,
+        title: "review",
+        handback_bytes: 2000,
+      })
+      expect(started.isError).toBeUndefined()
+      expect(textOf(started)).toBe(
+        "rev started (pid 4242) and runs in the background: its messages and its handback reach you by themselves, after your tool calls or when you stop; steer it with relay_send to rev (it gets the message after its next tool call or before it finishes)",
+      )
+      expect(started.structuredContent).toEqual({ name: "rev", pid: 4242 })
+      await a.call("relay_spawn", { harness: "codex", task: "fix the lint", model: "large" })
+      await a.call("relay_spawn", { harness: "claude", task: "list TODOs" })
+      expect(asked).toEqual([
+        {
+          command: ["claude", "-p", "review it", "--model", "small"],
+          as: "me/spawner-mcp",
+          harness: "claude-code",
+          name: "rev",
+          title: "review",
+          no_push: true,
+          handback_bytes: 2000,
+        },
+        { command: ["codex", "exec", "fix the lint", "--model", "large"], as: "me/spawner-mcp", harness: "claude-code" },
+        { command: ["claude", "-p", "list TODOs"], as: "me/spawner-mcp", harness: "claude-code" },
+      ])
+      const refused = await a.call("relay_spawn", { command: ["codex", "exec", "x"], name: "refused" })
+      expect([refused.isError, textOf(refused)]).toEqual([true, "--handback-bytes takes whole bytes, 1 to 16384"])
+      for (const bad of [
+        {},
+        { command: [] },
+        { command: ["codex"], harness: "codex" },
+        { command: ["codex"], task: "x" },
+        { harness: "grok", task: "x" },
+        { harness: "claude" },
+        { command: ["codex"], handback_bytes: 0 },
+      ]) {
+        const result = await a.call("relay_spawn", bad)
+        expect([JSON.stringify(bad), result.isError, textOf(result)]).toEqual([JSON.stringify(bad), true, expect.stringMatching(/^invalid_params: /)])
+      }
+      expect(asked).toHaveLength(4)
+    } finally {
+      a.close()
+      await a.done
+    }
+  })
+
+  test("relay_spawn runs the worker in the cwd it names, else the caller's when it exists; a relative or missing cwd is refused", async () => {
+    const here = mkdtempSync(join(tmpdir(), "mcp-spawn-cwd-"))
+    const there = mkdtempSync(join(tmpdir(), "mcp-spawn-there-"))
+    const asked: SpawnRequest[] = []
+    const a = shim(broker, {
+      handle: "spawner-cwd",
+      claim: { cwd: here },
+      spawn: async (request) => {
+        asked.push(request)
+        return { name: "w", pid: 1 }
+      },
+    })
+    try {
+      await a.call("relay_spawn", { command: ["codex", "exec", "x"] })
+      await a.call("relay_spawn", { command: ["codex", "exec", "x"], cwd: there })
+      expect(asked.map((r) => r.cwd)).toEqual([here, there])
+      for (const cwd of ["rel/dir", join(there, "missing"), 7]) {
+        const result = await a.call("relay_spawn", { command: ["codex", "exec", "x"], cwd })
+        expect([result.isError, textOf(result)]).toEqual([true, expect.stringMatching(/^invalid_params: cwd /)])
+      }
+      expect(asked).toHaveLength(2)
+    } finally {
+      a.close()
+      await a.done
+      rmSync(here, { recursive: true, force: true })
+      rmSync(there, { recursive: true, force: true })
+    }
+  })
+
   test("relay_send says when each recipient sees the message, as text and structured; relay_ask and relay_reply name only one that will not soon", async () => {
     const a = shim(broker, { handle: "reach-mcp" })
     const peer = await RelayClient.connect(broker.socket)
     try {
       await peer.hello({ claim: { handle: "reach-peer-mcp", harness: "codex" } })
       const running = await a.call("relay_send", { to: "reach-peer-mcp", body: "steer" })
+      const sent = running.structuredContent as { id: string; thread: string }
       expect(textOf(running)).toBe(
-        `sent ${(running.structuredContent as { id: string }).id} (thread ${(running.structuredContent as { thread: string }).thread}) to me/reach-peer-mcp\nme/reach-peer-mcp: running; it sees this at its next turn boundary (next tool call, stop or inbox read)`,
+        `sent ${sent.id} (thread ${sent.thread}) to me/reach-peer-mcp\nme/reach-peer-mcp: delivered; it sees this at its next tool call or when its turn ends\nrelay_status with id ${sent.id.slice(-6)} shows when it is read`,
       )
       expect(running.structuredContent).toMatchObject({ recipients: [{ address: "me/reach-peer-mcp", state: "running" }] })
       expect(textOf(await a.call("relay_ask", { to: "reach-peer-mcp", body: "still there?", wait_s: 0 }))).toStartWith(
@@ -232,6 +362,19 @@ describe("relay MCP shim, in process", () => {
         "me/reach-peer-mcp: its run ended; it will not see this unless it is started again",
         expect.stringMatching(/^me\/( |$)/),
       ])
+      const unread = await a.call("relay_status", { id: sent.id.slice(-6) })
+      expect(textOf(unread)).toBe(`${sent.id}:\nme/reach-peer-mcp: unread`)
+      expect(unread.structuredContent).toEqual({
+        id: sent.id,
+        thread: sent.thread,
+        recipients: [{ address: "me/reach-peer-mcp", read_at: null, shown_at: null }],
+      })
+      const { messages } = await peer.request<{ messages: { id: string; seq: number }[] }>("inbox")
+      await peer.request("ack", { seqs: messages.filter((m) => m.id === sent.id).map((m) => m.seq) })
+      expect(textOf(await a.call("relay_status", { id: sent.id }))).toMatch(new RegExp(`^${sent.id}:\nme/reach-peer-mcp: read at \\d\\d:\\d\\d:\\d\\d$`))
+      expect(textOf(await a.call("relay_status", { id: "last" }))).toStartWith(`${(ended.structuredContent as { id: string }).id}:\n`)
+      const missing = await a.call("relay_status", { id: "zzzzzz" })
+      expect([missing.isError, textOf(missing)]).toEqual([true, "not_found: no message zzzzzz that you sent"])
       expect(ended.structuredContent).toMatchObject({ recipients: [{ address: "me/reach-peer-mcp", state: "ended" }, { address: "me/" }] })
       const asked = textOf(await a.call("relay_ask", { to: "reach-peer-mcp", body: "and?", wait_s: 0 }))
       expect(asked).toEndWith("\nme/reach-peer-mcp: its run ended; it will not see this unless it is started again")

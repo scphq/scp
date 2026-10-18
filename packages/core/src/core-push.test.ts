@@ -215,6 +215,19 @@ describe("stop_wait", () => {
     expect(result.more).toBe(2)
   })
 
+  test("a peek shows what a stop would without holding it, so the stop after it still takes it", () => {
+    const { core, main, spawn } = setup()
+    const w1 = spawn("w1", 10).endpoint!
+    core.send(w1.id, { to: "main", body: "done-42" })
+    const peek = core.stopWait(main.id, { peek: true })
+    expect(peek).toMatchObject({ hold: null, workers: ["me/w1"], more: 0 })
+    expect(peek.messages.map((m) => m.body.text)).toEqual(["done-42"])
+    const result = core.stopWait(main.id)
+    expect(result.messages.map((m) => m.body.text)).toEqual(["done-42"])
+    expect(result.hold).not.toBeNull()
+    expect(core.stopWait(main.id, { peek: true }).messages).toEqual([])
+  })
+
   test("a hook of another process than the one holding the endpoint gets nothing", () => {
     const { core, main, spawn } = setup()
     spawn("w1", 10)
@@ -239,7 +252,7 @@ describe("stop_wait", () => {
     const { core, db, main, as, spawn } = setup()
     const bg = core.grant(as(main.id), { name: "bg", ttl_s: 3600, bind_process: key(1010), spawn: true, no_push: true })
     const idle = core.grant(as(main.id), { name: "idle", ttl_s: 3600, bind_process: key(1030), spawn: true, no_push: true })
-    expect(core.stopWait(main.id)).toMatchObject({ workers: [], starting: 0 })
+    expect(core.stopWait(main.id)).toMatchObject({ workers: [], starting: 0, background: ["me/bg", "me/idle"] })
     const worker = core.claim({ handle: "w", harness: "codex", process: key(10), session: key(10), lineage: [key(10), key(1010), key(1)] }).endpoint
     spawn("fg", 20)
     expect(
@@ -253,6 +266,7 @@ describe("stop_wait", () => {
     core.spawnExit(as(main.id), { grant: bg.token, code: 0, output: "bg done" })
     core.spawnExit(as(main.id), { grant: idle.token, code: 1 })
     expect(core.stopWait(main.id)).toMatchObject({ messages: [], workers: ["me/fg"], starting: 0, others: 3 })
+    expect(core.stopWait(main.id)).not.toHaveProperty("background")
     expect(core.inject(main.id, { stop: true })).toMatchObject({ workers: 1 })
     expect(core.inject(main.id, { stop: true })).not.toHaveProperty("worker_unread")
     expect(core.inbox(main.id).map((m) => m.body.text)).toEqual([
@@ -563,5 +577,66 @@ describe("a send's reach", () => {
       to: ["me/guarded"],
       dropped: 1,
     })
+  })
+})
+
+describe("inbox after a background hook", () => {
+  const handback = (core: RelayCore, main: { id: string }, grant: string) =>
+    core.spawnExit({ kind: "endpoint", id: main.id, auth: "session" }, { grant, code: 0, output: "the result" })
+  const showDeferred = (core: RelayCore, id: string, deferred = true) => {
+    const shown = core.inject(id, { transient: true, process: key(1) })
+    core.injected(shown.offered, shown.hold, { endpoint: id, read: shown.offered, deferred })
+    return shown
+  }
+
+  test("a handback a background hook showed is still listed by inbox, marked as shown, until inbox acks it", () => {
+    const { core, clock, main, spawn } = setup()
+    const { grant } = spawn("w1", 10)
+    handback(core, main, grant)
+    clock.now += 1000
+    expect(showDeferred(core, main.id).messages).toHaveLength(1)
+    clock.now += 20_000
+    const listed = core.inbox(main.id)
+    expect(listed.map((m) => m.from.address)).toEqual(["me/w1"])
+    expect(listed[0]!.shown_at).toBe(new Date(clock.now - 20_000).toISOString())
+    expect(
+      core.ack(
+        main.id,
+        listed.map((m) => m.seq),
+      ),
+    ).toBe(0)
+    expect(core.inbox(main.id)).toEqual([])
+  })
+
+  test("a later tool event or a prompt settles it; a foreground hook's showing was never deferred", () => {
+    const { core, clock, main, spawn } = setup()
+    handback(core, main, spawn("w1", 10).grant)
+    showDeferred(core, main.id)
+    core.event(main.id, { kind: "tool", tool: "Bash" }, { transient: true, process: key(1) })
+    expect(core.inbox(main.id)).toHaveLength(1)
+    clock.now += 3000
+    core.event(main.id, { kind: "tool", tool: "Bash" }, { transient: true, process: key(1) })
+    expect(core.inbox(main.id)).toEqual([])
+
+    handback(core, main, spawn("w2", 20).grant)
+    showDeferred(core, main.id)
+    clock.now += 3000
+    core.prompted(main.id, { transient: true, process: key(1) })
+    expect(core.inbox(main.id)).toEqual([])
+
+    handback(core, main, spawn("w3", 30).grant)
+    showDeferred(core, main.id, false)
+    expect(core.inbox(main.id)).toEqual([])
+  })
+
+  test("a stop event leaves it listed, and it ages out of inbox after the window", () => {
+    const { core, clock, main, spawn } = setup()
+    handback(core, main, spawn("w1", 10).grant)
+    showDeferred(core, main.id)
+    clock.now += 3000
+    core.event(main.id, { kind: "stop" }, { transient: true, process: key(1) })
+    expect(core.inbox(main.id)).toHaveLength(1)
+    clock.now += LIMITS.deferredShowS * 1000
+    expect(core.inbox(main.id)).toEqual([])
   })
 })

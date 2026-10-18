@@ -33,7 +33,7 @@ describe("a handback's output", () => {
     const kept = out.slice(HANDBACK_CUT.length + 1)
     expect(big.endsWith(`\n${kept}`)).toBe(true)
     expect(size(kept)).toBeGreaterThan(LIMITS.handbackBytes - 1300)
-    expect(handbackOutput(big, false, 64)).toBe(`${HANDBACK_CUT}\nDone.`)
+    expect(handbackOutput(`${"a".repeat(20)}\nbbbbbb\nccccc`, false, 30)).toBe(`${HANDBACK_CUT}\nccccc`)
   })
 
   test("one line longer than the cap keeps its last characters behind the marker; a cap too small for the marker keeps only text", () => {
@@ -43,6 +43,19 @@ describe("a handback's output", () => {
     expect(size(out)).toBeLessThanOrEqual(LIMITS.handbackBytes)
     expect(handbackOutput("abcdefghij\nklmnop", false, 8)).toBe("klmnop")
     expect(handbackOutput("abcdefghijklmnop", false, 8)).toBe("ijklmnop")
+  })
+
+  test("a line longer than the cap keeps its tail mid-line rather than drop it for the short lines after it", () => {
+    const report = `${line(1, 20_000)}\ndone`
+    const out = handbackOutput(report)
+    expect(out.startsWith(`${HANDBACK_CUT}\n`)).toBe(true)
+    expect(out.endsWith(`${line(1, 20_000).slice(-200)}\ndone`)).toBe(true)
+    expect(size(out)).toBeLessThanOrEqual(LIMITS.handbackBytes)
+    expect(size(out)).toBeGreaterThan(LIMITS.handbackBytes - 8)
+    const small = handbackOutput(REPORT, false, 64)
+    expect(small.startsWith(`${HANDBACK_CUT}\n`)).toBe(true)
+    expect(small).toEndWith("\n\nDone.")
+    expect(REPORT.endsWith(small.slice(HANDBACK_CUT.length + 1))).toBe(true)
   })
 
   test("output that already lost its start is marked even when the rest fits", () => {

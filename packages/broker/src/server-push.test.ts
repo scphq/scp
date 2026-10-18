@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Envelope, RelayError, type StopWaitResult } from "@scp-dev/core"
+import { type Envelope, LIMITS, RelayError, type StopWaitResult, wrapMessage } from "@scp-dev/core"
 import { RelayClient } from "./client"
 import { type Broker, startBroker } from "./server"
 
@@ -160,6 +160,111 @@ describe("broker, stop_wait", () => {
       restated: 1,
     })
     expect(await hook.request("inject", { stop: true, directives: true })).toMatchObject({ block: false })
+  })
+})
+
+/** another worker `main` spawned, its grant bound to pid+1000 and claimed from pid */
+async function spawned(broker: Broker, main: RelayClient, name: string, pid: number) {
+  const { token } = await main.grant({ name, bind_process: key(pid + 1000), ttl_s: 3600, spawn: true })
+  const client = await connect(broker, { claim: { handle: "codex", harness: "codex", process: key(pid), lineage: [key(pid), key(pid + 1000), key(1)] } })
+  return { client, token }
+}
+
+const say = (client: RelayClient, body: string) => client.request("send", { to: "main", body })
+
+describe("broker, stop_wait gathers the results of workers finishing together", () => {
+  test("two workers finishing a second apart reach the stop in one push, which goes as the last of them reports", async () => {
+    const { broker, main, hook, worker } = await setup()
+    const w2 = await spawned(broker, main, "w2", 20)
+    const waiting = hook.stopWait(10)
+    await Bun.sleep(100)
+    await say(worker, "w1 done")
+    await Bun.sleep(1000)
+    await say(w2.client, "w2 done")
+    const last = Date.now()
+    const result = await waiting
+    expect(result.messages.map((m) => [m.from.address, m.body.text])).toEqual([
+      ["me/w1", "w1 done"],
+      ["me/w2", "w2 done"],
+    ])
+    expect(result.offered).toHaveLength(2)
+    expect(Date.now() - last).toBeLessThan(LIMITS.pushQuietS * 1000)
+  })
+
+  test("with no other worker running the push goes at once", async () => {
+    const { hook, worker } = await setup()
+    const waiting = hook.stopWait(10)
+    await Bun.sleep(100)
+    await say(worker, "done-42")
+    const sent = Date.now()
+    expect((await waiting).messages.map((m) => m.body.text)).toEqual(["done-42"])
+    expect(Date.now() - sent).toBeLessThan(LIMITS.pushQuietS * 1000)
+  })
+
+  test("results that keep coming are cut off the cap after the first while a third worker runs silent", async () => {
+    const { broker, main, hook, worker } = await setup()
+    const w2 = await spawned(broker, main, "w2", 20)
+    await spawned(broker, main, "w3", 30)
+    const waiting = hook.stopWait(20)
+    await Bun.sleep(100)
+    const first = Date.now()
+    const stream = (async () => {
+      for (const [i, client] of [worker, w2.client, worker, w2.client, worker].entries()) {
+        if (i) await Bun.sleep((LIMITS.pushGraceS * 1000) / 4 + 200)
+        await say(client, `result ${i}`)
+      }
+    })()
+    const result = await waiting
+    const took = Date.now() - first
+    await stream
+    expect(took).toBeGreaterThanOrEqual(LIMITS.pushGraceS * 1000 - 500)
+    expect(took).toBeLessThan(LIMITS.pushGraceS * 1000 + 1200)
+    const texts = result.messages.map((m) => m.body.text)
+    expect(texts.slice(0, 3)).toEqual(["result 0", "result 1", "result 2"])
+    expect(texts).not.toContain("result 4")
+    expect(result.workers).toEqual(["me/w1", "me/w2", "me/w3"])
+  }, 20_000)
+
+  test("the gathering ends once the push budget is full, keeping within it", async () => {
+    const { broker, main, hook, worker } = await setup()
+    const w2 = await spawned(broker, main, "w2", 20)
+    await spawned(broker, main, "w3", 30)
+    const waiting = hook.stopWait(10)
+    await Bun.sleep(100)
+    await say(worker, "a".repeat(Math.floor(LIMITS.pushBytes * 0.6)))
+    await Bun.sleep(300)
+    await say(w2.client, "b".repeat(Math.floor(LIMITS.pushBytes * 0.6)))
+    const last = Date.now()
+    const result = await waiting
+    expect(Date.now() - last).toBeLessThan(LIMITS.pushQuietS * 1000)
+    expect(result.messages.map((m) => m.body.text[0])).toEqual(["a"])
+    expect(result.more).toBe(1)
+    expect(Buffer.byteLength(result.messages.map(wrapMessage).join(""))).toBeLessThanOrEqual(LIMITS.pushBytes)
+  })
+
+  test("the last other worker's exit or a prompt ends the gathering at once", async () => {
+    const exited = await setup()
+    const w2 = await spawned(exited.broker, exited.main, "w2", 20)
+    const waiting = exited.hook.stopWait(10)
+    await Bun.sleep(100)
+    await say(exited.worker, "w1 done")
+    await Bun.sleep(300)
+    await exited.main.spawnExit({ grant: w2.token, code: 0, output: "w2 out" })
+    const exit = Date.now()
+    expect((await waiting).messages.map((m) => m.body.text)).toEqual(["w1 done", "worker me/w2 finished (exit 0)\n\nw2 out"])
+    expect(Date.now() - exit).toBeLessThan(LIMITS.pushQuietS * 1000)
+
+    const prompted = await setup()
+    await spawned(prompted.broker, prompted.main, "w2", 20)
+    const mark = (await prompted.hook.request<{ prompts?: number }>("inject", { stop: true })).prompts!
+    const stop = prompted.hook.stopWait(10, mark)
+    await Bun.sleep(100)
+    await say(prompted.worker, "w1 done")
+    await Bun.sleep(300)
+    await prompted.hook.request("prompted", {})
+    const prompt = Date.now()
+    expect(await stop).toMatchObject({ prompted: true, messages: [{ body: { text: "w1 done" } }] })
+    expect(Date.now() - prompt).toBeLessThan(LIMITS.pushQuietS * 1000)
   })
 })
 

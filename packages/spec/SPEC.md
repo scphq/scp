@@ -441,6 +441,7 @@ Endpoints have no short form. Messages do: a message's short id is the last 6 ch
 | `require_reply` | true? | sender | Present only on a request whose sender requires a reply. |
 | `relation` | `"parent"`, `"ancestor"` or `"child"`? | broker | The sender's tree relation as the recipient's broker computes it (section 8.6). |
 | `parent_key` | string? | broker | With `relation: "parent"`: the steer key of the spawn grant the recipient spent. |
+| `shown_at` | timestamp? | broker | Set only by `inbox` on a delivery a deferred hook showing already acknowledged (section 7.11): when that hook showed it. |
 
 - A client MUST NOT send any of `from`, `id`, `seq`, `hop`, `created_at`, `auth`, `expires_at`, `relation` at the top level of `send` parameters. A broker or hub MUST refuse them `invalid_params`.
 - The fields marked broker or relay MUST be computed by the relays, never copied from anything the sender supplies.
@@ -480,7 +481,7 @@ On success the broker stores the message once and one delivery per recipient, ac
 | Field | Meaning |
 | --- | --- |
 | `id`, `thread`, `hop` | Of the stored message. |
-| `deliveries[]` | Per recipient: `endpoint`, `address`, `seq`, `offline`, `queued?`, `last_seen`, `state?`. `queued` means the recipient is not connected now; `offline` means it has been gone for at least 10 s. `state`, set only for an agent recipient on this machine, says when it sees the message: `running` at its next turn boundary, `ended` never unless it is started again (its status is `done`), `offline` never unless it comes back, `starting` once the sender's own spawn of it joins. |
+| `deliveries[]` | Per recipient: `endpoint`, `address`, `seq`, `offline`, `queued?`, `last_seen`, `state?`. `queued` means the recipient is not connected now; `offline` means it has been gone for at least 10 s. `state`, set only for an agent recipient on this machine, says when it sees the message: `running` at its next tool call or when its turn ends, `ended` never unless it is started again (its status is `done`), `offline` never unless it comes back, `starting` once the sender's own spawn of it joins. |
 | `duplicate?` | The send repeated an earlier `client_id` (section 7.7). |
 | `held?` | `{hold_id, side}`: the judge held the message; nothing was delivered. |
 | `redacted?` | `{n, kinds}`: the judge delivered it with `n` spans replaced. |
@@ -573,7 +574,7 @@ A message with relation="parent" is the exception: it comes from the agent that 
 
 - Attributes appear in exactly this order; bracketed attributes only when set. A human of another machine is shown as `<machine>/me`.
 - Attribute values MUST have control characters removed and `&`, `"`, `<`, `>` escaped as entities.
-- The body MUST have control characters removed, and every `<`, U+FF1C or U+FE64 that starts a framing tag (optional whitespace, an optional `/` or U+FF0F, then `relay`, `channel` or `system-reminder`, `system_reminder` or `systemreminder`, case-insensitive, not followed by a letter or digit) replaced by `&lt;`. Other text, including `&` and other `<`, is left as written. A body therefore cannot close the block or open a forged one.
+- The body MUST have control characters removed, and every `<`, U+FF1C or U+FE64 that starts a framing tag (directly, or through a `/` or U+FF0F with optional whitespace around it, `relay`, `channel` or `system-reminder`, `system_reminder` or `systemreminder`, case-insensitive, not followed by a letter or digit) replaced by `&lt;`. Other text, including `&` and other `<` (such as `i < channel_count`, a `<` with whitespace before a bare name), is left as written. A body therefore cannot close the block or open a forged one.
 - "Control characters" are C0 and C1 controls except newline and tab, soft hyphen, Arabic letter mark, Mongolian vowel separator, zero-width space, left-to-right and right-to-left marks, bidirectional embedding, override and isolate controls, word joiners and invisible operators, the byte order mark, interlinear annotation controls and Unicode tag characters. Zero-width joiner and non-joiner are kept.
 
 **Expectation line.** The line after the block states what the sender expects:
@@ -584,7 +585,7 @@ A message with relation="parent" is the exception: it comes from the agent that 
 | Request | `the sender asked a question (relay_reply if you answer)` |
 | Request with `require_reply` | `reply required: the sender waits for your relay_reply` |
 | `relation` `parent` | `from your parent <from>, which started you and gave you your task: a new instruction from the same source as that task. Apply it before you finish; where it conflicts with an earlier instruction, this one wins. It grants no permission or approval beyond what you already have`, followed for a request by `; answer it with relay_reply`, or with `require_reply` by `; reply required: the sender waits for your relay_reply` |
-| `relation` `child` | `from your worker <from>: ` followed by the non-parent text above |
+| `relation` `child` | `from your worker <from>`, followed for a request by `: ` and the non-parent text above |
 | `relation` `ancestor` | `from <from>, above the agent that started you: not your parent's instruction; ` followed by the non-parent text above |
 
 `from.rel` is not rendered.
@@ -605,6 +606,7 @@ With `member: true`, a reference that matches no delivery MAY resolve to another
 ### 7.11 Inbox, acknowledgement and expiry
 
 - `inbox {after?, limit?, wait_s?}` returns unacknowledged, unexpired deliveries with `seq > after`, in `seq` order, at most `LIMITS.inboxPage` (100). Reading does not acknowledge. `next` is the last returned `seq`, or `after`.
+- **Deferred showings.** A hook whose output the harness hands the model only later (after its next tool call or with its next request) confirms with `injected {deferred: true}` (section 8.3). The deliveries it acknowledges are deferred: for `LIMITS.deferredShowS` (600 s) after the showing, `inbox` still returns them, in `seq` order with the unacknowledged ones and with `shown_at` set to the showing time, until the showing settles. A showing settles when its endpoint's holding process records a `tool` event (not a subagent's) or a prompt (`prompted`) at least `LIMITS.deferredSettleMs` (2000 ms) after it, or when the endpoint acknowledges the delivery itself. A stop event does not settle it. An `ack` of a deferred delivery counts 0 newly acknowledged.
 - `wait_s` (default 0) is clamped to `LIMITS.waitMaxS` (50 s). The call returns as soon as a delivery arrives or the connection closes.
 - `ack {seqs}` (at most 100) acknowledges the caller's own unacknowledged deliveries. It is idempotent. Sending a reply acknowledges the replied-to delivery; a hook's confirmation with `read` acknowledges what it showed; `ask` acknowledges the reply it returns.
 - A recipient with `LIMITS.inboxMax` (1000) unacknowledged, unexpired deliveries refuses new sends `inbox_full`.
@@ -621,6 +623,19 @@ With `member: true`, a reference that matches no delivery MAY resolve to another
 4. `pending: true`: the wait elapsed or the connection closed.
 
 If the judge holds the request, `ask` returns `held` at once without waiting.
+
+### 7.13 Receipts
+
+`receipts {id}` tells a sender whether the recipients of a message it sent have read it. `id` is the message's id, `last` (the newest message the caller sent), or a suffix of at least 4 characters of `[0-9a-z]`, such as its short id, that matches exactly one message the caller sent; an ambiguous suffix is `invalid_params` listing up to 5 matches, newest first. Only the sender may ask: a message the caller did not send is `not_found`, as is one that does not exist.
+
+The result (`MessageReceipts`) carries `id`, `thread` and `recipients[]`, one per delivery still kept, in `seq` order:
+
+| Field | Meaning |
+| --- | --- |
+| `address` | The recipient's address; a recipient still waiting for the sender's spawn to join (section 7.3) is named by the spawn's address. |
+| `read_at` | When the delivery was acknowledged, or null. Null while only a deferred showing acknowledged it. |
+| `delivered_at` | Present while only a deferred showing (section 7.11) acknowledged the delivery: when it did. The text reaches the model with its next request. |
+| `shown_at` | When a hook or channel showed the delivery, or null. |
 
 ---
 
@@ -657,7 +672,7 @@ Pull is sufficient for conformance. Push is what makes delivery native and is RE
 
 - **Budget.** Oldest first, at most `LIMITS.injectMessages` (5) messages and at most `LIMITS.injectBytes` (4096) bytes of wrapped text per injection. A single message larger than the byte budget is offered but not shown; it stays unread for the inbox. A message from one of the session's live workers that fits `LIMITS.pushBytes` is left for the stop push (section 8.6) to show whole.
 - **Offer hold.** Returned deliveries are offered under a hold id `hld_...` for `LIMITS.injectHoldS` (10 s). Other hooks and channel pushes skip offered deliveries. Offers not confirmed in time become fresh again.
-- **Confirmation.** After printing, the hook sends `injected {seqs, hold, read, preamble?, intro?}`. `seqs` are all offered seqs; `read` are those shown, which the broker acknowledges. Offered but unshown seqs are marked injected and stay unacknowledged. `preamble: true` records that the session saw the full preamble.
+- **Confirmation.** After printing, the hook sends `injected {seqs, hold, read, deferred?, preamble?, intro?}`. `seqs` are all offered seqs; `read` are those shown, which the broker acknowledges. Offered but unshown seqs are marked injected and stay unacknowledged. `preamble: true` records that the session saw the full preamble. `deferred: true` marks a showing the harness hands the model only later: the acknowledged deliveries stay listed by `inbox` until the showing settles, and count as delivered rather than read (sections 7.11, 7.13).
 - **Result.** `messages`, `offered`, `hold`, `more` (fresh minus shown), `unread`, `block` (false), and `brief`, `intro`, `intro_key` as applicable.
 - **Intro.** Until a hook confirms `intro: true`, a spawned worker's injections name its spawner and steer key (section 8.7).
 - A harness that cannot render message text at a prompt (only a pointer) MAY request counts only and print the unread count with a pointer to its inbox tool.
@@ -692,12 +707,13 @@ When `block` is true the hook holds the stop and prints, in order: late directiv
 A session that spawned workers can wait at its stop for their messages instead of ending its turn.
 
 - When the stop is not blocked, the harness can continue a stop with text, the session has live workers or unread worker messages, and `pushes_left` is not 0, the hook loops `stop_wait {wait_s, prompts}` until it gets messages, the workers end, a new prompt arrives, the push budget runs out or the push wait elapses.
-- **Push wait.** Configured per install (reference default 600 s, 0 disables, range 0 to 3600); the effective wait is the smaller of the install setting and `SCP_PUSH_WAIT`. Each `stop_wait` blocks for at most `LIMITS.waitMaxS`, rechecking every second.
+- **Push wait.** Configured per install (reference default 600 s, 0 disables, range 0 to 3600); the effective wait is the smaller of the install setting and `SCP_PUSH_WAIT`. Each `stop_wait` blocks for at most `LIMITS.waitMaxS`, rechecking every second and on every delivery, plus any gathering below.
 - **Live workers.** Unrevoked spawn grants of the session, without `no_push`, created since the session's `spawned_at`, that are either unspent and unexpired (`starting`; revoked once their bound process is dead) or spent by an endpoint that is neither `done` nor offline.
-- **Result** (`StopWaitResult`): `messages` (worker messages and handbacks about workers, within `LIMITS.pushBytes`, 20480 bytes of wrapped text), `offered`, `hold`, `more`, `workers` (addresses), `starting`, `others`, `others_shown?`, `pushes_left`, `prompted?`, `brief?`.
+- **Result** (`StopWaitResult`): `messages` (worker messages and handbacks about workers, within `LIMITS.pushBytes`, 20480 bytes of wrapped text), `offered`, `hold`, `more`, `workers` (addresses), `starting`, `background?` (the addresses of the session's live `no_push` workers, joined or not, which no stop waits on; absent when there are none), `others`, `others_shown?`, `pushes_left`, `prompted?`, `brief?`.
+- **Gathering.** When `wait_s` is above 0 and the push has worker messages to show while other workers still run (live workers that sent none of them, or `starting` ones), the broker waits on, holding nothing, so that results landing together reach the stop in one push. It stops gathering when no further worker message arrived for `LIMITS.pushQuietS` (3 s), `LIMITS.pushGraceS` (6 s) after gathering began (which MAY run past `wait_s`), when the push budget is full (`more` above 0), no other worker runs, a prompt arrives or the connection closes, and then returns and holds what it would show at that moment.
 - **Other messages.** When a worker message is shown, the session's other unread messages that no hook has shown or holds follow it in `messages`: the newest first, at most `LIMITS.injectMessages`, each fitting whole in what is left of `LIMITS.pushBytes`, then put back in seq order and held with the worker messages. `others_shown` counts them; `others` counts the other unread messages left, never their text.
 - **Budget.** A session may continue at most `LIMITS.pushes` (20) stops between two prompts. When none are left, nothing is shown. A worker whose message a push showed is not shown again for `LIMITS.pushGapS` (30 s).
-- **Prompt.** A prompt-submit hook sends `prompted`, which increments the session's prompt count and resets its pushes. A waiting stop then sees `prompted: true` and lets the stop pass so the harness takes the user's prompt.
+- **Prompt.** A prompt-submit hook sends `prompted`, which increments the session's prompt count and resets its pushes. A waiting or gathering stop wakes at once, sees `prompted: true` and lets the stop pass so the harness takes the user's prompt.
 - The hook prints the preamble, the blocks, a read line, counts of further worker and other messages, and either the workers still running ("their next message reaches you when you stop"), that no worker is running, or that the push budget is used up. It confirms with `injected {seqs, hold, read, push: true}`. Pushes never count as stop holds.
 
 ### 8.7 Steering: parent directives and the steer key
@@ -799,7 +815,7 @@ The spawn operation (reference: `swarm spawn [flags] -- <harness command>`) runs
 `spawn_exit {grant, code, output?, stderr?, unapplied?, exits?, started?}` (code 0 to 255; `unapplied` at most `LIMITS.inboxPage` message ids of steers the spawn took but could not hand the worker; `exits` at most 8 times in ms, one per run the spawn resumed; `started: false` when the harness never started) MAY be called only by the grant's issuer or an ancestor of its spender. It is refused when a revoked grant was spent ("a new spawn holds its endpoint").
 
 - A spent grant's endpoint is set `done` with note `exited <code>` (prefixed to the earlier note, cut to `LIMITS.noteChars`) and its hook session is ended. An unspent grant is revoked, and messages waiting for its worker (section 7.3) are dropped. A harness that never `started` hands nothing back.
-- **Output cleaning.** Escape sequences and control characters are removed; each line keeps the text after its last carriage return; the remainder of a cut private key is dropped; credentials are redacted; the last `LIMITS.handbackBytes` (16384) bytes are kept on a character boundary, prefixed by the line `[earlier output cut]` when anything was cut and the cap has room for it, starting at the first line that begins within the cap (on a character boundary when one line is longer than that). A spawner MAY choose a smaller cap.
+- **Output cleaning.** Escape sequences and control characters are removed; each line keeps the text after its last carriage return; the remainder of a cut private key is dropped; credentials are redacted; the last `LIMITS.handbackBytes` (16384) bytes are kept on a character boundary, prefixed by the line `[earlier output cut]` when anything was cut and the cap has room for it, starting at the first line that begins within the cap. It starts on a character boundary within a line instead when no line begins within the cap, or when the line the cap falls in is alone longer than the cap and the lines after it would keep less than half of it. A spawner MAY choose a smaller cap.
 - **Message.** Exactly one handback per grant, of kind `message`, delivered to the issuer without send checks. Its sender is the worker, or the system endpoint when the worker never joined. Its thread is the last thread between the two since the grant, else a stable thread id derived from the grant. Its hop follows the worker's causal hop (section 12.1). No handback is sent when that thread is full.
 - **Body.** Parts separated by blank lines:
   - `worker <address> finished (exit <code>)`, then the cleaned output; or
@@ -807,7 +823,7 @@ The spawn operation (reference: `swarm spawn [flags] -- <harness command>`) runs
   - `worker <address> exited without replying (exit <code>)`; or
   - for a worker that never joined (a plain command, not a relay agent): `worker <name> finished (exit <code>), not a relay agent`, then, when the spawner's messages were queued for it, `<n> message(s) you sent it never reached it: it never joined the relay`, then any output.
   - When the worker never joined or exited non-zero, the tail of its cleaned `stderr` (at most `2 * LIMITS.stderrBytes` bytes) follows last under the line `stderr (last <LIMITS.stderrBytes / 1024> KB):`, and the output is cut from the front so the body stays within `LIMITS.handbackBytes`.
-  - For a worker that joined, one line per steer from the spawner it never applied (those still unread, plus `unapplied`): `steer not applied: "<text>" (<short id>, <when>)`, the text on one line, credentials redacted, clipped to 120 characters plus `...`; `<when>` is `arrived after it exited`, or `arrived <s> s before it exited` (`under 1` below a second) followed by `, after its last step` or `, unread`.
+  - For a worker that joined, one line per message the spawner sent it since the grant that it read (acknowledged by the worker, a hook or the spawn), oldest first, at most `LIMITS.inboxPage`, excluding `unapplied`: `your steer <short id> was read at <HH:MM:SS>`, the acknowledgement time in the broker's local time; `was delivered at` instead when only a deferred showing (section 7.11) acknowledged it and the worker exited non-zero (after a clean exit the model had its next request). Then one line per steer from the spawner it never applied (those still unread, plus `unapplied`): `steer not applied: "<text>" (<short id>, <when>)`, the text on one line, credentials redacted, clipped to 120 characters plus `...`; `<when>` is `arrived after it exited`, or `arrived <s> s before it exited` (`under 1` below a second) followed by `, after its last step` or `, unread`. These lines form one part.
 - The broker wakes the issuer. The handback reaches it through its stop push, injection or inbox, and is audited `spawn_exit`.
 
 ### 9.4 Worker lifecycle
@@ -1377,11 +1393,12 @@ An integration with push capability additionally:
 | `inbox` | `after?`, `limit?` (at most 100), `wait_s?`, `offer?` | `{messages, next, hold?}` | `invalid_params` | ep |
 | `ack` | `seqs` (at most 100) | `{acked}` | `invalid_params` | ep |
 | `message` | `id` (reference, section 7.10), `member?` | `{message}` (Envelope, thread message or null) | `invalid_params` | ep |
+| `receipts` | `id` (id, suffix of 4 or more, or `last`; section 7.13) | MessageReceipts | `invalid_params`, `not_found` | ep (sender) |
 | `title` | `text` | EndpointView | `invalid_params`, `too_large`, `secret_refused` | ep (agent) |
 | `status` | `state?`, `note?` | EndpointView | `invalid_params`, `secret_refused` | ep, hook |
 | `event` | `kind`, `tool?`, `summary?`, `agent?` | ActivityRow | `invalid_params`, `too_large` | ep, hook |
 | `inject` | `stop?`, `count?`, `hold_unread?`, `directives?` | sections 8.3, 8.5 | | ep, hook |
-| `injected` | `seqs`, `hold`, `read?`, `stop?`, `push?`, `nudged?`, `restated?`, `preamble?`, `intro?` | `{injected, held?, pushed?, nudged?, restated?, briefed?, introduced?}` | `invalid_params` | ep, hook |
+| `injected` | `seqs`, `hold`, `read?`, `deferred?`, `stop?`, `push?`, `nudged?`, `restated?`, `preamble?`, `intro?` | `{injected, held?, pushed?, nudged?, restated?, briefed?, introduced?}` | `invalid_params` | ep, hook |
 | `stop_wait` | `wait_s?`, `prompts?` | StopWaitResult | | ep, hook |
 | `prompted` | | `{prompted}` | | ep, hook |
 | `peek_turn` | `role`, `text` | `{stored}` | `unauthorized`, `invalid_params` | hook of the holding process |
@@ -1467,7 +1484,8 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
     "expires_at": { "type": "string", "format": "date-time" },
     "require_reply": { "const": true },
     "relation": { "enum": ["parent", "ancestor", "child"] },
-    "parent_key": { "type": "string", "pattern": "^[0-9a-z]{6}$" }
+    "parent_key": { "type": "string", "pattern": "^[0-9a-z]{6}$" },
+    "shown_at": { "type": "string", "format": "date-time" }
   }
 }
 ```
@@ -1514,8 +1532,10 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `restartGraceS` | 60 | `injectMessages` | 5 |
 | `injectBytes` | 4096 | `pushBytes` | 20480 |
 | `pushes` | 20 | `pushGapS` | 30 |
+| `pushQuietS` | 3 | `pushGraceS` | 6 |
 | `stopBlocks` | 3 | `directiveHolds` | 5 |
-| `injectHoldS` | 10 | `listOfflineWithinS` | 86400 |
+| `injectHoldS` | 10 | `deferredShowS` | 600 |
+| `deferredSettleMs` | 2000 | `listOfflineWithinS` | 86400 |
 | `handleBoundS` | 2592000 | `idempotencyS` | 86400 |
 | `auditKeepS` | 2592000 | `noteChars` | 280 |
 | `handbackBytes` | 16384 | `activityKeep` | 5000 |
@@ -1576,6 +1596,8 @@ The MCP server speaks JSON-RPC 2.0 over stdio (lines up to 4 MiB; protocol versi
 | `relay_list` | `all?`, `contacts?` | `list` |
 | `relay_peers` | `all?` | `peers` |
 | `relay_send` | `to` (1 to 16), `body`, `thread?`, `private?` | `send` with a `client_id` |
+| `relay_status` | `id` (id, short id or `last`) | `receipts` |
+| `relay_spawn` | `command` (argv, at least one word) or `harness` (`claude`, `codex`) with `task` and `model?`; `name?`, `title?` (at most 64), `no_push?`, `handback_bytes?` (1 to `LIMITS.handbackBytes`), `cwd?` (absolute, an existing directory) | `whoami`, then the spawn operation (section 9.2) in the background, as the caller |
 | `relay_reply` | `id` (id, short id, suffix of 4 or more, or `last`), `body` | `message {member}`, `send {kind: reply}` |
 | `relay_inbox` | `wait_s` (0 to 50), `ack` (default true) | `inbox`, `ack` |
 | `relay_ask` | `to`, `body`, `wait_s` (default 30), `require_reply?` | `ask` |
@@ -1587,6 +1609,10 @@ The MCP server speaks JSON-RPC 2.0 over stdio (lines up to 4 MiB; protocol versi
 | `relay_group` | `action`, `name`, `endpoint`, `rules`, `in`, `out` | `group` |
 | `relay_peek` | `endpoint`, `turns` (1 to 10), `full?`, `who?` | `peek`, `peek_who` |
 | `relay_set_peek` | `on` | `peek_set` |
+
+- `relay_spawn` is listed only when the server is given a way to spawn. Without `cwd` the worker runs in the caller's working directory when that exists. `harness` builds `claude -p <task>` or `codex exec <task>`, with `--model <model>` when given. It returns the worker's name and its runner's pid once its harness started; a failed spawn is a tool error carrying the spawn's message.
+- `relay_send` adds a line pointing to `relay_status` with the message's short id when a recipient's state is `running` or `starting`.
+- `relay_inbox` precedes a message with `shown_at` by the line `(a hook already showed you this at <HH:MM:SS>; that copy may reach you after this call)`.
 
 With `--channels`, the server advertises the `claude/channel` experimental capability and pushes messages as `notifications/claude/channel` (section 8.4).
 
