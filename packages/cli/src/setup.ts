@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -791,6 +792,27 @@ function museInstalled(env: Env): Json | undefined {
 
 const installedFrom = (record: Json | undefined) => (record && isObject(record.source) ? String(record.source.path) : undefined)
 
+/** whether two paths name the same file, so Muse's canonical /private/tmp matches /tmp */
+function samePath(a: string | undefined, b: string): boolean {
+  if (a === undefined) return false
+  if (a === b) return true
+  try {
+    return realpathSync(a) === realpathSync(b)
+  } catch {
+    return false
+  }
+}
+
+/** whether Muse still holds some of the scp plugin's hooks for review: a headless muse exec runs none of those */
+function museReviewNeeded(cli: string, run: (argv: string[]) => RunResult): boolean {
+  try {
+    const caps = (JSON.parse(run([cli, "plugins", "inspect", SERVER, "--json"]).output) as Json).runtime_capabilities
+    return Array.isArray(caps) && caps.some((cap) => isObject(cap) && cap.status === "review_needed")
+  } catch {
+    return false
+  }
+}
+
 function pluginDir(manifest: string): string {
   return dirname(dirname(manifest))
 }
@@ -837,21 +859,28 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     const from = installedFrom(record)
     const current = content ?? readFileSync(resolved(file), "utf8")
     const disabled = record?.enabled === false
-    const install = content !== undefined || from !== dir || record?.manifest_sha256 !== sha256(current)
-    if (!install && !disabled) {
+    const install = content !== undefined || !samePath(from, dir) || record?.manifest_sha256 !== sha256(current)
+    const cli = ctx.found.get("muse")!
+    const review = install || museReviewNeeded(cli, run)
+    if (!install && !disabled && !review) {
       note(plan, harness, `hooks: up to date in ${file}${held}`)
       return
     }
-    const cli = ctx.found.get("muse")!
-    const commands = [...(install ? [[cli, "plugins", "install", dir, "--scope", "user"]] : []), ...(disabled ? [[cli, "plugins", "enable", SERVER]] : [])]
+    const commands = [
+      ...(install ? [[cli, "plugins", "install", dir, "--scope", "user"]] : []),
+      ...(disabled ? [[cli, "plugins", "enable", SERVER]] : []),
+      ...(review ? [[cli, "plugins", "approve", SERVER]] : []),
+    ]
     const head = install
-      ? `${content ? "write" : "install"} the ${CLI_NAME} plugin ${file}${held}${from && from !== dir ? `, replacing the scp plugin installed from ${from}` : ""}${disabled ? ", and enable it, which Muse has disabled" : ""}`
-      : `enable the ${CLI_NAME} plugin ${file}, which Muse has disabled`
+      ? `${content ? "write" : "install"} the ${CLI_NAME} plugin ${file}${held}${from && !samePath(from, dir) ? `, replacing the scp plugin installed from ${from}` : ""}${disabled ? ", and enable it, which Muse has disabled" : ""}`
+      : disabled
+        ? `enable the ${CLI_NAME} plugin ${file}, which Muse has disabled`
+        : `approve the hooks of the ${CLI_NAME} plugin ${file}, which Muse holds for review`
     addStep(plan, {
       harness,
       label: "hooks",
       file,
-      plan: [head, ...commands.map(shown), ...(install ? ["Muse asks you to review a plugin's hooks before it runs them"] : [])],
+      plan: [head, ...commands.map(shown), ...(review ? ["approves its hooks: a headless muse exec runs no hook Muse holds for review"] : [])],
       apply: () => {
         const next = install ? desiredHooks(kind, file, blockStop) : undefined
         const saved = next === undefined ? undefined : writeFile(file, next, now, { mode: 0o644 })
@@ -932,7 +961,7 @@ function planUnhook(plan: Plan, harness: SetupHarness, kind: Hooked, file: strin
   const gone: Step = { harness, label: "hooks", file, plan: [`forget ${file}, which is gone`], apply: () => undefined, manifest: forgotten }
   if (kind === "muse") {
     const cli = ctx.found.get("muse")
-    const installed = installedFrom(museInstalled(ctx.env)) === pluginDir(file)
+    const installed = samePath(installedFrom(museInstalled(ctx.env)), pluginDir(file))
     if (!existsSync(target) && !installed) {
       addStep(plan, gone)
       return
@@ -1151,7 +1180,7 @@ export function verifyMusePlugin(cli: string, dir: string, run: (argv: string[])
   } catch {
     return { ok: false, line: `unknown: muse plugins list --json exited ${result.code}: ${lastLine(result.output)}` }
   }
-  const ours = installedFrom(record) === dir
+  const ours = samePath(installedFrom(record), dir)
   if (manifest === undefined) return { ok: !ours, line: ours ? "still installed (muse plugins list)" : "removed (muse plugins list)" }
   if (!ours) return { ok: false, line: "failed: muse plugins list does not show the scp plugin from setup" }
   const current = record!.manifest_sha256 === sha256(manifest) && record!.enabled !== false

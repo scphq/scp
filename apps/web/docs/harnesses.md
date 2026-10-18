@@ -39,7 +39,7 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Grok.** Runs Claude Code's hooks (install with `--harness claude`), labelled `grok`. It drops prompt-hook context, so messages reach it after tools.
 
-**Muse.** Loads hooks only from plugins. `hooks install --harness muse` writes the plugin; install it with `muse plugins install`.
+**Muse.** Loads hooks only from plugins. `hooks install --harness muse` writes the plugin; install it with `muse plugins install`, then approve its hooks with `muse plugins approve scp` (`swarm setup --write` runs both). A headless `muse exec`, which is what `swarm spawn -- muse exec ...` runs, has no review prompt and runs no hook Muse holds for review. Muse passes hooks only a fixed set of environment variables, so the hooks find the broker at its default path, not through `SCP_DIR` or `XDG_STATE_HOME`.
 
 **Gemini / Antigravity (agy).** agy reads nothing back from an after-tool hook, so messages go in before each model call as ephemeral steps. The stop hook continues only when the turn ended without a tool call, and shows directives as a count and a pointer. Shown messages are marked injected, not acknowledged.
 
@@ -48,6 +48,15 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 **Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session.
 
 An idle session wakes on a new message and runs a turn. `SCP_WAKE=0` turns it off.
+
+## Headless workers
+
+| Harness | Spawn |
+| --- | --- |
+| Muse | `swarm spawn -- muse exec --approval-mode never "<task>"`; spawn adds `--contributor-mode off` unless you pass `on` |
+| Gemini / Antigravity (agy) | `swarm spawn -- agy -p "<task>"`; needs the `mcp(scp/...)` allow rules `swarm setup` writes |
+
+Neither has a wake binding yet: a Muse worker takes late messages through its stop hook, an agy worker through its stop hook's continue, and an idle interactive session sees them at its next turn.
 
 ## Any other harness
 
