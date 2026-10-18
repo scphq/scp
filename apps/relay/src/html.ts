@@ -243,8 +243,11 @@ table.activity td:last-child{grid-column:1/-1;white-space:normal!important}}
 .panel .empty{margin-top:.75rem}
 .strip{display:grid;gap:.5rem;margin-top:1rem}
 .strip-row{display:flex;align-items:center;gap:.625rem;min-width:0}
-.strip-row .dot{margin-right:0}
-.strip-name{flex:none;width:7.5rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.strip-who{display:flex;flex:none;align-items:baseline;gap:.375rem;width:11rem;min-width:0;overflow:hidden;white-space:nowrap}
+.strip-who .hicon{flex:none;margin-right:0}
+.strip-who .mini{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.strip-name{flex:0 0 auto;max-width:7.5rem;overflow:hidden;text-overflow:ellipsis}
+.strip details.offline{margin-top:0}
 .cells{display:flex;flex-wrap:wrap;gap:3px;min-width:0}
 .cell{display:inline-block;width:10px;height:10px;border:1px solid var(--faint);background:transparent}
 .cell.online{border-color:var(--acc);background:var(--acc)}
