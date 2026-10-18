@@ -65,6 +65,7 @@ import type { JudgeAuditDetail, JudgeAuditEvent } from "./judge"
 import { handbackOutput } from "./handback"
 import { findSecret, redactSecrets } from "./scrub"
 import { one, type Sql, type SqlValue } from "./sql"
+import { utf8Bytes } from "./utf8"
 
 export const HUMAN_HANDLE = "_human"
 export const SYSTEM_HANDLE = "_relay"
@@ -1386,7 +1387,7 @@ export class RelayCore {
     const now = this.now()
     const clientId = cleanText(params.client_id, "client_id", 128)
     if (typeof params.body !== "string") throw new RelayError("invalid_params", "body must be a string")
-    const bytes = new TextEncoder().encode(params.body).length
+    const bytes = utf8Bytes(params.body)
     if (bytes > LIMITS.bodyBytes) throw new RelayError("too_large", `the body is ${bytes} bytes, more than ${LIMITS.bodyBytes}`)
     const kind = params.kind ?? "message"
     if (!MESSAGE_KINDS.includes(kind)) throw new RelayError("invalid_params", `kind must be one of ${MESSAGE_KINDS.join(", ")}`)
@@ -1448,6 +1449,7 @@ export class RelayCore {
         attachments.map((a) => a.path).sort(),
         mime,
         ttl,
+        params.require_reply === true,
       ]),
     )
     if (clientId) {
@@ -1954,7 +1956,7 @@ export class RelayCore {
     let used = 0
     let push: Set<number> | undefined
     for (const row of rows) {
-      const size = Buffer.byteLength(wrapMessage(this.envelope(row, row.seq)))
+      const size = utf8Bytes(wrapMessage(this.envelope(row, row.seq)))
       if (size > bytes) {
         if (pushable && size <= LIMITS.pushBytes) {
           push ??= pushable()
@@ -1996,7 +1998,7 @@ export class RelayCore {
       now,
     )!.n
     const { shown, offered } = this.budget(rows, LIMITS.pushBytes)
-    const used = shown.reduce((sum, row) => sum + Buffer.byteLength(wrapMessage(this.envelope(row, row.seq))), 0)
+    const used = shown.reduce((sum, row) => sum + utf8Bytes(wrapMessage(this.envelope(row, row.seq))), 0)
     const others = rows.length ? this.pushOthers(me, now, LIMITS.pushBytes - used) : []
     const hold = this.hold([...offered, ...others.map((row) => row.seq)], now)
     this.received(endpoint, [...shown, ...others], now)
@@ -2035,7 +2037,7 @@ export class RelayCore {
     for (const row of rows) {
       if (picked.length >= LIMITS.injectMessages) break
       if (workers.has(row.seq)) continue
-      const size = Buffer.byteLength(wrapMessage(this.envelope(row, row.seq)))
+      const size = utf8Bytes(wrapMessage(this.envelope(row, row.seq)))
       if (size > left) continue
       picked.push(row)
       left -= size
@@ -2793,7 +2795,7 @@ export class RelayCore {
       if (cut) truncated = true
       return { role: row.role, at: iso(row.at)!, text, tools: row.role === "assistant" ? tools(Math.max(prev, since - 1), row.at) : [] }
     })
-    const size = () => shown.reduce((n, turn) => n + new TextEncoder().encode(turn.text).length, 0)
+    const size = () => shown.reduce((n, turn) => n + utf8Bytes(turn.text), 0)
     while (shown.length > 1 && size() > PEEK.totalBytes) {
       shown.shift()
       truncated = true
@@ -3185,6 +3187,8 @@ export class RelayCore {
     const name = cleanText(p.name, "name", 63)
     if (name !== null && !validHandle(name)) throw new RelayError("invalid_params", `name ${JSON.stringify(name)} is not a valid handle`)
     const labels = cleanLabels(p.labels)
+    const leaked = findSecret(JSON.stringify(labels))
+    if (leaked) throw this.refuse(me.id, "secret_refused", `the labels look like they carry a credential (${leaked})`)
     const title = oneLine(p.title, "title", 64) || null
     if (title && findSecret(title)) throw this.refuse(me.id, "secret_refused", "the title looks like it carries a credential")
     const ttl = p.ttl_s ?? LIMITS.grantTtlS
@@ -3379,7 +3383,7 @@ export class RelayCore {
   ): string | null {
     if (grant.handback !== null) return null
     const tail = stderr && (!spender || code !== 0) ? `${STDERR_LABEL}\n${stderr}` : ""
-    const output = tail ? handbackOutput(whole, false, LIMITS.handbackBytes - new TextEncoder().encode(tail).length - 2) : whole
+    const output = tail ? handbackOutput(whole, false, LIMITS.handbackBytes - utf8Bytes(tail) - 2) : whole
     const now = this.now()
     const stable = `thr_${grant.created_at.toString(36).padStart(9, "0")}${this.hash(`handback:${grant.token_hash}`).slice(0, 16)}`
     const last = spender

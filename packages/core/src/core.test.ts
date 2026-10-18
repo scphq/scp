@@ -663,6 +663,8 @@ describe("edge cases", () => {
     core.send(a.endpoint.id, { to: "b", body: "first", client_id: "k" })
     expect(code(() => core.send(a.endpoint.id, { to: "c", body: "CHANGED", client_id: "k" }))).toBe("invalid_params")
     expect(core.inbox(c.endpoint.id)).toEqual([])
+    core.send(a.endpoint.id, { to: "b", body: "ask", kind: "request", client_id: "r" })
+    expect(code(() => core.send(a.endpoint.id, { to: "b", body: "ask", kind: "request", require_reply: true, client_id: "r" }))).toBe("invalid_params")
   })
 
   test("handles that look like the gone prefix under LIKE still list", () => {
@@ -1855,6 +1857,16 @@ describe("spawn bindings", () => {
     const used = () => (t.db.query("SELECT used_by FROM grants WHERE bound_process IS NOT NULL").get() as { used_by: string | null }).used_by
     return { ...t, main, actor, grant, shim, used }
   }
+
+  test("a grant whose labels carry a credential is refused before it is stored", () => {
+    const { core, actor, db } = spawned()
+    const secret = `scp_${"a1B2".repeat(8)}`
+    const count = () => (db.query("SELECT COUNT(*) AS n FROM grants").get() as { n: number }).n
+    const before = count()
+    expect(code(() => core.grant(actor, { labels: { note: `use ${secret}` } }))).toBe("secret_refused")
+    expect(count()).toBe(before)
+    expect(JSON.stringify(core.log())).not.toContain(secret)
+  })
 
   test("a claim whose lineage holds the bound key takes the grant's name, placement, title and labels", () => {
     const { core, shim, used } = spawned()
