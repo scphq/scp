@@ -1,1 +1,1 @@
-export const BIN = "scp";
+export const BIN = "swarm";

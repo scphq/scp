@@ -259,15 +259,15 @@ function limitText(world: ScopeWorld, e: ScopeNode, list: ScopeList, dir: ScopeD
   const sels = [...new Set(list.entries.map((entry) => effectiveSelector(list, entry)))]
   const to = `${sels.join(",") || "nobody"}${cross ? " only within its own fleet" : ""}`
   const add = selectorFor(x)
-  const widen = `widen with scp rules widen ${short(e)} --${dir} ${add}`
+  const widen = `widen with swarm rules widen ${short(e)} --${dir} ${add}`
   if (list.source === "own rules") {
-    const set = `scp rules set --${dir} ${[...sels, add].join(",")}`
+    const set = `swarm rules set --${dir} ${[...sels, add].join(",")}`
     return you
       ? `your own rules limit ${whose} to ${to}; widen them with ${set}`
       : `${short(e)}'s own rules limit ${whose} to ${to}; ${short(e)} widens them with ${set}`
   }
   if (list.source.startsWith("policy"))
-    return `the ${list.source.replace(/^policy \((.*)\)$/, "policy rule for $1")} limits ${whose} to ${to}; change it in the policy file (scp policy path)`
+    return `the ${list.source.replace(/^policy \((.*)\)$/, "policy rule for $1")} limits ${whose} to ${to}; change it in the policy file (swarm policy path)`
   if (list.group)
     return `group ${list.group}'s rules (set by ${list.by === "policy" ? "the policy file" : nameOf(world, list.by, e)}) limit ${whose} to ${to}; ${widen}`
   if (list.by === "inherited") {

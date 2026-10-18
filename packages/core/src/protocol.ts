@@ -326,10 +326,10 @@ export interface Envelope {
   /**
    * the sender as the local broker sees it from the recipient, never from anything the sender claims: `parent` when it issued the grant the
    * recipient's current incarnation spent or is its ancestor, `child` when it is the recipient's descendant; unset for humans and other machines.
-   * A recipient an `scp spawn` grant with a steer key placed hears only that issuer's keyed messages as `parent`: another ancestor's are `ancestor`
+   * A recipient a `swarm spawn` grant with a steer key placed hears only that issuer's keyed messages as `parent`: another ancestor's are `ancestor`
    */
   relation?: "parent" | "ancestor" | "child"
-  /** with `parent`, from the issuer of the `scp spawn` grant the recipient spent: that grant's steer key, which the worker's prompt names */
+  /** with `parent`, from the issuer of the `swarm spawn` grant the recipient spent: that grant's steer key, which the worker's prompt names */
   parent_key?: string
 }
 
@@ -400,8 +400,8 @@ export interface JudgeRedacted {
 
 /**
  * when an agent recipient sees a message, as its sender may know it: `running` at its next turn boundary (its next tool call or stop),
- * `ended` never unless it is started again (it is done: an `scp spawn` run that exited, a finished subagent), `offline` never unless it
- * comes back, `starting` once it joins (the sender's own `scp spawn` of it has not joined yet)
+ * `ended` never unless it is started again (it is done: a `swarm spawn` run that exited, a finished subagent), `offline` never unless it
+ * comes back, `starting` once it joins (the sender's own `swarm spawn` of it has not joined yet)
  */
 export type Reach = "running" | "ended" | "offline" | "starting"
 

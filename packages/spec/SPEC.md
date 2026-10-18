@@ -39,7 +39,7 @@ SCP defines that layer: identity of endpoints, the message envelope, delivery in
 
 ### 1.4 Reference implementation
 
-The reference implementation is the `scp` CLI, with an MCP server started by `scp mcp` and harness hooks run as `scp hook`. Wire identifiers, the preamble text, environment variable names and some refusal texts are fixed strings (for example `scp/1`, `SCP_GRANT`, auth value `account`). These literals are part of the protocol. The CLI and MCP surfaces are specified as the reference binding in Appendices E and F.
+The reference implementation is the `swarm` CLI, with an MCP server started by `swarm mcp` and harness hooks run as `swarm hook`. Wire identifiers, the preamble text, environment variable names and some refusal texts are fixed strings (for example `scp/1`, `SCP_GRANT`, auth value `account`). These literals are part of the protocol. The CLI and MCP surfaces are specified as the reference binding in Appendices E and F.
 
 ---
 
@@ -706,7 +706,7 @@ A session that spawned workers can wait at its stop for their messages instead o
 - **Steer key.** A spawn grant carries a random 6-character base-36 steer key. The spawner's prompt for the worker ends with the steer note:
 
   ```
-  [scp spawn: <parent address>, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="<key>"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]
+  [swarm spawn: <parent address>, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="<key>"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]
   ```
 
 - When the recipient spent a steer-keyed spawn grant, a `parent` sender keeps `relation: "parent"` only if it is that grant's issuer and the grant existed when the message was sent; the envelope then carries `parent_key`. Every other ancestor is downgraded to `relation: "ancestor"`.
@@ -773,7 +773,7 @@ The bindings of the reference integration per harness are in Appendix G.
 
 ### 9.2 Spawn
 
-The spawn operation (reference: `scp spawn [flags] -- <harness command>`) runs a worker harness under a fresh spawn grant:
+The spawn operation (reference: `swarm spawn [flags] -- <harness command>`) runs a worker harness under a fresh spawn grant:
 
 1. Mint a spawn grant with `ttl_s` 3600, `bind_process` set to the spawner's own process key, and the defaults below.
 2. Build the worker's environment from the spawner's minus the spawner's identity variables (`SCP_NAME`, `SCP_SESSION`, `SCP_GRANT`, `SCP_PARENT`, `SCP_HARNESS`), plus the grant's environment and labels.
@@ -789,7 +789,7 @@ The spawn operation (reference: `scp spawn [flags] -- <harness command>`) runs a
 | Title | The prompt's first non-empty line, control characters removed, whitespace collapsed, redacted, cut to 64 characters; dropped if it still contains a credential. |
 | Name | `<program base name>-<5 random [a-z0-9]>`, else `worker-<5 random>`. |
 
-`spawn_env` (reference: `scp spawn-env`) mints an ordinary grant with the same parameters and prints its environment, without steer key, handback or push.
+`spawn_env` (reference: `swarm spawn-env`) mints an ordinary grant with the same parameters and prints its environment, without steer key, handback or push.
 
 ### 9.3 Handback
 
@@ -1533,7 +1533,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 
 ## Appendix E. Reference binding: CLI verbs
 
-`scp [--as <handle>] [--harness <h>] [--human] [--json] <verb>`
+`swarm [--as <handle>] [--harness <h>] [--human] [--json] <verb>`
 
 | Verb | Wire |
 | --- | --- |
@@ -1586,7 +1586,7 @@ With `--channels`, the server advertises the `claude/channel` experimental capab
 
 ## Appendix G. Harness hook bindings
 
-All hooks run `scp hook <harness> [event] [--block-stop-on-unread] [--push-wait <s>] [--no-inject] [--subagent]` with the harness's JSON payload on standard input (at most 8 MiB). The event is read from the payload (`hook_event_name`) or the argument.
+All hooks run `swarm hook <harness> [event] [--block-stop-on-unread] [--push-wait <s>] [--no-inject] [--subagent]` with the harness's JSON payload on standard input (at most 8 MiB). The event is read from the payload (`hook_event_name`) or the argument.
 
 | Harness | Events | Context output | Stop output | Stop push | Subagents |
 | --- | --- | --- | --- | --- | --- |
@@ -1597,7 +1597,7 @@ All hooks run `scp hook <harness> [event] [--block-stop-on-unread] [--push-wait 
 | Gemini / Antigravity (agy) | SessionStart, PreInvocation (prompt), PostToolUse (activity only), Stop (only when the termination reason is `NO_TOOL_CALL`) | `{"injectSteps":[{"ephemeralMessage":<text>}]}`; `{}` when empty | `{"decision":"continue","reason":<text>}`; directives as a count and pointer | no | no |
 | OpenCode | Plugin: tool execution (text appended to the tool output), chat message (synthetic text part), session created, session idle | as Claude Code; prompt shows an unread pointer only | Emulated: on idle, a held stop's text is submitted as a new prompt | no | child sessions as activity |
 
-Each integration also registers the MCP server (`scp mcp --harness <h>`) under the name `scp` in the harness's MCP configuration. Shown messages are acknowledged on every harness except agy, where they are marked injected only.
+Each integration also registers the MCP server (`swarm mcp --harness <h>`) under the name `scp` in the harness's MCP configuration. Shown messages are acknowledged on every harness except agy, where they are marked injected only.
 
 ## Appendix H. End-to-end example
 
