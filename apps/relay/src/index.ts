@@ -2,11 +2,14 @@ import { api } from "./api";
 import { getCode, getSignIn, postCode, postSignIn, postSignOut } from "./auth";
 import { deviceCode, devicePage, devicePost, deviceToken } from "./device";
 import type { Env } from "./env";
+import { hubRoute } from "./hub/routes";
 import { CSS, html, layout } from "./html";
 import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
 import { tokensPage, tokensPost } from "./tokens";
 import { DAY, HttpError, json } from "./util";
 import { back, type Ctx, loadCtx, toSignIn } from "./web";
+
+export { OrgHub } from "./hub/object";
 
 async function pages(ctx: Ctx): Promise<Response> {
   const { req, url, user } = ctx;
@@ -65,6 +68,8 @@ export default {
         return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
       if (url.pathname === "/v1/device/code" && req.method === "POST") return await deviceCode(req, env.DB, url.origin, Date.now());
       if (url.pathname === "/v1/device/token" && req.method === "POST") return await deviceToken(req, env.DB, url.origin, Date.now());
+      if (url.pathname === "/v1/relay/ws") return await hubRoute(req, env, "ws");
+      if (url.pathname === "/v1/relay/rpc") return await hubRoute(req, env, "rpc");
       if (url.pathname.startsWith("/v1/")) return await api(req, env, url);
       return await pages(await loadCtx(req, env));
     } catch (e) {

@@ -1,4 +1,5 @@
 import { authenticate } from "./credentials";
+import { closeGrants } from "./hub/routes";
 import type { Env, User } from "./env";
 import { acceptInvite, createInvite, createOrg, listInvites, listMembers, listOrgs, type Membership, requireMember } from "./orgs";
 import { createToken, listDevices, listTokens, revokeDevice, revokeToken } from "./tokens";
@@ -103,11 +104,13 @@ export async function api(req: Request, env: Env, url: URL): Promise<Response> {
     }
     if (kind === "tokens" && id && method === "DELETE") {
       await revokeToken(env.DB, m, actor.user, id, now);
+      await closeGrants(env, m.org.id, { tokenId: id });
       return json({ revoked: id });
     }
     if (kind === "devices" && !id && method === "GET") return json({ devices: await listDevices(env.DB, m, actor.user) });
     if (kind === "devices" && id && method === "DELETE") {
       await revokeDevice(env.DB, m, actor.user, id, now);
+      await closeGrants(env, m.org.id, { tokenId: id });
       return json({ revoked: id });
     }
   }

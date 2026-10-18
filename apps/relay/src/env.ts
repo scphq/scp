@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  HUB: DurableObjectNamespace;
   EMAIL?: SendEmail;
   /** `cloudflare` (default), `resend` or `log` */
   MAILER?: string;

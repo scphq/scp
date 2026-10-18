@@ -9,8 +9,13 @@
     "test": "bun test",
     "cf-typegen": "wrangler types"
   },
+  "dependencies": {
+    "@scp-dev/core": "workspace:*",
+    "@scp-dev/hub": "workspace:*"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260601.0",
+    "@scp-dev/broker": "workspace:*",
     "miniflare": "^4.20260601.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.106.0"

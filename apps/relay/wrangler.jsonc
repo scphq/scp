@@ -4,6 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // bundle the workspace packages from source, as the tests do
+  "alias": { "@scp-dev/core": "../../packages/core/src/index.ts", "@scp-dev/hub": "../../packages/hub/src/index.ts" },
   "routes": [{ "pattern": "app.scp.dev", "custom_domain": true }],
   "d1_databases": [
     {
@@ -13,6 +15,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "OrgHub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OrgHub"] }],
   "send_email": [{ "name": "EMAIL" }],
   "vars": {
     "MAILER": "cloudflare",

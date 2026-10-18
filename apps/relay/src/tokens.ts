@@ -1,4 +1,5 @@
 import { mint, TOKEN_PREFIX } from "./credentials";
+import { closeGrants } from "./hub/routes";
 import type { User } from "./env";
 import { html } from "./html";
 import { canManage, type Membership, notice, orgHeader, requireMember } from "./orgs";
@@ -178,6 +179,7 @@ export async function tokensPost(ctx: Ctx, user: User, handle: string, rest: str
     if (kind === "tokens" && id && action === "revoke") await revokeToken(ctx.env.DB, m, user, id, ctx.now);
     else if (kind === "devices" && id && action === "revoke") await revokeDevice(ctx.env.DB, m, user, id, ctx.now);
     else throw new HttpError(404, "not_found", "Not found.");
+    await closeGrants(ctx.env, m.org.id, { tokenId: id });
     return back(ctx, `/orgs/${handle}/tokens`);
   } catch (e) {
     if (e instanceof HttpError && e.status < 500) return tokensPage(ctx, user, handle, { err: e.message }, e.status);
