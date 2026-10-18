@@ -494,7 +494,11 @@ export interface IdentityInput {
   startOf?: (pid: number) => string | undefined
   /** process keys of the harness and its ancestors (default {@link lineage}) */
   lineageOf?: (pid: number) => string[]
+  /** a Claude Code hook's payload session id, over $CLAUDE_CODE_SESSION_ID */
+  harnessSession?: string
 }
+
+const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 /** the claim a shim or hook makes for this harness session */
 export function relayIdentity(input: IdentityInput): Claim & { handle: string; harness: string; session: string; process: string; cwd: string } {
@@ -505,6 +509,8 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const handle = input.as ?? input.env.SCP_NAME ?? deriveHandle(harness, cwd)
   const harnessProcess = processKey(pid, input.startOf)
   const keys = input.lineageOf ? input.lineageOf(pid) : lineage(pid)
+  const harnessSession =
+    harness === "claude-code" ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id)) : undefined
   return {
     handle,
     harness,
@@ -515,5 +521,6 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     ...(input.env.SCP_PARENT ? { parent: input.env.SCP_PARENT } : {}),
     ...(keys.length ? { lineage: keys } : {}),
     ...(input.env.SCP_GRANT ? { grant: input.env.SCP_GRANT } : {}),
+    ...(harnessSession ? { harness_session: harnessSession } : {}),
   }
 }

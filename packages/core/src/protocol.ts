@@ -170,6 +170,8 @@ export interface Claim {
   session?: string
   /** the harness process the claim comes from, `pid:<pid>:<start time>`: a shim restarted in that process may rejoin its endpoint */
   process?: string
+  /** the harness's own stable session id (Claude Code's): a resumed session in a new harness process takes back the offline endpoint of that id */
+  harness_session?: string
   /** process keys of the claimant's harness process and its ancestors, nearest first: the nearest endpoint holding one places the claim under it */
   lineage?: string[]
   /** a `krt_` grant from `spawn-env`: places the claim at or below its lineage placement, with the grant's caps and groups */

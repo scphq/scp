@@ -615,8 +615,10 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     ),
   )
   if ("dark" in joined) return
+  const harnessSession = event.agent ? undefined : asString(field(payload, "session_id", "sessionId"))
   const claim = relayIdentity({
     ...(joined.handle ? { as: joined.handle } : {}),
+    ...(harnessSession ? { harnessSession } : {}),
     harness,
     fallbackHarness: "hook",
     cwd: event.cwd ?? options.cwd,
@@ -738,8 +740,10 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     ),
   )
   if ("dark" in joined) return
+  const harnessSession = asString(field(payload, "session_id", "sessionId"))
   const claim = relayIdentity({
     ...(joined.handle ? { as: joined.handle } : {}),
+    ...(harnessSession ? { harnessSession } : {}),
     harness,
     fallbackHarness: "hook",
     cwd: asString(payload.cwd) ?? options.cwd,

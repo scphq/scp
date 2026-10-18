@@ -2,6 +2,7 @@ import { Readable } from "node:stream"
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync } from "node:fs"
 import { join } from "node:path"
+import { LIMITS } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { runHook } from "./hooks"
 import { harnessLineage } from "./identity"
@@ -266,6 +267,51 @@ describe("swarm join --under, adopt and unlink", () => {
     } finally {
       parent.close()
       child.close()
+    }
+  })
+})
+
+describe("a resumed Claude Code session", () => {
+  test("its hooks in a new harness process send the payload's session id and take back its named endpoint; name passes --take-over", async () => {
+    const root = mkdtempSync(join(process.env.HOME!, "resume-"))
+    const dir = join(root, "relay")
+    const project = join(root, "lane")
+    mkdirSync(join(project, ".git"), { recursive: true })
+    const env = cleanEnv({ SCP_DIR: dir, XDG_CONFIG_HOME: join(root, "config"), CLAUDECODE: "1" })
+    const clock = { now: Date.now() }
+    const broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "policy.json"), log: () => {}, now: () => clock.now })
+    const session = "0b8c6a52-5d2e-4c4f-9a3e-1f2d3c4b5a69"
+    const tool = (pid: number) =>
+      runHook(["claude"], {
+        env,
+        cwd: project,
+        stdin: Readable.from([JSON.stringify({ hook_event_name: "PostToolUse", cwd: project, session_id: session, tool_name: "Bash", tool_input: {} })]),
+        connect: () => RelayClient.connect(broker.socket),
+        harnessPid: () => pid,
+      })
+    const run = async (...args: string[]) => {
+      const child = Bun.spawn([process.execPath, "--no-env-file", entry, ...args], { env, cwd: project, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      return { stdout, stderr, code }
+    }
+    const peer = await RelayClient.connect(broker.socket)
+    try {
+      await peer.hello({ claim: { handle: "peer", harness: "codex" } })
+      const refused = await run("name", "peer", "--take-over", "--as", "other")
+      expect(refused.code).not.toBe(0)
+      expect(refused.stderr).toContain("only the human at a terminal takes over another endpoint")
+      await tool(process.pid)
+      const first = broker.core.list({ all: true }).find((e) => e.address === "me/claude-lane")!
+      broker.core.rename({ kind: "endpoint", id: first.id, auth: "session" }, { handle: "orch" })
+      clock.now += (LIMITS.hookIdleS + 1) * 1000
+      await tool(process.ppid)
+      expect(broker.core.list({ all: true }).filter((e) => e.address === "me/orch" || e.address === "me/claude-lane")).toMatchObject([
+        { id: first.id, address: "me/orch", presence: "online" },
+      ])
+    } finally {
+      peer.close()
+      await broker.stop()
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })
