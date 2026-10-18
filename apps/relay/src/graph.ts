@@ -648,7 +648,7 @@ function paintEdge(p) {
   p.style.strokeWidth = String(r1(1.1 + Math.min(2.6, Math.log2(e.count) * 0.55)));
 }
 
-/** an edge's path: straight for a spawn, a gentle bow within a machine; between machines it rises to the hub and runs through it, each direction on its own lane */
+/** an edge's path: straight for a spawn within a machine and an S curve from the parent down to a child on another machine; a message bows gently within a machine and between machines rises to the hub and runs through it, each direction on its own lane */
 function curve(e, a, b) {
   const trim = (p, c, by) => { const ux = c.x - p.x, uy = c.y - p.y, l = Math.max(Math.hypot(ux, uy), 1); return { x: p.x + ux / l * by, y: p.y + uy / l * by }; };
   const pt = (p) => r1(p.x) + " " + r1(p.y);
@@ -658,6 +658,11 @@ function curve(e, a, b) {
     const c1 = { x: a.x, y: lerp(a.y, hy, 0.6) }, c2 = { x: lerp(a.x, h.x, 0.55), y: hy };
     const c3 = { x: lerp(b.x, h.x, 0.55), y: hy }, c4 = { x: b.x, y: lerp(b.y, hy, 0.6) };
     return "M" + pt(trim(a, c1, R + 3)) + "C" + pt(c1) + " " + pt(c2) + " " + pt(h) + "C" + pt(c3) + " " + pt(c4) + " " + pt(trim(b, c4, end));
+  }
+  if (e.kind === "spawn" && machineOf(e.from) !== machineOf(e.to)) {
+    const k = Math.max(Math.abs(b.y - a.y), Math.abs(b.x - a.x) * 0.35, 60) * 0.5;
+    const c1 = { x: a.x, y: a.y + k }, c2 = { x: b.x, y: b.y - k };
+    return "M" + pt(trim(a, c1, R + 3)) + "C" + pt(c1) + " " + pt(c2) + " " + pt(trim(b, c2, end));
   }
   const dx = b.x - a.x, dy = b.y - a.y, d = Math.max(Math.hypot(dx, dy), 1), nx = -dy / d, ny = dx / d;
   const bow = e.kind === "spawn" ? 0 : Math.min(46, d * 0.2);

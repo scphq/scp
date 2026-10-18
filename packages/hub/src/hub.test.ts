@@ -1236,6 +1236,15 @@ describe("graph", () => {
     expect(hub.graph(GRAPH_MINUTES_MAX).edges.filter((e) => e.kind === "message")).toHaveLength(2)
     expect(hub.graph(10_000).minutes).toBe(GRAPH_MINUTES_MAX)
   })
+
+  test("a child linked under another machine's agent has a spawn edge from it", async () => {
+    const { hub, bridge } = setup()
+    await bridge("laptop", [{ address: "me/lead", parent_ep: null, depth: 0 }])
+    await bridge("desk", [{ address: "me/app", parent_ep: null, depth: 0, parent_addr: "laptop/lead" }], "tok_b", "usr_v")
+    const graph = hub.graph()
+    expect(graph.nodes.find((n) => n.address === "ada/desk/app")?.parent).toBe("ada/laptop/lead")
+    expect(graph.edges).toEqual([{ kind: "spawn", from: "ada/laptop/lead", to: "ada/desk/app" }])
+  })
 })
 
 describe("local events", () => {

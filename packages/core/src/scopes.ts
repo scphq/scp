@@ -293,19 +293,20 @@ export function relationText(peer: PolicySubject, me: PolicySubject): string {
 /**
  * The scope check for a message from `a` to `b`: `out(a)` admits `b` and `in(b)` admits `a`. Either side the account's human (with `humanAlways`)
  * or the system endpoint passes, except an `unverified` human sender (one without a terminal), which is checked like any unplaced sender; an
- * ancestor of `b` (unless `strict`) and a solicited reply pass both.
+ * ancestor of `b` (unless `strict`), a solicited reply and a parent and child `linked` across machines pass both.
  */
 export function scopeDecision(
   world: ScopeWorld,
   a: ScopeNode,
   b: ScopeNode,
-  options: { humanAlways: boolean; solicited?: boolean; unverified?: boolean; strict?: boolean },
+  options: { humanAlways: boolean; solicited?: boolean; linked?: boolean; unverified?: boolean; strict?: boolean },
 ): ScopeDecision {
   const kinds = [a.subject.kind, b.subject.kind]
   if (kinds.includes("system")) return { allowed: true, reasons: ["the relay itself"] }
   if (options.humanAlways && (b.human || (a.human && !options.unverified))) return { allowed: true, reasons: ["the human is always reachable"] }
   if (!options.strict && isAncestor(a, b)) return { allowed: true, reasons: [`${a.address} is an ancestor of ${b.address}: scopes never stop it`] }
   if (options.solicited) return { allowed: true, reasons: [`a reply to ${b.address}'s message in its thread`] }
+  if (options.linked) return { allowed: true, reasons: [`${a.address} and ${b.address} are parent and child across machines`] }
   const memo: Memo = new Map()
   const out = admits(world, a, "out", b, memo)
   if (!out.ok) return { allowed: false, dir: "out", reasons: [out.why] }

@@ -188,6 +188,48 @@ describe("bridge", () => {
     expect(hub.list({ all: true }).find((v) => v.address.endsWith("app"))?.parent ?? null).toBeNull()
   })
 
+  test("a root links under another machine's agent: every machine shows it, the two reach each other though scoped, a cycle is refused, unlink clears it", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a")
+    const b = await machine(fake, "b")
+    const app = await agent(a, "app")
+    const lead = await agent(b, "lead")
+    await app.request("rules_set", { in: [], out: [] })
+    const onB = (handle: string) => b.core.list({ all: true }).find((v) => v.address === `me/a/${handle}`)
+    await waitFor(() => onB("app"), "a/app on b")
+    await waitFor(() => a.core.list({ all: true }).find((v) => v.address === "me/b/lead"), "b/lead on a")
+    const human = await RelayClient.connect(a.socket)
+    cleanups.push(() => human.close())
+    await human.hello({ human: true, tty: true })
+    expect(await human.request("adopt", { endpoint: "app", parent: "b/lead" })).toMatchObject({
+      parent: "me/b/lead",
+      endpoint: { parent: "me/b/lead", depth: 0 },
+    })
+    await waitFor(() => onB("app")?.parent === "me/lead", "a/app under lead on b")
+    const hub = (fake.hub("ada") as unknown as { core: { list(f: { all: boolean }): { address: string; parent?: string | null }[] } }).core
+    expect(hub.list({ all: true }).find((v) => v.address.endsWith("/a/app"))?.parent).toEndWith("/b/lead")
+
+    await app.request("send", { to: "b/lead", body: "up" })
+    expect((await lead.request<Inbox>("inbox", { wait_s: 5 })).messages.map((m) => m.body.text)).toEqual(["up"])
+    await lead.request("send", { to: "a/app", body: "down" })
+    expect((await app.request<Inbox>("inbox", { wait_s: 5 })).messages.map((m) => m.body.text)).toEqual(["down"])
+
+    const other = await RelayClient.connect(b.socket)
+    cleanups.push(() => other.close())
+    await other.hello({ human: true, tty: true })
+    expect(await code(other.request("adopt", { endpoint: "lead", parent: "a/app" }))).toBe("scope_refused")
+
+    const side = await RelayClient.connect(a.socket)
+    cleanups.push(() => side.close())
+    const joined = await side.hello({ transient: true, claim: { handle: "side", harness: "claude-code", session: "s-side" }, join: { under: "b/lead" } })
+    expect(joined.endpoint?.parent).toBe("me/b/lead")
+    await waitFor(() => onB("side")?.parent === "me/lead", "a/side under lead on b")
+
+    await human.request("unlink", { endpoint: "app" })
+    await waitFor(() => (onB("app") && (onB("app")!.parent ?? null) === null ? true : undefined), "a/app a root again on b")
+    expect(await code(app.request("send", { to: "b/lead", body: "x" }))).toBe("not_found")
+  })
+
   test("a broker linked again under a new machine name relabels its endpoints, mirrors them there, and the old name leaves nothing behind", async () => {
     const fake = hubServer()
     const root = mkdtempSync(join(tmpdir(), "relay-bridge-rename-"))

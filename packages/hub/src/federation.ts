@@ -106,6 +106,8 @@ export interface MirrorScope {
   parent_ep?: string | null
   /** 0 for a root; null when not known */
   depth?: number | null
+  /** a parent on another machine of the account, `<machine>/<handle>`; null for none */
+  parent_addr?: string | null
   rules?: MirrorRules | null
   caps?: MirrorCaps | null
   /**
@@ -147,6 +149,7 @@ interface ParsedScope {
   tree?: string | null
   parent?: string | null
   depth?: number | null
+  parentAddr?: string | null
   rules?: MirrorRules | null
   caps?: ScopeCaps | null
   title?: string | null
@@ -449,6 +452,64 @@ export class FederatedCore extends RelayCore {
     return !(row as FederatedRow).remote
   }
 
+  /** `<machine>/<handle>` of a row of this account: a mirrored row's remote, a local one's on this machine; null for another account's or without a machine */
+  private keyOf(row: EndpointRow): string | null {
+    const remote = (row as FederatedRow).remote
+    if (remote) return isForeign(remote) ? null : remote
+    return this.machine === null ? null : `${this.machine}/${row.handle}`
+  }
+
+  /** the row `<machine>/<handle>` names: a local one on this machine, else a mirrored one */
+  private byKey(key: string): EndpointRow | undefined {
+    if (!REMOTE.test(key)) return undefined
+    const handle = handlePart(key)
+    if (machinePart(key) === this.machine) return validHandle(handle) ? this.byHandle(handle) : undefined
+    return this.byRemote(key)
+  }
+
+  /** whether walking up from `start` (local and mirrored parents, then a link across machines) reaches a row whose key or id is in `targets` */
+  private reachesUp(start: EndpointRow, targets: Set<string>): boolean {
+    const seen = new Set<string>()
+    let row: EndpointRow | undefined = start
+    while (row && !seen.has(row.id) && seen.size <= LIMITS.depthMax * 4) {
+      seen.add(row.id)
+      const key = this.keyOf(row)
+      if (targets.has(row.id) || (key !== null && targets.has(key))) return true
+      row = row.parent_ep ? this.byId(row.parent_ep) : row.parent_addr ? this.byKey(row.parent_addr) : undefined
+    }
+    return false
+  }
+
+  /** a parent on another machine is a mirrored agent of this account that neither is nor sits under the child or one of its descendants */
+  protected override linkAcross(row: EndpointRow, parent: EndpointRow): string {
+    const remote = (parent as FederatedRow).remote
+    if (!remote || isForeign(remote) || parent.kind !== "agent" || handlePart(remote) === "")
+      throw new RelayError("invalid_params", "the parent is an agent endpoint of this account")
+    if (row.parent_addr === remote) return remote
+    const below = this.sql.all<{ id: string }>(`SELECT id FROM endpoints WHERE tree = ?`, row.id).map((r) => r.id)
+    const key = this.keyOf(row)
+    if (this.reachesUp(parent, new Set([row.id, ...below, ...(key === null ? [] : [key])])))
+      throw new RelayError("scope_refused", `${this.address(parent)} sits under ${this.address(row)}: a session cannot go under its own descendant`)
+    return remote
+  }
+
+  protected override renamedHandle(from: string, to: string): void {
+    if (this.machine !== null) this.sql.all(`UPDATE endpoints SET parent_addr = ? WHERE parent_addr = ?`, `${this.machine}/${to}`, `${this.machine}/${from}`)
+  }
+
+  protected override linkedAcross(a: EndpointRow, b: EndpointRow): boolean {
+    const [ka, kb] = [this.keyOf(a), this.keyOf(b)]
+    return (a.parent_addr !== null && a.parent_addr === kb) || (b.parent_addr !== null && b.parent_addr === ka)
+  }
+
+  protected override linkedParent(row: EndpointRow, shown?: Set<string>): string | null {
+    const key = row.parent_addr
+    if (!key) return null
+    const parent = this.byKey(key)
+    if (parent) return shown && !shown.has(parent.id) ? null : this.address(parent)
+    return shown ? null : this.remoteAddress(key)
+  }
+
   /** a live mirrored row shows the presence its machine mirrored, not one its last_seen decays to here */
   protected override view(row: EndpointRow, shown?: Set<string>): EndpointView {
     const view = super.view(row, shown)
@@ -613,6 +674,7 @@ export class FederatedCore extends RelayCore {
         const old = !before && view.was !== null ? this.byRemote(`${machine}/${view.was}`) : undefined
         if (old && old.token_hash === null) {
           this.sql.all(`UPDATE endpoints SET remote = ? WHERE id = ?`, remote, old.id)
+          this.sql.all(`UPDATE endpoints SET parent_addr = ? WHERE parent_addr = ?`, remote, `${machine}/${view.was}`)
           before = this.byId(old.id) as FederatedRow
           renamed.set(old.id, view.was!)
         }
@@ -697,6 +759,7 @@ export class FederatedCore extends RelayCore {
       tree: root?.handle ?? null,
       parent_ep: parent?.handle ?? null,
       depth: row.depth ?? 0,
+      parent_addr: row.parent_addr ?? null,
       rules: Object.keys(rules).length ? rules : null,
       caps: wire,
       title: row.title ?? null,
@@ -1627,9 +1690,9 @@ export class FederatedCore extends RelayCore {
     const was = this.view(before)
     const presence = was.presence !== view.presence
     const status = before.status_state !== after.status_state || before.status_note !== after.status_note
-    const other = (["kind", "harness", "model", "cwd", "labels", "title", "wake", "tree", "parent_ep", "depth", "rules", "caps", "incarnation"] as const).some(
-      (field) => before[field] !== (after as FederatedRow)[field],
-    )
+    const other = (
+      ["kind", "harness", "model", "cwd", "labels", "title", "wake", "tree", "parent_ep", "parent_addr", "depth", "rules", "caps", "incarnation"] as const
+    ).some((field) => before[field] !== (after as FederatedRow)[field])
     return presence || status || other ? { view, added: false, presence, status } : null
   }
 
@@ -1646,6 +1709,7 @@ export class FederatedCore extends RelayCore {
       tree: row.depth === null ? null : row.tree ? handle(row.tree) : remote ? handlePart(remote) : row.handle,
       parent_ep: handle(row.parent_ep),
       depth: row.depth,
+      parent_addr: row.parent_addr ?? null,
       rules: row.rules ? (JSON.parse(row.rules) as MirrorRules) : null,
       caps: row.caps ? this.wireCaps(JSON.parse(row.caps) as ScopeCaps) : null,
       incarnation: (row as FederatedRow).incarnation ?? null,
@@ -1695,14 +1759,23 @@ export class FederatedCore extends RelayCore {
       caps = merged.caps.length || Object.keys(merged.allow).length ? JSON.stringify(merged) : null
     }
     const rules = scope.rules !== undefined ? scope.rules : fresh ? null : undefined
+    const linked = scope.parentAddr !== undefined ? scope.parentAddr : fresh ? null : row.parent_addr
     return {
       ...place,
+      parent_addr: linked !== null && (place.parent_ep !== null || this.loops(row, linked)) ? null : linked,
       rules: rules === undefined ? row.rules : rules && (rules.in || rules.out) ? JSON.stringify(rules) : null,
       caps,
       title: scope.title !== undefined ? scope.title : fresh ? null : row.title,
       wake: scope.wake !== undefined ? scope.wake : fresh ? null : row.wake,
       incarnation: scope.incarnation ?? row.incarnation,
     }
+  }
+
+  /** whether a link of `row` under `key` closes a cycle in what this relay mirrors */
+  private loops(row: EndpointRow, key: string): boolean {
+    const parent = this.byKey(key)
+    const own = this.keyOf(row)
+    return parent !== undefined && this.reachesUp(parent, new Set([row.id, ...(own === null ? [] : [own])]))
   }
 
   /** wire caps of `machine` with their `ep:<handle>` references as this core's row ids; an endpoint the machine does not mirror is `gone`, which admits nothing */
@@ -1848,6 +1921,12 @@ function parseScope(view: Partial<MirrorView>): ParsedScope {
   if (given("depth")) {
     if (view.depth !== null && (!Number.isInteger(view.depth) || (view.depth as number) < 0 || (view.depth as number) > 1000)) throw bad("depth")
     out.depth = view.depth ?? null
+  }
+  if (given("parent_addr")) {
+    const key = view.parent_addr
+    if (key !== null && (typeof key !== "string" || !REMOTE.test(key) || !MACHINE_NAME.test(machinePart(key)) || !validHandle(handlePart(key))))
+      throw bad("parent_addr")
+    out.parentAddr = key ?? null
   }
   if (given("rules")) {
     if (view.rules !== null && !isRecord(view.rules)) throw bad("rules")

@@ -181,3 +181,30 @@ test("the fleet strip shows the root square first, never an offline square, and 
   expect(html).not.toMatch(/old|dead/);
   expect(html).toContain('<span class="mini">box</span>');
 });
+
+test("a session linked under a parent on another machine nests under it with its machine tag", () => {
+  const lead = ep("lead", "online");
+  const worker = { ...ep("worker", "online"), address: "acme/vm/worker", labels: { machine: "vm" }, parent: "acme/box/lead" };
+  const page = liveRegion(
+    {
+      machines: [
+        { name: "box", kind: "device", online: true, last_seen: null },
+        { name: "vm", kind: "device", online: true, last_seen: null },
+      ],
+      endpoints: [lead, worker],
+      activity: [],
+    },
+    "acme",
+    Date.now(),
+  ).value;
+  expect(page).toMatch(
+    /<h3 class="mono">box<\/h3>[\s\S]*lead[\s\S]*class="sub d1" data-anc="acme\/box\/lead"[\s\S]*worker<\/span> <span class="tag" title="runs on vm">vm<\/span>[\s\S]*<h3 class="mono">vm<\/h3>/,
+  );
+  expect(page).toContain("Its agent shows under a parent on another machine.");
+});
+
+test("the fleet counts a child on another machine under its orchestrator", () => {
+  const worker = { ...ep("worker", "online"), address: "acme/vm/worker", labels: { machine: "vm" }, parent: "acme/box/lead" };
+  const trees = fleetTrees([ep("lead", "online"), worker]);
+  expect(trees.map((t) => [t.root.address, t.kids.map((k) => k.address)])).toEqual([["acme/box/lead", ["acme/vm/worker"]]]);
+});
