@@ -126,7 +126,7 @@ export const GRAPH_MINUTES_MAX = 60
 /** what a read-only dashboard stream sees as it happens: addresses, kinds and presence, never a body, note, summary or label */
 export type DashboardEvent =
   | { type: "presence"; at: string; machine: string | null; endpoint: string; presence: Presence }
-  | { type: "message"; at: string; kind: string; from: string; to: string[] }
+  | { type: "message"; at: string; kind: string; from: string; to: string[]; local?: true }
   | { type: "endpoints"; at: string; machine: string }
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null)
@@ -136,7 +136,8 @@ export function dashboardEvent(event: Record<string, unknown>, at: string): Dash
   if (event.type === "message") {
     const from = str(event.from)
     const to = Array.isArray(event.to) ? event.to.filter((a): a is string => typeof a === "string") : []
-    return from && to.length ? { type: "message", at, kind: str(event.kind) ?? "message", from, to } : null
+    if (!from || !to.length) return null
+    return { type: "message", at, kind: str(event.kind) ?? "message", from, to, ...(event.local === true ? { local: true as const } : {}) }
   }
   if (event.type === "presence") {
     const endpoint = str(event.endpoint)
@@ -218,7 +219,16 @@ const HUB_MIGRATION = [
   `CREATE TABLE IF NOT EXISTS machines (name TEXT PRIMARY KEY, token_id TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER)`,
   `CREATE TABLE IF NOT EXISTS hub_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS machine_tombstones (name TEXT PRIMARY KEY, actor_id TEXT, user_id TEXT, at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS local_events (from_ep TEXT NOT NULL, to_ep TEXT NOT NULL, at INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS local_events_at ON local_events (at)`,
 ]
+
+/** kinds a bridge reports for a delivery its broker made on its own machine */
+export const LOCAL_EVENT_KINDS = ["message", "request", "reply", "status", "handback", "spawn"] as const
+/** events per `local_events` frame, recipients per event, and how far back an event's `at` may lie */
+export const LOCAL_EVENTS = { perFrame: 200, recipients: 64, maxAgeMs: 300_000 } as const
+const LOCAL_KEEP_MS = 3_600_000
+const HASH_ID = /^[0-9a-f]{8,64}$/
 
 const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "machines", "machines_rm"])
 const CLIENT_METHODS = new Set(["whoami", "send", "ask", "ask_wait", "inbox", "ack", "status", "event", ...OBSERVER_METHODS])
@@ -542,6 +552,7 @@ export class RelayHub {
     this.setState("last_validated", now)
     if (now - (this.state("last_sweep") ?? 0) >= SWEEP_MS) {
       this.relay.sweep()
+      this.deps.sql.all(`DELETE FROM local_events WHERE at <= ?`, now - LOCAL_KEEP_MS)
       this.expireMachines(now)
       this.forgetTombstones(now)
       const denied = this.deniedGrants()
@@ -1024,6 +1035,8 @@ export class RelayHub {
         this.fleet({ type: "activity", machine, ...row })
         return row
       }
+      case "local_events":
+        return { recorded: this.localEvents(machine, params.events) }
       case "list":
         if (params.contacts === true) return { contacts: await this.contactList() }
         return { endpoints: core.list(listFilters(params)) }
@@ -1405,6 +1418,48 @@ export class RelayHub {
     })
   }
 
+  /**
+   * a bridge's metadata for deliveries its broker made on its own machine: counted for the graph and streamed to watchers and the
+   * dashboard as `local`; unknown endpoints and malformed events are skipped
+   */
+  private localEvents(machine: string, value: unknown): number {
+    if (!Array.isArray(value) || value.length > LOCAL_EVENTS.perFrame)
+      throw new RelayError("invalid_params", `events is a list of at most ${LOCAL_EVENTS.perFrame}`)
+    const core = this.relay
+    const now = this.now()
+    const resolve = (handle: unknown): string | null => {
+      try {
+        return core.remoteEndpoint(machine, handle)
+      } catch {
+        return null
+      }
+    }
+    let recorded = 0
+    for (const raw of value) {
+      if (typeof raw !== "object" || raw === null) continue
+      const event = raw as Params
+      const kind = (LOCAL_EVENT_KINDS as readonly unknown[]).includes(event.kind) ? (event.kind as string) : null
+      const at = typeof event.at === "number" && Number.isFinite(event.at) ? Math.min(Math.max(event.at, now - LOCAL_EVENTS.maxAgeMs), now) : null
+      const from = resolve(event.from)
+      if (!kind || at === null || !from || !Array.isArray(event.to) || event.to.length > LOCAL_EVENTS.recipients) continue
+      const to = [...new Set(event.to.map(resolve).filter((id): id is string => id !== null && id !== from))]
+      if (!to.length) continue
+      for (const ep of to) this.deps.sql.all(`INSERT INTO local_events (from_ep, to_ep, at) VALUES (?, ?, ?)`, from, ep, at)
+      this.fleet({
+        type: "message",
+        machine,
+        local: true,
+        ...(typeof event.id === "string" && HASH_ID.test(event.id) ? { id: event.id } : {}),
+        ...(typeof event.thread === "string" && HASH_ID.test(event.thread) ? { thread: event.thread } : {}),
+        kind,
+        from: core.addressOf(from),
+        to: to.map((ep) => core.addressOf(ep)),
+      })
+      recorded++
+    }
+    return recorded
+  }
+
   /** the body's bytes when the account can hold them; refuses a send past the `storedBytes` limit */
   private room(sender: string, body: unknown): number {
     if (typeof body !== "string") return 0
@@ -1647,9 +1702,13 @@ export class RelayHub {
     const edges: GraphEdge[] = nodes.flatMap((n) =>
       n.parent && n.parent !== n.address && listed.has(n.parent) ? [{ kind: "spawn" as const, from: n.parent, to: n.address }] : [],
     )
+    const since = this.now() - window * 60_000
     const pairs = this.deps.sql.all<{ from_ep: string; to_ep: string; n: number; last: number }>(
-      `SELECT from_ep, to_ep, COUNT(*) AS n, MAX(at) AS last FROM pair_events WHERE at > ? GROUP BY from_ep, to_ep`,
-      this.now() - window * 60_000,
+      `SELECT from_ep, to_ep, COUNT(*) AS n, MAX(at) AS last FROM (
+         SELECT from_ep, to_ep, at FROM pair_events WHERE at > ? UNION ALL SELECT from_ep, to_ep, at FROM local_events WHERE at > ?
+       ) GROUP BY from_ep, to_ep`,
+      since,
+      since,
     )
     const traffic: GraphEdge[] = pairs.flatMap((row) => {
       const from = byId.get(row.from_ep)

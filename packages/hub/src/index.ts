@@ -21,6 +21,8 @@ export {
   type GraphNode,
   type HubGraph,
   HUB_LIMITS,
+  LOCAL_EVENT_KINDS,
+  LOCAL_EVENTS,
   RelayHub,
   type HubAuth,
   type HubConn,
