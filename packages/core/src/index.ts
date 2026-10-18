@@ -1,3 +1,4 @@
+export { newId, RelayCore, type CoreOptions, type EndpointRow, type MessageRow } from "./core"
 export * from "./protocol"
 export {
   collapseTools,
@@ -125,3 +126,4 @@ export {
 export * from "./xacct"
 export { sha256Hex } from "./sha256"
 export { one, type Sql, type SqlValue } from "./sql"
+export { utf8Bytes } from "./utf8"

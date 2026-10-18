@@ -1,5 +1,8 @@
 export const PROTOCOL = "scp/1"
 
+/** the reference CLI's command, as refusals and notes name its verbs */
+export const CLI_NAME = "swarm"
+
 export const CAPABILITIES = ["inbox.wait", "ask", "scopes", "groups"] as const
 /** the local broker serves the peek, judge and hold review methods the hosted hub does not */
 export const BROKER_CAPABILITIES = [...CAPABILITIES, "peek", "judge", "holds"] as const

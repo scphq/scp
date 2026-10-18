@@ -480,10 +480,12 @@ On success the broker stores the message once and one delivery per recipient, ac
 | Field | Meaning |
 | --- | --- |
 | `id`, `thread`, `hop` | Of the stored message. |
-| `deliveries[]` | Per recipient: `endpoint`, `address`, `seq`, `offline`, `queued?`, `last_seen`. `queued` means the recipient is not connected now; `offline` means it has been gone for at least 10 s. |
+| `deliveries[]` | Per recipient: `endpoint`, `address`, `seq`, `offline`, `queued?`, `last_seen`, `state?`. `queued` means the recipient is not connected now; `offline` means it has been gone for at least 10 s. `state`, set only for an agent recipient on this machine, says when it sees the message: `running` at its next turn boundary, `ended` never unless it is started again (its status is `done`), `offline` never unless it comes back, `starting` once the sender's own spawn of it joins. |
 | `duplicate?` | The send repeated an earlier `client_id` (section 7.7). |
 | `held?` | `{hold_id, side}`: the judge held the message; nothing was delivered. |
 | `redacted?` | `{n, kinds}`: the judge delivered it with `n` spans replaced. |
+
+**Sends to a spawn that has not joined.** A recipient `<user>/<name>` that no endpoint holds, where the sender issued an unspent, unrevoked, unexpired spawn grant named `<name>` whose bound process is alive, is not `not_found`: the delivery waits under that grant, reported with an opaque `endpoint`, `queued: true`, `last_seen: null` and `state: "starting"`, and moves to the endpoint whose claim spends the grant. A delivery to an agent of that name that is `done` or offline while such a grant waits reports `state: "starting"`. When the spawn exits without joining, the waiting deliveries are dropped and counted in the handback (section 9.3).
 
 ### 7.4 Fan-out
 
@@ -508,7 +510,7 @@ On success the broker stores the message once and one delivery per recipient, ac
 ### 7.7 Idempotency
 
 - A send with `client_id` is keyed by (sender endpoint, `client_id`) for `LIMITS.idempotencyS` (24 h).
-- The key covers a hash of the sorted recipient ids, body, kind, requested thread, parent id, data class, sorted attachment paths, mime and ttl.
+- The key covers a hash of the sorted recipient ids, body, kind, requested thread, parent id, data class, sorted attachment paths, mime, ttl and whether `require_reply` is set.
 - A repeat with the same hash MUST return the stored result with `duplicate: true` and MUST NOT create a delivery, wake anyone or emit an event. A repeat with a different hash is `invalid_params`.
 - The idempotency lookup happens after validation, credential and scope checks and before hop, rate and inbox checks.
 
@@ -692,7 +694,8 @@ A session that spawned workers can wait at its stop for their messages instead o
 - When the stop is not blocked, the harness can continue a stop with text, the session has live workers or unread worker messages, and `pushes_left` is not 0, the hook loops `stop_wait {wait_s, prompts}` until it gets messages, the workers end, a new prompt arrives, the push budget runs out or the push wait elapses.
 - **Push wait.** Configured per install (reference default 600 s, 0 disables, range 0 to 3600); the effective wait is the smaller of the install setting and `SCP_PUSH_WAIT`. Each `stop_wait` blocks for at most `LIMITS.waitMaxS`, rechecking every second.
 - **Live workers.** Unrevoked spawn grants of the session, without `no_push`, created since the session's `spawned_at`, that are either unspent and unexpired (`starting`; revoked once their bound process is dead) or spent by an endpoint that is neither `done` nor offline.
-- **Result** (`StopWaitResult`): `messages` (worker messages and handbacks about workers, within `LIMITS.pushBytes`, 20480 bytes of wrapped text), `offered`, `hold`, `more`, `workers` (addresses), `starting`, `others` (count of other unread messages, never their text), `pushes_left`, `prompted?`, `brief?`.
+- **Result** (`StopWaitResult`): `messages` (worker messages and handbacks about workers, within `LIMITS.pushBytes`, 20480 bytes of wrapped text), `offered`, `hold`, `more`, `workers` (addresses), `starting`, `others`, `others_shown?`, `pushes_left`, `prompted?`, `brief?`.
+- **Other messages.** When a worker message is shown, the session's other unread messages that no hook has shown or holds follow it in `messages`: the newest first, at most `LIMITS.injectMessages`, each fitting whole in what is left of `LIMITS.pushBytes`, then put back in seq order and held with the worker messages. `others_shown` counts them; `others` counts the other unread messages left, never their text.
 - **Budget.** A session may continue at most `LIMITS.pushes` (20) stops between two prompts. When none are left, nothing is shown. A worker whose message a push showed is not shown again for `LIMITS.pushGapS` (30 s).
 - **Prompt.** A prompt-submit hook sends `prompted`, which increments the session's prompt count and resets its pushes. A waiting stop then sees `prompted: true` and lets the stop pass so the harness takes the user's prompt.
 - The hook prints the preamble, the blocks, a read line, counts of further worker and other messages, and either the workers still running ("their next message reaches you when you stop"), that no worker is running, or that the push budget is used up. It confirms with `injected {seqs, hold, read, push: true}`. Pushes never count as stop holds.
@@ -793,17 +796,18 @@ The spawn operation (reference: `swarm spawn [flags] -- <harness command>`) runs
 
 ### 9.3 Handback
 
-`spawn_exit {grant, code, output?}` (code 0 to 255) MAY be called only by the grant's issuer or an ancestor of its spender. It is refused when a revoked grant was spent ("a new spawn holds its endpoint").
+`spawn_exit {grant, code, output?, stderr?, unapplied?, exits?, started?}` (code 0 to 255; `unapplied` at most `LIMITS.inboxPage` message ids of steers the spawn took but could not hand the worker; `exits` at most 8 times in ms, one per run the spawn resumed; `started: false` when the harness never started) MAY be called only by the grant's issuer or an ancestor of its spender. It is refused when a revoked grant was spent ("a new spawn holds its endpoint").
 
-- A spent grant's endpoint is set `done` with note `exited <code>` (prefixed to the earlier note, cut to `LIMITS.noteChars`) and its hook session is ended. An unspent grant is revoked.
+- A spent grant's endpoint is set `done` with note `exited <code>` (prefixed to the earlier note, cut to `LIMITS.noteChars`) and its hook session is ended. An unspent grant is revoked, and messages waiting for its worker (section 7.3) are dropped. A harness that never `started` hands nothing back.
 - **Output cleaning.** Escape sequences and control characters are removed; each line keeps the text after its last carriage return; the remainder of a cut private key is dropped; credentials are redacted; the last `LIMITS.handbackBytes` (16384) bytes are kept on a character boundary, prefixed by the line `[earlier output cut]` when anything was cut and the cap has room for it, starting at the first line that begins within the cap (on a character boundary when one line is longer than that). A spawner MAY choose a smaller cap.
 - **Message.** Exactly one handback per grant, of kind `message`, delivered to the issuer without send checks. Its sender is the worker, or the system endpoint when the worker never joined. Its thread is the last thread between the two since the grant, else a stable thread id derived from the grant. Its hop follows the worker's causal hop (section 12.1). No handback is sent when that thread is full.
-- **Body.**
-  - `worker <address> finished (exit <code>)`, a blank line, then the cleaned output; or
-  - `... exited (exit <code>) with no final output` when the worker had messaged the spawner but left no output; or
-  - `... exited without replying (exit <code>)`; or
-  - `worker <name> never joined the relay (exit <code>)` with any output.
-  - When messages from the spawner to the worker arrived after it finished, the body adds `<n> of your messages to it arrived after it finished and were not applied: <short ids>`.
+- **Body.** Parts separated by blank lines:
+  - `worker <address> finished (exit <code>)`, then the cleaned output; or
+  - `worker <address> exited (exit <code>) with no final output` when the worker had messaged the spawner but left no output; or
+  - `worker <address> exited without replying (exit <code>)`; or
+  - for a worker that never joined (a plain command, not a relay agent): `worker <name> finished (exit <code>), not a relay agent`, then, when the spawner's messages were queued for it, `<n> message(s) you sent it never reached it: it never joined the relay`, then any output.
+  - When the worker never joined or exited non-zero, the tail of its cleaned `stderr` (at most `2 * LIMITS.stderrBytes` bytes) follows last under the line `stderr (last <LIMITS.stderrBytes / 1024> KB):`, and the output is cut from the front so the body stays within `LIMITS.handbackBytes`.
+  - For a worker that joined, one line per steer from the spawner it never applied (those still unread, plus `unapplied`): `steer not applied: "<text>" (<short id>, <when>)`, the text on one line, credentials redacted, clipped to 120 characters plus `...`; `<when>` is `arrived after it exited`, or `arrived <s> s before it exited` (`under 1` below a second) followed by `, after its last step` or `, unread`.
 - The broker wakes the issuer. The handback reaches it through its stop push, injection or inbox, and is audited `spawn_exit`.
 
 ### 9.4 Worker lifecycle
