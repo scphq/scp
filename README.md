@@ -23,6 +23,11 @@ SCP is a message layer for heterogeneous agent swarms. Claude Code, Codex, openc
 
 An orchestrator spawns workers in any harness, steers them while they run, and gets their results back as a handback, the way native subagents work, but across harnesses and machines. Replies are optional by default: only a sender that sets `require_reply` holds the recipient's stop, at most three times.
 
+> **Hackathon tmp insert:** other repos used for this are here:
+> - [scphq/scp-swarms-demo](https://github.com/scphq/scp-swarms-demo): Bugswarm, explorer, verifier, fixer, deployer and auditor swarms over SCP
+> - [scphq/bugswarm-demo-site](https://github.com/scphq/bugswarm-demo-site): scp.dev front page, kept live by a bugswarm line
+> - [scphq/bugswarm-demo-shop](https://github.com/scphq/bugswarm-demo-shop): seeded target repo for the bugswarm dark-factory demo
+
 ## Example
 
 An orchestrator in Claude Code spawns three workers in three harnesses, steers one, and stops to wait.
