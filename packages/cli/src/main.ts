@@ -13,8 +13,10 @@ import {
   type JudgeHeld,
   type JudgeRedacted,
   LIMITS,
+  type MessageReceipts,
   PREAMBLE,
   reachLines,
+  receiptLines,
   RelayError,
   type ScopeChange,
   type ScopeView,
@@ -63,14 +65,16 @@ results back, as with native subagents.
   ${CLI_NAME} ask <to> [text|-] [--wait S]   send a request and wait for its reply: ${CLI_NAME} ask lead "which branch?"
   ${CLI_NAME} inbox [--wait S]            your unread messages, then marked read: ${CLI_NAME} inbox
   ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, status
-  ${CLI_NAME} status                      the fleet in short: who works, waits or is blocked, unread counts
+  ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
   ${CLI_NAME} peek <ep>                   a short, redacted view of a peekable agent's last turns: ${CLI_NAME} peek rev
   ${CLI_NAME} set-status <state> [note]   working, waiting, blocked or done: ${CLI_NAME} set-status done "PR open"
 
 - spawn returns at once with the worker's name: do not background it (no &, no run_in_background).
 - A worker's messages and its handback (exit code and its whole reply) arrive by themselves: when you stop, your stop
   waits for them and continues with them, and new messages also reach you after your tool calls. No polling needed.
-- Address a worker by the name spawn printed. Steer it meanwhile with ${CLI_NAME} send <name> <text>.
+- Address a worker by the name spawn printed. Steer it meanwhile with ${CLI_NAME} send <name> <text>: it gets
+  the message after its next tool call or before it finishes, so its task need not tell it to check an inbox.
+- With the relay MCP tools: relay_spawn starts a worker in one call, relay_send steers it, relay_status reads receipts.
 - --no-push: a worker your stop does not wait on; its messages and handback still reach you after your tool calls
   or with another worker's push.
 - An <id> is a message id, its short id (the last 6 characters, shown with every message) or last.
@@ -100,6 +104,9 @@ usage:
   ${CLI_NAME} ask-wait <id> [--wait S]           keep waiting for the reply to a request
   ${CLI_NAME} status [--all] [--activity]        the fleet in short: you, agents by presence and status, who waits or is blocked,
                                                  unread counts; --activity adds the latest activity, --all counts offline agents
+  ${CLI_NAME} status <id>                        a message you sent, a line per recipient: read at HH:MM:SS, delivered at
+                                                 HH:MM:SS (a background hook handed it over; it reaches the model with its next
+                                                 request), shown by a hook at HH:MM:SS (in its context, not yet marked read), or unread
   ${CLI_NAME} watch                              a live tail of the fleet: presence, messages, status, activity
   ${CLI_NAME} set-status <state> [note]          your status line: working, waiting, blocked or done
   ${CLI_NAME} set-title <text>                   what you work on, shown in list, peers and whoami ("" clears it)
@@ -156,8 +163,10 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  still reach you after your tool calls, with another worker's push, or in your inbox.
                                                  codex gets -c overrides that hand the grant to its scp MCP server
                                                  (also behind env, VAR=value, timeout, nohup or nice). codex exec outside a git
-                                                 repo gets --skip-git-repo-check when its codex has it, and with its prompt in argv
-                                                 runs on /dev/null for stdin (a - prompt, or none, keeps stdin).
+                                                 repo gets --skip-git-repo-check when its codex has it. With its prompt in argv it
+                                                 runs on /dev/null for stdin, except in the foreground (--fg), where piped context
+                                                 or a file reaches it (from an agent's shell only a pipe with data within 300 ms);
+                                                 a - prompt, or none, keeps stdin.
                                                  claude -p and grok -p get the relay messaging tools allowed (--allowedTools,
                                                  grok --allow) unless you pass a permission flag. muse runs with
                                                  --contributor-mode off unless you pass --contributor-mode on (or a -c contributor
@@ -325,6 +334,8 @@ const VERBS: Record<string, Option[]> = {
 
 /** a short message reference: `last`, or a suffix of an id such as its short id; all digits may be a seq too */
 const MESSAGE_REF = /^(last|[0-9a-z]{4,})$/
+/** Bound ack --all to the unread and deferred inboxes, plus a final empty page. */
+const ACK_ALL_PAGES = Math.ceil((2 * LIMITS.inboxMax) / LIMITS.inboxPage) + 1
 
 /**
  * a message delivered to the caller by id, seq, unique suffix (its short id) or `last`, with `member` also another's message in a thread the
@@ -375,6 +386,7 @@ function printMessage(message: Envelope): void {
   out(
     `#${message.seq} ${message.kind} from ${message.from.address} (${harness}) ${time(message.created_at)}  id ${shortId(message.id)} (${message.id})${message.reply_to ? `  reply to ${message.reply_to}` : ""}`,
   )
+  if (message.shown_at) out(`(a hook already showed you this at ${time(message.shown_at)}; that copy may reach you after this command)`)
   out(wrapMessage(message))
   out()
 }
@@ -722,6 +734,8 @@ async function runVerb(
           const lines = reachLines(result.deliveries)
           out(`sent ${result.id} to ${result.deliveries.map((d) => (lines.length ? d.address : deliveryText(d))).join(", ")}${redactedText(result.redacted)}`)
           for (const line of lines) out(`  ${line}`)
+          if (result.deliveries.some((d) => d.state === "running" || d.state === "starting"))
+            out(`  ${CLI_NAME} status ${shortId(result.id)} shows when it is read`)
         }
         return 0
       }
@@ -782,9 +796,9 @@ async function runVerb(
           result.acked += (await client.request<{ acked: number }>("ack", { seqs: seqs.slice(i, i + LIMITS.inboxPage) })).acked
       }
       if (values.all) {
-        for (let before = -1; before !== result.acked; ) {
-          before = result.acked
+        for (let page = 0; page < ACK_ALL_PAGES; page++) {
           const { messages } = await client.request<{ messages: Envelope[] }>("inbox", { wait_s: 0 })
+          if (!messages.length) break
           await ack(messages.flatMap((m) => (m.seq === undefined ? [] : [m.seq])))
         }
       } else {
@@ -803,6 +817,20 @@ async function runVerb(
       return 0
     }
     case "status": {
+      if (positionals.length) {
+        if (positionals.length > 1 || values.all || values.activity)
+          throw new RelayUsage(`${CLI_NAME} status takes one message id, or --all and --activity for the fleet`)
+        if (!broker) throw new RelayUsage(`${CLI_NAME} status <id> is the local broker's; it has no --cloud form`)
+        if (!me) throw new RelayUsage(`${CLI_NAME} status <id> reads a message you sent: pass --as HANDLE, or run it from the agent's shell or your terminal`)
+        const receipts = await client.request<MessageReceipts>("receipts", { id: positionals[0] })
+        if (asJson) json(receipts)
+        else {
+          out(`${receipts.id}:`)
+          const lines = receiptLines(receipts)
+          for (const line of lines.length ? lines : ["no deliveries of it are kept any more"]) out(`  ${line}`)
+        }
+        return 0
+      }
       const snapshot = await client.request<Snapshot>("snapshot", { all: values.all === true })
       if (asJson) {
         json(snapshot)

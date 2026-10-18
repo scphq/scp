@@ -1,7 +1,8 @@
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { connectBroker, relayDir } from "@scp-dev/broker"
-import { runRelayMcp } from "@scp-dev/mcp"
+import { runRelayMcp, type SpawnRequest } from "@scp-dev/mcp"
 import { RelayUsage, startDaemon } from "./common"
+import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
 import { harnessPid, relayIdentity } from "./identity"
 
@@ -32,7 +33,24 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     output: (line) => void process.stdout.write(line),
     env: process.env,
     channels: values.channels === true,
+    spawn: (request) => spawnDetached(spawnWords(request), request.cwd ?? claim.cwd),
     log: (line) => void process.stderr.write(`${line}\n`),
   })
   return 0
+}
+
+/** relay_spawn's request as `swarm spawn --bg` words, acting as the shim's own agent */
+export function spawnWords(request: SpawnRequest): string[] {
+  return [
+    "--bg",
+    "--as",
+    request.as,
+    ...(request.harness !== undefined ? ["--harness", request.harness] : []),
+    ...(request.name !== undefined ? ["--name", request.name] : []),
+    ...(request.title !== undefined ? ["--title", request.title] : []),
+    ...(request.no_push ? ["--no-push"] : []),
+    ...(request.handback_bytes !== undefined ? ["--handback-bytes", String(request.handback_bytes)] : []),
+    "--",
+    ...request.command,
+  ]
 }

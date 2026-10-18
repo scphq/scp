@@ -1,6 +1,6 @@
 import { Readable } from "node:stream"
 import { describe, expect, test } from "bun:test"
-import { type Envelope, PREAMBLE, PREAMBLE_BRIEF, type StopWaitResult } from "@scp-dev/core"
+import { type Envelope, LIMITS, PREAMBLE, PREAMBLE_BRIEF, type StopWaitResult } from "@scp-dev/core"
 import type { RelayClient } from "@scp-dev/broker"
 import {
   BLOCK_STOP,
@@ -89,18 +89,32 @@ describe("a stop waits on spawned workers", () => {
     expect(parsed.hookSpecificOutput.hookEventName).toBe("Stop")
     expect(parsed.hookSpecificOutput.additionalContext).toStartWith(PREAMBLE)
     expect(parsed.hookSpecificOutput.additionalContext).toContain('<relay-message from="me/w1" relation="child"')
-    expect(parsed.hookSpecificOutput.additionalContext).toContain("[from your worker me/w1: for your information; reply only if useful]")
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("[from your worker me/w1]")
     expect(parsed.hookSpecificOutput.additionalContext).toContain("2 other relay messages are unread")
-    expect(parsed.hookSpecificOutput.additionalContext).toEndWith("Workers you spawned still running: me/w1; their next message reaches you when you stop.")
+    expect(parsed.hookSpecificOutput.additionalContext).toEndWith("Workers you spawned still running: me/w1. End your turn to wait for them; no reply needed.")
     expect(parsed.hookSpecificOutput.additionalContext).not.toContain("done-43")
     const waits = sent("stop_wait").map((p) => p.wait_s as number)
     expect(waits).toHaveLength(2)
     expect(waits[0]).toBeLessThanOrEqual(50)
     expect(waits[0]).toBeGreaterThan(49)
     expect(deadlines).toHaveLength(1)
-    expect(deadlines[0]).toBeGreaterThanOrEqual(600_000)
-    expect(deadlines[0]).toBeLessThan(602_000)
+    expect(deadlines[0]).toBeGreaterThanOrEqual(600_000 + LIMITS.pushGraceS * 1000)
+    expect(deadlines[0]).toBeLessThan(602_000 + LIMITS.pushGraceS * 1000)
     expect(sent("injected")).toEqual([{ seqs: [12], hold: "hld_1", read: [12], push: true, preamble: true }])
+  })
+
+  test("the closing line says no reply is needed while workers still run, and says so plainly when none does", () => {
+    const got = { ...EMPTY, messages: [DONE], offered: [12], hold: "hld_1" }
+    expect(pushText({ ...got, workers: ["me/w1", "me/w2"], starting: 1 })).toEndWith(
+      "Workers you spawned still running: me/w1, me/w2, 1 not joined yet. End your turn to wait for them; no reply needed.",
+    )
+    expect(pushText({ ...got, workers: [] })).toEndWith("No worker you spawned is still running.")
+    expect(pushText({ ...got, workers: [], background: ["me/sleeper"] })).toEndWith(
+      "No worker your stop waits on is still running; me/sleeper (--no-push) still runs in the background.",
+    )
+    expect(pushText({ ...got, workers: ["me/a"], background: ["me/s1", "me/s2"] })).toEndWith(
+      "Workers you spawned still running: me/a. End your turn to wait for them; no reply needed. Also running with --no-push: me/s1, me/s2.",
+    )
   })
 
   test("shows other unread messages after the workers', wrapped the same and read with them, and counts what is left", async () => {

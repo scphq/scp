@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { PREAMBLE } from "@scp-dev/core"
+import { LIMITS, PREAMBLE } from "@scp-dev/core"
 import { accountHome, type Broker, RelayClient, relayDir, socketPath, startBroker } from "@scp-dev/broker"
 import { RELAY_BRIEF, RELAY_HELP, verbHelp } from "./main"
 import { grantParams, localHandle, RelayUsage, selectorList, terminalAttached } from "./common"
@@ -124,7 +124,8 @@ describe("swarm help", () => {
     expect(send).toContain("--thread takes a thread id")
     expect(send).not.toContain("swarm inbox")
     expect(verbHelp("reply")).toContain("An <id> is a message id")
-    expect(verbHelp("status")).not.toContain("An <id> is a message id")
+    expect(verbHelp("status")).toContain("An <id> is a message id")
+    expect(verbHelp("list")).not.toContain("An <id> is a message id")
     expect(verbHelp("peek")).toContain("swarm peek --who [ep]")
     expect(verbHelp("peek")).not.toContain("swarm set-peek")
     expect(verbHelp("rules")).toContain("scopes (selectors are comma-separated")
@@ -180,7 +181,9 @@ describe("swarm", () => {
     await swarm(["inbox", "--as", "b", "--harness", "codex"])
     const sent = await swarm(["send", "b", "ping from a"], { SCP_NAME: "a", SCP_LABELS: "role=impl,lane=relay" })
     expect(sent.stdout).toEqual(
-      expect.stringMatching(/^sent msg_\S+ to me\/b\n {2}me\/b: running; it sees this at its next turn boundary \(next tool call, stop or inbox read\)\n$/),
+      expect.stringMatching(
+        /^sent msg_\S+ to me\/b\n {2}me\/b: delivered; it sees this at its next tool call or when its turn ends\n {2}swarm status [0-9a-z]{6} shows when it is read\n$/,
+      ),
     )
     const inbox = await swarm(["inbox", "--as", "b", "--harness", "codex", "--ack"])
     expect(inbox.stdout).toContain('<relay-message from="me/a" harness="cli" auth="local-uid" kind="message"')
@@ -599,6 +602,22 @@ describe("swarm", () => {
     const asked = await swarm(["ask", "reach-done", "still there?", "--wait", "0"], { SCP_NAME: "reach-sender" })
     expect(asked.stderr).toMatch(/me\/reach-done(: its run ended; it will not see this unless it is started again| ended \(done\) without replying)/)
     expect(asked.stderr).not.toContain("sees the request on its next tool turn")
+  })
+
+  test("status <id> says per recipient of a message you sent when it read it, else unread; only for the sender, one id at a time", async () => {
+    await swarm(["whoami", "--as", "rcpt-b", "--harness", "codex"])
+    const sent = await swarm(["send", "rcpt-b", "read me"], { SCP_NAME: "rcpt-a" })
+    const id = /^sent (msg_\S+) /.exec(sent.stdout)![1]!
+    const status = (args: string[]) => swarm(["status", ...args], { SCP_NAME: "rcpt-a" })
+    expect((await status([id.slice(-6)])).stdout).toBe(`${id}:\n  me/rcpt-b: unread\n`)
+    await swarm(["inbox", "--as", "rcpt-b", "--harness", "codex"])
+    expect((await status([id])).stdout).toMatch(new RegExp(`^${id}:\\n  me/rcpt-b: read at \\d\\d:\\d\\d:\\d\\d\\n$`))
+    const receipts = JSON.parse((await status(["last", "--json"])).stdout) as { id: string; recipients: { address: string; read_at: string | null }[] }
+    expect(receipts).toMatchObject({ id, recipients: [{ address: "me/rcpt-b", read_at: expect.stringMatching(/^\d{4}-/) }] })
+    const foreign = await swarm(["status", id, "--as", "rcpt-b", "--harness", "codex"])
+    expect([foreign.code, foreign.stderr]).toEqual([125, expect.stringContaining(`no message ${id} that you sent`)])
+    expect((await status([id, "--all"])).stderr).toContain("swarm status takes one message id")
+    expect((await swarm(["status", id])).stderr).toContain("swarm status <id> reads a message you sent")
   })
 
   test("reply answers a message by its id: to its sender, in its thread, marking it read", async () => {
@@ -1399,6 +1418,35 @@ describe("swarm, from a hooks-only session's shell", () => {
     const inbox = await peer.request<{ messages: { from: { address: string } }[] }>("inbox")
     expect(inbox.messages.map((m) => m.from.address)).toEqual(["me/claude-lane"])
     expect(addresses().filter((a) => /^me\/claude-lane-\d+$/.test(a))).toEqual([])
+  })
+
+  test("ack --all goes past a full page of messages a background hook already showed", async () => {
+    const senders = await Promise.all(
+      Array.from({ length: 6 }, async (_, i) => {
+        const client = await RelayClient.connect(broker.socket)
+        await client.hello({ claim: { handle: `bulk-${i}`, harness: "codex" } })
+        return client
+      }),
+    )
+    const hook = await RelayClient.connect(broker.socket)
+    try {
+      await hook.hello({
+        transient: true,
+        claim: { handle: "claude-lane", harness: "claude-code", session: key, process: key, lineage: lineage(process.pid), cwd: process.env.HOME! },
+      })
+      for (const [i, sender] of senders.entries()) for (let n = 0; n < 18; n++) await sender.request("send", { to: "claude-lane", body: `bulk ${i}.${n}` })
+      for (let shown = 0; shown < LIMITS.inboxPage; ) {
+        const offered = await hook.request<{ offered: number[]; hold: string | null }>("inject", {})
+        const seqs = offered.offered.slice(0, LIMITS.inboxPage - shown)
+        await hook.request("injected", { seqs, hold: offered.hold, read: seqs, deferred: true })
+        shown += seqs.length
+      }
+      expect((await swarm(["ack", "--all"], env)).stdout.trim()).toBe(`${6 * 18 - LIMITS.inboxPage} acked`)
+      expect((await swarm(["inbox"], env)).stderr).toContain("no unread messages")
+    } finally {
+      hook.close()
+      for (const sender of senders) sender.close()
+    }
   })
 
   test("--as of a handle another live session holds is refused, and creates no endpoint", async () => {

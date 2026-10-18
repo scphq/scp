@@ -29,7 +29,7 @@ Steer: ${CLI_NAME} send <name> <text>; a claude -p or codex exec prompt gets a n
 A codex exec worker that exited before a late steer is resumed with it (codex exec resume, at most twice).
 Harnesses: codex gets -c overrides that hand it the grant (also behind env, timeout, nohup or nice); a ${CLI_NAME}
 command from its workspace-write sandbox needs -c sandbox_workspace_write.network_access=true. codex exec
-gets --skip-git-repo-check outside a git repo and a closed stdin unless its prompt is - (read from stdin). Workers
+gets --skip-git-repo-check outside a git repo, and with its prompt in argv piped stdin only under --fg. Workers
 message with the relay MCP tools (relay_send, relay_inbox, relay_reply). claude -p and grok -p get those tools allowed
 unless you pass a permission flag. muse runs with --contributor-mode off unless you pass on. agy needs the allow rules ${CLI_NAME}
 setup writes.

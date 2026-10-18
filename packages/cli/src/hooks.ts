@@ -337,7 +337,7 @@ export function unreadPointer(unread: number, awaiting = 0): string | undefined 
   return parts.length ? parts.join(" ") : undefined
 }
 
-/** Frames worker messages and handbacks, followed by other messages and unread counts. */
+/** Frames messages, unread counts and workers to wait on, distinguishing --no-push workers. */
 export function pushText(result: StopWaitResult): string | undefined {
   if (!result.messages.length && !result.more) return undefined
   const parts = [...preambleLines(result.brief, fromParent(result.messages)), ...result.messages.map(wrapMessage)]
@@ -354,11 +354,16 @@ export function pushText(result: StopWaitResult): string | undefined {
       `Push budget used up for this prompt; read the rest with ${CLI_NAME} inbox.${running.length ? ` Workers you spawned still running: ${running.join(", ")}.` : ""}`,
     )
   } else {
-    parts.push(
-      running.length
-        ? `Workers you spawned still running: ${running.join(", ")}; their next message reaches you when you stop.`
-        : "No worker you spawned is still running.",
-    )
+    const background = result.background ?? []
+    if (running.length) {
+      parts.push(
+        `Workers you spawned still running: ${running.join(", ")}. End your turn to wait for them; no reply needed.${background.length ? ` Also running with --no-push: ${background.join(", ")}.` : ""}`,
+      )
+    } else if (background.length) {
+      parts.push(
+        `No worker your stop waits on is still running; ${background.join(", ")} (--no-push) still ${background.length === 1 ? "runs" : "run"} in the background.`,
+      )
+    } else parts.push("No worker you spawned is still running.")
   }
   return parts.join("\n\n")
 }
@@ -427,7 +432,10 @@ export function hookReply(harness: string, kind: HookEvent["kind"], text: string
   return JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext: text } })
 }
 
-const NUDGE = `${CLI_NAME}: set your title and a one-line now with relay_set_title / relay_set_now so peers can find you.`
+/** Background tool hooks reach the model with its next request. */
+const DEFERS = new Set(["claude-code", "codex"])
+
+const NUDGE = `${CLI_NAME} (optional): a title and a one-line now (relay_set_title / relay_set_now) help peers find you; skip it when you only run workers.`
 
 /** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
 export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
@@ -540,6 +548,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
           ...(directive ? { restated: directive.restated } : {}),
           ...(full ? { preamble: true } : {}),
           ...(intro ? { intro: true } : {}),
+          ...(event.kind === "tool" && DEFERS.has(claim.harness) ? { deferred: true } : {}),
         })
         .catch(() => {})
     }
@@ -604,7 +613,7 @@ async function subagentHook(
   return reply
 }
 
-/** Waits for spawned workers until a message, prompt, deadline or push budget ends the wait. */
+/** Waits for worker messages, allowing the broker's grace period to gather results before the deadline. */
 async function push(
   client: RelayClient,
   harness: string,
@@ -615,7 +624,7 @@ async function push(
   continues = true,
 ): Promise<string | undefined> {
   const end = Date.now() + waitMs
-  if (waitMs > 0) options.deadline?.(end - began + PUSH_PRINT_MS)
+  if (waitMs > 0) options.deadline?.(end - began + LIMITS.pushGraceS * 1000 + PUSH_PRINT_MS)
   let result: StopWaitResult
   for (;;) {
     result = await client.request<StopWaitResult>("stop_wait", {

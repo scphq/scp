@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdirSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync } from "node:fs"
 import { join } from "node:path"
 import { TOOLS } from "@scp-dev/mcp"
 import { PREAMBLE } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { harnessPid } from "./identity"
+import { spawnWords } from "./mcp"
 
 setDefaultTimeout(30_000)
 
@@ -130,6 +131,78 @@ describe("swarm mcp", () => {
     }
     const install = spawnShim(["install", "--harness", "claude", "--channels"], env)
     expect(await install.stop()).toMatchObject({ code: 125, stdout: "" })
+  })
+
+  test("relay_spawn runs swarm spawn --bg as the calling shim's agent: it returns at once, and the handback reaches that agent; a refused spawn is the CLI's message", async () => {
+    const lead = spawnShim(["--as", "mcp-lead"], env)
+    const other = spawnShim(["--as", "mcp-other"], env)
+    try {
+      await other.call("relay_whoami")
+      const began = Date.now()
+      const started = await lead.call("relay_spawn", { command: ["sh", "-c", "sleep 1; echo hi"], name: "mcpw1", no_push: true })
+      expect(Date.now() - began).toBeLessThan(5000)
+      expect(textOf(started)).toMatch(
+        /^mcpw1 started \(pid \d+\) and runs in the background: .*steer it with relay_send to mcpw1 \(it gets the message after its next tool call or before it finishes\)$/,
+      )
+      let handback = ""
+      for (const deadline = Date.now() + 15_000; !handback.includes("worker mcpw1") && Date.now() < deadline; )
+        handback += textOf(await lead.call("relay_inbox", { wait_s: 2 }))
+      expect(handback).toContain('from="me/relay"')
+      expect(handback).toContain("worker mcpw1 finished (exit 0), not a relay agent\n\nhi")
+      expect(textOf(await other.call("relay_inbox"))).toBe("no unread messages")
+
+      const cwd = realpathSync(mkdtempSync(join(process.env.HOME!, "mcp-cwd-")))
+      await lead.call("relay_spawn", { command: ["sh", "-c", "pwd"], name: "mcpw2", no_push: true, cwd })
+      let ran = ""
+      for (const deadline = Date.now() + 15_000; !ran.includes("worker mcpw2") && Date.now() < deadline; )
+        ran += textOf(await lead.call("relay_inbox", { wait_s: 2 }))
+      expect(ran).toContain(`worker mcpw2 finished (exit 0), not a relay agent\n\n${cwd}`)
+
+      const refused = await lead.call("relay_spawn", { command: ["sh", "-c", "exit 0"], name: "Bad Name!" })
+      const cli = Bun.spawn(
+        [process.execPath, "--no-env-file", entry, "spawn", "--bg", "--as", "mcp-lead", "--harness", "mcp", "--name", "Bad Name!", "--", "sh", "-c", "exit 0"],
+        { env: cleanEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+      )
+      const stderr = await new Response(cli.stderr).text()
+      expect(refused.isError).toBe(true)
+      expect(stderr.split("\n")[0]).toBe(`swarm: ${textOf(refused)}`)
+    } finally {
+      await lead.stop()
+      await other.stop()
+    }
+  })
+
+  test("a relay_spawn request maps to swarm spawn --bg words, its command after --", () => {
+    expect(
+      spawnWords({
+        command: ["codex", "exec", "--json", "x"],
+        as: "me/lead",
+        harness: "claude-code",
+        name: "rev",
+        title: "t",
+        no_push: true,
+        handback_bytes: 900,
+      }),
+    ).toEqual([
+      "--bg",
+      "--as",
+      "me/lead",
+      "--harness",
+      "claude-code",
+      "--name",
+      "rev",
+      "--title",
+      "t",
+      "--no-push",
+      "--handback-bytes",
+      "900",
+      "--",
+      "codex",
+      "exec",
+      "--json",
+      "x",
+    ])
+    expect(spawnWords({ command: ["claude", "-p", "x"], as: "me/lead" })).toEqual(["--bg", "--as", "me/lead", "--", "claude", "-p", "x"])
   })
 
   test("the shim never becomes me/: --human and a reserved --as are refused", async () => {
