@@ -1,5 +1,5 @@
 import { Readable } from "node:stream"
-import { readFileSync, writeSync } from "node:fs"
+import { closeSync, fstatSync, openSync, readFileSync, readSync, writeSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
 import {
@@ -16,6 +16,7 @@ import {
   type StopNudge,
   type StopWaitResult,
   stripControl,
+  TITLE_CHARS,
   validHandle,
   wrapMessage,
 } from "@scp-dev/core"
@@ -419,6 +420,74 @@ function claudeVersion(payload: Json, env: Env): string | undefined {
   }
 }
 
+/** how much of a transcript's end a stop reads for the session's own title */
+const TITLE_TAIL_BYTES = 128 * 1024
+const TITLE_LINE = /^\{"type":"(custom-title|ai-title|summary)"/
+/** OpenCode's placeholder before it names a session */
+const OPENCODE_UNNAMED = /^(New|Child) session - \d{4}-/
+
+/** a title of at most the cap, on one line, credentials redacted */
+export function titleText(text: string | undefined): string | undefined {
+  if (!text) return undefined
+  const line = redactSecrets(stripControl(text.slice(0, 4096)).replace(/\s+/g, " ").trim())
+    .slice(0, TITLE_CHARS)
+    .trim()
+  return line || undefined
+}
+
+/** the first non-empty line of a prompt, as a title */
+export function promptTitle(prompt: string | undefined): string | undefined {
+  return titleText(prompt?.split("\n").find((line) => line.trim()))
+}
+
+/** the newest name Claude Code wrote near a transcript's end: one the user gave it, else its own summary */
+export function transcriptTitle(path: string | undefined, session: string | undefined): string | undefined {
+  if (!path || !session || !path.startsWith("/") || !path.endsWith(`/${session}.jsonl`)) return undefined
+  let fd: number | undefined
+  try {
+    fd = openSync(path, "r")
+    const size = fstatSync(fd).size
+    const start = Math.max(0, size - TITLE_TAIL_BYTES)
+    const buffer = Buffer.alloc(size - start)
+    const read = readSync(fd, buffer, 0, buffer.length, start)
+    const lines = buffer.subarray(0, read).toString("utf8").split("\n")
+    if (start > 0) lines.shift()
+    const found: Record<string, string> = {}
+    for (const line of lines) {
+      const kind = TITLE_LINE.exec(line)?.[1]
+      if (!kind) continue
+      try {
+        const record = JSON.parse(line) as Json
+        const text = asString(record.customTitle ?? record.aiTitle ?? record.summary)
+        if (text) found[kind] = text
+      } catch {}
+    }
+    return titleText(found["custom-title"] ?? found["ai-title"] ?? found.summary)
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/** what a hook infers the session's title from: the first prompt on a prompt, the harness's own name for the session on a stop */
+function inferredTitle(harness: string, event: HookEvent, named: string, payload: Json): { text: string; from: "prompt" | "summary" } | undefined {
+  if (event.agent) return undefined
+  if (event.kind === "prompt" && named === "userpromptsubmit") {
+    const text = promptTitle(asString(payload.prompt))
+    return text ? { text, from: "prompt" } : undefined
+  }
+  if (event.kind !== "stop" || named !== "stop") return undefined
+  const own = harness === "opencode" ? asString(payload.session_title) : undefined
+  const text =
+    harness === "claude-code"
+      ? transcriptTitle(asString(field(payload, "transcript_path", "transcriptPath")), asString(field(payload, "session_id", "sessionId")))
+      : own && !OPENCODE_UNNAMED.test(own)
+        ? titleText(own)
+        : undefined
+  return text ? { text, from: "summary" } : undefined
+}
+
 /** Formats harness replies; older Claude Code needs a blocking reason instead of Stop context. */
 export function hookReply(harness: string, kind: HookEvent["kind"], text: string, unread = 0, continues = true): string {
   if (kind === "stop" && harness === "claude-code" && continues)
@@ -434,6 +503,15 @@ export function hookReply(harness: string, kind: HookEvent["kind"], text: string
 
 /** Background tool hooks reach the model with its next request. */
 const DEFERS = new Set(["claude-code", "codex"])
+
+/** the prompts between two reminders to refresh the status note, from SCP_TLDR_EVERY; 0 turns them off */
+export const TLDR_EVERY_DEFAULT = 10
+export const TLDR = `SCP: update your tl;dr with \`${CLI_NAME} set-now "..."\` or relay_set_now (what you are doing now).`
+
+export function tldrEvery(env: Env): number {
+  const raw = env.SCP_TLDR_EVERY?.trim()
+  return raw && /^\d{1,6}$/.test(raw) ? Number(raw) : TLDR_EVERY_DEFAULT
+}
 
 const NUDGE = `${CLI_NAME} (optional): a title and a one-line now (relay_set_title / relay_set_now) help peers find you; skip it when you only run workers.`
 
@@ -484,7 +562,10 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   const inject = takes && !event.agent && (stop || injectsAt(claim.harness, event.kind)) && (options.remaining?.() ?? Number.POSITIVE_INFINITY) >= INJECT_MIN_MS
   try {
     const posted: Promise<unknown>[] = [client.hello({ transient: true, claim })]
-    if (event.kind === "prompt" && named === "userpromptsubmit") posted.push(client.request("prompted", {}))
+    const every = tldrEvery(options.env)
+    const prompted =
+      event.kind === "prompt" && named === "userpromptsubmit" ? client.request<{ tldr?: boolean }>("prompted", every ? { tldr_every: every } : {}) : undefined
+    if (prompted) posted.push(prompted)
     if (event.kind !== "prompt") {
       const session = event.agent ? undefined : asString(field(payload, "session_id", "sessionId"))
       const transcript = session && claim.harness === "claude-code" ? asString(field(payload, "transcript_path", "transcriptPath")) : undefined
@@ -502,6 +583,8 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (event.status) posted.push(client.request("status", { state: event.status }))
     const turn = peekTurn(event, named, payload)
     if (turn) posted.push(client.request("peek_turn", turn))
+    const title = inferredTitle(claim.harness, event, named, payload)
+    if (title) posted.push(client.request("title_infer", title))
     const injected = inject
       ? client.request<Injected>(
           "inject",
@@ -513,7 +596,8 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       const untitled = hello?.status === "fulfilled" && (hello.value as HelloResult).endpoint?.title === null
       return untitled && (claim.harness === "claude-code" || claim.harness === "codex") ? hookReply(claim.harness, event.kind, NUDGE) : undefined
     }
-    if (result.status !== "fulfilled" || !result.value) return
+    const tldr = (await prompted?.catch(() => undefined))?.tldr === true ? TLDR : undefined
+    if (result.status !== "fulfilled" || !result.value) return tldr ? hookReply(claim.harness, event.kind, tldr) : undefined
     const continues = !stop || claim.harness !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
     if (stop && !result.value.block) {
       if (waits === undefined || !PUSHES.has(claim.harness) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) return
@@ -527,7 +611,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     const shown = stop || counts ? undefined : injectionText({ ...result.value, more: await moreNow(client, result.value) }, claim.harness !== "agy")
     const text = stop
       ? [directive?.text, [pointer, nudgeText(nudged, result.value.nudge_more)].filter(Boolean).join("\n")].filter(Boolean).join("\n\n")
-      : [intro, counts ? unreadPointer(result.value.unread, result.value.awaiting) : shown].filter(Boolean).join("\n\n")
+      : [intro, counts ? unreadPointer(result.value.unread, result.value.awaiting) : shown, tldr].filter(Boolean).join("\n\n")
     if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return
     const reply = hookReply(claim.harness, event.kind, text, result.value.unread, continues)
     const offered = result.value.offered ?? []
@@ -872,7 +956,13 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
       if (event.type === "session.created" && info) children.set(sessionID, Promise.resolve(Boolean(info.parentID)))
       if (!name || (await isChild(sessionID))) return
       const stop = name === "Stop" && !failed.has(sessionID)
-      const reply = await hook({ hook_event_name: name, session_id: sessionID, cwd: directory, ...(name === "SessionStart" ? { source: "startup" } : {}) }, stop, name !== "Stop" || stop, stop && BLOCK_STOP)
+      const title = name === "Stop" ? await client.session.get({ path: { id: sessionID } }).then((found: any) => found?.data?.title).catch(() => undefined) : undefined
+      const reply = await hook(
+        { hook_event_name: name, session_id: sessionID, cwd: directory, ...(name === "SessionStart" ? { source: "startup" } : {}), ...(typeof title === "string" ? { session_title: title } : {}) },
+        stop,
+        name !== "Stop" || stop,
+        stop && BLOCK_STOP,
+      )
       const text = reply.decision === "block" && typeof reply.reason === "string" && !reply.reason.includes("<relay-message") ? reply.reason : undefined
       if (text) await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
     },

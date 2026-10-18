@@ -7,6 +7,8 @@ export interface FakeToken {
   tokenId: string
   /** the account handle the token acts as */
   user: string
+  /** the org member the token belongs to; none is the personal account's owner */
+  actor?: string
 }
 
 export interface FakeHubServer {
@@ -88,7 +90,14 @@ export function startFakeHubServer(options: {
     if (!token) return null
     return {
       account: token.user,
-      grant: { tokenId: token.tokenId, userId: `usr_${token.user}`, actorId: null, expiresAt: Date.now() + 3_600_000, scoped: false, role: null },
+      grant: {
+        tokenId: token.tokenId,
+        userId: `usr_${token.user}`,
+        actorId: token.actor ?? null,
+        expiresAt: Date.now() + 3_600_000,
+        scoped: false,
+        role: token.actor ? "member" : null,
+      },
     }
   }
 

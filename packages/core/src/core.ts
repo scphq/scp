@@ -69,6 +69,8 @@ import { one, type Sql, type SqlValue } from "./sql"
 import { utf8Bytes } from "./utf8"
 
 export const HUMAN_HANDLE = "_human"
+/** an agent title's length cap */
+export const TITLE_CHARS = 64
 export const SYSTEM_HANDLE = "_relay"
 export const GONE_PREFIX = "_gone_"
 
@@ -240,6 +242,12 @@ export interface EndpointRow {
   /** JSON {@link ScopeCaps} */
   caps: string | null
   title: string | null
+  /** the title a hook last inferred: the title is inferred while it equals this */
+  title_auto: string | null
+  /** the prompt count when a summary last set the inferred title; null when the first prompt set it */
+  title_turn: number | null
+  /** the prompt count when the status note last changed or a hook last reminded the agent to refresh it */
+  tldr_turn: number | null
   /** when a new spawn last took the endpoint over: mail and messages from before it were the earlier holder's */
   reset_at: number | null
   /** when a new spawn last took the endpoint over: with its id, names the holder another machine sees */
@@ -496,6 +504,9 @@ export class RelayCore {
       ["directive_holds", "INTEGER"],
       ["harness_session", "TEXT"],
       ["harness_transcript", "TEXT"],
+      ["title_auto", "TEXT"],
+      ["title_turn", "INTEGER"],
+      ["tldr_turn", "INTEGER"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -1364,10 +1375,12 @@ export class RelayCore {
     const text = oneLine(note, "note", LIMITS.noteChars)
     if (text && findSecret(text)) throw this.refuse(endpoint, "secret_refused", "the status note looks like it carries a credential")
     this.sql.all(
-      `UPDATE endpoints SET status_state = COALESCE(?, status_state, 'working'), status_note = COALESCE(?, status_note, ''), last_seen = ? WHERE id = ?`,
+      `UPDATE endpoints SET status_state = COALESCE(?, status_state, 'working'), status_note = COALESCE(?, status_note, ''), last_seen = ?,
+       tldr_turn = CASE WHEN ? THEN COALESCE(prompts, 0) ELSE tldr_turn END WHERE id = ?`,
       state ?? null,
       text,
       this.now(),
+      text === null ? 0 : 1,
       endpoint,
     )
   }
@@ -1378,9 +1391,31 @@ export class RelayCore {
     if (row.kind !== "agent") throw new RelayError("invalid_params", "only an agent endpoint has a title")
     const title = oneLine(value, "title", 64) || null
     if (title && findSecret(title)) throw this.refuse(endpoint, "secret_refused", "the title looks like it carries a credential")
-    this.sql.all(`UPDATE endpoints SET title = ? WHERE id = ?`, title, endpoint)
+    this.sql.all(`UPDATE endpoints SET title = ?, title_auto = NULL, title_turn = NULL WHERE id = ?`, title, endpoint)
     this.audit("title", endpoint, null, { title })
     return this.whoami(endpoint)
+  }
+
+  /**
+   * a hook's guess at the session's title, from the harness's own summary or the first prompt's first line; whether it changed the title.
+   * Never over a title set explicitly; the first prompt fills only an empty title, and a summary replaces an inferred one at most every
+   * ${LIMITS.titleRefreshTurns} prompts, or at once over the first prompt's
+   */
+  inferTitle(endpoint: string, params: { text?: unknown; from?: unknown }, options: { transient?: boolean; process?: string } = {}): boolean {
+    if (params.from !== "summary" && params.from !== "prompt") throw new RelayError("invalid_params", "from is summary or prompt")
+    if (typeof params.text !== "string") throw new RelayError("invalid_params", "text must be a string")
+    const row = this.mustEndpoint(endpoint)
+    if (row.kind !== "agent" || !this.holds(row, options)) return false
+    const title = stripControl(redactSecrets(params.text.slice(0, 4096).replace(/\s+/g, " ").trim()))
+      .slice(0, TITLE_CHARS)
+      .trim()
+    if (!title || findSecret(title) || title === row.title) return false
+    if (row.title !== null && row.title !== row.title_auto) return false
+    const turn = row.prompts ?? 0
+    if (params.from === "prompt" && row.title !== null) return false
+    if (params.from === "summary" && row.title !== null && row.title_turn !== null && turn - row.title_turn < LIMITS.titleRefreshTurns) return false
+    this.sql.all(`UPDATE endpoints SET title = ?, title_auto = ?, title_turn = ? WHERE id = ?`, title, title, params.from === "summary" ? turn : null, endpoint)
+    return true
   }
 
   // messages
@@ -2100,6 +2135,16 @@ export class RelayCore {
     return true
   }
 
+  /** whether a prompt should remind the agent to refresh its status note: `every` prompts passed since the note or the last reminder; counts the reminder */
+  tldrDue(endpoint: string, every: number): boolean {
+    if (!Number.isInteger(every) || every <= 0) return false
+    const row = this.mustEndpoint(endpoint)
+    const turn = row.prompts ?? 0
+    if (row.kind !== "agent" || turn - (row.tldr_turn ?? 0) < every) return false
+    this.sql.all(`UPDATE endpoints SET tldr_turn = ? WHERE id = ?`, turn, endpoint)
+    return true
+  }
+
   /** the background hooks' showings ({@link injected}) older than ${LIMITS.deferredSettleMs} ms reached the agent: inbox no longer lists them */
   private settle(endpoint: string): void {
     this.sql.all(
@@ -2697,15 +2742,19 @@ export class RelayCore {
           endpoint,
         )
     } else if (params.kind === "session_start") {
+      const fresh = own && summary !== "compact" && summary !== "resume"
       this.sql.all(
         `UPDATE endpoints SET hook_seen = COALESCE(?, hook_seen), hook_ended = NULL, stop_blocks = CASE WHEN ? THEN 0 ELSE stop_blocks END, pushes = CASE WHEN ? THEN 0 ELSE pushes END,
-         briefed = CASE WHEN ? THEN NULL ELSE briefed END, introduced = CASE WHEN ? THEN NULL ELSE introduced END, directive_holds = CASE WHEN ? THEN NULL ELSE directive_holds END WHERE id = ?`,
+         briefed = CASE WHEN ? THEN NULL ELSE briefed END, introduced = CASE WHEN ? THEN NULL ELSE introduced END, directive_holds = CASE WHEN ? THEN NULL ELSE directive_holds END,
+         title = CASE WHEN ? AND title = title_auto THEN NULL ELSE title END, title_auto = CASE WHEN ? THEN NULL ELSE title_auto END WHERE id = ?`,
         options.transient ? now : null,
         own ? 1 : 0,
         own ? 1 : 0,
         own ? 1 : 0,
         own ? 1 : 0,
         own ? 1 : 0,
+        fresh ? 1 : 0,
+        fresh ? 1 : 0,
         endpoint,
       )
     } else if (options.transient) {
@@ -4657,7 +4706,7 @@ export class RelayCore {
 
   /** the user parts an address of this core may carry */
   protected addressUsers(): string[] {
-    return [this.user, "me"]
+    return [this.user, "me", "local"]
   }
 
   /** whether the row is this host's own, the only rows with a tree, groups, rules and caps here */
@@ -4671,7 +4720,7 @@ export class RelayCore {
     const slash = text.indexOf("/")
     const user = slash === -1 ? null : text.slice(0, slash)
     const handle = slash === -1 ? text : text.slice(slash + 1)
-    if (user !== null && user !== "me" && user !== this.user) throw unreachable(text)
+    if (user !== null && user !== "me" && user !== "local" && user !== this.user) throw unreachable(text)
     const row = handle === "" ? this.byHandle(HUMAN_HANDLE) : validHandle(handle) ? this.byHandle(handle) : undefined
     if (!row) throw unreachable(text)
     return row

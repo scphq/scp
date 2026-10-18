@@ -250,6 +250,8 @@ const handlePart = (remote: string): string => remote.slice(remote.indexOf("/") 
 export class FederatedCore extends RelayCore {
   readonly machine: string | null
   private aliases: Set<string>
+  private account: string | null = null
+  private others = new Set<string>()
   private scope: string | null = null
   private readonly defaultAuth: RelayAuth
   private readonly endpointCap: number | null
@@ -294,6 +296,23 @@ export class FederatedCore extends RelayCore {
 
   setAliases(aliases: string[]): void {
     this.aliases = new Set(aliases)
+  }
+
+  /** the account handle another member's machines render under, `<account>/<machine>/<handle>`; this member's own stay `me/<machine>/<handle>` */
+  setOthers(account: string, machines: Iterable<string>): void {
+    this.account = account
+    this.others = new Set(machines)
+  }
+
+  /** whether `machine` is another member's: it renders under the account handle */
+  setOther(machine: string, other: boolean): void {
+    if (other) this.others.add(machine)
+    else this.others.delete(machine)
+  }
+
+  /** how this host renders `<machine>/<handle>` of its own account */
+  remoteAddress(remote: string): string {
+    return `${this.account && this.others.has(machinePart(remote)) ? this.account : this.user}/${remote}`
   }
 
   /** runs `fn` with unqualified handles resolving on `machine`: a direct client's own namespace on the hub */
@@ -361,7 +380,7 @@ export class FederatedCore extends RelayCore {
   }
 
   private isLocalUser(part: string): boolean {
-    return part === "me" || part === this.user || this.aliases.has(part)
+    return part === "me" || part === "local" || part === this.user || this.aliases.has(part)
   }
 
   /** whether an endpoint of another account `part` ever reached this relay, so `<part>/me` is that account's human */
@@ -408,7 +427,7 @@ export class FederatedCore extends RelayCore {
   }
 
   protected override addressUsers(): string[] {
-    return [this.user, "me", ...this.aliases]
+    return [this.user, "me", "local", ...this.aliases]
   }
 
   protected override localRow(row: EndpointRow): boolean {
@@ -418,7 +437,7 @@ export class FederatedCore extends RelayCore {
   protected override address(row: EndpointRow): string {
     const remote = (row as FederatedRow).remote
     if (remote && isForeign(remote)) return remote.slice(1)
-    return remote ? `${this.user}/${remote}` : super.address(row)
+    return remote ? this.remoteAddress(remote) : super.address(row)
   }
 
   protected override subject(row: EndpointRow): PolicySubject {

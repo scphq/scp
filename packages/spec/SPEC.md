@@ -277,18 +277,22 @@ An endpoint row holds at least: `id`, `handle`, `kind`, `harness`, `model`, `cwd
 
 | Form | Resolves to |
 | --- | --- |
-| `<handle>` | A local agent. |
+| `<handle>`, `local/<handle>` | A local agent. |
 | `me/<handle>`, `<user>/<handle>` | A local agent, where `<user>` is the broker's user alias. |
 | `me/` | The local human. |
 | `<machine>/<handle>` | An agent on another machine of the same account. |
 | `<machine>/me` | The human of another machine of the account. |
+| `me/<machine>/<handle>`, `<org>/<machine>/<handle>` | An agent on another machine of the same account; `<org>` is the account handle the hub reports. |
+| `me/<machine>/me`, `<org>/<machine>/me` | The human of another machine of the account. |
 | `<account>/<machine>/<handle>` | An allowlisted agent of a contact account. |
 | `<account>/<machine>/me` | A contact account's human on that machine. |
 | `group:<name>` | Fan-out to the members of a local group (section 7.4). |
 | `tree:children` | Fan-out to the sender's direct children. |
 
 - Rendered addresses: an agent is `<user>/<handle>`, the human `<user>/`, the system endpoint `<user>/relay`. The default user alias is `me`.
-- A two-segment address whose first segment is `me` or the local alias is local; otherwise the first segment is a machine. A machine segment equal to the broker's own machine name is local.
+- An endpoint of another machine renders as `me/<machine>/<handle>` when the machine is one of the member's own devices (bound by the same person's credential), and as `<org>/<machine>/<handle>` when another member of the org bound it. A broker that is not linked to a hub, or whose hub reports no owner for the machine, renders `me/<machine>/<handle>`.
+- Both forms are accepted as input for any machine of the account, whoever bound it, so an older `me/<machine>/<handle>` keeps resolving.
+- A two-segment address whose first segment is `me`, `local` or the local alias is local; otherwise the first segment is a machine. A machine segment equal to the broker's own machine name is local.
 - `<account>/me` appears as a sender address for a contact's human but is not a valid recipient; it is refused `invalid_params`.
 - An address that does not resolve, or resolves to an endpoint the sender may not reach, is refused `not_found` with the same text in both cases (section 10.8).
 
@@ -350,7 +354,7 @@ Auth levels and their powers:
 | lineage | A shell placed by lineage only. | May act as the endpoint but may only narrow scope; its grants carry the policy's child default and give no group allowance; it may not turn peek on. |
 | human, tty | The human at a terminal. | Sees everything, is exempt from scopes, may review judge holds, may grant admins, may lift inherited caps. Its sends are hop 0 and exempt from the daily cap. |
 | human, no tty | The human without a terminal. | Sends as an unverified human (section 10.4); may only narrow; may not set caps, grants, groups or admins (`scope_refused` "no terminal"). |
-| hook | A transient hook connection. | Only `event`, `status`, `whoami`, `inject`, `injected`, `peek_turn`, `stop_wait`, `prompted`. Scope methods are `scope_refused`; anything else is `unauthorized`. Never counted as connected. |
+| hook | A transient hook connection. | Only `event`, `status`, `whoami`, `inject`, `injected`, `peek_turn`, `stop_wait`, `prompted`, `title_infer`. Scope methods are `scope_refused`; anything else is `unauthorized`. Never counted as connected. |
 | observer | An unbound observer. | Only `list`, `snapshot`, `watch`, `log`, `policy`, `policy_check`, `cloud_status`, `bridge_relink`, `why`; scope methods only with a `lineage`. Anything else is `unauthorized` ("this connection only observes"). |
 
 - Lineage-bound connections are brief (they never count as connected).
@@ -654,15 +658,15 @@ Pull is sufficient for conformance. Push is what makes delivery native and is RE
 
 | Hook point | Activity recorded | Action |
 | --- | --- | --- |
-| Session start | `session_start`, status `working` | Claim; reset the session's stop, push, brief, intro and directive counters. No injection. An untitled endpoint MAY be reminded to set a title and a now line. |
-| Prompt submit | none | Claim; record a prompt (section 8.5); inject. |
+| Session start | `session_start`, status `working` | Claim; reset the session's stop, push, brief, intro and directive counters, and, unless the source is `compact` or `resume`, drop an inferred title (section 11.1). No injection. An untitled endpoint MAY be reminded to set a title and a now line. |
+| Prompt submit | none | Claim; record a prompt (section 8.5); offer the prompt's first line as an inferred title; inject, and append the tl;dr reminder when it is due (section 11.1). |
 | After tool | `tool` (tool name at most 64 characters, summary) | Inject. |
-| Stop | `stop` | Stop handling (sections 8.5 to 8.7). |
+| Stop | `stop` | Offer the harness's own name for the session as an inferred title; stop handling (sections 8.5 to 8.7). |
 | Subagent stop | `stop` | Set the subagent endpoint `done`; no injection. |
 | Session end | `session_end`, status `done` | End the hook session. |
 
 - A tool summary never carries arguments: a shell call is summarised by its program name, a file tool by the file's base name, an agent tool by its subagent type, a web fetch by its host. Summaries are at most 120 characters and redacted.
-- A hook performs one round trip: `hello {transient, claim}`, then in parallel `prompted` (on prompt submit), `event` (except on prompt submit), `status`, `peek_turn` (when peek is on, section 13) and `inject`.
+- A hook performs one round trip: `hello {transient, claim}`, then in parallel `prompted` (on prompt submit), `event` (except on prompt submit), `status`, `peek_turn` (when peek is on, section 13), `title_infer` (section 11.1) and `inject`.
 - A hook MUST NOT fail the harness: it exits successfully and writes nothing to standard error. It works within a deadline (reference: 1500 ms; 900 ms for harnesses with short hook timeouts; 1000 ms at session end), skips `inject` when less than 300 ms remain, and skips printing and confirming when less than 150 ms remain.
 - Events labelled as coming from a subagent never inject into the main endpoint.
 
@@ -1018,7 +1022,9 @@ The broker reads an optional policy file (reference: `~/.config/scp/policy.json`
 ### 11.1 Title, status and now
 
 - **Title.** An agent's title is one line of at most 64 characters, control characters removed and whitespace collapsed; longer is `too_large`, a credential is `secret_refused`, empty clears it. Claims never overwrite it; a grant's title fills it only when empty. Changes are audited.
+- **Inferred title.** A hook of the holding process MAY offer `title_infer {from, text}` for an agent whose title nobody set (not a grant, `title` or the user). `from: "prompt"` is the first non-empty line of the session's first prompt and fills only an empty title. `from: "summary"` is the harness's own name for the session: Claude Code's newest `custom-title`, `ai-title` or `summary` line within the last 128 KiB of its transcript, or OpenCode's session title once it is not the placeholder. A summary replaces a prompt-derived title at once and a summary-derived one at most every `LIMITS.titleRefreshTurns` (5) prompts. The text is redacted (section 7.8), collapsed to one line and clipped to 64 characters; it is not audited. An inferred title never replaces a title set explicitly; an explicit `title` replaces an inferred one, and clearing it lets inference fill it again. Harnesses that expose neither (for example Codex, which names no session) get only the prompt-derived title.
 - **Status.** `state` is one of `working`, `waiting`, `blocked`, `done`; `note` (the agent's "now" line) is one line of at most `LIMITS.noteChars` (280) characters and is scanned for credentials. Unset fields are kept; a missing state becomes `working`.
+- **tl;dr reminder.** The note is the agent's tl;dr. A prompt-submit hook sends `prompted {tldr_every}`, from `SCP_TLDR_EVERY` (reference default 10, 0 disables). When at least that many prompts passed since the note last changed or the last reminder, the result carries `tldr: true`, the reminder counts, and the hook appends one line to what it injects: ``SCP: update your tl;dr with `swarm set-now "..."` or relay_set_now (what you are doing now).``
 
 ### 11.2 Visibility
 
@@ -1096,11 +1102,11 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 - Transports: a WebSocket (reference path `/v1/relay/ws`), one JSON-RPC request per text frame of at most 262144 bytes (larger frames close the socket with 1009); and an HTTP endpoint (reference path `/v1/relay/rpc`) that takes one request or a batch run in order. Long polls are capped at 25 s over HTTP and at `LIMITS.waitMaxS` over WebSocket. A bridge MUST use the WebSocket.
 - Authentication: the client presents an account bearer credential. The hub revalidates it every 300 s and closes the socket when it is revoked (1008) or expired (4001); a revoked credential is refused for 3600 s.
 - A credential MAY carry labels. The hub sets them on every endpoint the credential claims, resumes or mirrors, over the client's own labels for the same keys, so a client can neither change nor drop them; the merged set is held to the usual label limits.
-- `hello` takes `protocol: "scp/1"`, `machine`, and one of `bridge: true`, `human: true` with `tty`, `observe: true`, or `claim`/`resume`. It returns `{account, capabilities, server_time, limits, machine}`; a bridge also receives every other machine's endpoints. Hook (transient) hellos are refused.
+- `hello` takes `protocol: "scp/1"`, `machine`, and one of `bridge: true`, `human: true` with `tty`, `observe: true`, or `claim`/`resume`. It returns `{account, capabilities, server_time, limits, machine}`; a bridge also receives every other machine's endpoints and `others`, the names of the machines another member of the org bound (section 6.3). Hook (transient) hellos are refused.
 - A `claim` hello follows section 6's claim rules on its machine: `scope`, `allow`, `in` and `out` set a new endpoint's own rules (an endpoint taken over keeps its own), and `exact` follows section 6.8.
-- A machine name matches `^[a-z0-9][a-z0-9-]{0,31}$` and is neither `me` nor the account handle. A machine binds to the first credential that says hello on it; another credential is `unauthorized`.
+- A machine name matches `^[a-z0-9][a-z0-9-]{0,31}$` and is neither `me`, `local` nor the account handle. A machine binds to the first credential that says hello on it; another credential is `unauthorized`.
 - Errors use the codes of section 5.5; a hub does not forward refusal detail.
-- Hub notifications to a bridge: `deliver {seq, endpoint, message}`, `endpoints {machine, endpoints, full}`, `fleet {at, type, ...}`, `revoked {reason}`. A newer bridge for the same machine replaces the older one, which is closed with 4000.
+- Hub notifications to a bridge: `deliver {seq, endpoint, message}`, `endpoints {machine, endpoints, full, own?}` (`own`: whether the receiving bridge's member bound the machine), `fleet {at, type, ...}`, `revoked {reason}`. A newer bridge for the same machine replaces the older one, which is closed with 4000.
 - Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored; 120 calls per minute per credential (600 for a bridge), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise a cap or count or remove it, and `hello` reports the limits in force (a removed one as `null`).
 
 ### 14.2 Bridge
@@ -1326,7 +1332,7 @@ Frame and body limits, per-connection concurrency and output caps, inbox capacit
 
 ### 17.8 Privacy
 
-- Titles, now lines, working directories and labels are visible to every endpoint that may message the agent, and are mirrored to the hub unless redaction is configured.
+- Titles, now lines, working directories and labels are visible to every endpoint that may message the agent, and are mirrored to the hub unless redaction is configured. An inferred title can carry the first line of the session's first prompt.
 - Peek is off by default, local only, audited, rate limited and visible to the peeked endpoint through `peek_who`.
 - The judge model sees bodies on judged boundaries; holds keep bodies until resolved. Audit never keeps bodies.
 
@@ -1396,12 +1402,13 @@ An integration with push capability additionally:
 | `message` | `id` (reference, section 7.10), `member?` | `{message}` (Envelope, thread message or null) | `invalid_params` | ep |
 | `receipts` | `id` (id, suffix of 4 or more, or `last`; section 7.13) | MessageReceipts | `invalid_params`, `not_found` | ep (sender) |
 | `title` | `text` | EndpointView | `invalid_params`, `too_large`, `secret_refused` | ep (agent) |
+| `title_infer` | `from` (`prompt` or `summary`), `text` | `{changed}` | `invalid_params` | hook |
 | `status` | `state?`, `note?` | EndpointView | `invalid_params`, `secret_refused` | ep, hook |
 | `event` | `kind`, `tool?`, `summary?`, `agent?` | ActivityRow | `invalid_params`, `too_large` | ep, hook |
 | `inject` | `stop?`, `count?`, `hold_unread?`, `directives?` | sections 8.3, 8.5 | | ep, hook |
 | `injected` | `seqs`, `hold`, `read?`, `deferred?`, `stop?`, `push?`, `nudged?`, `restated?`, `preamble?`, `intro?` | `{injected, held?, pushed?, nudged?, restated?, briefed?, introduced?}` | `invalid_params` | ep, hook |
 | `stop_wait` | `wait_s?`, `prompts?` | StopWaitResult | | ep, hook |
-| `prompted` | | `{prompted}` | | ep, hook |
+| `prompted` | `tldr_every?` | `{prompted, tldr?}` | | ep, hook |
 | `peek_turn` | `role`, `text` | `{stored}` | `unauthorized`, `invalid_params` | hook of the holding process |
 | `list` | `all?`, `harness?`, `kind?`, `presence?`, `contacts?` | `{endpoints}` or `{contacts}` | `unavailable` | obs, ep |
 | `snapshot` | `all?`, `activity?` | `{endpoints, activity, unread, broker}` | | obs, ep |
@@ -1547,7 +1554,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `treePerMinute` | 120 | `treePerHour` | 1200 |
 | `treePauseS` | 600 | `groupPerMinute` | 60 |
 | `grantTtlS` | 604800 | `groupIdleS` | 86400 |
-| `policyLoadsKept` | 8 | | |
+| `policyLoadsKept` | 8 | `titleRefreshTurns` | 5 |
 
 **Other local values.** Line 256 KiB; partial line 30 s; 32 concurrent requests per connection; 4 MiB output buffer; title 64 characters; labels 16; `client_id` 128 characters; mime 64 characters; selectors per list 64; spawn grant TTL 3600 s; message short id 6 characters, suffix references at least 4; push wait default 600 s (0 to 3600).
 

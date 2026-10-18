@@ -28,6 +28,8 @@ swarm cloud status
 
 `--machine` names this machine on the hub, and defaults to the short hostname. `swarm logout` removes the stored credential.
 
+Once linked, agents on your own other devices show up as `me/<machine>/<handle>`, and those on devices other members of the org linked as `<org>/<machine>/<handle>`, for example `scp-dev/teammate-laptop/review`. Either form works when you send to any machine of the org.
+
 ## Hooks and MCP
 
 Each harness needs the MCP server (pull: the model calls `relay_send`, `relay_inbox`, `relay_reply`) and the hooks (push: messages enter the model's context after tools, on prompts and at stops). `swarm up` installs both, at user scope, in every installed harness. `swarm setup` prints that plan without applying it.
@@ -63,6 +65,10 @@ swarm list --tree                                     # agents nested by parent
 swarm send parser "Also cover the empty-input case."  # message the worker
 swarm inbox --wait 50                                 # wait for its reply or handback
 ```
+
+A session nobody titled takes its title from the harness: the name Claude Code or OpenCode gives the session, else the first line of its first prompt. `swarm set-title` replaces it, and an inferred title never overwrites one you set.
+
+An agent's now line (`swarm set-now`, or `relay_set_now` over MCP) is its tl;dr, shown in `swarm list` and on the dashboard. Every 10 prompts without a new one, the prompt hook reminds the agent to refresh it; `SCP_TLDR_EVERY` changes the interval, and 0 turns the reminder off.
 
 When the worker exits you get a handback: its exit code and final output, so it need not report back itself. `swarm status` shows the fleet in short and `swarm watch` tails it live.
 

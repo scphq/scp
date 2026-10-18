@@ -5,7 +5,21 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { dirname, join } from "node:path"
 import { type ActivityRow, LIMITS, PREAMBLE, PREAMBLE_BRIEF } from "@scp-dev/core"
 import { type Broker, localHostName, RelayClient, socketPath, startBroker, systemHostname } from "@scp-dev/broker"
-import { BLOCK_STOP, claudeVersionFile, hookReply, mapHookPayload, opencodePlugin, runHook, stopContinues, SUBAGENT, subagentIntro, summarize } from "./hooks"
+import {
+  BLOCK_STOP,
+  claudeVersionFile,
+  hookReply,
+  mapHookPayload,
+  opencodePlugin,
+  promptTitle,
+  runHook,
+  stopContinues,
+  SUBAGENT,
+  subagentIntro,
+  summarize,
+  TLDR,
+  transcriptTitle,
+} from "./hooks"
 import { readCapped, STDIN_CAP, subagentSkip } from "./hook-fast"
 import {
   deriveHandle,
@@ -629,6 +643,51 @@ describe("swarm hook", () => {
     expect(json(prompt.stdout).hookSpecificOutput!.additionalContext).toStartWith(`${PREAMBLE_BRIEF}\n\n<relay-message`)
     expect(JSON.stringify(broker.core.activity({ limit: 1000 }))).not.toContain("PROMPT-MARKER")
     expect(rows("me/inject-claude").map((r) => r.kind)).toEqual(["session_start", "tool", "tool", "tool"])
+  })
+
+  test("a Claude Code session without a title takes its first prompt's first line, then the name its transcript ends with", async () => {
+    const env = { SCP_DIR: dir, SCP_SESSION: "titled-claude", CLAUDECODE: "1", SCP_NAME: "titled-claude" }
+    const transcript = join(dir, "ttl-1.jsonl")
+    const base = { session_id: "ttl-1", transcript_path: transcript, cwd: project }
+    const title = () => broker.core.list({ all: true }).find((e) => e.address === "me/titled-claude")?.title
+    await hook(["claude"], { ...base, hook_event_name: "SessionStart", source: "startup" }, env)
+    await hook(["claude"], { ...base, hook_event_name: "UserPromptSubmit", prompt: `\n  wire the ${SECRET} parser\nmore detail` }, env)
+    expect(title()).toBe("wire the [redacted github token] parser")
+    writeFileSync(transcript, "")
+    await hook(["claude"], { ...base, hook_event_name: "Stop", last_assistant_message: "done" }, env)
+    expect(title()).toBe("wire the [redacted github token] parser")
+    const line = (record: object) => `${JSON.stringify({ ...record, sessionId: "ttl-1" })}\n`
+    writeFileSync(transcript, `${"x".repeat(200_000)}\n${line({ type: "ai-title", aiTitle: "Parser wiring" })}${line({ type: "user", message: {} })}`)
+    await hook(["claude"], { ...base, hook_event_name: "Stop", last_assistant_message: "done" }, env)
+    expect(title()).toBe("Parser wiring")
+  })
+
+  test("every SCP_TLDR_EVERY prompts the prompt hook reminds the agent to refresh its tl;dr; 0 turns it off", async () => {
+    const base = { session_id: "tldr", cwd: project, prompt: "go" }
+    const prompt = (env: Record<string, string>) => hook(["claude"], { ...base, hook_event_name: "UserPromptSubmit" }, env)
+    const env = { SCP_DIR: dir, SCP_SESSION: "tldr-claude", CLAUDECODE: "1", SCP_NAME: "tldr-claude", SCP_TLDR_EVERY: "2" }
+    await hook(["claude"], { ...base, hook_event_name: "SessionStart", source: "startup" }, env)
+    expect((await prompt(env)).stdout).toBe("")
+    expect(json((await prompt(env)).stdout).hookSpecificOutput!.additionalContext).toBe(TLDR)
+    expect((await prompt(env)).stdout).toBe("")
+    expect((await prompt({ ...env, SCP_TLDR_EVERY: "0" })).stdout).toBe("")
+  })
+
+  test("a transcript's custom title beats its summary, and a path not named for the session is not read", () => {
+    const path = join(dir, "ttl-2.jsonl")
+    writeFileSync(
+      path,
+      [
+        { type: "summary", summary: "old" },
+        { type: "custom-title", customTitle: "mine" },
+        { type: "ai-title", aiTitle: "auto" },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join("\n"),
+    )
+    expect(transcriptTitle(path, "ttl-2")).toBe("mine")
+    expect(transcriptTitle(path, "other")).toBeUndefined()
+    expect(promptTitle(`  \n${"word ".repeat(30)}`)).toHaveLength(64)
   })
 
   test("swarm inbox still lists what a background PostToolUse hook just showed, whose text Claude Code hands over only later", async () => {

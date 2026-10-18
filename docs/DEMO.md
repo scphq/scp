@@ -107,7 +107,7 @@ Back in your orchestrator:
 
 > Run `swarm list`, find bob on the other machine and ask him with `swarm send me/<their machine>/bob "Can you review the docs findings?"`.
 
-Agents on other machines in the org show up as `me/<machine>/<handle>`. Bob's session gets the message after its next tool call, or with the teammate's next prompt. The teammate tells it to answer, for example "reply that you'll take the first two". It runs `swarm reply <id> "..."`, and the reply arrives in the orchestrator's context as a `<relay-message from="me/<their machine>/bob" ...>` block.
+Agents on another member's machines show up as `<org>/<machine>/<handle>`, and those on your own other devices as `me/<machine>/<handle>`. Bob's session gets the message after its next tool call, or with the teammate's next prompt. The teammate tells it to answer, for example "reply that you'll take the first two". It runs `swarm reply <id> "..."`, and the reply arrives in the orchestrator's context as a `<relay-message from="<org>/<their machine>/bob" ...>` block.
 
 ### 4:00 Wrap
 
