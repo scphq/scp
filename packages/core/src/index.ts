@@ -16,11 +16,13 @@ export {
 } from "./core"
 export * from "./protocol"
 export {
+  clock,
   collapseTools,
   deliveryText,
   PREAMBLE,
   PREAMBLE_BRIEF,
   reachLines,
+  receiptLines,
   SHORT_ID,
   shortId,
   steerNote,

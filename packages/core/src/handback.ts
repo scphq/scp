@@ -8,16 +8,19 @@ const ESCAPES = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[P^_][^\u001
 export const HANDBACK_CUT = "[earlier output cut]"
 
 /**
- * clean text's last `bytes` bytes: all of it when it fits and nothing was `dropped`, else from the first line that starts in reach (a
- * character boundary when one line is longer than that) behind {@link HANDBACK_CUT} on its own line, when the cap has room for it
+ * clean text's last `bytes` bytes: all of it when it fits and nothing was `dropped`, else from the first line that starts in reach behind
+ * {@link HANDBACK_CUT} on its own line, when the cap has room for it; from a character boundary within the line cut instead when that line
+ * alone is longer than the reach and starting at the next one would keep less than half of it
  */
 export function keepLast(text: string, bytes: number, dropped = false): string {
   const encoded = new TextEncoder().encode(text)
   if (!text || (!dropped && encoded.length <= bytes)) return text
   const mark = bytes > HANDBACK_CUT.length + 1 ? `${HANDBACK_CUT}\n` : ""
-  let start = Math.max(0, encoded.length - (bytes - mark.length))
+  const reach = bytes - mark.length
+  let start = Math.max(0, encoded.length - reach)
   const nl = start > 0 && encoded[start - 1] !== 0x0a ? encoded.indexOf(0x0a, start) : -1
-  if (nl !== -1 && nl + 1 < encoded.length) start = nl + 1
+  const long = nl !== -1 && nl - (encoded.lastIndexOf(0x0a, start - 1) + 1) > reach && encoded.length - (nl + 1) < reach / 2
+  if (nl !== -1 && nl + 1 < encoded.length && !long) start = nl + 1
   while (start > 0 && start < encoded.length - 1 && encoded[start] === 0x0a) start++
   while (start < encoded.length && (encoded[start]! & 0xc0) === 0x80) start++
   return `${mark}${new TextDecoder().decode(encoded.subarray(start))}`

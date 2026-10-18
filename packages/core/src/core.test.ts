@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { RelayCore } from "./core"
 import { matches, parsePolicy } from "./policy"
 import { LIMITS, RelayError } from "./protocol"
-import { shortId, stripControl, wrapMessage } from "./render"
+import { clock as hhmmss, shortId, stripControl, wrapMessage } from "./render"
 import { findSecret } from "./scrub"
 import type { Sql, SqlValue } from "./sql"
 
@@ -2037,19 +2037,106 @@ describe("spawn bindings", () => {
     })
   })
 
-  test("a handback names the spawner's messages the worker never read as steers not applied, never those it read or another sender's", () => {
-    const { core, actor, main, grant, shim } = spawned()
+  test("a handback names when the worker read each of the spawner's messages it read, and those it never read as steers not applied, never another sender's", () => {
+    const { core, actor, main, grant, shim, clock } = spawned()
     const { endpoint } = shim(6)
     const read = core.send(main.id, { to: "wm1", body: "start with the docs" })
+    clock.now += 4000
     core.ack(endpoint.id, [core.inbox(endpoint.id)[0]!.seq])
-    core.send(core.humanId(), { to: "wm1", body: "fyi" }, { tty: true })
+    const readAt = clock.now
+    const fyi = core.send(core.humanId(), { to: "wm1", body: "fyi" }, { tty: true })
+    core.ack(endpoint.id, [core.inbox(endpoint.id).find((m) => m.id === fyi.id)!.seq])
     const late = [core.send(main.id, { to: "wm1", body: "also the tests" }), core.send(main.id, { to: "wm1", body: "and lint" })]
     const result = core.spawnExit(actor, { grant: grant.token, code: 0, output: "done" })
     const text = core.delivered(main.id, result.handback)!.body.text
     expect(text).toBe(
-      `worker me/wm1 finished (exit 0)\n\ndone\n\n${late.map((m) => `steer not applied: "${m.id === late[0]!.id ? "also the tests" : "and lint"}" (${shortId(m.id)}, arrived under 1 s before it exited)`).join("\n")}`,
+      `worker me/wm1 finished (exit 0)\n\ndone\n\nyour steer ${shortId(read.id)} was read at ${hhmmss(readAt)}\n${late.map((m) => `steer not applied: "${m.id === late[0]!.id ? "also the tests" : "and lint"}" (${shortId(m.id)}, arrived under 1 s before it exited)`).join("\n")}`,
     )
-    expect(text).not.toContain(shortId(read.id))
+    expect(text).not.toContain(shortId(fyi.id))
+  })
+
+  test("a steer a resume took and applied reads as read when spawn took it; one it could not apply is only not applied", () => {
+    const { core, actor, main, grant, shim, clock } = spawned()
+    const { endpoint } = shim(6)
+    core.event(endpoint.id, { kind: "session_start", session_id: "s-1" }, { transient: true, process: key(6) })
+    const applied = core.send(main.id, { to: "wm1", body: "rename it" })
+    clock.now += 2000
+    core.spawnSteers(actor, { grant: grant.token, take: true })
+    const takenAt = clock.now
+    const failed = core.send(main.id, { to: "wm1", body: "and lint" })
+    core.spawnSteers(actor, { grant: grant.token, take: true })
+    const text = core.delivered(main.id, core.spawnExit(actor, { grant: grant.token, code: 1, output: "x", unapplied: [failed.id] }).handback)!.body.text
+    expect(text).toContain(`\nyour steer ${shortId(applied.id)} was read at ${hhmmss(takenAt)}\n`)
+    expect(text).toContain(`steer not applied: "and lint" (${shortId(failed.id)},`)
+    expect(text).not.toContain(`your steer ${shortId(failed.id)}`)
+  })
+
+  test("receipts say per recipient of a message the caller sent when it read it, when a hook showed it, or that it is unread; by id, short id or last", () => {
+    const { core, clock, main, shim } = spawned({ spawn: true })
+    const peer = core.claim({ handle: "peer", harness: "codex", process: key(30), lineage: [key(30)] }).endpoint
+    const steer = core.send(main.id, { to: ["wm1", "peer"], body: "also the tests" })
+    const iso = (ms: number) => new Date(ms).toISOString()
+    expect(core.receipts(main.id, steer.id)).toEqual({
+      id: steer.id,
+      thread: steer.thread,
+      recipients: [
+        { address: "me/peer", read_at: null, shown_at: null },
+        { address: "me/wm1", read_at: null, shown_at: null },
+      ],
+    })
+    const { endpoint } = shim(6)
+    clock.now += 2000
+    const shown = core.inject(endpoint.id)
+    core.injected(shown.offered, shown.hold)
+    const shownAt = clock.now
+    clock.now += 3000
+    core.ack(peer.id, [core.inbox(peer.id)[0]!.seq])
+    expect(core.receipts(main.id, shortId(steer.id)).recipients).toEqual([
+      { address: "me/peer", read_at: iso(clock.now), shown_at: null },
+      { address: "me/wm1", read_at: null, shown_at: iso(shownAt) },
+    ])
+    expect(core.receipts(main.id, "last").id).toBe(steer.id)
+    expect(code(() => core.receipts(peer.id, steer.id))).toBe("not_found")
+    expect(code(() => core.receipts(main.id, 5))).toBe("invalid_params")
+  })
+
+  test("after a clean exit the handback counts a background hook's showing as read: the model had its next request", () => {
+    const { core, actor, main, grant, shim, clock } = spawned()
+    const { endpoint } = shim(6)
+    const handed = core.send(main.id, { to: "wm1", body: "rename it" })
+    const shown = core.inject(endpoint.id)
+    core.injected(shown.offered, shown.hold, { endpoint: endpoint.id, read: shown.offered, deferred: true })
+    const text = core.delivered(main.id, core.spawnExit(actor, { grant: grant.token, code: 0, output: "done" }).handback)!.body.text
+    expect(text).toContain(`your steer ${shortId(handed.id)} was read at ${hhmmss(clock.now)}`)
+  })
+
+  test("a background hook's showing is delivered, not read, in receipts and the handback, after it settles too; an inbox read stays read", () => {
+    const { core, actor, main, grant, shim, clock } = spawned()
+    const { endpoint } = shim(6)
+    const handed = core.send(main.id, { to: "wm1", body: "rename it" })
+    const read = core.send(main.id, { to: "wm1", body: "and lint" })
+    const upgraded = core.send(main.id, { to: "wm1", body: "and docs" })
+    clock.now += 2000
+    const shown = core.inject(endpoint.id)
+    const seqs = shown.messages.filter((m) => m.id !== read.id).map((m) => m.seq!)
+    core.injected(seqs, shown.hold, { endpoint: endpoint.id, read: seqs, deferred: true })
+    const handedAt = clock.now
+    clock.now += LIMITS.deferredSettleMs + 1000
+    core.prompted(endpoint.id)
+    core.ack(endpoint.id, [core.inbox(endpoint.id).find((m) => m.id === read.id)!.seq, seqs[1]])
+    const readAt = clock.now
+    const iso = (ms: number) => new Date(ms).toISOString()
+    expect(core.receipts(main.id, handed.id).recipients).toEqual([{ address: "me/wm1", read_at: null, delivered_at: iso(handedAt), shown_at: iso(handedAt) }])
+    expect(core.receipts(main.id, read.id).recipients).toEqual([{ address: "me/wm1", read_at: iso(readAt), shown_at: null }])
+    expect(core.receipts(main.id, upgraded.id).recipients).toEqual([{ address: "me/wm1", read_at: iso(readAt), shown_at: iso(handedAt) }])
+    const text = core.delivered(main.id, core.spawnExit(actor, { grant: grant.token, code: 1, output: "done" }).handback)!.body.text
+    expect(text).toContain(
+      [
+        `your steer ${shortId(handed.id)} was delivered at ${hhmmss(handedAt)}`,
+        `your steer ${shortId(read.id)} was read at ${hhmmss(readAt)}`,
+        `your steer ${shortId(upgraded.id)} was read at ${hhmmss(readAt)}`,
+      ].join("\n"),
+    )
   })
 
   test("a steer not applied says when it arrived: before the exit after the last step, before a later step, or after the exit; its text clipped", () => {

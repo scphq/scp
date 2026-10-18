@@ -196,7 +196,8 @@ export class RelayClient {
 
   /**
    * at a stop: the spawned workers' unread messages, held for the hook to print, waiting up to `wait_s` while workers still run, none came,
-   * pushes are left and no prompt moved the `prompts` mark inject handed out
+   * pushes are left and no prompt moved the `prompts` mark inject handed out; with `wait_s` above 0 and other workers still running, the
+   * broker gathers more of their results into the same push for up to ${LIMITS.pushGraceS} s, which may run past `wait_s`
    */
   stopWait(waitS = 0, prompts?: number): Promise<StopWaitResult> {
     return this.request<StopWaitResult>("stop_wait", { wait_s: waitS, ...(prompts !== undefined ? { prompts } : {}) })

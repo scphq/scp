@@ -1,13 +1,17 @@
+import { statSync } from "node:fs"
+import { isAbsolute } from "node:path"
 import {
   type AskResult,
   type Claim,
   CLI_NAME,
+  clock,
   deliveryText,
   type EndpointView,
   type Envelope,
   type JudgeHeld,
   type JudgeRedacted,
   LIMITS,
+  type MessageReceipts,
   type PeekResult,
   type PeekSeen,
   type PeekState,
@@ -15,6 +19,7 @@ import {
   type PeerView,
   PREAMBLE,
   reachLines,
+  receiptLines,
   RelayError,
   type ScopeChange,
   type ScopeView,
@@ -37,8 +42,8 @@ export const INSTRUCTIONS = [
   "Use relay_list to see the other agents on this machine, and relay_send or relay_ask to message one by its address.",
   "Read messages for you with relay_inbox and reply with relay_reply when an answer is useful; keep your own line current with relay_set_status and relay_set_title.",
   'A message marked relation="parent" is from the agent that started you and gave you your task: it continues that task, so apply it before you finish, the newer instruction winning, still only within what your user authorised.',
-  "When you start, set your title and a one-line now with relay_set_title / relay_set_now so peers can find you.",
-  `To hand work to another agent, run ${CLI_NAME} spawn <harness command> from your shell (e.g. ${CLI_NAME} spawn codex exec "..."): it returns at once with the worker's name, so never background it; the worker's result reaches you by itself as a relay message, and relay_send to its name steers it meanwhile.`,
+  "Optionally set your title and a one-line now with relay_set_title / relay_set_now so peers can find you; skip it when you only run workers.",
+  `To hand work to another agent, call relay_spawn with its harness command (e.g. command ["codex", "exec", "..."], or ${CLI_NAME} spawn codex exec "..." from your shell): it returns at once with the worker's name; its messages and its result reach you by themselves as relay messages, relay_send to its name steers it meanwhile, and relay_status with a message id says when it read it.`,
   "You see and reach only agents in your scope: relay_peers says why each is reachable; relay_rules and relay_group narrow who may message you.",
   "Never put credentials in a message: send a reference instead.",
 ].join("\n")
@@ -57,9 +62,27 @@ export interface RelayMcpOptions {
   /** push deliveries as `notifications/claude/channel` */
   channels?: boolean
   version?: string
+  /** starts a worker for relay_spawn, resolving with its name and its runner's pid once its harness started; without it there is no relay_spawn */
+  spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
   /** diagnostics, never stdout */
   log?: (line: string) => void
   heartbeatMs?: number
+}
+
+/**
+ * what relay_spawn asks for: `swarm spawn --bg` of `command` with these flags, acting as `as`, the shim's own address, of `harness`,
+ * in `cwd`: the one asked for, else the caller's working directory when it exists, else (none) the shim's
+ */
+export interface SpawnRequest {
+  command: string[]
+  as: string
+  harness?: string
+  name?: string
+  title?: string
+  no_push?: boolean
+  handback_bytes?: number
+  /** the directory the worker runs in, absolute and existing */
+  cwd?: string
 }
 
 type Json = Record<string, unknown>
@@ -116,6 +139,31 @@ export const TOOLS = [
       required: ["to", "body"],
       additionalProperties: false,
     },
+  },
+  {
+    name: "relay_spawn",
+    description: `Start a worker agent under you, as ${CLI_NAME} spawn does: command is its harness command as argv, its task in it (e.g. ["claude", "-p", "<task>", "--model", "<model>"] or ["codex", "exec", "<task>"]), or give harness and task instead. It returns at once with the worker's name; its messages and its handback (exit code and final output) reach you by themselves, and relay_send to that name steers it: the worker gets your message after its next tool call or before it finishes, so its task need not tell it to check an inbox.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "array", items: { type: "string" }, minItems: 1, description: "the harness command as argv" },
+        harness: { type: "string", enum: ["claude", "codex"], description: "instead of command: claude -p <task> or codex exec <task>" },
+        task: { type: "string", description: "with harness: the worker's task" },
+        model: { type: "string", description: "with harness: its --model" },
+        name: { type: "string", description: "its address (default <harness>-<5 random characters>)" },
+        title: { type: "string", maxLength: 64, description: "its title until it sets its own (default the task's first line)" },
+        no_push: { type: "boolean", description: "your stop does not wait on it; its messages and handback still reach you after your tool calls" },
+        handback_bytes: { type: "integer", minimum: 1, maximum: LIMITS.handbackBytes, description: "hand back only the last N bytes of its final output" },
+        cwd: { type: "string", description: "the absolute path of an existing directory it runs in (default your working directory)" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "relay_status",
+    description:
+      "Whether the recipients of a message you sent read it: per recipient read at, delivered at (a background hook handed it over; it reaches the model with its next request), shown by a hook at, or unread. By the message's id, its short id or last (the newest you sent).",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false },
   },
   {
     name: "relay_reply",
@@ -353,6 +401,48 @@ function groupText(result: unknown): string {
   ].join("\n")
 }
 
+/** relay_spawn's arguments as a spawn request, all but who spawns; a `cwd` must be an existing directory's absolute path */
+function spawnRequest(args: Json): Omit<SpawnRequest, "as" | "harness"> {
+  if ((args.command === undefined) === (args.harness === undefined)) throw new ToolInputError("give command (the harness command as argv) or harness and task")
+  let command: string[]
+  if (args.command !== undefined) {
+    const words = args.command
+    if (!Array.isArray(words) || !words.length || !words.every((w) => typeof w === "string") || !String(words[0]).trim())
+      throw new ToolInputError('command must be the harness command as a list of words, e.g. ["codex", "exec", "<task>"]')
+    if (args.task !== undefined || args.model !== undefined) throw new ToolInputError("task and model go with harness; with command, put them in it")
+    command = words as string[]
+  } else {
+    const harness = oneOf(args, "harness", ["claude", "codex"] as const)
+    const model = str(args, "model")
+    command = [...(harness === "claude" ? ["claude", "-p"] : ["codex", "exec"]), str(args, "task", true), ...(model ? ["--model", model] : [])]
+  }
+  const bytes = args.handback_bytes
+  if (bytes !== undefined && (typeof bytes !== "number" || !Number.isInteger(bytes) || bytes < 1 || bytes > LIMITS.handbackBytes))
+    throw new ToolInputError(`handback_bytes must be whole bytes, 1 to ${LIMITS.handbackBytes}`)
+  const name = args.name === undefined ? undefined : str(args, "name", true)
+  const title = str(args, "title")
+  const noPush = bool(args, "no_push")
+  const cwd = str(args, "cwd")
+  if (cwd !== undefined && !isAbsolute(cwd)) throw new ToolInputError("cwd must be an absolute path")
+  if (cwd !== undefined && !isDirectory(cwd)) throw new ToolInputError(`cwd ${cwd} is not an existing directory`)
+  return {
+    command,
+    ...(name ? { name } : {}),
+    ...(title !== undefined ? { title } : {}),
+    ...(noPush ? { no_push: true } : {}),
+    ...(bytes !== undefined ? { handback_bytes: bytes } : {}),
+    ...(cwd !== undefined ? { cwd } : {}),
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 function seconds(args: Json, fallback: number): number {
   const value = args.wait_s
   if (value === undefined) return fallback
@@ -392,7 +482,9 @@ async function* chunks(input: RelayMcpOptions["input"]): AsyncIterable<Uint8Arra
 }
 
 function delivered(messages: Envelope[]): string {
-  return [PREAMBLE, ...messages.map(wrapMessage)].join("\n\n")
+  const shown = (message: Envelope) =>
+    message.shown_at ? `(a hook already showed you this at ${clock(message.shown_at)}; that copy may reach you after this call)\n` : ""
+  return [PREAMBLE, ...messages.map((message) => `${shown(message)}${wrapMessage(message)}`)].join("\n\n")
 }
 
 /**
@@ -401,6 +493,7 @@ function delivered(messages: Envelope[]): string {
  */
 export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   const log = options.log ?? (() => {})
+  const tools = options.spawn ? TOOLS : TOOLS.filter((t) => t.name !== "relay_spawn")
   const home = options.env?.HOME
   const sent = new Map<string, { from: string; thread: string }>()
   let client: RelayClient | undefined
@@ -561,9 +654,39 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         if (result.held) return text(heldText(result.held))
         const lines = reachLines(result.deliveries)
         const to = result.deliveries.map((d) => (lines.length ? d.address : deliveryText(d))).join(", ")
+        const receipt = result.deliveries.some((d) => d.state === "running" || d.state === "starting")
+          ? [`relay_status with id ${shortId(result.id)} shows when it is read`]
+          : []
         return {
-          ...text([`sent ${result.id} (thread ${result.thread}) to ${to}${redactedText(result.redacted)}`, ...lines].join("\n")),
+          ...text([`sent ${result.id} (thread ${result.thread}) to ${to}${redactedText(result.redacted)}`, ...lines, ...receipt].join("\n")),
           structuredContent: sentContent(result),
+        }
+      }
+      case "relay_spawn": {
+        const request = spawnRequest(args)
+        const spawn = options.spawn
+        if (!spawn) throw new RelayError("method_not_found", "no tool relay_spawn")
+        const view = await call<EndpointView>("whoami")
+        let started: { name: string; pid: number }
+        try {
+          const cwd = request.cwd ?? (view.cwd && isAbsolute(view.cwd) && isDirectory(view.cwd) ? view.cwd : undefined)
+          started = await spawn({ ...request, as: view.address, ...(view.harness ? { harness: view.harness } : {}), ...(cwd ? { cwd } : {}) })
+        } catch (error) {
+          return text(error instanceof Error ? error.message : String(error), true)
+        }
+        return {
+          ...text(
+            `${started.name} started (pid ${started.pid}) and runs in the background: its messages and its handback reach you by themselves, after your tool calls or when you stop; steer it with relay_send to ${started.name} (it gets the message after its next tool call or before it finishes)`,
+          ),
+          structuredContent: { name: started.name, pid: started.pid },
+        }
+      }
+      case "relay_status": {
+        const receipts = await call<MessageReceipts>("receipts", { id: str(args, "id", true) })
+        const lines = receiptLines(receipts)
+        return {
+          ...text([`${receipts.id}:`, ...(lines.length ? lines : ["no deliveries of it are kept any more"])].join("\n")),
+          structuredContent: { ...receipts },
         }
       }
       case "relay_reply": {
@@ -793,10 +916,10 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       case "ping":
         return respond({})
       case "tools/list":
-        return respond({ tools: TOOLS })
+        return respond({ tools })
       case "tools/call": {
         if (!initialized) return write({ jsonrpc: "2.0", id, error: { code: -32002, message: "call initialize first" } })
-        if (!TOOLS.some((t) => t.name === params.name)) {
+        if (!tools.some((t) => t.name === params.name)) {
           return write({ jsonrpc: "2.0", id, error: { code: -32602, message: `unknown tool ${JSON.stringify(params.name)}` } })
         }
         return respond(await callTool(params))
