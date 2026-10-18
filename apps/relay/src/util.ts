@@ -103,8 +103,11 @@ export function setCookie(name: string, value: string, secure: boolean, maxAge: 
 
 /** a local path to return to after sign-in, never another origin */
 export function safeNext(raw: string | null | undefined): string {
-  if (!raw?.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) return "/orgs";
-  return raw;
+  if (!raw?.startsWith("/") || /[\u0000-\u001f\u007f\\]/.test(raw)) return "/orgs";
+  const base = "https://relay.invalid";
+  const url = new URL(raw, base);
+  if (url.origin !== base) return "/orgs";
+  return url.pathname + url.search + url.hash;
 }
 
 export const DAY = 86_400_000;
