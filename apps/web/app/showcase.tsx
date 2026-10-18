@@ -19,7 +19,7 @@ type View = (typeof VIEWS)[number]["id"];
 type Mode = (typeof MODES)[number]["id"];
 
 const FIGURES: Record<Mode, string> = {
-  hub: "Two machines with several fleets each and an ambient swarm, linked through their account's hub, with a contact to another account",
+  hub: "Trees under one hub: machine a on account a, machine b on account b with three fleets each, and ambient swarm a; messages between the accounts pass the judge",
   mesh: "Four machines of one account whose brokers link directly to each other, with no hub",
 };
 
@@ -62,7 +62,7 @@ export function Showcase({ captions }: { captions: Record<View | "mesh", string>
           <figure className="demo" aria-label={FIGURES[mode]}>
             <div className="d-bar">
               <span className="d-lights" aria-hidden="true" />
-              <span className="d-title">one account</span>
+              <span className="d-title">{mode === "hub" ? "two accounts" : "one account"}</span>
               <span className="d-count" ref={status} />
             </div>
             {mode === "hub" ? <Swarm status={status} /> : <Mesh status={status} />}

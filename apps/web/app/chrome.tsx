@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { DOCS, REPO, SPEC } from "./content";
+import { DEMO, DOCS, REPO, SPEC } from "./content";
 
 /** Two corner brackets around a solid square. */
 export function Mark({ size = 16 }: { size?: number }) {
@@ -30,6 +30,7 @@ export function Header({ page = "home" }: { page?: "home" | "docs" | "spec" }) {
             spec
           </Link>
           <Link href="/#quickstart">quickstart</Link>
+          <a href={DEMO}>demo</a>
           <a href={REPO}>github</a>
         </nav>
       </div>

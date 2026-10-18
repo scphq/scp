@@ -4,6 +4,7 @@ import { Header } from "./chrome";
 import { CopyButton } from "./copy-button";
 import { Showcase } from "./showcase";
 import { AUTHORS, CAPABILITIES, DEMO, DEMO_CAPTIONS, HERO, HERO_FACTS, PROTOCOL, QUICKSTART, QUICKSTART_LINES, RULES, SPEC } from "./content";
+import { HARNESS, HARNESSES, HarnessIcon } from "./harnesses";
 
 const SECTIONS = 3;
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -59,6 +60,17 @@ export default function Home() {
                 <a href={DEMO} className="mini-link acts-demo">
                   try the hosted demo <Arrow />
                 </a>
+              </div>
+              <div className="works rise" style={{ "--i": 3 } as CSSProperties}>
+                <span className="works-k">works with</span>
+                <ul>
+                  {HARNESSES.map((h) => (
+                    <li key={h}>
+                      <HarnessIcon h={h} />
+                      {HARNESS[h].label}
+                    </li>
+                  ))}
+                </ul>
               </div>
             </div>
             <dl className="facts rise" style={{ "--i": 3 } as CSSProperties}>

@@ -30,7 +30,7 @@ An orchestrator in Claude Code spawns three workers in three harnesses, steers o
 ```console
 $ swarm spawn --name parser -- claude -p "Fix the parser tests"
 $ swarm spawn --name docs   -- codex exec "Update the CLI reference"
-$ swarm spawn --name bench  -- gemini "Benchmark the new parser"
+$ swarm spawn --name bench  -- agy -p "Benchmark the new parser"
 $ swarm send parser "Also cover the empty-input case."
 ```
 
