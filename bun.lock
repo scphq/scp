@@ -70,6 +70,7 @@
         "smol-toml": "^1.9.1",
       },
       "devDependencies": {
+        "@openai/codex": "0.159.0",
         "opencode-ai": "1.18.34",
         "tsup": "^8.5.1",
       },
@@ -511,6 +512,20 @@
     "@nodelib/fs.stat": ["@nodelib/fs.stat@2.0.5", "", {}, "sha512-RkhPPp2zrqDAQA/2jNhnztcPAlv64XdhIp7a7454A5ovI7Bukxgt7MX7udwAu3zg1DcpPU0rz3VV1SeaqvY4+A=="],
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
+
+    "@openai/codex": ["@openai/codex@0.159.0", "", { "optionalDependencies": { "@openai/codex-darwin-arm64": "npm:@openai/codex@0.159.0-darwin-arm64", "@openai/codex-darwin-x64": "npm:@openai/codex@0.159.0-darwin-x64", "@openai/codex-linux-arm64": "npm:@openai/codex@0.159.0-linux-arm64", "@openai/codex-linux-x64": "npm:@openai/codex@0.159.0-linux-x64", "@openai/codex-win32-arm64": "npm:@openai/codex@0.159.0-win32-arm64", "@openai/codex-win32-x64": "npm:@openai/codex@0.159.0-win32-x64" }, "bin": { "codex": "bin/codex.js" } }, "sha512-nQWxAkzn+Rhr8TgtIhVhSlqvCytrMoqe+P8xoo4xxhCIBnzOfRs6SEmkMJfTPjkU3BYlsplwDOY2dbSp4+514g=="],
+
+    "@openai/codex-darwin-arm64": ["@openai/codex@0.159.0-darwin-arm64", "", { "os": "darwin", "cpu": "arm64" }, "sha512-D1x+5n2y0TE43ERJs3CbBDRPLQl968hpqsInOwYNhfnTOTT53McpfFa6+VfPWwmPi0zW0aJ0C97K+6MhNHYe6A=="],
+
+    "@openai/codex-darwin-x64": ["@openai/codex@0.159.0-darwin-x64", "", { "os": "darwin", "cpu": "x64" }, "sha512-uNsvmDAYH2H7/uJi3NYtn0d+bpMHgovZyZwm62Q8q/cdd1rp5oEbk2Axe5pbyiWFwSpjdT6fbuY8gTdX2i7zjg=="],
+
+    "@openai/codex-linux-arm64": ["@openai/codex@0.159.0-linux-arm64", "", { "os": "linux", "cpu": "arm64" }, "sha512-cm7ihiXIZILGQPWgak3ApOcRZ6beupDNPHVAJ9CyHxZSQPsTy6CSYg1GYLVe2DlRUQYprnXHZceOgheXo0PvHA=="],
+
+    "@openai/codex-linux-x64": ["@openai/codex@0.159.0-linux-x64", "", { "os": "linux", "cpu": "x64" }, "sha512-7ks+EeQjX33wfJXbggseyF0CJRFVgzDHA6BzC7mJjFsJKmdAuOFWMFeMeZe8vL/G6xEpL29wOdwR85sK49F0iA=="],
+
+    "@openai/codex-win32-arm64": ["@openai/codex@0.159.0-win32-arm64", "", { "os": "win32", "cpu": "arm64" }, "sha512-o4oHXi4IONlLyMRHOIxXTPG1OdbD7Pxmqd2AcYRWHXP1YjrdqdEQozqQLU05rdYGcfrwBwcBqPpGO9LLVHd0fg=="],
+
+    "@openai/codex-win32-x64": ["@openai/codex@0.159.0-win32-x64", "", { "os": "win32", "cpu": "x64" }, "sha512-Fp+TghoUzxOguHj/WAxOIZCIJpTOb4pB9p90tf6+g2PSTWSCvqpawwxPmDuCMxKs8Sn1gO5zP621PoCkBt5cuQ=="],
 
     "@opennextjs/aws": ["@opennextjs/aws@4.1.11", "", { "dependencies": { "@ast-grep/napi": "^0.45.3", "@aws-sdk/client-cloudfront": "3.984.0", "@aws-sdk/client-dynamodb": "3.984.0", "@aws-sdk/client-lambda": "3.984.0", "@aws-sdk/client-s3": "3.984.0", "@aws-sdk/client-sqs": "3.984.0", "@node-minify/core": "^9.0.2", "@node-minify/terser": "^9.0.1", "@tsconfig/node18": "^18.2.7", "aws4fetch": "^1.0.20", "chalk": "^5.6.2", "cookie": "^1.1.1", "esbuild": "0.28.2", "express": "^5.2.1", "path-to-regexp": "^6.3.0", "urlpattern-polyfill": "^10.1.0", "yaml": "^2.9.1" }, "peerDependencies": { "next": ">=15.5.28 <16 || >=16.4.1" }, "bin": { "open-next": "dist/index.js" } }, "sha512-cew0cUgGZF/Kr/C+Z1qvmAdKj4Va5cRho+aB6Ci/5ILd+QDdrR2LVaC/6Qm12KVF37vSLDK7lPDd/KdvvCoNEw=="],
 
