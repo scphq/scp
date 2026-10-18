@@ -112,7 +112,7 @@ const CSP = [
   "default-src 'none'",
   "style-src 'self' https://fonts.googleapis.com",
   "font-src https://fonts.gstatic.com",
-  "script-src https://challenges.cloudflare.com",
+  "script-src 'self' https://challenges.cloudflare.com",
   "frame-src https://challenges.cloudflare.com",
   "connect-src 'self' https://challenges.cloudflare.com",
   "img-src 'self' data:",

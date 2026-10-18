@@ -12,4 +12,15 @@ export {
   type RemoteView,
   type XEndpoint,
 } from "./federation"
-export { HUB_LIMITS, RelayHub, type HubAuth, type HubConn, type HubDeps, type HubGrant, type HubLimits, type HubRole, type HubSocket } from "./hub"
+export {
+  HUB_LIMITS,
+  RelayHub,
+  type HubAuth,
+  type HubConn,
+  type HubDeps,
+  type HubGrant,
+  type HubLimits,
+  type HubRole,
+  type HubSocket,
+  type MachineRow,
+} from "./hub"

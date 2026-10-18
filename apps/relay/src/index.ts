@@ -5,6 +5,7 @@ import type { Env } from "./env";
 import { hubRoute } from "./hub/routes";
 import { CSS, html, layout } from "./html";
 import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
+import { APP_JS, overviewPage } from "./overview";
 import { tokensPage, tokensPost } from "./tokens";
 import { DAY, HttpError, json } from "./util";
 import { back, type Ctx, loadCtx, toSignIn } from "./web";
@@ -37,7 +38,8 @@ async function pages(ctx: Ctx): Promise<Response> {
   const rest = path.split("/").filter(Boolean).slice(1);
   if (!post) {
     if (rest.length === 0) return orgsPage(ctx, user);
-    if (rest.length === 1) return orgPage(ctx, user, rest[0]!);
+    if (rest.length === 1) return overviewPage(ctx, user, rest[0]!);
+    if (rest.length === 2 && rest[1] === "members") return orgPage(ctx, user, rest[0]!);
     if (rest.length === 2 && rest[1] === "tokens") return tokensPage(ctx, user, rest[0]!);
     throw new HttpError(404, "not_found", "Not found.");
   }
@@ -66,6 +68,8 @@ export default {
       if (url.pathname === "/health") return json({ ok: true, service: "scp-relay" });
       if (url.pathname === "/app.css")
         return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
+      if (url.pathname === "/app.js")
+        return new Response(APP_JS, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=3600" } });
       if (url.pathname === "/v1/device/code" && req.method === "POST") return await deviceCode(req, env.DB, url.origin, Date.now());
       if (url.pathname === "/v1/device/token" && req.method === "POST") return await deviceToken(req, env.DB, url.origin, Date.now());
       if (url.pathname === "/v1/relay/ws") return await hubRoute(req, env, "ws");

@@ -1,3 +1,5 @@
+import type { ActivityRow, EndpointView } from "@scp-dev/core";
+import type { MachineRow } from "@scp-dev/hub";
 import { authenticate } from "../credentials";
 import type { Env } from "../env";
 import { json } from "../util";
@@ -34,5 +36,26 @@ export async function closeGrants(env: Env, orgId: string, match: { tokenId: str
     await res.body?.cancel();
   } catch (e) {
     console.error("scp-relay hub revoke failed", e);
+  }
+}
+
+export interface Overview {
+  machines: MachineRow[];
+  endpoints: EndpointView[];
+  activity: ActivityRow[];
+}
+
+/** the org hub's machines, endpoints and latest activity for the dashboard; null when the hub does not answer */
+export async function hubOverview(env: Env, orgId: string): Promise<Overview | null> {
+  try {
+    const res = await hubStub(env, orgId).fetch(`${INTERNAL}/overview`);
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    return (await res.json()) as Overview;
+  } catch (e) {
+    console.error("scp-relay hub overview failed", e);
+    return null;
   }
 }

@@ -127,6 +127,31 @@ td form{display:inline}
 .secret{margin-top:1rem;padding:1rem 1.125rem;border:1px solid var(--line);background:var(--surface);font-family:var(--mono);font-size:.8125rem;overflow-wrap:anywhere;user-select:all}
 .usercode{margin-top:1.5rem;font-family:var(--mono);font-size:clamp(2rem,6vw,3rem);letter-spacing:.12em}
 .role{font-family:var(--mono);font-size:.6875rem;padding:.125rem .375rem;border:1px solid var(--line);color:var(--ink)}
+h3{font-size:.9375rem;font-weight:560;letter-spacing:-.01em}
+.nowrap{white-space:nowrap}
+.push{margin-left:auto}
+.block-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem 1rem}
+.dot{display:inline-block;width:6px;height:6px;margin-right:.5rem;vertical-align:middle;border:1px solid var(--faint);background:transparent}
+.dot.online{border-color:var(--acc);background:var(--acc)}
+.dot.idle{border-color:var(--dim);background:var(--dim)}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+.tag{display:inline-block;font-family:var(--mono);font-size:.6875rem;padding:.0625rem .375rem;background:var(--surface);border:1px solid var(--line-soft);color:var(--ink);white-space:nowrap}
+.machine{margin-top:1.75rem}
+table.agents{table-layout:fixed;min-width:46rem}
+table.agents td{overflow-wrap:anywhere}
+.c-agent{width:14%}.c-harness{width:14%}.c-title{width:19%}.c-presence{width:12%}.c-status{width:20%}.c-labels{width:13%}.c-seen{width:8%}
+.machine-head{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem .75rem}
+.machine-head .dot{margin-right:0}
+.machine-head h3{font-family:var(--mono);font-size:.875rem;font-weight:500}
+.steps{list-style:none;display:grid;gap:1.25rem;margin-top:1.5rem;counter-reset:step}
+.steps li{counter-increment:step}
+.steps .label::before{content:counter(step,decimal-leading-zero) "  ";color:var(--faint)}
+.cmd{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-top:.5rem;padding:.5rem .5rem .5rem 1rem;border:1px solid var(--line);background:var(--surface)}
+.cmd code{font-size:.8125rem;overflow-wrap:anywhere;user-select:all}
+.cmd .prompt{color:var(--faint);user-select:none}
+.sub-block{margin-top:2.25rem;padding-top:1.5rem;border-top:1px solid var(--line-soft)}
+.sub-block>*+*{margin-top:.75rem}
 .foot-in{display:flex;flex-wrap:wrap;justify-content:space-between;gap:1rem;padding-block:2rem}
-@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
 `;
