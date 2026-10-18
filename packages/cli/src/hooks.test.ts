@@ -1201,17 +1201,34 @@ describe("a stop's nudges", () => {
 })
 
 describe("the OpenCode plugin", () => {
+  test("the generated plugin preserves its install markers and enables the wake waiter by environment", () => {
+    const source = opencodePlugin()
+    expect(source).toStartWith("// scp:")
+    expect(source).toContain("const BLOCK_STOP = false")
+    expect(source).toContain('process.env.SCP_WAKE !== "0"')
+    expect(source).toContain('["swarm", "hook", "opencode", "--wake", "50"]')
+  })
+
   type Calls = { args: string[]; payload: Record<string, unknown> }[]
-  async function load(reply: Record<string, unknown>, sessions: Record<string, string | undefined> = {}, flaky: string[] = [], blockStop = true) {
+  async function load(
+    reply: Record<string, unknown>,
+    sessions: Record<string, string | undefined> = {},
+    flaky: string[] = [],
+    blockStop = true,
+    enableWake = false,
+    delayWake = false,
+  ) {
     const root = mkdtempSync(join(process.env.HOME!, "oc-plugin-"))
     const bin = join(root, "bin")
     mkdirSync(bin)
     const log = join(root, "calls.log")
     const replyFile = join(root, "reply.json")
     writeFileSync(replyFile, JSON.stringify(reply))
-    writeFileSync(join(bin, "swarm"), `#!/bin/sh\nline="$(printf '%s\\t' "$*")$(cat)"\nprintf '%s\\n' "$line" >> '${log}'\ncat '${replyFile}'\n`, {
-      mode: 0o755,
-    })
+    writeFileSync(
+      join(bin, "swarm"),
+      `#!/bin/sh\nline="$(printf '%s\\t' "$*")$(cat)"\nprintf '%s\\n' "$line" >> '${log}'\n${delayWake ? "trap 'exit 0' TERM\n" : ""}cat '${replyFile}'\n${delayWake ? 'case "$*" in *--wake*) sleep 1;; esac\n' : ""}`,
+      { mode: 0o755 },
+    )
     const file = join(root, "scp.ts")
     writeFileSync(file, opencodePlugin({ blockStop }))
     const prompts: unknown[] = []
@@ -1228,7 +1245,16 @@ describe("the OpenCode plugin", () => {
     }
     const path = process.env.PATH
     process.env.PATH = `${bin}:${path}`
-    const plugin = await (await import(file)).Scp({ client, directory: "/work/oc" })
+    const wake = process.env.SCP_WAKE
+    process.env.SCP_WAKE = enableWake ? "1" : "0"
+    const plugin = await (async () => {
+      try {
+        return await (await import(file)).Scp({ client, directory: "/work/oc" })
+      } finally {
+        if (wake === undefined) delete process.env.SCP_WAKE
+        else process.env.SCP_WAKE = wake
+      }
+    })()
     const calls = (): Calls =>
       existsSync(log)
         ? readFileSync(log, "utf8")
@@ -1254,6 +1280,45 @@ describe("the OpenCode plugin", () => {
       restore: () => (process.env.PATH = path),
     }
   }
+
+  test("one process waiter wakes the last idle root only while no root is busy", async () => {
+    const oc = await load({ hookSpecificOutput: { additionalContext: "WAKE-CONTEXT" } }, { ses_child: "ses_root" }, [], false, true)
+    try {
+      await oc.plugin.event({ event: { type: "session.status", properties: { sessionID: "ses_root", status: { type: "busy" } } } })
+      await oc.plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_other", info: { id: "ses_other" } } } })
+      await oc.plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_child" } } })
+      await oc.settle(1)
+      expect(oc.calls().filter((c) => c.args.includes("--wake"))).toEqual([])
+      await oc.plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_root" } } })
+      await oc.settle(3)
+      const wakes = oc.calls().filter((c) => c.args.includes("--wake"))
+      expect(wakes).toHaveLength(1)
+      expect(wakes[0]).toEqual({
+        args: ["hook", "opencode", "--wake", "50"],
+        payload: { hook_event_name: "Wake", session_id: "ses_root", cwd: "/work/oc" },
+      })
+      expect(oc.prompts).toEqual([{ path: { id: "ses_root" }, body: { parts: [{ type: "text", text: "WAKE-CONTEXT" }] } }])
+    } finally {
+      await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_root" } } })
+      oc.restore()
+    }
+  })
+
+  test("a waiter that printed still queues its prompt after a root turns busy", async () => {
+    const oc = await load({ hookSpecificOutput: { additionalContext: "PRINTED-CONTEXT" } }, {}, [], false, true, true)
+    try {
+      await oc.plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_root", info: { id: "ses_root" } } } })
+      await oc.settle(2)
+      expect(oc.prompts).toEqual([])
+      await oc.plugin.event({ event: { type: "session.status", properties: { sessionID: "ses_root", status: { type: "retry" } } } })
+      for (let i = 0; i < 40 && !oc.prompts.length; i++) await Bun.sleep(50)
+      expect(oc.prompts).toEqual([{ path: { id: "ses_root" }, body: { parts: [{ type: "text", text: "PRINTED-CONTEXT" }] } }])
+      expect(oc.calls().filter((c) => c.args.includes("--wake"))).toHaveLength(1)
+    } finally {
+      await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_root" } } })
+      oc.restore()
+    }
+  })
 
   test("a child session's start and idle are ignored, its tools report as a subagent, and nothing is injected into it", async () => {
     const oc = await load({ hookSpecificOutput: { additionalContext: "CTX" }, decision: "block", reason: "r", unread: 1 }, { ses_known_child: "ses_root" })

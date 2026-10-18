@@ -843,14 +843,25 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if ((known.get(me) ?? "offline") !== after.presence) presenceChanged(after)
         return row
       }
-      case "inject":
-        return core.inject(me, {
+      case "inject": {
+        const waitMs = waitSeconds(params.wait_s)
+        const options = {
           stop: params.stop === true,
           count: params.count === true,
           holdUnread: params.hold_unread === true,
           directives: params.directives === true,
+          wake: waitMs > 0 && params.stop !== true && params.count !== true,
           ...hookOf(s),
-        })
+        }
+        const deadline = Date.now() + (options.wake ? waitMs : 0)
+        let result = core.inject(me, options)
+        while (!result.offered.length && !s.data.closed && Date.now() < deadline) {
+          await waitFor(me, deadline - Date.now(), s)
+          if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
+          result = core.inject(me, options)
+        }
+        return result
+      }
       case "stop_wait": {
         const waitMs = waitSeconds(params.wait_s)
         const deadline = Date.now() + waitMs

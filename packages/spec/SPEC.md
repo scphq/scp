@@ -675,6 +675,7 @@ Pull is sufficient for conformance. Push is what makes delivery native and is RE
 `inject {}` returns fresh deliveries: unacknowledged, unexpired, never injected and not under an offer hold.
 
 - **Budget.** Oldest first, at most `LIMITS.injectMessages` (5) messages and at most `LIMITS.injectBytes` (4096) bytes of wrapped text per injection. A single message larger than the byte budget is offered but not shown; it stays unread for the inbox. A message from one of the session's live workers that fits `LIMITS.pushBytes` is left for the stop push (section 8.6) to show whole.
+- **Wait.** `inject {wait_s}` (a wake) blocks up to `wait_s` seconds (at most `LIMITS.waitMaxS`) until it has a delivery to offer, and offers a live worker's message rather than leaving it for the stop push. A wake's showing is confirmed `deferred`, since the harness hands it to the model as the next turn.
 - **Offer hold.** Returned deliveries are offered under a hold id `hld_...` for `LIMITS.injectHoldS` (10 s). Other hooks and channel pushes skip offered deliveries. Offers not confirmed in time become fresh again.
 - **Confirmation.** After printing, the hook sends `injected {seqs, hold, read, deferred?, preamble?, intro?}`. `seqs` are all offered seqs; `read` are those shown, which the broker acknowledges. Offered but unshown seqs are marked injected and stay unacknowledged. `preamble: true` records that the session saw the full preamble. `deferred: true` marks a showing the harness hands the model only later: the acknowledged deliveries stay listed by `inbox` until the showing settles, and count as delivered rather than read (sections 7.11, 7.13).
 - **Result.** `messages`, `offered`, `hold`, `more` (fresh minus shown), `unread`, `block` (false), and `brief`, `intro`, `intro_key` as applicable.
@@ -1406,7 +1407,7 @@ An integration with push capability additionally:
 | `title_infer` | `from` (`prompt` or `summary`), `text` | `{changed}` | `invalid_params` | hook |
 | `status` | `state?`, `note?` | EndpointView | `invalid_params`, `secret_refused` | ep, hook |
 | `event` | `kind`, `tool?`, `summary?`, `agent?` | ActivityRow | `invalid_params`, `too_large` | ep, hook |
-| `inject` | `stop?`, `count?`, `hold_unread?`, `directives?` | sections 8.3, 8.5 | | ep, hook |
+| `inject` | `stop?`, `count?`, `hold_unread?`, `directives?`, `wait_s?` | sections 8.3, 8.5 | | ep, hook |
 | `injected` | `seqs`, `hold`, `read?`, `deferred?`, `stop?`, `push?`, `nudged?`, `restated?`, `preamble?`, `intro?` | `{injected, held?, pushed?, nudged?, restated?, briefed?, introduced?}` | `invalid_params` | ep, hook |
 | `stop_wait` | `wait_s?`, `prompts?` | StopWaitResult | | ep, hook |
 | `prompted` | `tldr_every?` | `{prompted, tldr?}` | | ep, hook |
@@ -1638,9 +1639,11 @@ All hooks run `swarm hook <harness> [event] [--block-stop-on-unread] [--push-wai
 | Muse | Plugin manifest: SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no |
 | Gemini / Antigravity (agy) | SessionStart, PreInvocation (prompt), PostToolUse (activity only), Stop (only when the termination reason is `NO_TOOL_CALL`) | `{"injectSteps":[{"ephemeralMessage":<text>}]}`; `{}` when empty | `{"decision":"continue","reason":<text>}`; directives as a count and pointer | no | no |
 | pi | Extension: mounts `swarm mcp --harness pi --channels` and registers its tools as pi tools | none; messages arrive by channel push | none | no | no |
-| OpenCode | Plugin: tool execution (text appended to the tool output), chat message (synthetic text part), session created, session idle | as Claude Code; prompt shows an unread pointer only | Emulated: on idle, a held stop's text is submitted as a new prompt | no | child sessions as activity |
+| OpenCode | Plugin: tool execution (text appended to the tool output), chat message (synthetic text part), session created, session idle, session status | as Claude Code; prompt shows an unread pointer only | Emulated: on idle, a held stop's text is submitted as a new prompt | no | child sessions as activity |
 
 The pi extension (`@scp-dev/pi`, run by `swarm pi [--name N]`) declares the `claude/channel` capability and hands each pushed message to pi as a custom message with `deliverAs: "steer"` and `triggerTurn: true`: it steers a running turn after its tool calls, and starts a turn on an idle session. A resumed session (`pi --continue`, `pi --session <id>`) receives the messages that arrived while it was closed.
+
+The OpenCode plugin wakes an idle session (wake binding `opencode-plugin`): while no root session of the process runs a turn, it keeps one `swarm hook opencode --wake 50` waiting and submits what it prints as a new prompt with `session.promptAsync`; a turn starting stops the waiter, and a waiter that printed has already confirmed its messages, so they are never injected again. `SCP_WAKE=0` turns it off.
 
 Each integration also registers the MCP server (`swarm mcp --harness <h>`) under the name `scp` in the harness's MCP configuration. Shown messages are acknowledged on every harness except agy, where they are marked injected only.
 

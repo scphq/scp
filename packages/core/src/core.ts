@@ -1866,10 +1866,11 @@ export class RelayCore {
    * `directive_seqs`. Any call says `brief` once the session was shown the full preamble ({@link briefed}), and one that is no stop names in
    * `intro` the spawner of an endpoint a `swarm spawn` grant placed, with the grant's steer key in `intro_key`, until a hook showed it
    * ({@link introduced}). A hook of another process than the one holding the endpoint (a child that inherited the session key) gets nothing.
+   * A wake also offers live workers' messages.
    */
   inject(
     endpoint: string,
-    options: { stop?: boolean; count?: boolean; holdUnread?: boolean; directives?: boolean; transient?: boolean; process?: string } = {},
+    options: { stop?: boolean; count?: boolean; holdUnread?: boolean; directives?: boolean; transient?: boolean; process?: string; wake?: boolean } = {},
   ): {
     messages: Envelope[]
     offered: number[]
@@ -1959,7 +1960,7 @@ export class RelayCore {
       now,
       LIMITS.inboxPage,
     )
-    const { shown, offered } = this.budget(rows, LIMITS.injectBytes, () => this.pushable(me, now))
+    const { shown, offered } = this.budget(rows, LIMITS.injectBytes, options.wake ? undefined : () => this.pushable(me, now))
     const hold = this.hold(offered, now)
     this.received(endpoint, shown, now)
     return { messages: shown.map((row) => this.envelope(row, row.seq)), offered, hold, more: waiting - shown.length, unread, block: false, ...brief, ...intro }
