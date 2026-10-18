@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "scp-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // Placeholder until the domain is confirmed.
+  // "routes": [{ "pattern": "app.scp.dev", "custom_domain": true }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "scp-relay",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "send_email": [{ "name": "EMAIL" }],
+  "vars": {
+    "MAILER": "cloudflare",
+    "MAIL_FROM": "login@scp.dev",
+    "TURNSTILE_SITE_KEY": "1x00000000000000000000AA"
+  },
+  // Secrets: SESSION_SECRET, TURNSTILE_SECRET, optional RESEND_API_KEY (with MAILER=resend).
+  "triggers": { "crons": ["17 3 * * *"] },
+  "observability": { "enabled": true }
+}
