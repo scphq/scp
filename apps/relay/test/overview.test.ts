@@ -2,7 +2,7 @@ import type { EndpointView, Presence } from "@scp-dev/core";
 import { expect, test } from "bun:test";
 
 interface OverviewModule {
-  orderRows(endpoints: EndpointView[]): { e: EndpointView; depth: number }[];
+  orderRows(endpoints: EndpointView[]): { e: EndpointView; depth: number; anc: string[]; kids: number }[];
   liveRegion(o: { machines: unknown[]; endpoints: EndpointView[]; activity: unknown[] }, handle: string, now: number): { value: string };
 }
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
@@ -43,6 +43,26 @@ test("rows go online, idle, offline, then by handle, with each subagent under it
     ["amy", 0],
     ["old", 0],
   ]);
+  expect(rows.find((r) => r.e.address.endsWith("/zed"))?.kids).toBe(1);
+  expect(rows.find((r) => r.e.address.endsWith("/kid"))?.anc).toEqual(["acme/box/zed"]);
+});
+
+test("a parent row gets a caret over its indented subtree, expanded when live and collapsed when offline", () => {
+  const page = liveRegion(
+    {
+      machines: [],
+      endpoints: [ep("lead", "online"), ep("w1", "online", "lead"), ep("w2", "idle", "w1"), ep("past", "offline"), ep("pw", "offline", "past")],
+      activity: [],
+    },
+    "acme",
+    Date.now(),
+  ).value;
+  expect(page).toContain('data-tree="acme/box/lead" aria-expanded="true"');
+  expect(page).toContain('data-tree="acme/box/w1" aria-expanded="true"');
+  expect(page).toContain('<tr class="sub d2" data-anc="acme/box/lead acme/box/w1">');
+  expect(page).toContain('data-tree="acme/box/past" aria-expanded="false"');
+  expect(page).toContain('<tr class="sub d1" data-anc="acme/box/past" hidden>');
+  expect(page.match(/data-tree=/g)).toHaveLength(3);
 });
 
 test("the agents table keeps offline agents behind a toggle, drops the machine label and shows a retired parent as ended", () => {
@@ -75,6 +95,7 @@ test("an idle agent a message can wake shows apart from one that reads at its ne
   expect(page).toContain('title="idle, a message wakes it via codex-app-server"><span class="dot idle wake"');
   expect(page.match(/class="dot idle wake"/g)).toHaveLength(1);
   expect(page.match(/reads messages at its next turn/g)).toHaveLength(2);
-  expect(page).toContain('aria-label="codex"');
-  expect(page).toContain('aria-label="claude-code"');
+  expect(page).toContain('<svg class="hicon h-codex" width="12" height="12" viewBox="0 0 16 16" role="img" aria-label="codex">');
+  expect(page).toContain('class="hicon h-claude"');
+  expect(page).not.toContain('class="harness"');
 });

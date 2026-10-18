@@ -231,7 +231,8 @@ describe("org overview", () => {
       expect(page).toContain(`data-copy="${cmd}"`);
     expect(page).toContain("SCP_TOKEN");
     expect(page).toContain('href="/orgs/freshco/tokens"');
-    expect(page).toContain('<script src="/app.js" defer></script>');
+    expect(page).toMatch(/<script src="\/app\.js\?v=[0-9a-z]+" defer><\/script>/);
+    expect(page).toMatch(/<link rel="stylesheet" href="\/app\.css\?v=[0-9a-z]+">/);
     expect(page).toMatch(/data-live="\d+"/);
 
     const js = await relay.fetch("/app.js");
