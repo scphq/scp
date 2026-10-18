@@ -1,12 +1,15 @@
 import type { Env, Role, User } from "./env";
-import { closeGrants } from "./hub/routes";
-import { type Html, html } from "./html";
+import { closeGrants, hubOverview } from "./hub/routes";
+import { type Html, html, stamp } from "./html";
 import { judgePost, judgeSection } from "./judge";
 import { mailerFor } from "./mailer";
+import { APP_JS, harnessIcon, hicon, REFRESH_MS } from "./overview";
 import { DAY, HttpError, normalizeEmail, randomId, randomSecret, sha256 } from "./util";
 import { back, type Ctx, field, page, readForm } from "./web";
 
 export const HANDLE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** handles a route under `/orgs/` already takes */
+const RESERVED = new Set(["new"]);
 const INVITE_TTL = 7 * DAY;
 
 export interface Org {
@@ -52,6 +55,7 @@ export async function createOrg(db: D1Database, user: User, rawHandle: string, r
   const handle = rawHandle.trim().toLowerCase();
   if (!HANDLE.test(handle))
     throw new HttpError(400, "invalid_handle", "A handle is lowercase letters, digits and hyphens, starting with a letter or digit, at most 64 characters.");
+  if (RESERVED.has(handle)) throw new HttpError(409, "handle_taken", "That handle is taken.");
   const name = rawName.trim() || handle;
   if (name.length > 80) throw new HttpError(400, "invalid_name", "A name is at most 80 characters.");
   const id = randomId("org");
@@ -210,29 +214,124 @@ export async function removeMember(db: D1Database, m: Membership, actor: User, u
 
 const when = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-export function orgHeader(m: Membership, tab: "overview" | "members" | "tokens"): Html {
-  return html`<p class="label"><a class="mini-link" href="/orgs">Orgs</a> / ${m.org.handle}</p>
-    <h1>${m.org.name}</h1>
-    <p class="lead">You are <span class="role">${m.role}</span> of <code>${m.org.handle}</code>.</p>
-    <nav class="nav sub" aria-label="Organization">
-      <a href="/orgs/${m.org.handle}" ${tab === "overview" ? html`aria-current="page"` : ""}>Overview</a>
-      <a href="/orgs/${m.org.handle}/members" ${tab === "members" ? html`aria-current="page"` : ""}>Members</a>
-      <a href="/orgs/${m.org.handle}/tokens" ${tab === "tokens" ? html`aria-current="page"` : ""}>Tokens and devices</a>
-    </nav>`;
+export type OrgTab = "overview" | "activity" | "sessions" | "graph" | "tokens" | "members";
+
+/** each org tab's label and path under `/orgs/<handle>`, in tab bar order */
+export const ORG_TABS: [OrgTab, string, string][] = [
+  ["overview", "Overview", ""],
+  ["activity", "Activity", "/activity"],
+  ["sessions", "Sessions", "/sessions"],
+  ["graph", "Graph", "/graph"],
+  ["tokens", "Tokens and devices", "/tokens"],
+  ["members", "Members", "/members"],
+];
+
+/** a row of links as tabs, the current one marked */
+export const tabBar = (label: string, tabs: [string, string][], current: string): Html =>
+  html`<nav class="tabs" aria-label="${label}">${tabs.map(([href, text]) => html`<a href="${href}"${href === current ? html` aria-current="page"` : ""}>${text}</a>`)}</nav>`;
+
+export function orgHeader(m: Membership, tab: OrgTab): Html {
+  const base = `/orgs/${m.org.handle}`;
+  return html`<div class="org-head">
+      <p class="label"><a class="mini-link" href="/orgs">Orgs</a> / ${m.org.handle}</p>
+      <div class="org-title"><h1>${m.org.name}</h1><span class="mini">you are <span class="role">${m.role}</span></span></div>
+    </div>
+    ${tabBar(
+      "Organization",
+      ORG_TABS.map(([, text, path]) => [base + path, text]),
+      base + ORG_TABS.find(([t]) => t === tab)![2],
+    )}`;
+}
+
+/** an org tab: the header and tab bar, then its body; a live tab refetches its region and listens to the event stream */
+export function orgTab(ctx: Ctx, m: Membership, tab: OrgTab, title: string, body: Html, opts: { live?: boolean; status?: number } = {}): Response {
+  const app = html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script>`;
+  const head = opts.live ? html`${app}<noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>` : app;
+  const region = opts.live
+    ? html`<div class="tab-body" data-live="${REFRESH_MS}" data-events="/orgs/${m.org.handle}/events">${body}</div>`
+    : html`<div class="tab-body">${body}</div>`;
+  return page(ctx, { title, nav: "orgs", head }, html`${orgHeader(m, tab)}${region}`, opts.status);
 }
 
 export const notice = (text: string | undefined, err = false): Html | "" =>
   text ? html`<p class="notice${err ? " err" : ""}" role="${err ? "alert" : "status"}">${text}</p>` : "";
 
+/** live agents in an org and their harnesses, most common first; from the org's hub */
+interface HubTally {
+  agents: number;
+  harnesses: string[];
+}
+
+const TALLY_TTL = 30_000;
+const TALLY_WAIT = 1500;
+const tallies = new Map<string, { at: number; tally: Promise<HubTally | null> }>();
+
+async function tallyOf(env: Env, orgId: string): Promise<HubTally | null> {
+  const o = await hubOverview(env, orgId);
+  if (!o) return null;
+  const live = o.endpoints.filter((e) => e.kind === "agent" && e.presence !== "offline");
+  const by = new Map<string, { n: number; name: string }>();
+  for (const e of live) {
+    const key = harnessIcon(e.harness);
+    const seen = by.get(key) ?? { n: 0, name: e.harness ?? "unknown" };
+    seen.n++;
+    by.set(key, seen);
+  }
+  return { agents: live.length, harnesses: [...by.values()].sort((a, b) => b.n - a.n || a.name.localeCompare(b.name)).map((h) => h.name) };
+}
+
+/** the hub's tally, cached a short while; null when the hub is slow or down, so one hub never holds up the list */
+async function hubTally(env: Env, orgId: string, now: number): Promise<HubTally | null> {
+  let hit = tallies.get(orgId);
+  if (!hit || now - hit.at > TALLY_TTL) {
+    hit = { at: now, tally: tallyOf(env, orgId).catch(() => null) };
+    tallies.set(orgId, hit);
+  }
+  const slow = new Promise<null>((done) => setTimeout(() => done(null), TALLY_WAIT));
+  return Promise.race([hit.tally, slow]);
+}
+
+/** the devices each org's list row counts: every device for an owner or admin, else the caller's own, as the tokens tab lists them */
+async function deviceCounts(db: D1Database, userId: string): Promise<Map<string, number>> {
+  const { results } = await db
+    .prepare(
+      "SELECT d.org_id, COUNT(*) AS n FROM device_credentials d JOIN memberships m ON m.org_id = d.org_id AND m.user_id = ? WHERE d.revoked_at IS NULL AND (m.role IN ('owner', 'admin') OR d.user_id = ?) GROUP BY d.org_id",
+    )
+    .bind(userId, userId)
+    .all<{ org_id: string; n: number }>();
+  return new Map(results.map((r) => [r.org_id, r.n]));
+}
+
+const ORGS_TABS: [string, string][] = [
+  ["/orgs", "Member of"],
+  ["/orgs/new", "New organization"],
+];
+
+const orgsHead = (current: string): Html =>
+  html`<p class="label">Organizations</p>
+    <h1>Your organizations</h1>
+    <p class="lead">An organization has one hub. Its members' agents can message each other across machines.</p>
+    ${tabBar("Organizations", ORGS_TABS, current)}`;
+
+function agentsCell(t: HubTally | null): Html {
+  if (!t) return html`<span class="mini" title="The hub did not answer in time">-</span>`;
+  const icons = t.harnesses.slice(0, 3).map((h) => hicon(h));
+  const more = t.harnesses.length > 3 ? html`<span class="mini more" title="${t.harnesses.slice(3).join(", ")}">&hellip;</span>` : "";
+  return html`<span class="harnesses" title="${t.harnesses.join(", ") || "no live agents"}">${icons}${more}</span><span class="mono">${t.agents}</span>`;
+}
+
 export async function orgsPage(ctx: Ctx, user: User, error = "", status = 200): Promise<Response> {
-  const orgs = await listOrgs(ctx.env.DB, user.id);
-  const invites = await invitesFor(ctx.env.DB, user.email, ctx.now);
+  const [orgs, invites, devices] = await Promise.all([
+    listOrgs(ctx.env.DB, user.id),
+    invitesFor(ctx.env.DB, user.email, ctx.now),
+    deviceCounts(ctx.env.DB, user.id),
+  ]);
+  const tally = await Promise.all(orgs.map((o) => hubTally(ctx.env, o.id, ctx.now)));
   return page(
     ctx,
     { title: "Organizations", nav: "orgs" },
-    html`<p class="label">Organizations</p>
-      <h1>Your organizations</h1>
-      <p class="lead">An organization has one hub. Its members' agents can message each other across machines.</p>
+    html`${orgsHead("/orgs")}
+      <div class="tab-body">
       ${notice(error, true)}
       ${
         invites.length
@@ -246,21 +345,39 @@ export async function orgsPage(ctx: Ctx, user: User, error = "", status = 200): 
             )}</tbody></table></div></section>`
           : ""
       }
-      <section class="block"><h2>Member of</h2>
+      <section class="block">
       ${
         orgs.length
-          ? html`<div class="table"><table><thead><tr><th>Handle</th><th>Name</th><th>Role</th><th>Members</th></tr></thead>
-            <tbody>${orgs.map((o) => html`<tr><td class="mono"><a href="/orgs/${o.handle}">${o.handle}</a></td><td>${o.name}</td><td><span class="role">${o.role}</span></td><td class="mono">${o.members}</td></tr>`)}</tbody></table></div>`
-          : html`<p class="empty">You are not in an organization yet. Create one, or accept an invite.</p>`
+          ? html`<div class="table"><table class="orgs"><thead><tr><th>Handle</th><th>Name</th><th>Role</th><th class="end">Members</th><th class="end">Devices</th><th class="end" title="Online and idle agents, with their harnesses">Agents</th></tr></thead>
+            <tbody>${orgs.map(
+              (o, i) =>
+                html`<tr><td class="mono"><a href="/orgs/${o.handle}">${o.handle}</a></td><td>${o.name}</td><td><span class="role">${o.role}</span></td><td class="mono end">${o.members}</td><td class="mono end">${devices.get(o.id) ?? 0}</td><td class="end agents-cell">${agentsCell(tally[i]!)}</td></tr>`,
+            )}</tbody></table></div>`
+          : html`<p class="empty">You are not in an organization yet. <a href="/orgs/new">Create one</a>, or accept an invite.</p>`
       }
       </section>
+      </div>`,
+    status,
+  );
+}
+
+/** `/orgs/new`: the create form on its own tab */
+export function newOrgPage(ctx: Ctx, error = "", status = 200, values: { handle?: string; name?: string } = {}): Response {
+  return page(
+    ctx,
+    { title: "New organization", nav: "orgs" },
+    html`${orgsHead("/orgs/new")}
+      <div class="tab-body">
+      ${notice(error, true)}
       <section class="block"><h2>Create an organization</h2>
+      <p class="small">You become its owner. The handle is in every agent address, like <code>acme/laptop/lead</code>, and cannot change later.</p>
       <form class="form" method="post" action="/orgs">
         <input type="hidden" name="csrf" value="${ctx.csrf}">
-        <label class="field"><span>Handle</span><input type="text" name="handle" pattern="[a-z0-9][a-z0-9\\-]{0,63}" placeholder="acme" required></label>
-        <label class="field"><span>Name</span><input type="text" name="name" maxlength="80" placeholder="Acme"></label>
-        <div class="acts"><button class="btn btn-primary" type="submit">Create</button></div>
-      </form></section>`,
+        <label class="field"><span>Handle</span><input type="text" name="handle" value="${values.handle ?? ""}" pattern="[a-z0-9][a-z0-9\\-]{0,63}" placeholder="acme" required autofocus></label>
+        <label class="field"><span>Name</span><input type="text" name="name" value="${values.name ?? ""}" maxlength="80" placeholder="Acme"></label>
+        <div class="acts"><button class="btn btn-primary" type="submit">Create</button><a class="btn btn-ghost" href="/orgs">Cancel</a></div>
+      </form></section>
+      </div>`,
     status,
   );
 }
@@ -272,11 +389,12 @@ export async function orgPage(ctx: Ctx, user: User, handle: string, flash: { ok?
   const judge = await judgeSection(ctx, m);
   const removable = (target: { user_id: string; role: Role }) =>
     target.user_id === user.id ? target.role !== "owner" : m.role === "owner" || (m.role === "admin" && target.role === "member");
-  return page(
+  return orgTab(
     ctx,
-    { title: m.org.name, nav: "orgs" },
-    html`${orgHeader(m, "members")}
-      ${notice(flash.err, true)}${notice(flash.ok)}
+    m,
+    "members",
+    `${m.org.name} members`,
+    html`${notice(flash.err, true)}${notice(flash.ok)}
       ${flash.link ? html`<p class="small">Invite link, if the email does not arrive:</p><p class="secret">${flash.link}</p>` : ""}
       <section class="block"><h2>Members</h2><div class="table"><table>
         <thead><tr><th>Email</th><th>Role</th><th>Joined</th><th></th></tr></thead>
@@ -311,7 +429,7 @@ export async function orgPage(ctx: Ctx, user: User, handle: string, flash: { ok?
           : ""
       }
       ${judge}`,
-    status,
+    { status },
   );
 }
 
@@ -347,7 +465,7 @@ export async function orgsPost(ctx: Ctx, user: User, path: string[]): Promise<Re
       const org = await createOrg(ctx.env.DB, user, field(form, "handle"), field(form, "name"), ctx.now);
       return back(ctx, `/orgs/${org.handle}`);
     } catch (e) {
-      if (e instanceof HttpError && e.status < 500) return orgsPage(ctx, user, e.message, e.status);
+      if (e instanceof HttpError && e.status < 500) return newOrgPage(ctx, e.message, e.status, { handle: field(form, "handle"), name: field(form, "name") });
       throw e;
     }
   }

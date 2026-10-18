@@ -1,10 +1,11 @@
 import { mint, TOKEN_PREFIX } from "./credentials";
-import { closeGrants } from "./hub/routes";
+import { closeGrants, hubOverview } from "./hub/routes";
 import type { User } from "./env";
-import { html } from "./html";
-import { canManage, type Membership, notice, orgHeader, requireMember } from "./orgs";
+import { type Html, html } from "./html";
+import { canManage, type Membership, notice, orgTab, requireMember } from "./orgs";
+import { ago, groupByMachine } from "./overview";
 import { DAY, HttpError, randomId } from "./util";
-import { back, type Ctx, field, page, readForm } from "./web";
+import { back, type Ctx, field, readForm } from "./web";
 
 export const TOKEN_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
@@ -103,6 +104,29 @@ export async function revokeDevice(db: D1Database, m: Membership, user: User, id
 
 const when = (ms: number | null): string => (ms === null ? "never" : new Date(ms).toISOString().slice(0, 10));
 
+/** the machines the hub knows, each with its agents; a device or token above is what lets one join */
+async function machinesBlock(ctx: Ctx, orgId: string): Promise<Html> {
+  const o = await hubOverview(ctx.env, orgId);
+  const groups = o ? groupByMachine(o) : [];
+  return html`<section class="block"><h2>Machines</h2>
+    <p class="small">Machines that joined this org's hub. Revoke the device or token a machine signed in with to cut it off.</p>
+    ${
+      !o
+        ? html`<p class="empty">The hub did not answer. Reload to see machines.</p>`
+        : groups.length
+          ? html`<div class="table"><table><thead><tr><th>Machine</th><th>Kind</th><th>State</th><th class="end">Agents</th><th class="end">Last seen</th></tr></thead>
+            <tbody>${groups.map((g) => {
+              const online = g.machine?.online || g.endpoints.some((e) => e.presence === "online");
+              const live = g.endpoints.filter((e) => e.presence !== "offline").length;
+              return html`<tr><td class="mono">${g.name}</td><td>${g.machine ? html`<span class="role">${g.machine.kind}</span>` : html`<span class="mini">unlisted</span>`}</td>
+                <td><span class="dot ${online ? "online" : "offline"}" aria-hidden="true"></span><span class="mini">${online ? "online" : "offline"}</span></td>
+                <td class="mono end">${live} of ${g.endpoints.length}</td><td class="mono end" title="${g.machine?.last_seen ?? ""}">${online ? "now" : ago(g.machine?.last_seen ?? null, ctx.now)}</td></tr>`;
+            })}</tbody></table></div>`
+          : html`<p class="empty">No machines yet. Run <code>swarm up</code> on one.</p>`
+    }
+  </section>`;
+}
+
 interface Flash {
   err?: string;
   created?: { name: string; token: string };
@@ -110,15 +134,15 @@ interface Flash {
 
 export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Flash = {}, status = 200): Promise<Response> {
   const m = await requireMember(ctx.env.DB, handle, user.id);
-  const tokens = await listTokens(ctx.env.DB, m.org.id);
-  const devices = await listDevices(ctx.env.DB, m, user);
+  const [tokens, devices, machines] = await Promise.all([listTokens(ctx.env.DB, m.org.id), listDevices(ctx.env.DB, m, user), machinesBlock(ctx, m.org.id)]);
   const revoke = (path: string) =>
     html`<form method="post" action="/orgs/${m.org.handle}/${path}/revoke"><input type="hidden" name="csrf" value="${ctx.csrf}"><button class="btn btn-ghost btn-small" type="submit">Revoke</button></form>`;
-  return page(
+  return orgTab(
     ctx,
-    { title: `${m.org.name} tokens`, nav: "orgs" },
-    html`${orgHeader(m, "tokens")}
-      ${notice(flash.err, true)}
+    m,
+    "tokens",
+    `${m.org.name} tokens and devices`,
+    html`${notice(flash.err, true)}
       ${
         flash.created
           ? html`<section class="block"><h2>Token ${flash.created.name} created</h2>
@@ -162,8 +186,9 @@ export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Fl
               )}</tbody></table></div>`
             : html`<p class="empty">No devices. Run <code>swarm up</code> in a terminal.</p>`
         }
-      </section>`,
-    status,
+      </section>
+      ${machines}`,
+    { status },
   );
 }
 

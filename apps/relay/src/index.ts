@@ -4,14 +4,36 @@ import { deviceCode, devicePage, devicePost, deviceToken } from "./device";
 import type { Env } from "./env";
 import { hubRoute } from "./hub/routes";
 import { CSS, html, layout } from "./html";
-import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
-import { eventsRoute, GRAPH_CSS, graphPage, graphScript } from "./graph";
-import { APP_JS, overviewPage } from "./overview";
+import { activityPage, overviewPage, sessionsPage } from "./dashboard";
+import { acceptPost, invitePage, newOrgPage, orgPage, orgsPage, orgsPost } from "./orgs";
+import { eventsRoute, GRAPH_CSS, graphPage, graphScript, graphTabPage } from "./graph";
+import { APP_JS } from "./overview";
 import { tokensPage, tokensPost } from "./tokens";
 import { DAY, HttpError, json } from "./util";
 import { back, type Ctx, loadCtx, toSignIn } from "./web";
 
 export { OrgHub } from "./hub/object";
+
+type OrgPage = (ctx: Ctx, user: NonNullable<Ctx["user"]>, handle: string) => Promise<Response>;
+
+/** each org tab by its path segment */
+const TAB_PAGES: Record<string, OrgPage> = {
+  activity: activityPage,
+  sessions: sessionsPage,
+  graph: graphTabPage,
+  tokens: tokensPage,
+  members: orgPage,
+};
+
+/** older or guessable paths, sent on to the tab that holds them */
+const TAB_ALIASES: Record<string, string> = {
+  overview: "",
+  agents: "/sessions",
+  devices: "/tokens",
+  machines: "/tokens",
+  settings: "/members",
+  judge: "/members",
+};
 
 async function pages(ctx: Ctx): Promise<Response> {
   const { req, url, user } = ctx;
@@ -40,11 +62,13 @@ async function pages(ctx: Ctx): Promise<Response> {
   if (events && !post) return eventsRoute(ctx, user, events[1]!);
   const rest = path.split("/").filter(Boolean).slice(1);
   if (!post) {
-    if (rest.length === 0) return orgsPage(ctx, user);
-    if (rest.length === 1) return overviewPage(ctx, user, rest[0]!);
-    if (rest.length === 2 && rest[1] === "members") return orgPage(ctx, user, rest[0]!);
-    if (rest.length === 2 && rest[1] === "tokens") return tokensPage(ctx, user, rest[0]!);
-    if (rest.length === 2 && rest[1] === "graph") return graphPage(ctx, user, rest[0]!);
+    const [handle, tab, sub] = rest as [string?, string?, string?];
+    if (!handle) return orgsPage(ctx, user);
+    if (handle === "new" && !tab) return newOrgPage(ctx);
+    if (!tab) return overviewPage(ctx, user, handle);
+    if (tab === "graph" && sub === "full" && rest.length === 3) return graphPage(ctx, user, handle);
+    if (rest.length === 2 && Object.hasOwn(TAB_PAGES, tab)) return TAB_PAGES[tab]!(ctx, user, handle);
+    if (rest.length === 2 && Object.hasOwn(TAB_ALIASES, tab)) return back(ctx, `/orgs/${handle}${TAB_ALIASES[tab]}`);
     throw new HttpError(404, "not_found", "Not found.");
   }
   if (rest[1] === "tokens" || rest[1] === "devices") return tokensPost(ctx, user, rest[0]!, rest.slice(1));

@@ -14,7 +14,7 @@ export async function judgeSection(ctx: Ctx, m: Membership): Promise<Html> {
   const configured = judgeSetup(ctx.env) !== null;
   const holds = enabled && configured && canManage(m.role) ? await hubHolds(ctx.env, m.org.id) : null;
   const action = `/orgs/${m.org.handle}`;
-  return html`<section class="block"><h2>Relay judge</h2>
+  return html`<section class="block" id="judge"><h2>Relay judge</h2>
     <p class="small">A model reads this org's messages before the hub delivers them, and holds the ones that look like they leak private data until an owner or admin reviews them.</p>
     <p>The relay judge is <span class="role">${enabled ? "on" : "off"}</span>.</p>
     ${configured ? "" : html`<p class="notice" role="status">The judge is not configured on this relay (no model or key), so no message is judged.</p>`}
