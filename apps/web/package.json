@@ -8,6 +8,7 @@
     "build:worker": "opennextjs-cloudflare build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "og": "bun scripts/og.ts",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"

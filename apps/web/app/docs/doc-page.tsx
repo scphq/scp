@@ -3,11 +3,17 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Header } from "../chrome";
 import { DOCS, docHref, loadDoc } from "../../lib/docs";
+import { shareMetadata } from "../share";
 
 export function docMetadata(slug: string): Metadata {
   const doc = loadDoc(slug);
   if (!doc) return {};
-  return { title: doc.title, description: doc.description, alternates: { canonical: docHref(slug) } };
+  return {
+    title: doc.title,
+    description: doc.description,
+    alternates: { canonical: docHref(slug) },
+    ...shareMetadata(`${doc.title}, SCP`, doc.description, docHref(slug)),
+  };
 }
 
 /** A docs page: the page list beside the rendered markdown. */
