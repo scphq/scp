@@ -12,7 +12,7 @@
       },
     },
     "apps/web": {
-      "name": "@scp/web",
+      "name": "@scp-dev/web",
       "version": "0.0.1",
       "dependencies": {
         "geist": "^1.7.0",
@@ -31,24 +31,24 @@
       },
     },
     "packages/cli": {
-      "name": "@scp/cli",
+      "name": "@scp-dev/cli",
       "version": "0.0.0",
       "bin": {
         "scp": "./src/cli.ts",
       },
     },
     "packages/core": {
-      "name": "@scp/core",
+      "name": "@scp-dev/core",
       "version": "0.0.0",
       "dependencies": {
-        "@scp/spec": "workspace:*",
+        "@scp-dev/spec": "workspace:*",
       },
       "devDependencies": {
         "tsup": "^8.5.1",
       },
     },
     "packages/spec": {
-      "name": "@scp/spec",
+      "name": "@scp-dev/spec",
       "version": "0.0.0",
       "devDependencies": {
         "tsup": "^8.5.1",
@@ -464,13 +464,13 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.64.9", "", { "os": "win32", "cpu": "x64" }, "sha512-IoIgQLpK1DbOcQf1vX+i5oe5LXypsCVb1j/mU6BLAbOGmXH4E+j4kMfgZRwPYUohVBurNyVMgIKVM5dR6xA0kA=="],
 
-    "@scp/cli": ["@scp/cli@workspace:packages/cli"],
+    "@scp-dev/cli": ["@scp-dev/cli@workspace:packages/cli"],
 
-    "@scp/core": ["@scp/core@workspace:packages/core"],
+    "@scp-dev/core": ["@scp-dev/core@workspace:packages/core"],
 
-    "@scp/spec": ["@scp/spec@workspace:packages/spec"],
+    "@scp-dev/spec": ["@scp-dev/spec@workspace:packages/spec"],
 
-    "@scp/web": ["@scp/web@workspace:apps/web"],
+    "@scp-dev/web": ["@scp-dev/web@workspace:apps/web"],
 
     "@sindresorhus/is": ["@sindresorhus/is@7.2.0", "", {}, "sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw=="],
 
@@ -1134,7 +1134,7 @@
 
     "@opennextjs/aws/esbuild": ["esbuild@0.28.2", "", { "optionalDependencies": { "@esbuild/aix-ppc64": "0.28.2", "@esbuild/android-arm": "0.28.2", "@esbuild/android-arm64": "0.28.2", "@esbuild/android-x64": "0.28.2", "@esbuild/darwin-arm64": "0.28.2", "@esbuild/darwin-x64": "0.28.2", "@esbuild/freebsd-arm64": "0.28.2", "@esbuild/freebsd-x64": "0.28.2", "@esbuild/linux-arm": "0.28.2", "@esbuild/linux-arm64": "0.28.2", "@esbuild/linux-ia32": "0.28.2", "@esbuild/linux-loong64": "0.28.2", "@esbuild/linux-mips64el": "0.28.2", "@esbuild/linux-ppc64": "0.28.2", "@esbuild/linux-riscv64": "0.28.2", "@esbuild/linux-s390x": "0.28.2", "@esbuild/linux-x64": "0.28.2", "@esbuild/netbsd-arm64": "0.28.2", "@esbuild/netbsd-x64": "0.28.2", "@esbuild/openbsd-arm64": "0.28.2", "@esbuild/openbsd-x64": "0.28.2", "@esbuild/openharmony-arm64": "0.28.2", "@esbuild/sunos-x64": "0.28.2", "@esbuild/win32-arm64": "0.28.2", "@esbuild/win32-ia32": "0.28.2", "@esbuild/win32-x64": "0.28.2" }, "bin": { "esbuild": "bin/esbuild" } }, "sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA=="],
 
-    "@scp/web/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+    "@scp-dev/web/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "bun-types/undici-types": ["undici-types@8.12.2", "", {}, "sha512-VoMeD2O0KdHhcn+oPqOrpivN+7aDOklVSwOLD7JNjbzV1CboAFek9IFOXnreoufTUtAsCsOK0iETiERPNR/fDA=="],
 

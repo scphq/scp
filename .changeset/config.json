@@ -11,5 +11,5 @@
     "version": true,
     "tag": false
   },
-  "ignore": ["@scp/web"]
+  "ignore": ["@scp-dev/web"]
 }

@@ -1,5 +1,5 @@
 {
-  "name": "@scp/spec",
+  "name": "@scp-dev/spec",
   "version": "0.0.0",
   "private": true,
   "description": "The Swarm Communication Protocol specification and protocol identifier.",

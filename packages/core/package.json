@@ -1,5 +1,5 @@
 {
-  "name": "@scp/core",
+  "name": "@scp-dev/core",
   "version": "0.0.0",
   "private": true,
   "description": "Swarm Communication Protocol types: message envelope, endpoint address, rendering and credential scanning.",
@@ -26,7 +26,7 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@scp/spec": "workspace:*"
+    "@scp-dev/spec": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.1"

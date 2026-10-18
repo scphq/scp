@@ -1,6 +1,6 @@
 # Releasing
 
-Changesets drive npm releases. `@scp/spec`, `@scp/core` and `@scp/cli` are the publishable packages; `@scp/web` is never published.
+Changesets drive npm releases. `@scp-dev/spec`, `@scp-dev/core` and `@scp-dev/cli` are the publishable packages; `@scp-dev/web` is never published.
 All three are `private: true` today, so `changeset publish` skips them and a release publishes nothing until a package drops that flag.
 
 ## Day to day
@@ -16,13 +16,7 @@ The release PR is opened with `GITHUB_TOKEN`, so CI does not run on it by itself
 
 ### 1. npm scope
 
-`@scp/core`, `@scp/spec` and `@scp/cli` are unpublished, but the `@scp` scope is already taken: an npm organization named `scp`
-exists and publishes an unrelated package, so this repository cannot publish under it unless that org's owner hands it over.
-`@scphq` is free (`npm view @scphq/core` returns 404 and the scope does not exist).
-
-1. Create the free npm organization `scphq` on npmjs.com.
-2. Rename the packages to `@scphq/spec`, `@scphq/core` and `@scphq/cli` (their `name` fields and the `@scp/spec` dependency and import in core),
-   then run `bun install` to refresh `bun.lock`.
+The packages publish under the npm organization `scp-dev`: `@scp-dev/spec`, `@scp-dev/core` and `@scp-dev/cli`.
 
 ### 2. GitHub settings
 
@@ -33,7 +27,7 @@ Under Settings > Actions > General, allow GitHub Actions to create and approve p
 npm configures a trusted publisher from the package's own settings page, so a name that has never been published cannot get one yet.
 The first version of each package goes out with a token:
 
-1. Create a granular access token on npmjs.com with read and write permission on all packages of the `scphq` organization (a name that
+1. Create a granular access token on npmjs.com with read and write permission on all packages of the `scp-dev` organization (a name that
    does not exist yet cannot be selected on its own) and a short expiry.
 2. Add it as the repository secret `NPM_TOKEN`.
 3. Remove `"private": true` from the packages to publish, add a changeset and merge the `chore: release` PR. The release finds no OIDC

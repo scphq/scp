@@ -66,4 +66,4 @@ jobs:
 
       # Runs `next build`, then bundles the Cloudflare worker; nothing is deployed.
       - name: Build the site
-        run: bun run --filter @scp/web build:worker
+        run: bun run --filter @scp-dev/web build:worker

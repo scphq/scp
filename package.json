@@ -9,7 +9,7 @@
     "lint:fix": "biome check --write .",
     "test": "bun test",
     "build:packages": "bun run --filter './packages/*' build",
-    "build": "bun run build:packages && bun run --filter @scp/web build",
+    "build": "bun run build:packages && bun run --filter @scp-dev/web build",
     "changeset": "changeset",
     "version-packages": "changeset version && bun install --lockfile-only",
     "release": "bun run build:packages && bun scripts/pin-workspace-deps.ts && changeset publish"
