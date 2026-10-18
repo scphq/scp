@@ -30,6 +30,11 @@ jobs:
         with:
           bun-version-file: package.json
 
+      # Before the tests: the broker smoke test runs the built packages under Node 22.13+.
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
@@ -49,10 +54,6 @@ jobs:
 
       - name: Build packages
         run: bun run build:packages
-
-      - uses: actions/setup-node@v7.0.0
-        with:
-          node-version: "24"
 
       - name: Import every package entry in plain Node
         run: |
