@@ -50,7 +50,7 @@ ${c.head ?? ""}
 </head>
 <body>
 <header class="head"><div class="wrap head-in">
-<a class="brand" href="/"><i class="mark" aria-hidden="true"></i>scp <span class="brand-dim">relay</span></a>
+<a class="brand" href="/"><svg class="mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>scp <span class="brand-dim">relay</span></a>
 ${nav}
 </div></header>
 <main><div class="wrap page">${body}</div></main>
@@ -81,7 +81,7 @@ code,pre,kbd{font-family:var(--mono)}
 .head-in{display:flex;align-items:center;justify-content:space-between;gap:1.5rem;height:var(--headh)}
 .brand{display:inline-flex;align-items:center;gap:.625rem;font-weight:600;letter-spacing:.02em;text-decoration:none}
 .brand-dim{color:var(--dim);font-weight:500}
-.mark{width:7px;height:7px;border:1px solid var(--fg);background:var(--fg)}
+.mark{width:16px;height:16px;flex:none;color:var(--fg)}
 .nav{display:flex;align-items:center;gap:1.5rem}
 .nav a,.linkish{font-family:var(--mono);font-size:.75rem;color:var(--ink);padding-block:.25rem;border:0;border-bottom:1px solid transparent;background:none;text-decoration:none;cursor:pointer}
 .nav a:hover,.linkish:hover,.nav a[aria-current]{color:var(--fg)}

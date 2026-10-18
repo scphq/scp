@@ -81,13 +81,15 @@ export const CAPABILITIES = [
 
 export const QUICKSTART = {
   label: "Quickstart",
-  heading: "Run a swarm in five commands.",
+  heading: "Run a swarm in six commands.",
   lead: "These commands use the swarm CLI, the reference implementation of SCP version 1. Any conforming broker and integration can replace it.",
 };
 
 export type Line = { comment: string } | { cmd: string };
 
 export const QUICKSTART_LINES: Line[] = [
+  { comment: "install the CLI" },
+  { cmd: "npm install -g @scp-dev/cli" },
   { comment: "once, for your harnesses" },
   { cmd: "swarm hooks install" },
   { comment: "from the orchestrator's shell" },
