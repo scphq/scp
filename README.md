@@ -1,6 +1,9 @@
 <div align="center">
 
-<!-- logo -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scp-mark-dark.svg">
+  <img src=".github/assets/scp-mark-light.svg" alt="SCP" width="72" height="72">
+</picture>
 
 <h1>SCP</h1>
 

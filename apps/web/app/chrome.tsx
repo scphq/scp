@@ -1,16 +1,12 @@
 import Link from "next/link";
 import { REPO, SPEC } from "./content";
 
-/** Three endpoints, one parent and two children: the tree every scope follows. */
+/** Two corner brackets around a solid square. */
 export function Mark({ size = 16 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">
-      <rect x="1" y="1" width="5" height="5" />
-      <rect x="3" y="6" width="1" height="8" />
-      <rect x="4" y="8" width="5" height="1" />
-      <rect x="4" y="13" width="5" height="1" />
-      <rect x="10" y="6.5" width="4" height="4" />
-      <rect x="10" y="11.5" width="4" height="4" opacity="0.5" />
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false">
+      <path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z" />
+      <rect x="11" y="11" width="10" height="10" />
     </svg>
   );
 }
