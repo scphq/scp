@@ -25,7 +25,7 @@ An orchestrator spawns workers in any harness, steers them while they run, and g
 
 > **Hackathon tmp insert:** other repos used for this are here:
 > - [scphq/scp-swarms-demo](https://github.com/scphq/scp-swarms-demo): Bugswarm, explorer, verifier, fixer, deployer and auditor swarms over SCP
-> - [scphq/bugswarm-demo-site](https://github.com/scphq/bugswarm-demo-site): scp.dev front page, kept live by a bugswarm line
+> - [scphq/bugswarm-demo-site](https://github.com/scphq/bugswarm-demo-site): dashboard page for the bugswarm workflow
 > - [scphq/bugswarm-demo-shop](https://github.com/scphq/bugswarm-demo-shop): seeded target repo for the bugswarm dark-factory demo
 
 ## Example
