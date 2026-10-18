@@ -5,7 +5,7 @@ import type { Env } from "./env";
 import { hubRoute } from "./hub/routes";
 import { CSS, html, layout } from "./html";
 import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
-import { GRAPH_CSS, graphScript } from "./graph";
+import { eventsRoute, GRAPH_CSS, graphPage, graphScript } from "./graph";
 import { APP_JS, overviewPage } from "./overview";
 import { tokensPage, tokensPost } from "./tokens";
 import { DAY, HttpError, json } from "./util";
@@ -26,8 +26,9 @@ async function pages(ctx: Ctx): Promise<Response> {
 
   const signedIn = path === "/orgs" || path.startsWith("/orgs/") || path === "/device" || path.startsWith("/invites/");
   if (!signedIn) throw new HttpError(404, "not_found", "Not found.");
+  const events = /^\/orgs\/([^/]+)\/events$/.exec(path);
   if (!user) {
-    if (post) throw new HttpError(401, "signed_out", "Your session ended. Sign in again.");
+    if (post || events) throw new HttpError(401, "signed_out", "Your session ended. Sign in again.");
     return toSignIn(ctx);
   }
 
@@ -36,12 +37,14 @@ async function pages(ctx: Ctx): Promise<Response> {
   const invite = /^\/invites\/([A-Za-z0-9_-]{20,64})$/.exec(path);
   if (invite && !post) return invitePage(ctx, user, invite[1]!);
 
+  if (events && !post) return eventsRoute(ctx, user, events[1]!);
   const rest = path.split("/").filter(Boolean).slice(1);
   if (!post) {
     if (rest.length === 0) return orgsPage(ctx, user);
     if (rest.length === 1) return overviewPage(ctx, user, rest[0]!);
     if (rest.length === 2 && rest[1] === "members") return orgPage(ctx, user, rest[0]!);
     if (rest.length === 2 && rest[1] === "tokens") return tokensPage(ctx, user, rest[0]!);
+    if (rest.length === 2 && rest[1] === "graph") return graphPage(ctx, user, rest[0]!);
     throw new HttpError(404, "not_found", "Not found.");
   }
   if (rest[1] === "tokens" || rest[1] === "devices") return tokensPost(ctx, user, rest[0]!, rest.slice(1));

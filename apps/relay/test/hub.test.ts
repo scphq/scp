@@ -301,7 +301,7 @@ describe("org overview", () => {
     }, "a message edge on the graph");
     expect(data.text).toMatch(/<script src="\/graph\.js\?v=[a-z0-9]+" defer><\/script>/);
     expect(data.text).toMatch(/<link rel="stylesheet" href="\/graph\.css\?v=[a-z0-9]+">/);
-    expect(data.text).toContain("data-graph hidden");
+    expect(data.text).toContain(`data-graph data-events="/orgs/graphco/events" hidden`);
     expect(data.text).toContain('data-view-set="table"');
     expect(data.text).not.toContain("private plan");
     expect(data.g.nodes.find((n) => n.label === "lead")).toMatchObject({ machine: "laptop" });
@@ -315,5 +315,56 @@ describe("org overview", () => {
     expect(js.headers.get("content-type")).toStartWith("text/javascript");
     expect(await js.text()).toContain("[data-graph-data]");
     expect(await (await relay.fetch("/graph.css")).text()).toContain(".graph-svg");
+  });
+
+  test("the full-screen graph renders for members, and its event stream is a members-only same-origin socket of metadata, never a body", async () => {
+    const owner = new Browser(relay);
+    await owner.signIn("stream-owner@example.com");
+    await owner.post("/orgs", { handle: "streamco" });
+    const device = await deviceLogin(owner, "laptop");
+    const origin = await relay.listening();
+    const laptop = await machine(origin, "laptop", device);
+    const desk = await machine(origin, "desk", device);
+    const lead = await agent(laptop, "lead");
+    await agent(desk, "review");
+    await waitFor(async () => {
+      const { endpoints } = await lead.request<{ endpoints: { address: string }[] }>("list");
+      return endpoints.some((e) => e.address.endsWith("/desk/review"));
+    }, "desk/review on the laptop");
+
+    const page = await (await owner.get("/orgs/streamco/graph")).text();
+    expect(page).toContain('<body class="bare">');
+    expect(page).toContain('data-events="/orgs/streamco/events"');
+    expect(page).toContain('href="/orgs/streamco">Back to overview</a>');
+    expect(page).toMatch(/<script type="application\/json" data-graph-data>[\s\S]*streamco\/desk\/review/);
+    expect(page).toMatch(/<script src="\/graph\.js\?v=[a-z0-9]+" defer><\/script>/);
+    expect(await (await owner.get("/orgs/streamco")).text()).toContain('href="/orgs/streamco/graph">Full screen</a>');
+
+    const cookie = (b: Browser): string => [...b.jar].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("; ");
+    const open = (b: Browser | null, from = relay.origin) =>
+      relay.fetch("/orgs/streamco/events", { headers: { upgrade: "websocket", origin: from, ...(b ? { cookie: cookie(b) } : {}) } });
+    const stranger = new Browser(relay);
+    await stranger.signIn("stream-stranger@example.com");
+    expect((await open(null)).status).toBe(401);
+    expect((await open(stranger)).status).toBe(404);
+    expect((await open(owner, "https://evil.test")).status).toBe(403);
+    expect((await relay.fetch("/orgs/streamco/events", { headers: { cookie: cookie(owner) } })).status).toBe(426);
+
+    const res = (await open(owner)) as Response & { webSocket: WebSocket | null };
+    expect(res.status).toBe(101);
+    const ws = res.webSocket!;
+    const frames: string[] = [];
+    ws.addEventListener("message", (e) => frames.push(String(e.data)));
+    (ws as unknown as { accept(): void }).accept();
+    await waitFor(() => frames.some((f) => f.includes('"hello"')), "the stream's hello");
+    await lead.request("send", { to: "streamco/desk/review", body: "a private plan" });
+    const sent = await waitFor(() => frames.map((f) => JSON.parse(f)).find((f) => f.type === "message"), "a message event");
+    expect(Object.keys(sent).sort()).toEqual(["at", "from", "kind", "to", "type"]);
+    expect(sent).toMatchObject({ kind: "message", from: expect.stringContaining("/laptop/lead"), to: [expect.stringContaining("/desk/review")] });
+    await lead.request("status", { state: "working", note: "a private note" });
+    await laptop.stop();
+    await waitFor(() => frames.map((f) => JSON.parse(f)).find((f) => f.type === "presence" && f.presence === "offline"), "the laptop going offline");
+    for (const leak of ["private plan", "private note", "body"]) expect(frames.join("\n")).not.toContain(leak);
+    ws.close();
   });
 });

@@ -5,6 +5,8 @@ import { type HubGrant as Credential, revalidate } from "../credentials";
 export const GRANT_HEADER = "x-scp-hub-grant";
 /** the org handle, the address user part (`acme` in `acme/laptop/main`), set by the Worker only */
 export const ORG_HEADER = "x-scp-hub-org";
+/** the member a dashboard event stream is opened for */
+export const DASH_HEADER = "x-scp-dash-user";
 
 const ROLES = new Set(["owner", "admin", "member"]);
 /** a credential without an expiry gets a far bound; the hub still revalidates it every few minutes */

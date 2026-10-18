@@ -3,7 +3,7 @@ import type { HoldView, HubGraph, MachineRow } from "@scp-dev/hub";
 import { authenticate } from "../credentials";
 import type { Env } from "../env";
 import { json } from "../util";
-import { GRANT_HEADER, hubGrant, ORG_HEADER } from "./grant";
+import { DASH_HEADER, GRANT_HEADER, hubGrant, ORG_HEADER } from "./grant";
 import { JUDGE_HEADER } from "./judge";
 
 const INTERNAL = "https://hub.internal";
@@ -75,6 +75,11 @@ export async function hubGraph(env: Env, orgId: string, minutes?: number): Promi
     console.error("scp-relay hub graph failed", e);
     return null;
   }
+}
+
+/** a member's read-only event stream from the org hub: presence, endpoint and message metadata, never a body */
+export function hubEvents(env: Env, orgId: string, userId: string): Promise<Response> {
+  return hubStub(env, orgId).fetch(`${INTERNAL}/dash`, { headers: { upgrade: "websocket", [DASH_HEADER]: userId } });
 }
 
 /** whether the org's owner turned the relay judge on; off when the column is missing too */

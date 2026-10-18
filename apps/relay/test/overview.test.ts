@@ -95,7 +95,7 @@ test("an idle agent a message can wake shows apart from one that reads at its ne
   expect(page).toContain('title="idle, a message wakes it via codex-app-server"><span class="dot idle wake"');
   expect(page.match(/class="dot idle wake"/g)).toHaveLength(1);
   expect(page.match(/reads messages at its next turn/g)).toHaveLength(2);
-  expect(page).toContain('<svg class="hicon h-codex" width="12" height="12" viewBox="0 0 16 16" role="img" aria-label="codex">');
+  expect(page).toContain('<svg class="hicon h-codex" width="12" height="12" viewBox="0 0 24 24" role="img" aria-label="codex">');
   expect(page).toContain('class="hicon h-claude"');
   expect(page).not.toContain('class="harness"');
 });
