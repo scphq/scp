@@ -1,5 +1,19 @@
 # @scp-dev/broker
 
+## 0.3.0
+
+### Minor Changes
+
+- b571297: A session can be linked under a parent on another machine of the same account: `swarm join --under me/<machine>/<handle>` from the session, or `swarm adopt <child> --parent me/<machine>/<handle>` by the human at its terminal. The child stays a root of its own machine and records the parent as a remote address that its bridge mirrors, so every machine and the hub show it as the parent's child, and the dashboard graph and Sessions tree draw it under the parent with its machine tag. The parent and the child reach each other both ways through the hub, a link that would close a cycle is refused, and `swarm unlink` clears it.
+
+### Patch Changes
+
+- d1570ab: An ended session no longer advertises its wake: a hook's session_end, an exited harness process, a closed waker past its grace and a takeover clear it, while a live waker still keeps it, and the OpenCode waiter of a session that left sets none. A leftover mesh.json loads the mesh only when it is enabled, and a CLI without the mesh module warns and runs without it.
+- Updated dependencies [b571297]
+- Updated dependencies [d1570ab]
+  - @scp-dev/core@0.2.0
+  - @scp-dev/hub@0.6.0
+
 ## 0.2.1
 
 ### Patch Changes

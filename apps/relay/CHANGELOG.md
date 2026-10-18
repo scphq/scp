@@ -1,5 +1,15 @@
 # @scp-dev/relay
 
+## 0.3.2
+
+### Patch Changes
+
+- b571297: A session can be linked under a parent on another machine of the same account: `swarm join --under me/<machine>/<handle>` from the session, or `swarm adopt <child> --parent me/<machine>/<handle>` by the human at its terminal. The child stays a root of its own machine and records the parent as a remote address that its bridge mirrors, so every machine and the hub show it as the parent's child, and the dashboard graph and Sessions tree draw it under the parent with its machine tag. The parent and the child reach each other both ways through the hub, a link that would close a cycle is refused, and `swarm unlink` clears it.
+- Updated dependencies [b571297]
+- Updated dependencies [d1570ab]
+  - @scp-dev/core@0.2.0
+  - @scp-dev/hub@0.6.0
+
 ## 0.3.1
 
 ### Patch Changes
