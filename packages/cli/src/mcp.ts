@@ -4,7 +4,7 @@ import { runRelayMcp, sessionInboxOf, type SpawnRequest } from "@scp-dev/mcp"
 import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
-import { harnessAt, harnessPid, psParent, relayIdentity, writeShimBinding } from "./identity"
+import { harnessAt, harnessPid, launcherPid, psParent, relayIdentity, writeShimBinding } from "./identity"
 import { membership } from "./session"
 
 /** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
@@ -26,7 +26,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     fallbackHarness: "mcp",
     cwd: process.cwd(),
     env: process.env,
-    harnessPid: () => harnessPid(),
+    harnessPid: () => launcherPid(process.env) ?? harnessPid(),
     inferHarness: (pid) => harnessAt(pid),
   })
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)

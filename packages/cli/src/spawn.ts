@@ -46,7 +46,7 @@ const SERVER = "scp"
 export const SPAWN_RUNNER = "SCP_SPAWN_RUNNER"
 
 /** the spawner's own identity, which the harness it starts must not inherit */
-const SPAWNER_IDENTITY = ["SCP_NAME", "SCP_SESSION", "SCP_GRANT", "SCP_PARENT", "SCP_HARNESS", "SCP_SHIM_BINDING", SPAWN_RUNNER]
+const SPAWNER_IDENTITY = ["SCP_NAME", "SCP_SESSION", "SCP_GRANT", "SCP_PARENT", "SCP_HARNESS", "SCP_SHIM_BINDING", "SCP_HARNESS_PID", SPAWN_RUNNER]
 
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
 const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING"]
@@ -188,6 +188,12 @@ const PRESETS: Record<string, { headless: string[]; own: string[]; allow: string
     own: ["--allow", "--allowedTools", "--allowed-tools", "--always-approve", "--permission-mode"],
     allow: MESSAGING.flatMap((tool) => ["--allow", tool]),
   },
+}
+
+/** the allow rules for the relay messaging tools that a headless `harness` needs, unless `args` hold a flag with which the user decides that */
+export function messagingAllow(harness: string, args: string[]): string[] {
+  const preset = PRESETS[harness]
+  return preset && !hasFlag(args, preset.own) ? preset.allow : []
 }
 
 /** muse's top-level options that take a value */
@@ -578,7 +584,7 @@ export function workerName(command: string[], random: () => string = nameSuffix)
 }
 
 /** a note for a headless agy whose settings lack the permission rules `swarm setup` writes: it denies the relay tools without them */
-export function agyNote(command: string[], env: Env): string | null {
+export function agyNote(command: string[], env: Env, verb = "spawn"): string | null {
   const at = programAt(command)
   const args = command.slice(at + 1)
   if (
@@ -593,7 +599,7 @@ export function agyNote(command: string[], env: Env): string | null {
     allow = (JSON.parse(readFileSync(agySettingsFile(env), "utf8")) as { permissions?: { allow?: unknown } } | null)?.permissions?.allow
   } catch {}
   if (Array.isArray(allow) && agyRules().every((rule) => allow.includes(rule))) return null
-  return `${CLI_NAME} spawn: headless agy denies the relay tools without the permission rules ${CLI_NAME} setup writes to ${agySettingsFile(env)}; run ${CLI_NAME} setup`
+  return `${CLI_NAME} ${verb}: headless agy denies the relay tools without the permission rules ${CLI_NAME} setup writes to ${agySettingsFile(env)}; run ${CLI_NAME} setup`
 }
 
 const FORWARDED = ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"] as const

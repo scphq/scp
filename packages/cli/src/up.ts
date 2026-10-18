@@ -17,6 +17,8 @@ const WAKE_LAUNCH: [harness: string, line: string][] = [
   ["codex", `${CLI_NAME} codex --name <name>      messages start or steer its turns`],
   ["pi", `${CLI_NAME} pi --name <name>         messages arrive as turns`],
   ["opencode", "opencode                          its scp plugin wakes an idle session (on by default)"],
+  ["agy", `${CLI_NAME} agy --name <name>        headless: each message resumes its conversation`],
+  ["grok", `${CLI_NAME} grok --name <name>       headless: each message resumes its session`],
 ]
 
 /** what `swarm up` prints last: the wake-enabled launch of each installed harness, and the fallback for a running session */
