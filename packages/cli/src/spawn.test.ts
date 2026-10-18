@@ -699,26 +699,42 @@ describe("swarm spawn", () => {
       ])
     })
 
-    test("in the foreground with an open piped stdin gets /dev/null and never waits on it; with a - prompt it keeps the pipe", async () => {
+    test("in the foreground: piped context, a file with data and a - prompt reach codex exec; an agent shell's pipe still silent after the check gets /dev/null", async () => {
       take()
-      const run = async (prompt: string, input?: string) => {
-        const child = Bun.spawn([process.execPath, "--no-env-file", entry, "spawn", "--fg", "--", "codex", "exec", prompt], {
-          stdin: "pipe",
+      const recorded = () => JSON.parse(readFileSync(`${record}.stdin`, "utf8")) as { kind: string; read: string }
+      const run = async (prompt: string, input?: string | ReturnType<typeof Bun.file>, shell: { agent?: boolean; delayMs?: number } = {}) => {
+        const argv = [process.execPath, "--no-env-file", entry, "spawn", "--fg", "--", "codex", "exec", prompt]
+        const base = Object.fromEntries(
+          Object.entries(process.env).filter(([key]) => !/^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_|OPENCODE|GROK_|MUSE_|CODEX_THREAD_ID|ANTIGRAVITY_)/.test(key)),
+        )
+        const options = {
           stdout: "pipe",
           stderr: "pipe",
-          env: { ...process.env, ...env({ CODEX_HOME: codexHome(true), FAKE_STDIN: "1" }) },
-        })
+          env: { ...base, ...env({ CODEX_HOME: codexHome(true), FAKE_STDIN: "1", ...(shell.agent === false ? {} : { CLAUDECODE: "1" }) }) },
+        } as const
+        if (typeof input === "object") return { code: await Bun.spawn(argv, { ...options, stdin: input }).exited, stdin: recorded() }
+        const child = Bun.spawn(argv, { ...options, stdin: "pipe" })
         if (input !== undefined) {
+          if (shell.delayMs) await Bun.sleep(shell.delayMs)
           child.stdin.write(input)
           child.stdin.end()
         }
         const code = await Promise.race([child.exited, Bun.sleep(15_000).then(() => "timeout" as const)])
         if (code === "timeout") child.kill()
         else if (input === undefined) child.stdin.end()
-        return { code, stdin: JSON.parse(readFileSync(`${record}.stdin`, "utf8")) as { kind: string; read: string } }
+        return { code, stdin: recorded() }
       }
       expect(await run("go")).toEqual({ code: 0, stdin: { kind: "devnull", read: "" } })
       expect(await run("-", "the prompt from stdin")).toEqual({ code: 0, stdin: { kind: "pipe", read: "the prompt from stdin" } })
+      expect(await run("review", "diff --git a/x b/x")).toEqual({ code: 0, stdin: { kind: "pipe", read: "diff --git a/x b/x" } })
+      expect(await run("review", "")).toEqual({ code: 0, stdin: { kind: "devnull", read: "" } })
+      expect(await run("review", "slow diff", { agent: false, delayMs: 1200 })).toEqual({ code: 0, stdin: { kind: "pipe", read: "slow diff" } })
+      expect(await run("review", "slow diff", { delayMs: 1200 })).toEqual({ code: 0, stdin: { kind: "devnull", read: "" } })
+      const context = join(root, "context.diff")
+      writeFileSync(context, "diff --git a/y b/y")
+      expect((await run("review", Bun.file(context))).stdin.kind).toBe("file")
+      writeFileSync(context, "")
+      expect((await run("review", Bun.file(context))).stdin.kind).toBe("devnull")
       take()
     })
   })
@@ -865,7 +881,7 @@ describe("swarm spawn", () => {
       }
     }
 
-    test("is resumed once with the steer by the session id its hook reported, exec's options kept, and the steer is not reported unapplied", async () => {
+    test("is resumed once with the steer by the session id its hook reported, exec's options kept, and the handback says when it read the steer, not that it went unapplied", async () => {
       await inbox()
       const { result, calls, handback } = await steered(["also update the changelog"], { FAKE_SESSION: "019a-sess-1" })
       expect(result.code).toBe(0)
@@ -885,7 +901,7 @@ describe("swarm spawn", () => {
       expect(argv).not.toContain("do it")
       expect(argv.at(-1)).toMatch(/<relay-message from="me\/lead" relation="parent" key="[0-9a-z]{6}"[^>]*>\nalso update the changelog\n<\/relay-message>/)
       expect(argv.at(-1)).toEndWith("Your parent sent this after your last step: apply it now, then finish. If you already applied it, just finish.")
-      expect(handback).toBe("worker me/ws1 finished (exit 0)\n\nresumed 2")
+      expect(handback).toMatch(/^worker me\/ws1 finished \(exit 0\)\n\nresumed 2\n\nyour steer [0-9a-z]{6} was read at \d\d:\d\d:\d\d$/)
     })
 
     test("is resumed at most twice; a steer past that is reported not applied, with its text", async () => {
@@ -896,7 +912,7 @@ describe("swarm spawn", () => {
       expect(calls[2]!.at(-1)).toContain("steer two")
       expect(calls[2]!.at(-1)).not.toContain("steer one")
       expect(handback).toMatch(
-        /^worker me\/ws2 finished \(exit 0\)\n\nresumed 3\n\nsteer not applied: "steer three" \([0-9a-z]{6}, arrived (under 1|\d+) s before it exited, after its last step\)$/,
+        /^worker me\/ws2 finished \(exit 0\)\n\nresumed 3\n\n(your steer [0-9a-z]{6} was read at \d\d:\d\d:\d\d\n){2}steer not applied: "steer three" \([0-9a-z]{6}, arrived (under 1|\d+) s before it exited, after its last step\)$/,
       )
     })
 
@@ -1581,6 +1597,8 @@ describe("a Claude Code worker's transcript", () => {
     expect(capped).toBe(`[earlier output cut]\n\n${"b".repeat(9000)}\n\n${"c".repeat(100)}\n\nDone.`)
     expect(new TextEncoder().encode(capped).length).toBeLessThanOrEqual(LIMITS.handbackBytes)
     expect(repliesOutput(turns, 40)).toBe("[earlier output cut]\n\nDone.")
+    expect(repliesOutput(["- a: one\n- b: two", "Steer applied.\n\n- a: one\n- b: two\n\nSTEER-x"])).toBe("Steer applied.\n\n- a: one\n- b: two\n\nSTEER-x")
+    expect(repliesOutput(["Reading the files now.", "- a: one\n- b: two"])).toBe("Reading the files now.\n\n- a: one\n- b: two")
     const huge = repliesOutput(["first", `${"é".repeat(9000)}end`])
     expect(huge.startsWith("[earlier output cut]\né")).toBe(true)
     expect(huge.endsWith("éend")).toBe(true)
@@ -1606,6 +1624,22 @@ describe("a Claude Code worker's transcript", () => {
     expect(transcriptReplies(path, session, root)).toEqual(["early", "late"])
     expect(transcriptReplies(path, session, root, new TextEncoder().encode(lines[2]!).length + 5)).toEqual(["[earlier output cut]", "late"])
     expect(repliesOutput(transcriptReplies(path, session, root, new TextEncoder().encode(lines[2]!).length + 5))).toBe("[earlier output cut]\n\nlate")
+  })
+
+  test("a read window with no prompt and no reply text hands back nothing, so the stdout tail stands in", () => {
+    const tool = JSON.stringify({
+      type: "assistant",
+      sessionId: session,
+      message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] },
+    })
+    const path = file(
+      `${session}.jsonl`,
+      [JSON.stringify({ type: "user", sessionId: session, message: { role: "user", content: "the task" } }), tool, tool].join("\n"),
+    )
+    const replies = transcriptReplies(path, session, root, new TextEncoder().encode(tool).length * 2)
+    expect(replies).toEqual(["[earlier output cut]"])
+    expect(repliesOutput(replies)).toBe("")
+    expect(repliesOutput(["[earlier output cut]", " "])).toBe("")
   })
 
   test("a reply the model's output limit cut off says so", () => {

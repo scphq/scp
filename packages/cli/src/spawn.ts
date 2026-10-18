@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
-import { closeSync, existsSync, constants as files, fstatSync, openSync, readFileSync, readSync, realpathSync, writeSync } from "node:fs"
+import { closeSync, existsSync, constants as files, fstatSync, openSync, readFileSync, readSync, realpathSync, type Stats, writeSync } from "node:fs"
 import { constants, homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { parseArgs } from "node:util"
@@ -335,7 +335,7 @@ function codexExec(args: string[]): { exec: number; sub?: { name: "resume" | "re
   return { exec, ...(sub ? { sub } : {}), operands, ...(cd !== undefined ? { cd } : {}) }
 }
 
-/** Codex exec reads stdin when its prompt is absent or "-"; argv prompts can run on /dev/null. */
+/** Codex exec reads stdin for absent or "-" prompts; argv prompts accept context through harnessStdin. */
 export function closedStdin(command: string[]): boolean {
   const at = programAt(command)
   if (command[at] === undefined || basename(command[at]!) !== "codex") return false
@@ -344,6 +344,42 @@ export function closedStdin(command: string[]): boolean {
   if (!run || run.operands.includes("-")) return false
   if (run.sub?.name === "resume") return run.operands.length >= (hasFlag(args, ["--last"]) ? 1 : 2)
   return run.sub !== undefined || run.operands.length > 0
+}
+
+/** Time for an agent shell's pipe to provide data before falling back to /dev/null. */
+export const STDIN_WAIT_MS = 300
+
+/** The first chunk consumed while probing stdin, followed by the remaining stream. */
+export type PipedStdin = { first: Buffer; rest: NodeJS.ReadableStream }
+
+/** Inherit a nonempty file, forward a pipe with data, or use /dev/null for empty or idle input. */
+export async function harnessStdin(waitMs?: number): Promise<"inherit" | "ignore" | PipedStdin> {
+  if (process.stdin.isTTY === true) return "ignore"
+  let stat: Stats
+  try {
+    stat = fstatSync(0)
+  } catch {
+    return "ignore"
+  }
+  if (stat.isFile()) return stat.size > 0 ? "inherit" : "ignore"
+  if (!stat.isFIFO() && !stat.isSocket()) return "ignore"
+  const input = process.stdin
+  return new Promise((resolve) => {
+    const settle = (result: "ignore" | PipedStdin) => {
+      clearTimeout(timer)
+      input.off("data", data)
+      input.off("end", ended)
+      input.off("error", ended)
+      input.pause()
+      resolve(result)
+    }
+    const data = (chunk: Buffer) => settle({ first: chunk, rest: input })
+    const ended = () => settle("ignore")
+    const timer = waitMs === undefined ? undefined : setTimeout(ended, waitMs)
+    input.on("data", data)
+    input.once("end", ended)
+    input.once("error", ended)
+  })
 }
 
 /** Add grant forwarding and messaging permissions while preserving wrappers and explicit harness permissions. */
@@ -607,7 +643,7 @@ export function runHarness(
     out?: NodeJS.WritableStream
     captureErr?: boolean
     err?: NodeJS.WritableStream
-    stdin?: "inherit" | "ignore"
+    stdin?: "inherit" | "ignore" | PipedStdin
     started?: (failed?: { message: string; code: number }) => void
     group?: boolean
   } = {},
@@ -618,11 +654,18 @@ export function runHarness(
   return new Promise((resolve) => {
     const tty = process.stdin.isTTY === true
     const group = options.group === true && !tty && process.stdout.isTTY !== true && process.stderr.isTTY !== true
+    const input = options.stdin ?? "inherit"
+    const piped = typeof input === "object" ? input : undefined
     const child = spawn(argv[0]!, argv.slice(1), {
-      stdio: [options.stdin ?? "inherit", capture ? "pipe" : "inherit", captureErr ? "pipe" : "inherit"],
+      stdio: [typeof input === "object" ? "pipe" : input, capture ? "pipe" : "inherit", captureErr ? "pipe" : "inherit"],
       env,
       detached: group,
     })
+    if (piped && child.stdin) {
+      child.stdin.on("error", () => {})
+      child.stdin.write(piped.first)
+      piped.rest.pipe(child.stdin)
+    }
     const pipes = [child.stdout, child.stderr].filter((pipe) => pipe !== null)
     const stdout = child.stdout ? tee(child.stdout, out) : undefined
     const stderr = child.stderr ? tee(child.stderr, options.err ?? process.stderr) : undefined
@@ -774,9 +817,17 @@ export function transcriptReplies(path: string, session: string, root: string, b
   return replies
 }
 
-/** Keep the newest whole replies within the byte cap, marking dropped replies and clipping the newest only when necessary. */
+/** Drop restated reports, keep the newest whole replies within the byte cap, and return empty for marker-only output. */
 export function repliesOutput(replies: string[], bytes: number = LIMITS.handbackBytes): string {
-  const clean = replies.map((reply) => handbackOutput(reply.replace(/\r\n?/g, "\n"), false, Number.MAX_SAFE_INTEGER)).filter(Boolean)
+  const lines = (text: string) =>
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+  const all = replies.map((reply) => handbackOutput(reply.replace(/\r\n?/g, "\n"), false, Number.MAX_SAFE_INTEGER)).filter(Boolean)
+  const restated = (text: string, later: string) => lines(text).length >= 2 && lines(text).every((line) => lines(later).includes(line))
+  const clean = all.filter((text, i) => text === HANDBACK_CUT || !all.slice(i + 1).some((later) => restated(text, later)))
+  if (clean.every((text) => text === HANDBACK_CUT)) return ""
   const size = (text: string) => new TextEncoder().encode(text).length
   const framed = (from: number) => {
     const text = clean.slice(from).join("\n\n")
@@ -784,7 +835,7 @@ export function repliesOutput(replies: string[], bytes: number = LIMITS.handback
   }
   let fit: string | undefined
   for (let from = clean.length - 1; from >= 0 && size(framed(from)) <= bytes; from--) fit = framed(from)
-  if (fit !== undefined || !clean.length) return fit ?? ""
+  if (fit !== undefined) return fit
   return keepLast(clean.at(-1)!, bytes, clean.length > 1)
 }
 
@@ -831,20 +882,9 @@ type Handshake = { name: string; pid: number } | { error: string; usage?: true; 
 
 /** Mint a process-bound grant, run or detach the harness, apply late steers and hand its result back. */
 export async function spawnCommand(args: string[], cwd: string): Promise<number> {
-  const split = splitSpawn(args)
-  let values: Values
-  try {
-    values = parseArgs({ args: split.flags, options: OPTIONS, strict: true }).values as Values
-  } catch (error) {
-    throw new RelayUsage(error instanceof Error ? error.message : String(error))
-  }
-  for (const key of Object.keys(values) as Option[]) if (!SPAWN_OPTIONS.includes(key)) throw new RelayUsage(`${CLI_NAME} spawn does not take --${key}`)
-  if (values.bg && values.fg) throw new RelayUsage("--bg and --fg: pick one")
-  const command = split.command
-  if (!command.length)
-    throw new RelayUsage(`${CLI_NAME} spawn runs a harness command: ${CLI_NAME} spawn [flags] [--] <harness cmd...>, e.g. ${CLI_NAME} spawn codex exec "..."`)
-  const refusal = contributorRefusal(command)
-  if (refusal) throw new RelayUsage(refusal)
+  const parsed = parseSpawn(args)
+  let values = parsed.values
+  const { command } = parsed
   const bytes = values["handback-bytes"] === undefined ? undefined : handbackBytes(values["handback-bytes"] as string)
   const runner = process.env[SPAWN_RUNNER]
   delete process.env[SPAWN_RUNNER]
@@ -892,8 +932,10 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   const started =
     handshake && ((failed?: { message: string; code: number }) => handshake(failed ? { error: failed.message, code: failed.code } : { name, pid: process.pid }))
   const launch = (argv: string[], extra: Parameters<typeof runHarness>[2] = {}) =>
-    runHarness(harnessArgv(argv, env), env, { ...extra, group: runner !== undefined, ...(closedStdin(argv) ? { stdin: "ignore" as const } : {}) })
-  let run = await launch(steerArgv(command, steer), started ? { started } : {})
+    runHarness(harnessArgv(argv, env), env, { group: runner !== undefined, ...(closedStdin(argv) ? { stdin: "ignore" as const } : {}), ...extra })
+  const first = steerArgv(command, steer)
+  const stdin = closedStdin(first) ? await harnessStdin(agentShell(process.env) ? STDIN_WAIT_MS : undefined) : undefined
+  let run = await launch(first, { ...(started ? { started } : {}), ...(stdin ? { stdin } : {}) })
   if (!run.started) {
     await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, "", walk, [], [], false)
     return run.code
@@ -916,6 +958,36 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
     worker?.session && worker.transcript ? repliesOutput(transcriptReplies(worker.transcript, worker.session, claudeTranscripts(process.env)), bytes) : ""
   await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, replies || harnessOutput(run, bytes), walk, unapplied, exits, true, stderrOutput(run))
   return run.code
+}
+
+/** Validate spawn flags and the harness command before starting a runner. */
+function parseSpawn(args: string[]): { values: Values; command: string[] } {
+  const split = splitSpawn(args)
+  let values: Values
+  try {
+    values = parseArgs({ args: split.flags, options: OPTIONS, strict: true }).values as Values
+  } catch (error) {
+    throw new RelayUsage(error instanceof Error ? error.message : String(error))
+  }
+  if (values.help) return { values, command: split.command }
+  for (const key of Object.keys(values) as Option[]) if (!SPAWN_OPTIONS.includes(key)) throw new RelayUsage(`${CLI_NAME} spawn does not take --${key}`)
+  if (values.bg && values.fg) throw new RelayUsage("--bg and --fg: pick one")
+  const command = split.command
+  if (!command.length)
+    throw new RelayUsage(`${CLI_NAME} spawn runs a harness command: ${CLI_NAME} spawn [flags] [--] <harness cmd...>, e.g. ${CLI_NAME} spawn codex exec "..."`)
+  const refusal = contributorRefusal(command)
+  if (refusal) throw new RelayUsage(refusal)
+  if (values["handback-bytes"] !== undefined) handbackBytes(values["handback-bytes"] as string)
+  return { values, command }
+}
+
+/** Start a detached worker for a caller such as MCP, returning its name and runner pid after the harness starts. */
+export async function spawnDetached(args: string[], cwd: string): Promise<{ name: string; pid: number }> {
+  const { values } = parseSpawn(args)
+  if (values.help || values.fg) throw new RelayUsage("a detached spawn takes no --help or --fg")
+  const reply = await detachedRunner(args, cwd)
+  if ("error" in reply) throw new Error(reply.error)
+  return reply
 }
 
 /** an agent's shell: a harness's environment markers or a relay identity in the environment (spawn also needs stdin not a terminal) */
@@ -946,6 +1018,19 @@ function once<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => vo
 
 /** Re-exec with the caller's walk and no caller stdio. Return once the private handshake confirms the harness started. */
 async function detachSpawn(args: string[], cwd: string): Promise<number> {
+  const reply = await detachedRunner(args, cwd)
+  if ("error" in reply) {
+    note(reply.error)
+    return reply.code
+  }
+  console.log(
+    `${reply.name} started (pid ${reply.pid}) and runs in the background: its result arrives as a relay message by itself; steer it with ${CLI_NAME} send ${reply.name} <text>`,
+  )
+  return 0
+}
+
+/** The runner handshake, shared by shell and MCP spawns. */
+async function detachedRunner(args: string[], cwd: string): Promise<{ name: string; pid: number } | { error: string; code: number }> {
   const walk = walkNow()
   const child = spawn(SELF[0]!, [...SELF.slice(1), "spawn", ...args], {
     cwd,
@@ -973,13 +1058,9 @@ async function detachSpawn(args: string[], cwd: string): Promise<number> {
   if ("error" in reply) {
     if (reply.usage) throw new RelayUsage(reply.error)
     if (reply.code === undefined) throw new Error(reply.error)
-    note(reply.error)
-    return reply.code
+    return { error: reply.error, code: reply.code }
   }
-  console.log(
-    `${reply.name} started (pid ${reply.pid}) and runs in the background: its result arrives as a relay message by itself; steer it with ${CLI_NAME} send ${reply.name} <text>`,
-  )
-  return 0
+  return reply
 }
 
 /** a worker's harness session, its transcript and its spawner's unread steers to it, with `take` taken; undefined from a broker without spawn_steers or on a failure */

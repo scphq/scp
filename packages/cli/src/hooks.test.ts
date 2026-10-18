@@ -386,7 +386,8 @@ describe("swarm hook", () => {
       expect(json(started.stdout)).toEqual({
         hookSpecificOutput: {
           hookEventName: "SessionStart",
-          additionalContext: "swarm: set your title and a one-line now with relay_set_title / relay_set_now so peers can find you.",
+          additionalContext:
+            "swarm (optional): a title and a one-line now (relay_set_title / relay_set_now) help peers find you; skip it when you only run workers.",
         },
       })
       broker.core.title(endpoint(`me/${name}`)!.id, "docs")
@@ -628,6 +629,25 @@ describe("swarm hook", () => {
     expect(json(prompt.stdout).hookSpecificOutput!.additionalContext).toStartWith(`${PREAMBLE_BRIEF}\n\n<relay-message`)
     expect(JSON.stringify(broker.core.activity({ limit: 1000 }))).not.toContain("PROMPT-MARKER")
     expect(rows("me/inject-claude").map((r) => r.kind)).toEqual(["session_start", "tool", "tool", "tool"])
+  })
+
+  test("swarm inbox still lists what a background PostToolUse hook just showed, whose text Claude Code hands over only later", async () => {
+    const env = { SCP_DIR: dir, SCP_SESSION: "inject-later", CLAUDECODE: "1", SCP_NAME: "inject-later" }
+    await hook(["claude"], { hook_event_name: "SessionStart", cwd: project }, env)
+    const id = sendTo("inject-later", "HANDBACK-MARKER the whole result")
+    const shown = json((await hook(["claude"], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Bash", tool_input: {} }, env)).stdout)
+      .hookSpecificOutput!.additionalContext as string
+    expect(shown).toContain("HANDBACK-MARKER")
+    const inbox = async () => {
+      const child = Bun.spawn([process.execPath, "--no-env-file", entry, "inbox"], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: cleanEnv(env) })
+      const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      return stdout + stderr
+    }
+    const listed = await inbox()
+    expect(listed).toContain("HANDBACK-MARKER")
+    expect(listed).toContain(id)
+    expect(listed).toContain("a hook already showed you this at ")
+    expect(await inbox()).toContain("no unread messages")
   })
 
   test("a message too big to inline becomes a pointer to relay_inbox and stays unread, while one shown in full is read", async () => {
