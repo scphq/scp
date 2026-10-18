@@ -1,6 +1,7 @@
 import { authenticate } from "./credentials";
 import type { Env, User } from "./env";
 import { acceptInvite, createInvite, createOrg, listInvites, listMembers, listOrgs, type Membership, requireMember } from "./orgs";
+import { createToken, listDevices, listTokens, revokeDevice, revokeToken } from "./tokens";
 import { HttpError, json, readJson, str } from "./util";
 import { checkCsrf, checkOrigin, loadCtx } from "./web";
 
@@ -94,6 +95,20 @@ export async function api(req: Request, env: Env, url: URL): Promise<Response> {
     if (kind === "invites" && !id && method === "POST") {
       const body = await readJson(req);
       return json(await createInvite(env, url.origin, m, actor.user, str(body.email), str(body.role), now), 201);
+    }
+    if (kind === "tokens" && !id && method === "GET") return json({ tokens: await listTokens(env.DB, m.org.id) });
+    if (kind === "tokens" && !id && method === "POST") {
+      const body = await readJson(req);
+      return json(await createToken(env.DB, m, actor.user, str(body.name), body.expires_in_days, now), 201);
+    }
+    if (kind === "tokens" && id && method === "DELETE") {
+      await revokeToken(env.DB, m, actor.user, id, now);
+      return json({ revoked: id });
+    }
+    if (kind === "devices" && !id && method === "GET") return json({ devices: await listDevices(env.DB, m, actor.user) });
+    if (kind === "devices" && id && method === "DELETE") {
+      await revokeDevice(env.DB, m, actor.user, id, now);
+      return json({ revoked: id });
     }
   }
   throw new HttpError(404, "not_found", "Not found.");

@@ -11,6 +11,8 @@ afterAll(async () => {
   await relay?.dispose();
 });
 
+const csrfOf = (page: string): string => /name="csrf" value="([^"]+)"/.exec(page)?.[1] ?? "";
+
 describe("skeleton", () => {
   test("health answers", async () => {
     const res = await relay.fetch("/health");
@@ -194,6 +196,14 @@ describe("device login", () => {
     expect(await who.json()).toMatchObject({ kind: "device", org: "devorg", role: "owner", label: "laptop", ambient: false });
     const orgs = await relay.fetch("/v1/orgs", bearer(cred.access_token));
     expect(await orgs.json()).toEqual({ orgs: [{ handle: "devorg", name: "devorg", role: "owner", members: 1 }] });
+
+    const tokensPage = await (await a.get("/orgs/devorg/tokens")).text();
+    expect(tokensPage).toContain("laptop");
+    const deviceId = /\/orgs\/devorg\/devices\/(dvc_[A-Za-z0-9_-]+)\/revoke/.exec(tokensPage)?.[1];
+    expect((await a.post(`/orgs/devorg/devices/${deviceId}/revoke`, {})).status).toBe(303);
+    const after = await relay.fetch("/v1/whoami", bearer(cred.access_token));
+    expect(after.status).toBe(401);
+    expect(await after.json()).toEqual({ error: "revoked" });
   });
 
   test("a denied code yields access_denied and an unknown one invalid_grant", async () => {
@@ -216,5 +226,104 @@ describe("device login", () => {
     const start = (await (await relay.fetch("/v1/device/code", { method: "POST" })).json()) as { user_code: string };
     await a.get(`/device?code=${start.user_code}`);
     expect((await a.post("/device", { code: start.user_code, org: "acme", action: "approve" })).status).toBe(404);
+  });
+});
+
+describe("API tokens for ambient agents", () => {
+  test("create in the dashboard, shown once, verified as an ambient member, then revoked", async () => {
+    const a = new Browser(relay);
+    await a.signIn("ci-owner@example.com");
+    await a.post("/orgs", { handle: "ciorg" });
+    await a.get("/orgs/ciorg/tokens");
+    const created = await a.post("/orgs/ciorg/tokens", { name: "ci-nightly", expires_in_days: "30" });
+    expect(created.status).toBe(200);
+    const page = await created.text();
+    const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(page)?.[0];
+    expect(token).toBeDefined();
+    expect(page).toContain(`SCP_TOKEN=${token} scp hooks install`);
+    expect((await (await a.get("/orgs/ciorg/tokens")).text()).includes(token!)).toBe(false);
+
+    const who = await relay.fetch("/v1/whoami", bearer(token!));
+    expect(who.status).toBe(200);
+    const body = (await who.json()) as { expires_at: number };
+    expect(body).toMatchObject({ kind: "token", org: "ciorg", role: "member", label: "ci-nightly", ambient: true, endpoint_labels: { token: "ci-nightly" } });
+    expect(body.expires_at).toBeGreaterThan(Date.now() + 29 * 86_400_000);
+
+    expect((await relay.fetch("/v1/orgs", bearer(token!))).status).toBe(403);
+    expect((await a.post("/orgs/ciorg/tokens", { name: "ci-nightly" })).status).toBe(409);
+    expect((await a.post("/orgs/ciorg/tokens", { name: "Bad Name!" })).status).toBe(400);
+
+    const listed = await (await a.get("/orgs/ciorg/tokens")).text();
+    const id = /\/orgs\/ciorg\/tokens\/(tok_[A-Za-z0-9_-]+)\/revoke/.exec(listed)?.[1];
+    expect(listed).toContain(`${token!.slice(0, 10)}...${token!.slice(-4)}`);
+    expect((await a.post(`/orgs/ciorg/tokens/${id}/revoke`, {})).status).toBe(303);
+    const after = await relay.fetch("/v1/whoami", bearer(token!));
+    expect(after.status).toBe(401);
+    expect(await after.json()).toEqual({ error: "revoked" });
+  });
+
+  test("the API creates, lists and revokes tokens with a device credential", async () => {
+    const a = new Browser(relay);
+    await a.signIn("api-owner@example.com");
+    await a.post("/orgs", { handle: "apiorg" });
+    const cred = await deviceLogin(a, "apiorg", "ci-box");
+    const auth = { authorization: `Bearer ${cred.access_token}`, "content-type": "application/json" };
+    const made = await relay.fetch("/v1/orgs/apiorg/tokens", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ name: "cron", expires_in_days: "never" }),
+    });
+    expect(made.status).toBe(201);
+    const tok = (await made.json()) as { id: string; token: string; expires_at: null };
+    expect(tok.expires_at).toBeNull();
+    expect((await relay.fetch("/v1/whoami", bearer(tok.token))).status).toBe(200);
+    const list = (await (await relay.fetch("/v1/orgs/apiorg/tokens", { headers: auth })).json()) as { tokens: { id: string; name: string }[] };
+    expect(list.tokens.map((t) => t.name)).toEqual(["cron"]);
+    expect(JSON.stringify(list)).not.toContain(tok.token);
+    expect((await relay.fetch("/v1/orgs/acme/tokens", { headers: auth })).status).toBe(404);
+    expect((await relay.fetch(`/v1/orgs/apiorg/tokens/${tok.id}`, { method: "DELETE", headers: auth })).status).toBe(200);
+    expect((await relay.fetch("/v1/whoami", bearer(tok.token))).status).toBe(401);
+  });
+
+  test("a session JSON call needs the CSRF header", async () => {
+    const a = new Browser(relay);
+    await a.signIn("json-owner@example.com");
+    const page = await (await a.get("/orgs")).text();
+    const cookie = [...a.jar].map(([k, v]) => `${k}=${v}`).join("; ");
+    const post = (headers: Record<string, string>) =>
+      relay.fetch("/v1/orgs", {
+        method: "POST",
+        headers: { cookie, origin: relay.origin, "content-type": "application/json", ...headers },
+        body: JSON.stringify({ handle: "jsonorg" }),
+      });
+    expect((await post({})).status).toBe(403);
+    expect((await post({ "x-csrf-token": csrfOf(page) })).status).toBe(201);
+  });
+
+  test("removing a member revokes the tokens and devices they hold", async () => {
+    const a = new Browser(relay);
+    await a.signIn("team-owner@example.com");
+    await a.post("/orgs", { handle: "team" });
+    await a.get("/orgs/team");
+    const since = relay.mails.length;
+    await a.post("/orgs/team/invites", { email: "temp@example.com" });
+    const link = /\/invites\/([A-Za-z0-9_-]+)/.exec((await relay.mailTo("temp@example.com", since)).text)![1]!;
+    const b = new Browser(relay);
+    await b.signIn("temp@example.com");
+    await b.get(`/invites/${link}`);
+    await b.post("/invites/accept", { token: link });
+    await b.get("/orgs/team/tokens");
+    const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(await (await b.post("/orgs/team/tokens", { name: "runner" })).text())![0];
+    expect((await relay.fetch("/v1/whoami", bearer(token))).status).toBe(200);
+
+    const members = await (await a.get("/orgs/team")).text();
+    const uid = /\/orgs\/team\/members\/(usr_[A-Za-z0-9_-]+)\/remove/.exec(members)![1];
+    expect((await a.post(`/orgs/team/members/${uid}/remove`, {})).status).toBe(303);
+    expect(await (await relay.fetch("/v1/whoami", bearer(token))).json()).toEqual({ error: "revoked" });
+  });
+
+  test("an unknown or malformed bearer is refused", async () => {
+    expect(await (await relay.fetch("/v1/whoami", bearer(`scp_t_${"A".repeat(43)}`))).json()).toEqual({ error: "invalid" });
+    expect(await (await relay.fetch("/v1/whoami")).json()).toEqual({ error: "unauthorized" });
   });
 });

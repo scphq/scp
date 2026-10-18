@@ -214,6 +214,7 @@ export function orgHeader(m: Membership, tab: "members" | "tokens"): Html {
     <p class="lead">You are <span class="role">${m.role}</span> of <code>${m.org.handle}</code>.</p>
     <nav class="nav sub" aria-label="Organization">
       <a href="/orgs/${m.org.handle}" ${tab === "members" ? html`aria-current="page"` : ""}>Members</a>
+      <a href="/orgs/${m.org.handle}/tokens" ${tab === "tokens" ? html`aria-current="page"` : ""}>Tokens and devices</a>
     </nav>`;
 }
 

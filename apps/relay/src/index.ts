@@ -4,6 +4,7 @@ import { deviceCode, devicePage, devicePost, deviceToken } from "./device";
 import type { Env } from "./env";
 import { CSS, html, layout } from "./html";
 import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
+import { tokensPage, tokensPost } from "./tokens";
 import { DAY, HttpError, json } from "./util";
 import { back, type Ctx, loadCtx, toSignIn } from "./web";
 
@@ -34,8 +35,10 @@ async function pages(ctx: Ctx): Promise<Response> {
   if (!post) {
     if (rest.length === 0) return orgsPage(ctx, user);
     if (rest.length === 1) return orgPage(ctx, user, rest[0]!);
+    if (rest.length === 2 && rest[1] === "tokens") return tokensPage(ctx, user, rest[0]!);
     throw new HttpError(404, "not_found", "Not found.");
   }
+  if (rest[1] === "tokens" || rest[1] === "devices") return tokensPost(ctx, user, rest[0]!, rest.slice(1));
   return orgsPost(ctx, user, rest);
 }
 
