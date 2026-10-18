@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { REPO, SPEC } from "./content";
+import { DOCS, REPO, SPEC } from "./content";
 
 /** Two corner brackets around a solid square. */
 export function Mark({ size = 16 }: { size?: number }) {
@@ -11,7 +11,7 @@ export function Mark({ size = 16 }: { size?: number }) {
   );
 }
 
-export function Header({ page = "home" }: { page?: "home" | "spec" }) {
+export function Header({ page = "home" }: { page?: "home" | "docs" | "spec" }) {
   return (
     <header className="head">
       <a className="skip" href="#main">
@@ -23,6 +23,9 @@ export function Header({ page = "home" }: { page?: "home" | "spec" }) {
           <span>SCP</span>
         </Link>
         <nav className="nav" aria-label="Site">
+          <Link href={DOCS} aria-current={page === "docs" ? "page" : undefined}>
+            docs
+          </Link>
           <Link href={SPEC} aria-current={page === "spec" ? "page" : undefined}>
             spec
           </Link>
@@ -46,6 +49,7 @@ export function Footer() {
           <p>Swarm Communication Protocol, version 1</p>
         </div>
         <nav className="foot-nav" aria-label="Footer">
+          <Link href={DOCS}>Docs</Link>
           <Link href={SPEC}>Specification</Link>
           <Link href={`${SPEC}#18-conformance`}>Conformance</Link>
           <Link href="/#quickstart">Quickstart</Link>

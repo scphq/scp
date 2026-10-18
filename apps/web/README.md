@@ -1,6 +1,6 @@
 # scp.dev
 
-The site for the Swarm Communication Protocol: a short landing page and the specification at `/spec`, rendered at build time from `packages/spec/SPEC.md`.
+The site for the Swarm Communication Protocol: a short landing page, the docs at `/docs` and the specification at `/spec`, rendered at build time from `docs/*.md` and `packages/spec/SPEC.md`.
 
 Next.js (App Router), deployed to Cloudflare Workers through OpenNext.
 
@@ -11,7 +11,7 @@ bun install
 bun run dev        # next dev on http://localhost:3000
 ```
 
-Page copy lives in `app/content.ts`. The swarm view is `app/swarm.tsx`, the scripted fleet view is `app/demo.tsx`. Edit `packages/spec/SPEC.md` to change the spec; headings get stable anchors (`/spec#7-9-untrusted-content-framing`).
+Page copy lives in `app/content.ts`. The swarm view is `app/swarm.tsx`, the scripted fleet view is `app/demo.tsx`. Docs pages are Markdown in `docs/`, listed in `lib/docs.ts`. Edit `packages/spec/SPEC.md` to change the spec; headings get stable anchors (`/spec#7-9-untrusted-content-framing`).
 
 ## Build and preview
 
