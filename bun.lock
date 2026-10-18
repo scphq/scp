@@ -34,7 +34,7 @@
       "name": "@scp-dev/cli",
       "version": "0.0.0",
       "bin": {
-        "scp": "./src/cli.ts",
+        "swarm": "./src/cli.ts",
       },
     },
     "packages/core": {
