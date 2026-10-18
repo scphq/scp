@@ -267,6 +267,10 @@ export interface EndpointRow {
   linked: number | null
   /** how the session that holds the endpoint wakes it: a {@link Wake} other than none, or null */
   wake: string | null
+  /** the live connections that set the wake */
+  wakers: number
+  /** when the last hook connection that set the wake closed */
+  waker_left: number | null
 }
 
 export interface MessageRow {
@@ -549,6 +553,8 @@ export class RelayCore {
       ["named", "INTEGER"],
       ["linked", "INTEGER"],
       ["wake", "TEXT"],
+      ["wakers", "INTEGER NOT NULL DEFAULT 0"],
+      ["waker_left", "INTEGER"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -1324,7 +1330,7 @@ export class RelayCore {
       endpoint,
     )
     const row = this.mustEndpoint(endpoint)
-    if (!options.settle || presenceOf(row, now) !== "offline" || (row.status_state !== "working" && row.status_state !== "waiting")) return false
+    if (!options.settle || shownPresence(row, now) !== "offline" || (row.status_state !== "working" && row.status_state !== "waiting")) return false
     this.sql.all(`UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?`, endpoint)
     return true
   }
@@ -1341,6 +1347,7 @@ export class RelayCore {
       `UPDATE endpoints SET connections = 0, hook_seen = CASE WHEN kind = 'agent' AND hook_ended IS NULL THEN MAX(COALESCE(hook_seen, 0), ?) ELSE hook_seen END WHERE connections > 0`,
       this.now() - (LIMITS.hookIdleS - LIMITS.restartGraceS) * 1000,
     )
+    this.sql.all(`UPDATE endpoints SET wakers = 0, waker_left = ? WHERE wakers > 0`, this.now())
   }
 
   whoami(endpoint: string): EndpointView {
@@ -1370,7 +1377,7 @@ export class RelayCore {
     const shown = viewer ? new Set(this.visibleRows(viewer).map((row) => row.id)) : undefined
     const peeker = viewer ?? (filters.peekable === true ? this.byHandle(HUMAN_HANDLE)! : undefined)
     return this.listed()
-      .filter((row) => filters.all || row.connections > 0 || row.kind === "human" || (row.last_seen ?? 0) >= cutoff)
+      .filter((row) => filters.all || row.connections > 0 || row.kind === "human" || (row.last_seen ?? 0) >= cutoff || waking(row, now))
       .filter((row) => !filters.harness || row.harness === filters.harness)
       .filter((row) => !filters.kind || row.kind === filters.kind)
       .filter((row) => !viewer || row.id === viewer.id || this.mayMessage(viewer, row, viewer.kind === "human"))
@@ -1485,6 +1492,21 @@ export class RelayCore {
     if (row.wake === wake) return false
     this.sql.all(`UPDATE endpoints SET wake = ? WHERE id = ?`, wake, endpoint)
     return true
+  }
+
+  /**
+   * a connection that set the endpoint's wake starts (`live`) or stops counting as its waker. A hook's (`grace`) still counts for
+   * LIMITS.restartGraceS after it closes, while its harness starts the next one
+   */
+  waker(endpoint: string, live: boolean, options: { grace?: boolean } = {}): void {
+    if (live) this.sql.all(`UPDATE endpoints SET wakers = wakers + 1 WHERE id = ?`, endpoint)
+    else
+      this.sql.all(
+        `UPDATE endpoints SET wakers = MAX(wakers - 1, 0), waker_left = CASE WHEN ? THEN ? ELSE waker_left END WHERE id = ?`,
+        options.grace ? 1 : 0,
+        this.now(),
+        endpoint,
+      )
   }
 
   /**
@@ -1806,7 +1828,7 @@ export class RelayCore {
     const dark = recipients.filter(
       (r) =>
         r.kind === "agent" &&
-        presenceOf(r, now) === "offline" &&
+        shownPresence(r, now) === "offline" &&
         (now - Math.max(r.last_seen ?? 0, r.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS || (r.session === null && r.token_hash === null && r.hook_ended !== null)) &&
         !this.unjoinedSpawn(sender, r.handle, now),
     )
@@ -2066,7 +2088,7 @@ export class RelayCore {
   private reach(sender: EndpointRow, recipient: EndpointRow, offline: boolean, now: number): Reach | undefined {
     if (recipient.kind !== "agent" || !this.localRow(recipient)) return undefined
     const done = recipient.status_state === "done"
-    if ((done || presenceOf(recipient, now) === "offline") && this.unjoinedSpawn(sender, recipient.handle, now)) return "starting"
+    if ((done || shownPresence(recipient, now) === "offline") && this.unjoinedSpawn(sender, recipient.handle, now)) return "starting"
     if (done) return "ended"
     return offline ? "offline" : "running"
   }
@@ -2519,7 +2541,7 @@ export class RelayCore {
         continue
       }
       const row = this.byId(grant.used_by)
-      if (!row || row.status_state === "done" || (presenceOf(row, now) === "offline" && (grant.handback !== null || !pid || !this.alive(pid)))) continue
+      if (!row || row.status_state === "done" || (shownPresence(row, now) === "offline" && (grant.handback !== null || !pid || !this.alive(pid)))) continue
       workers.set(row.id, row)
       if (grant.pushed_at !== null && grant.pushed_at > now - LIMITS.pushGapS * 1000) paced.add(row.id)
     }
@@ -2921,10 +2943,10 @@ export class RelayCore {
       .filter((row) =>
         present
           ? present.includes(row.id)
-          : presenceOf(row, now) !== "offline" || Math.max(row.last_seen ?? 0, row.hook_seen ?? 0, row.hook_ended ?? 0) >= asked.created_at,
+          : shownPresence(row, now) !== "offline" || Math.max(row.last_seen ?? 0, row.hook_seen ?? 0, row.hook_ended ?? 0) >= asked.created_at,
       )
     const gone = (row: EndpointRow): boolean =>
-      presenceOf(row, now) === "offline" &&
+      shownPresence(row, now) === "offline" &&
       ((row.hook_ended ?? 0) >= asked.created_at || row.status_state === "done" || now - Math.max(row.last_seen ?? 0, row.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS)
     if (!rows.length || !rows.every(gone)) return null
     return rows.map((row) => ({ address: this.address(row), state: row.status_state as StatusState | null }))
@@ -3038,7 +3060,7 @@ export class RelayCore {
     for (const row of this.sql.all<EndpointRow>(
       `SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND status_state IN ('working', 'waiting')`,
     )) {
-      if (this.localRow(row) && presenceOf(row, now) === "offline")
+      if (this.localRow(row) && shownPresence(row, now) === "offline")
         this.sql.all(`UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?`, row.id)
     }
   }
@@ -5098,7 +5120,7 @@ export class RelayCore {
 
   /** with `shown`, the ids a viewer sees: a parent outside it is null */
   protected view(row: EndpointRow, shown?: Set<string>): EndpointView {
-    const presence = presenceOf(row, this.now())
+    const presence = shownPresence(row, this.now())
     return {
       id: row.id,
       address: this.address(row),
@@ -5401,6 +5423,17 @@ function presenceOf(row: EndpointRow, now: number): Presence {
   if (!row.hook_seen) return "offline"
   if (row.hook_seen >= now - LIMITS.hookOnlineS * 1000) return "online"
   return row.hook_seen >= now - LIMITS.hookIdleS * 1000 ? "idle" : "offline"
+}
+
+/** a wake with a live waker, or a hook waker that left within LIMITS.restartGraceS */
+function waking(row: EndpointRow, now: number): boolean {
+  return wakeOf(row) !== null && (row.wakers > 0 || (row.waker_left ?? 0) >= now - LIMITS.restartGraceS * 1000)
+}
+
+/** the presence an endpoint shows: one its waker can wake is at least idle, though its session's own presence decayed */
+function shownPresence(row: EndpointRow, now: number): Presence {
+  const presence = presenceOf(row, now)
+  return presence === "offline" && waking(row, now) ? "idle" : presence
 }
 
 function pairKey(a: string, b: string): string {

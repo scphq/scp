@@ -666,6 +666,34 @@ describe("bridge", () => {
     await waitFor(async () => (await presence("me/a/silent")) === "offline", "a/silent offline on b once its hooks stopped")
   })
 
+  test("a wakeable endpoint whose waker lives stays idle on the hub and the other machines, and goes offline when the waker closes", async () => {
+    const clock = { now: Date.now() }
+    const fake = hubServer()
+    const a = await machine(fake, "a", { now: () => clock.now, presenceEveryMs: 20 })
+    const b = await machine(fake, "b")
+    const review = await agent(b, "review")
+    const process = `pid:${globalThis.process.pid}:wake`
+    const hook = await RelayClient.connect(a.socket)
+    await hook.hello({ transient: true, claim: { handle: "lane", harness: "codex", session: "s-lane", process } })
+    hook.close()
+    const launcher = await RelayClient.connect(a.socket)
+    cleanups.push(() => launcher.close())
+    await launcher.hello({ observe: true, self: [process] })
+    await launcher.request("wake", { via: "codex-app-server" })
+    const hub = (fake.hub("ada") as unknown as { core: { list(f: { all: boolean }): EndpointView[] } }).core
+    const onHub = () => hub.list({ all: true }).find((v) => v.address.endsWith("/lane"))?.presence
+    const onB = async () =>
+      (await review.request<{ endpoints: EndpointView[] }>("list", { all: true })).endpoints.find((e) => e.address === "me/a/lane")?.presence
+    await waitFor(async () => (await onB()) === "online", "a/lane online on b")
+    clock.now += (LIMITS.hookIdleS + 1) * 1000
+    await waitFor(async () => (await onB()) === "idle", "a/lane idle on b")
+    await Bun.sleep(100)
+    expect([onHub(), await onB()]).toEqual(["idle", "idle"])
+    launcher.close()
+    await waitFor(async () => (await onB()) === "offline", "a/lane offline on b once its waker closed")
+    expect(onHub()).toBe("offline")
+  })
+
   test("a hook-only endpoint goes offline on the other machines once its harness process exits, and its handle is free again", async () => {
     const fake = hubServer()
     const a = await machine(fake, "a", { presenceEveryMs: 20 })

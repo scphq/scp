@@ -485,6 +485,25 @@ describe("swarm", () => {
     }
   })
 
+  test("list shows a wakeable endpoint idle while its waker lives, and hides it once the waker is gone", async () => {
+    const harness = `pid:${process.pid}:waker-list`
+    const hook = await RelayClient.connect(broker.socket)
+    const waker = await RelayClient.connect(broker.socket)
+    try {
+      await hook.hello({ transient: true, claim: { handle: "woken-lane", harness: "codex", session: "s-woken", process: harness } })
+      await hook.request("event", { kind: "session_end" })
+      await waker.hello({ observe: true, self: [harness] })
+      await waker.request("wake", { via: "codex-app-server" })
+      expect((await swarm(["list", "--roots"])).stdout).toMatch(/^ +me\/woken-lane +idle +codex-app-server +-$/m)
+      waker.close()
+      await Bun.sleep(50)
+      expect((await swarm(["list", "--roots"])).stdout).not.toContain("woken-lane")
+    } finally {
+      hook.close()
+      waker.close()
+    }
+  })
+
   test("watch quotes what agents wrote and tags the subagent behind an event", async () => {
     const watch = Bun.spawn([process.execPath, "--no-env-file", entry, "watch"], { stdout: "pipe", stderr: "pipe", env: process.env })
     const streams = { stdout: "", stderr: "" }

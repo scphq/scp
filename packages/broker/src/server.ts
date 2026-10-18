@@ -116,6 +116,8 @@ interface Connection {
   process?: string
   /** a one-shot CLI command's connection: its comings and goings are not fleet presence events */
   brief?: boolean
+  /** the endpoint whose wake this connection set: it counts as its waker until it closes or sets none */
+  waker?: string | undefined
   cwd?: string | undefined
   watching: boolean
   closed: boolean
@@ -425,6 +427,24 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     return core.list({ all: true }).filter((view) => core.machineOf(view.id) === null)
   }
 
+  /** counts `s` as the waker of `endpoint`, or of none, and reports the presence that moves */
+  function setWaker(s: Conn<Connection>, endpoint: string | undefined) {
+    const was = s.data.waker
+    if (was === endpoint) return
+    s.data.waker = endpoint
+    if (was) core.waker(was, false, { grace: s.data.transient === true })
+    if (endpoint) core.waker(endpoint, true)
+    for (const id of [was, endpoint]) if (id) presenceMoved(id)
+  }
+
+  /** reports an endpoint's presence when it is not the one last reported; whether it was not */
+  function presenceMoved(id: string): boolean {
+    const view = core.whoami(id)
+    if ((known.get(id) ?? "offline") === view.presence) return false
+    presenceChanged(view)
+    return true
+  }
+
   /** an endpoint's presence changed outside a connection's own hello or close: watchers and the other machines hear it */
   function presenceChanged(view: EndpointView) {
     known.set(view.id, view.presence)
@@ -609,6 +629,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     s.data.closed = true
     clearTimeout(s.data.lineTimer)
     connections.delete(s)
+    if (!closing) setWaker(s, undefined)
     if (s.data.endpoint && !closing && !s.data.transient && !s.data.lineage) {
       const before = core.whoami(s.data.endpoint).presence
       const settled = core.disconnect(s.data.endpoint, { settle: !s.data.brief })
@@ -917,7 +938,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "wake": {
         if (s.data.lineage && !s.data.own) throw new RelayError("unauthorized", "only the endpoint's own session says how it wakes")
         const changed = core.setWake(me, params.via, hookOf(s))
-        if (changed) bridge?.changed(me)
+        setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
+        if (!presenceMoved(me) && changed) bridge?.changed(me)
         return { changed }
       }
       case "rename": {

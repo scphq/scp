@@ -82,6 +82,8 @@ interface FederatedRow extends EndpointRow {
   scope_epoch: number | null
   /** this machine's own agent: the wire caps it mirrored last */
   mirrored_caps: string | null
+  /** another machine's row: the presence its bridge mirrored last */
+  mirrored_presence: Presence | null
 }
 
 /** own rules as they cross machines: selector lists per direction */
@@ -290,6 +292,7 @@ export class FederatedCore extends RelayCore {
     if (!columns.includes("incarnation")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN incarnation TEXT`)
     if (!columns.includes("scope_epoch")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN scope_epoch INTEGER`)
     if (!columns.includes("mirrored_caps")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_caps TEXT`)
+    if (!columns.includes("mirrored_presence")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_presence TEXT`)
     this.sql.all(`CREATE UNIQUE INDEX IF NOT EXISTS endpoints_remote ON endpoints (remote) WHERE remote IS NOT NULL`)
     if (this.xinbox) for (const statement of XACCT_MIGRATION) this.sql.all(statement)
   }
@@ -444,6 +447,13 @@ export class FederatedCore extends RelayCore {
 
   protected override localRow(row: EndpointRow): boolean {
     return !(row as FederatedRow).remote
+  }
+
+  /** a live mirrored row shows the presence its machine mirrored, not one its last_seen decays to here */
+  protected override view(row: EndpointRow, shown?: Set<string>): EndpointView {
+    const view = super.view(row, shown)
+    const { remote, mirrored_presence: mirrored } = row as FederatedRow
+    return remote && row.connections > 0 && (mirrored === "online" || mirrored === "idle") ? { ...view, presence: mirrored } : view
   }
 
   protected override address(row: EndpointRow): string {
@@ -625,6 +635,7 @@ export class FederatedCore extends RelayCore {
           status_note: view.status?.note ?? null,
           token_hash: null,
           connections: live ? 1 : 0,
+          mirrored_presence: view.presence,
           last_seen: view.lastSeen ?? (live ? now : (before?.last_seen ?? null)),
           auth: auth ?? row.auth,
           ...(view.kind === "agent" ? this.scopeColumns(machine, view.scope, row, place(view.handle)) : {}),
