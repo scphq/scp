@@ -209,6 +209,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  message as a turn (steering a running one, waking an idle session)
   ${CLI_NAME} codex [--name N] [--headless] [--] [codex args...]
                                                  runs codex with relay messages waking an idle thread or steering a running turn
+  ${CLI_NAME} muse [--name N] [--resume S] [--] [muse serve args...]
+                                                 runs a headless Muse session that relay messages wake, printing its replies
   ${CLI_NAME} opencode [--name N] [--] [opencode args...]
                                                  runs OpenCode with your own config and arguments, wake on: the plugin wakes an
                                                  idle session, or opens one; refuses to start without the current plugin
@@ -594,6 +596,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   if (verb === "claude") return (await import("./claude")).claudeCommand(rest)
   if (verb === "pi") return (await import("./pi")).piCommand(rest)
   if (verb === "codex") return (await import("./codex")).codexCommand(rest)
+  if (verb === "muse") return (await import("./muse")).museCommand(rest)
   if (verb === "opencode") return (await import("./opencode")).opencodeCommand(rest, process.env, undefined, cwd)
   if (verb === "agy" || verb === "grok") return (await import("./resume")).resumeCommand(verb, rest, process.env, cwd)
   if (verb === "spawn") {
