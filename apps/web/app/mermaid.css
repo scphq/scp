@@ -1,0 +1,31 @@
+.mermaid-figure {
+  padding: 1.5rem 1.25rem;
+  border: 1px solid var(--line-soft);
+  background: var(--bg);
+  line-height: 1.6;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.prose .mermaid-figure {
+  margin-top: 1.125rem;
+}
+
+.prose .mermaid-figure p {
+  margin: 0;
+}
+
+.mermaid-figure svg {
+  display: block;
+  margin-inline: auto;
+  height: auto;
+}
+
+/* mermaid measures labels in a detached svg, so the site's .label must not reach them there either */
+svg[id^="mermaid-"] .label {
+  display: revert;
+  font: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+  color: inherit;
+}

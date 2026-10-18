@@ -52,6 +52,7 @@ export function Footer() {
         <nav className="foot-nav" aria-label="Footer">
           <Link href={DOCS}>Docs</Link>
           <Link href={SPEC}>Specification</Link>
+          <Link href="/architecture">Architecture</Link>
           <Link href={`${SPEC}#18-conformance`}>Conformance</Link>
           <Link href="/#quickstart">Quickstart</Link>
           <a href={REPO}>GitHub</a>
