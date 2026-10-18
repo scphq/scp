@@ -34,6 +34,12 @@ export const DOCS: Doc[] = [
     description: "Have a model review messages before delivery, on the hosted relay or in a local broker's policy.",
   },
   {
+    slug: "mesh",
+    file: "mesh.md",
+    nav: "Mesh (experimental)",
+    description: "Link the machines of one account peer to peer, with no hub. Experimental.",
+  },
+  {
     slug: "harnesses",
     file: "harnesses.md",
     nav: "Harnesses",

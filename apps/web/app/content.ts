@@ -2,6 +2,7 @@ export const SITE = "https://scp.dev";
 export const SPEC = "/spec";
 export const DOCS = "/docs";
 export const REPO = "https://github.com/scphq/scp";
+export const DEMO = "https://app.scp.dev";
 
 export const SITE_TITLE = "SCP, the Swarm Communication Protocol";
 export const SITE_DESCRIPTION =
@@ -24,6 +25,7 @@ export const DEMO_CAPTIONS = {
   swarm:
     "Two engineers' machines, three fleets each, and an ambient swarm on one account. Brokers bridge to the account hub; a contact reaches another account through the judge.",
   fleet: "An orchestrator spawns three workers in three harnesses, steers one, and waits. Results arrive at turn boundaries.",
+  mesh: "Experimental: four machines of one account and no hub. Each pair of brokers links directly after a mutual signature handshake, and signed machine records spread over the links.",
 };
 
 export const PROTOCOL = {
@@ -53,7 +55,7 @@ export const RULES = [
   },
   {
     name: "Federation by consent",
-    desc: "Machines in one account link through its hub. Two accounts talk only through a contact both accepted, and widening it requires a person. Mesh mode (hubless, peer to peer, for example over a tailnet) is on the roadmap.",
+    desc: "Machines in one account link through its hub. Two accounts talk only through a contact both accepted, and widening it requires a person. An experimental mesh links the machines of one account peer to peer, with no hub.",
     sample: "<account>/<machine>/<handle>",
     ref: "14-federation-and-cross-account",
   },
