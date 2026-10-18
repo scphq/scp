@@ -727,13 +727,26 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
 /** Waits for context to start the harness's next turn and confirms only printed output. */
 async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: number, options: HookOptions): Promise<string | undefined> {
   if (options.env.SCP_TRANSPORT === "cloud" || field(payload, "agent_id", "agentId", "agent_type", "agentType", "subagentType")) return
+  const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
+  const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
+  const started = psStart(pid)
+  const joined = membership(
+    options.env,
+    sessionKey(
+      options.env,
+      processKey(pid, () => started),
+    ),
+  )
+  if ("dark" in joined) return
   const claim = relayIdentity({
-    harness: hookHarness(harnessArg, options.env),
+    ...(joined.handle ? { as: joined.handle } : {}),
+    harness,
     fallbackHarness: "hook",
     cwd: asString(payload.cwd) ?? options.cwd,
     env: options.env,
-    harnessPid: options.harnessPid ?? ((harness) => hookHarnessPid(options.env, harness)),
+    harnessPid: () => pid,
     ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
+    startOf: () => started,
   })
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000

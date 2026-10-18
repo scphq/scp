@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, test } from "bun:test"
-import { RelayClient, startBroker } from "@scp-dev/broker"
+import { RelayClient, startBroker, writeSessionMarker } from "@scp-dev/broker"
 import { LIMITS } from "@scp-dev/core"
 import { type HookOptions, OPENCODE_WAKE, runHook, WAKE } from "./hooks"
 
@@ -18,7 +18,7 @@ async function setup() {
   const broker = await startBroker({ dir: join(root, "state"), policyPath: join(root, "policy.json"), idleMs: 0, now: () => clock.now })
   cleanups.push(() => rmSync(root, { recursive: true, force: true }))
   cleanups.push(() => broker.stop())
-  const env = { SCP_NAME: "idle", SCP_SESSION: "wake-test" }
+  const env = { SCP_NAME: "idle", SCP_SESSION: "wake-test", SCP_DIR: join(root, "state") }
   const printed: string[] = []
   const deadlines: number[] = []
   const run = (wake: boolean, extra: Partial<HookOptions> = {}) =>
@@ -38,7 +38,7 @@ async function setup() {
   await run(false)
   const peer = broker.core.claim({ handle: "peer", harness: "test" }).endpoint
   const send = () => broker.core.send(peer.id, { to: "idle", body: "wake-message" })
-  return { broker, clock, printed, deadlines, run, send }
+  return { broker, clock, env, printed, deadlines, run, send }
 }
 
 describe("OpenCode wake hooks", () => {
@@ -64,6 +64,16 @@ describe("OpenCode wake hooks", () => {
     expect(wake()).toBeNull()
     expect(await run(true)).toBeUndefined()
     expect(wake()).toBe(OPENCODE_WAKE)
+  })
+
+  test("the waiter of a session that left advertises no wake", async () => {
+    const { broker, env, run } = await setup()
+    const idle = () => broker.core.list().find((e) => e.address === "me/idle")!
+    await run(true)
+    broker.core.leaveSession({ kind: "endpoint", id: idle().id, auth: "session" })
+    writeSessionMarker(env.SCP_DIR, `env:${env.SCP_SESSION}`, { joined: false, handle: "idle" })
+    expect(await run(true)).toBeUndefined()
+    expect(idle().wake).toBeNull()
   })
 
   test("stopping before printing leaves the offer unconfirmed for a later tool hook", async () => {

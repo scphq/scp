@@ -1500,13 +1500,21 @@ export class RelayCore {
    */
   waker(endpoint: string, live: boolean, options: { grace?: boolean } = {}): void {
     if (live) this.sql.all(`UPDATE endpoints SET wakers = wakers + 1 WHERE id = ?`, endpoint)
-    else
+    else {
+      const now = this.now()
       this.sql.all(
         `UPDATE endpoints SET wakers = MAX(wakers - 1, 0), waker_left = CASE WHEN ? THEN ? ELSE waker_left END WHERE id = ?`,
         options.grace ? 1 : 0,
-        this.now(),
+        now,
         endpoint,
       )
+      if (!options.grace) this.lapseWake(endpoint, now)
+    }
+  }
+
+  /** clears a wake no waker holds once a hook waker's grace ran out too: nothing is left to wake the endpoint */
+  private lapseWake(endpoint: string, now: number): void {
+    this.sql.all(`UPDATE endpoints SET wake = NULL WHERE id = ? AND wakers = 0 AND COALESCE(waker_left, 0) < ?`, endpoint, now - LIMITS.restartGraceS * 1000)
   }
 
   /**
@@ -3044,15 +3052,24 @@ export class RelayCore {
     }
   }
 
-  /** ends the hook presence of local agent endpoints whose harness process exited without a session_end, as one would */
+  /** ends the hook presence of local agent endpoints whose harness process exited without a session_end, as one would, and lapses wakes whose hook waker never came back */
   endExited(now = this.now()): void {
     for (const row of this.sql.all<EndpointRow>(
       `SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL`,
     )) {
       const pid = Number(/^pid:(\d+)/.exec(row.process!)?.[1])
       if (!pid || !this.localRow(row) || this.alive(pid)) continue
-      this.sql.all(`UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL WHERE id = ? AND connections = 0`, now, row.id)
+      this.sql.all(
+        `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL, wake = CASE WHEN wakers = 0 THEN NULL ELSE wake END WHERE id = ? AND connections = 0`,
+        now,
+        row.id,
+      )
     }
+    for (const row of this.sql.all<EndpointRow>(
+      `SELECT * FROM endpoints WHERE wake IS NOT NULL AND wakers = 0 AND waker_left < ?`,
+      now - LIMITS.restartGraceS * 1000,
+    ))
+      if (this.localRow(row)) this.lapseWake(row.id, now)
   }
 
   /** an agent endpoint left offline drops a working or waiting status, which no one is left to keep current */
@@ -3109,7 +3126,8 @@ export class RelayCore {
     if (params.kind === "session_end") {
       if (own)
         this.sql.all(
-          `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END WHERE id = ?`,
+          `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END,
+           wake = CASE WHEN wakers = 0 THEN NULL ELSE wake END WHERE id = ?`,
           now,
           endpoint,
         )
@@ -3821,7 +3839,8 @@ export class RelayCore {
       }
       const note = [`exited ${p.code}`, spender.status_note].filter(Boolean).join("; ").slice(0, LIMITS.noteChars)
       this.sql.all(
-        `UPDATE endpoints SET status_state = 'done', status_note = ?, hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END WHERE id = ?`,
+        `UPDATE endpoints SET status_state = 'done', status_note = ?, hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END,
+         wake = CASE WHEN wakers = 0 THEN NULL ELSE wake END WHERE id = ?`,
         note,
         now,
         spender.id,
