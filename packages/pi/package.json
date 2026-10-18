@@ -24,9 +24,9 @@
     "typecheck": "tsc -p ."
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": ">=0.73.1"
+    "@earendil-works/pi-coding-agent": ">=1.1.0"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "0.73.1"
+    "@earendil-works/pi-coding-agent": "1.1.0"
   }
 }
