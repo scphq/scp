@@ -194,7 +194,7 @@ function injectionNotes(harness: HookHarness, scope: Scope, target: string, bloc
       ]
     case "muse":
       return [
-        `Muse loads hooks only from plugins: muse plugins install ${dirname(dirname(target))} --scope ${scope}`,
+        `Muse loads hooks only from plugins: muse plugins install ${dirname(dirname(target))} --scope ${scope}, then muse plugins approve scp (a headless muse exec runs no hook Muse holds for review)`,
         `new relay messages reach the model after each tool call and with each prompt; ${held}`,
         pushed,
         "Muse hands plugin hooks no SCP_* variables: they key the session by the harness process, so set no SCP_SESSION for Muse's shim",

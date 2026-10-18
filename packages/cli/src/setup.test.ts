@@ -218,6 +218,11 @@ function fakeRun(f: Fixture, options: { relayHelp?: (bin: string) => string; fai
         if (args[0] !== "plugins") break
         const installed = existsSync(f.files.museInstalled) ? readJson(f.files.museInstalled) : { version: 1, plugins: {} }
         if (args[1] === "list") return { code: 0, output: JSON.stringify({ plugins: Object.values(installed.plugins).map((record) => ({ record })) }) }
+        if (args[1] === "inspect") {
+          const record = installed.plugins[args[2]!]
+          if (!record) return { code: 1, output: `plugin \`${args[2]}\` is not installed\n` }
+          return { code: 0, output: JSON.stringify({ runtime_capabilities: [{ status: record.reviewed ? "trusted_enabled" : "review_needed" }] }) }
+        }
         if (args[1] === "install") {
           const manifest = readFileSync(join(args[2]!, ".muse-plugin", "plugin.json"), "utf8")
           installed.plugins[SERVER] = {
@@ -226,10 +231,14 @@ function fakeRun(f: Fixture, options: { relayHelp?: (bin: string) => string; fai
             trust: "user-local",
             source: { provenance: "native-local", path: args[2] },
             manifest_sha256: sha(manifest),
+            reviewed: false,
           }
         } else if (args[1] === "enable") {
           if (!installed.plugins[args[2]!]) return { code: 1, output: `plugin \`${args[2]}\` is not installed\n` }
           installed.plugins[args[2]!].enabled = true
+        } else if (args[1] === "approve") {
+          if (!installed.plugins[args[2]!]) return { code: 1, output: `plugin \`${args[2]}\` is not installed\n` }
+          installed.plugins[args[2]!].reviewed = true
         } else if (args[1] === "remove") {
           if (!installed.plugins[args[2]!]) return { code: 1, output: `plugin \`${args[2]}\` is not installed\n` }
           delete installed.plugins[args[2]!]
@@ -262,7 +271,7 @@ function snapshot(root: string): Record<string, string> {
   return files
 }
 
-const mutating = (f: Fixture) => f.calls.filter((argv) => ["add", "add-json", "remove", "install", "enable"].includes(argv[2]!))
+const mutating = (f: Fixture) => f.calls.filter((argv) => ["add", "add-json", "remove", "install", "enable", "approve"].includes(argv[2]!))
 const userHooks = (f: Fixture) => ({
   claude: join(f.home, ".claude", "settings.json"),
   codex: join(f.home, ".codex", "hooks.json"),
@@ -390,10 +399,11 @@ describe("relay setup", () => {
     expect(readJson(hooks.agy)[SERVER].enabled).toBe(true)
     expect(readJson(hooks.muse)).toEqual(musePlugin())
     expect(f.calls).toContainEqual([join(f.home, ".local/bin/muse"), "plugins", "install", museDir(f), "--scope", "user"])
+    expect(f.calls).toContainEqual([join(f.home, ".local/bin/muse"), "plugins", "approve", SERVER])
     expect(readJson(f.files.museInstalled).plugins[SERVER].manifest_sha256).toBe(sha(readFileSync(hooks.muse, "utf8")))
     expect(text).toContain("Codex runs them after you review them in /hooks")
     expect(text).toContain("Grok runs the Claude Code hooks")
-    expect(text).toContain("Muse asks you to review a plugin's hooks before it runs them")
+    expect(text).toContain("approves its hooks: a headless muse exec runs no hook Muse holds for review")
     expect(text).toContain("muse hooks: in place in ~/.config/scp/muse-plugin/.muse-plugin/plugin.json")
     expect(text).toContain("muse hooks: installed (muse plugins list)")
     expect(text).toContain("hooks run: swarm from each harness's PATH (~/bin/swarm here)")
@@ -752,6 +762,39 @@ describe("relay setup hooks options", () => {
     expect(setup(f, { undo: true, hooks: true, write: true, harness: "claude" }).code).toBe(0)
     expect(readJson(userHooks(f).claude).hooks).toEqual({})
     expect(existsSync(manifestFile(f.env))).toBe(false)
+  })
+
+  test("a Muse plugin whose hooks wait for review is not up to date: setup approves them", () => {
+    const f = fixture()
+    expect(setup(f, { write: true, hooks: true, harness: "muse" }).code).toBe(0)
+    const installed = readJson(f.files.museInstalled)
+    installed.plugins[SERVER].reviewed = false
+    writeFileSync(f.files.museInstalled, JSON.stringify(installed))
+    const dry = setup(f, { hooks: true, harness: "muse" }).text
+    expect(dry).toContain("hooks: approve the hooks of the swarm plugin ~/.config/scp/muse-plugin/.muse-plugin/plugin.json, which Muse holds for review")
+    expect(dry).toContain(`$ muse plugins approve ${SERVER}`)
+    f.calls.length = 0
+    expect(setup(f, { write: true, hooks: true, harness: "muse" }).code).toBe(0)
+    expect(mutating(f).map((argv) => argv.slice(1, 3).join(" "))).toEqual(["plugins approve"])
+    expect(readJson(f.files.museInstalled).plugins[SERVER].reviewed).toBe(true)
+    f.calls.length = 0
+    expect(setup(f, { write: true, hooks: true, harness: "muse" }).code).toBe(0)
+    expect(mutating(f)).toEqual([])
+  })
+
+  test("a Muse plugin recorded under another path to the same plugin directory is up to date", () => {
+    const f = fixture()
+    expect(setup(f, { write: true, hooks: true, harness: "muse" }).code).toBe(0)
+    const link = join(f.home, "plugin-link")
+    symlinkSync(museDir(f), link)
+    const installed = readJson(f.files.museInstalled)
+    installed.plugins[SERVER].source.path = link
+    writeFileSync(f.files.museInstalled, JSON.stringify(installed))
+    f.calls.length = 0
+    const { code, text } = setup(f, { write: true, hooks: true, harness: "muse" })
+    expect(code).toBe(0)
+    expect(mutating(f)).toEqual([])
+    expect(text).toContain("muse hooks: installed (muse plugins list)")
   })
 
   test("a disabled Muse plugin is not up to date: setup enables it", () => {

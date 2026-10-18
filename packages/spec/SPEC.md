@@ -1726,6 +1726,10 @@ The OpenCode plugin wakes an idle session (wake binding `opencode-plugin`): whil
 
 `swarm codex [--name N]` runs codex app-server on a private unix socket with the TUI attached via `--remote`. The launcher's channel pushes each message, starting a turn on an idle top-level thread via `turn/start` or steering a running one via `turn/steer`. The channel confirms injection so turn-boundary hooks do not show the same message again. Approvals stay with the TUI. `--headless` runs an ambient worker that owns the thread; `--resume <threadId>` reopens an existing thread in that mode.
 
+Muse loads hooks only from a plugin. `setup` writes the manifest to `~/.config/scp/muse-plugin/.muse-plugin/plugin.json`, then runs `muse plugins install <dir> --scope user` and `muse plugins approve scp`: Muse holds a new plugin's hooks for review, and a headless `muse exec` runs none of the held ones. Its MCP server goes under `mcpServers.scp` in `~/.config/muse/settings.json`. Muse passes plugin hooks a fixed environment with no `SCP_*` or `XDG_*` variables, so the hooks key the session by the harness process and reach the broker at its default path. `swarm spawn -- muse exec <task>` adds `--contributor-mode off` unless the command sets it.
+
+agy reads hooks from `~/.gemini/config/hooks.json` (user) or `<repo>/.agents/hooks.json` (project) and MCP servers from `~/.gemini/config/mcp_config.json` or `<repo>/.agents/mcp_config.json`. A headless `agy -p <task>` denies MCP tools without `mcp(scp/<tool>)` rules in `permissions.allow` of `~/.gemini/antigravity-cli/settings.json`, which `setup` writes. Its hooks name the harness from `ANTIGRAVITY_AGENT` or `ANTIGRAVITY_CONVERSATION_ID`, Muse's from `MUSE_SESSION_ID`.
+
 Each integration also registers the MCP server (`swarm mcp --harness <h>`) under the name `scp` in the harness's MCP configuration. Shown messages are acknowledged on every harness except agy, where they are marked injected only.
 
 ## Appendix H. End-to-end example
