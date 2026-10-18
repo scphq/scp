@@ -1,6 +1,6 @@
 export const SITE = "https://scp.dev";
 export const SPEC = "/spec";
-export const REPO = "/spec";
+export const REPO = "https://github.com/scphq/scp";
 
 export const SITE_TITLE = "SCP, the Swarm Communication Protocol";
 export const SITE_DESCRIPTION =
