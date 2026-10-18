@@ -44,14 +44,23 @@ describe("email sign-in", () => {
     expect(ok.status).toBe(303);
     expect(ok.headers.get("location")).toBe("/orgs");
     expect(b.jar.has("__Host-scp_session")).toBe(true);
-    const signedIn = await b.get("/sign-in");
-    expect(signedIn.headers.get("location")).toBe("/orgs");
+    const orgs = await b.get("/orgs");
+    expect(orgs.status).toBe(200);
+    expect(await orgs.text()).toContain("Signed in as alice@example.com");
 
     const again = new Browser(relay);
     await again.get("/sign-in");
     await again.post("/sign-in", { email: "alice@example.com", "cf-turnstile-response": DUMMY_TOKEN });
     await again.get("/sign-in/code");
     expect((await again.post("/sign-in/code", { code: codeOf(mail) })).status).toBe(400);
+  });
+
+  test("sign-out ends the session", async () => {
+    const b = new Browser(relay);
+    await b.signIn("leaver@example.com");
+    const out = await b.post("/sign-out", {});
+    expect(out.status).toBe(303);
+    expect((await b.get("/orgs")).status).toBe(303);
   });
 
   test("a missing Turnstile token is refused and sends nothing", async () => {
@@ -86,5 +95,60 @@ describe("email sign-in", () => {
     expect((await b.post("/sign-in", fields, { csrf: "forged" })).status).toBe(403);
     expect((await b.post("/sign-in", fields, { origin: "https://evil.test" })).status).toBe(403);
     expect((await b.post("/sign-in", fields, { origin: null })).status).toBe(403);
+  });
+
+  test("a CSRF token from another browser does not carry over", async () => {
+    const a = new Browser(relay);
+    await a.signIn("csrf-a@example.com");
+    const other = new Browser(relay);
+    await other.signIn("csrf-b@example.com");
+    expect((await a.post("/orgs", { handle: "stolen" }, { csrf: other.csrf })).status).toBe(403);
+  });
+});
+
+describe("organizations and invites", () => {
+  test("A creates an org, invites B by email, B accepts, both are listed with roles", async () => {
+    const a = new Browser(relay);
+    await a.signIn("owner@example.com");
+    const created = await a.post("/orgs", { handle: "acme", name: "Acme" });
+    expect(created.status).toBe(303);
+    expect(created.headers.get("location")).toBe("/orgs/acme");
+    await a.follow(created);
+    expect((await a.post("/orgs", { handle: "acme", name: "Again" })).status).toBe(409);
+    expect((await a.post("/orgs", { handle: "Bad Handle" })).status).toBe(400);
+
+    await a.get("/orgs/acme");
+    const since = relay.mails.length;
+    const invited = await a.post("/orgs/acme/invites", { email: "member@example.com", role: "member" });
+    expect(invited.status).toBe(200);
+    const mail = await relay.mailTo("member@example.com", since);
+    const link = /https:\/\/relay\.test(\/invites\/[A-Za-z0-9_-]+)/.exec(mail.text)?.[1];
+    expect(link).toBeDefined();
+
+    const stranger = new Browser(relay);
+    await stranger.signIn("stranger@example.com");
+    const wrong = await stranger.get(link!);
+    expect(wrong.status).toBe(400);
+    expect(await wrong.text()).toContain("This invite is for member@example.com");
+
+    const b = new Browser(relay);
+    await b.signIn("member@example.com");
+    const listed = await b.get("/orgs");
+    expect(await listed.text()).toContain("Invites for you");
+    const view = await b.get(link!);
+    expect(view.status).toBe(200);
+    const accepted = await b.post("/invites/accept", { token: link!.split("/").pop()! });
+    expect(accepted.status).toBe(303);
+    expect(accepted.headers.get("location")).toBe("/orgs/acme");
+    expect((await b.post("/invites/accept", { token: link!.split("/").pop()! })).status).toBe(409);
+
+    const members = await (await a.get("/orgs/acme")).text();
+    expect(members).toMatch(/owner@example\.com.*?<span class="role">owner<\/span>/s);
+    expect(members).toMatch(/member@example\.com.*?<span class="role">member<\/span>/s);
+    expect((await stranger.get("/orgs/acme")).status).toBe(404);
+
+    const bPage = await (await b.get("/orgs/acme")).text();
+    expect(bPage).not.toContain("/orgs/acme/invites");
+    expect((await b.post("/orgs/acme/invites", { email: "x@example.com" })).status).toBe(403);
   });
 });

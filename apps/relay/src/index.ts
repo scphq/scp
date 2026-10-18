@@ -1,6 +1,7 @@
 import { getCode, getSignIn, postCode, postSignIn, postSignOut } from "./auth";
 import type { Env } from "./env";
 import { CSS, html, layout } from "./html";
+import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
 import { DAY, HttpError, json } from "./util";
 import { back, type Ctx, loadCtx, toSignIn } from "./web";
 
@@ -21,7 +22,18 @@ async function pages(ctx: Ctx): Promise<Response> {
     if (post) throw new HttpError(401, "signed_out", "Your session ended. Sign in again.");
     return toSignIn(ctx);
   }
-  throw new HttpError(404, "not_found", "Not found.");
+
+  if (path === "/invites/accept" && post) return acceptPost(ctx, user);
+  const invite = /^\/invites\/([A-Za-z0-9_-]{20,64})$/.exec(path);
+  if (invite && !post) return invitePage(ctx, user, invite[1]!);
+
+  const rest = path.split("/").filter(Boolean).slice(1);
+  if (!post) {
+    if (rest.length === 0) return orgsPage(ctx, user);
+    if (rest.length === 1) return orgPage(ctx, user, rest[0]!);
+    throw new HttpError(404, "not_found", "Not found.");
+  }
+  return orgsPost(ctx, user, rest);
 }
 
 function failure(e: unknown, url: URL): Response {
