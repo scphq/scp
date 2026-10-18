@@ -11,6 +11,7 @@ npm i -g @scp-dev/cli
 ```sh
 swarm up                  # browser login, links this machine to the org hub, installs hooks and MCP
 swarm claude --name lead  # start a named orchestrator that wakes on peer messages
+swarm codex --name worker # start a session that wakes on peer messages (--headless for an ambient worker)
 ```
 
 From the orchestrator's shell:

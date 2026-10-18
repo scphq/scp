@@ -1634,7 +1634,7 @@ All hooks run `swarm hook <harness> [event] [--block-stop-on-unread] [--push-wai
 | Harness | Events | Context output | Stop output | Stop push | Subagents |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | SessionStart, UserPromptSubmit, PostToolUse (`*`, plus a `--subagent` handler), Stop (`--push-wait 600`, timeout wait plus 30 s), SubagentStop, SessionEnd | `{"hookSpecificOutput":{"hookEventName":<event>,"additionalContext":<text>}}` | Version 2.1.163 or later: the same with `"hookEventName":"Stop"`; earlier: `{"decision":"block","reason":<text>}` | yes | yes |
-| Codex | SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no |
+| Codex | SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd; wake via `swarm codex` | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no |
 | Grok | Claude Code's hooks, labelled by environment | as Claude Code; injection after tools only | `{"decision":"block","reason":<text>}` | yes | no |
 | Muse | Plugin manifest: SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no |
 | Gemini / Antigravity (agy) | SessionStart, PreInvocation (prompt), PostToolUse (activity only), Stop (only when the termination reason is `NO_TOOL_CALL`) | `{"injectSteps":[{"ephemeralMessage":<text>}]}`; `{}` when empty | `{"decision":"continue","reason":<text>}`; directives as a count and pointer | no | no |
@@ -1644,6 +1644,8 @@ All hooks run `swarm hook <harness> [event] [--block-stop-on-unread] [--push-wai
 The pi extension (`@scp-dev/pi`, run by `swarm pi [--name N]`) declares the `claude/channel` capability and hands each pushed message to pi as a custom message with `deliverAs: "steer"` and `triggerTurn: true`: it steers a running turn after its tool calls, and starts a turn on an idle session. A resumed session (`pi --continue`, `pi --session <id>`) receives the messages that arrived while it was closed.
 
 The OpenCode plugin wakes an idle session (wake binding `opencode-plugin`): while no root session of the process runs a turn, it keeps one `swarm hook opencode --wake 50` waiting and submits what it prints as a new prompt with `session.promptAsync`; a turn starting stops the waiter, and a waiter that printed has already confirmed its messages, so they are never injected again. `SCP_WAKE=0` turns it off.
+
+`swarm codex [--name N]` runs codex app-server on a private unix socket with the TUI attached via `--remote`. The launcher's channel pushes each message, starting a turn on an idle top-level thread via `turn/start` or steering a running one via `turn/steer`. The channel confirms injection so turn-boundary hooks do not show the same message again. Approvals stay with the TUI. `--headless` runs an ambient worker that owns the thread; `--resume <threadId>` reopens an existing thread in that mode.
 
 Each integration also registers the MCP server (`swarm mcp --harness <h>`) under the name `scp` in the harness's MCP configuration. Shown messages are acknowledged on every harness except agy, where they are marked injected only.
 
