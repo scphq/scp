@@ -139,7 +139,7 @@ describe("steer keys", () => {
   test("a spawn's prompt note names the parent and its key, and comes out of a stored turn whole or cut", () => {
     const note = steerNote("me/orch", "k3y9ab")
     expect(note).toBe(
-      '\n\n[scp spawn: me/orch, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="k3y9ab"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]',
+      '\n\n[swarm spawn: me/orch, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="k3y9ab"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]',
     )
     expect(stripSteerNote(`fix it${note}`)).toBe("fix it")
     expect(stripSteerNote(`fix it${note.slice(0, -40)}`)).toBe("fix it")
@@ -155,7 +155,7 @@ describe("reachLines", () => {
       "me/run: running; it sees this at its next turn boundary (next tool call, stop or inbox read)",
       "me/end: its run ended; it will not see this unless it is started again",
       "me/gone: offline; it will not see this unless it comes back",
-      "me/new: not joined yet; it sees this once your scp spawn of it starts",
+      "me/new: not joined yet; it sees this once your swarm spawn of it starts",
       "me/",
     ])
     expect(reachLines(all, true)).toEqual(reachLines(all).slice(1, 4))

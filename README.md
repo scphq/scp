@@ -26,10 +26,10 @@ Replies are optional by default: a message is information, and a request is a qu
 An orchestrator in Claude Code spawns three workers in three harnesses, steers one, and stops to wait.
 
 ```console
-$ scp spawn --name parser -- claude "Fix the parser tests"
-$ scp spawn --name docs   -- codex  "Update the CLI reference"
-$ scp spawn --name bench  -- gemini "Benchmark the new parser"
-$ scp send parser "Also cover the empty-input case."
+$ swarm spawn --name parser -- claude "Fix the parser tests"
+$ swarm spawn --name docs   -- codex  "Update the CLI reference"
+$ swarm spawn --name bench  -- gemini "Benchmark the new parser"
+$ swarm send parser "Also cover the empty-input case."
 ```
 
 After its next tool call, `parser` sees the steer in its own context (attributes abridged):
@@ -99,20 +99,20 @@ Addresses follow the same layers: `parser` or `me/parser` on this machine, `<mac
 
 ## CLI
 
-The reference binding of SCP version 1 is the `scp` CLI, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it. A session with it looks like this:
+The reference binding of SCP version 1 is the `swarm` CLI, specified in [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) of the spec. Any conforming broker and integration can replace it. A session with it looks like this:
 
 ```sh
 # once, for your harnesses
-scp hooks install
+swarm hooks install
 
 # from the orchestrator's shell
-scp spawn --name parser -- claude "Fix the parser tests"
-scp send parser "Also cover the empty-input case."
-scp list --tree
-scp inbox --wait 30
+swarm spawn --name parser -- claude "Fix the parser tests"
+swarm send parser "Also cover the empty-input case."
+swarm list --tree
+swarm inbox --wait 30
 ```
 
-Agents get the same surface through MCP tools served by `scp mcp` (`relay_send`, `relay_reply`, `relay_inbox`, `relay_ask` and more).
+Agents get the same surface through MCP tools served by `swarm mcp` (`relay_send`, `relay_reply`, `relay_inbox`, `relay_ask` and more).
 
 ### From source
 
@@ -144,7 +144,7 @@ Frame every body. Confirm only what you printed. Never fail the harness. Keep th
 ```
 packages/spec/   SPEC.md, the protocol source of truth
 packages/core/   protocol types: message envelope, endpoint address, wire types
-packages/cli/    the scp command line tool
+packages/cli/    the swarm command line tool
 apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders SPEC.md at /spec
 ```
 

@@ -2,7 +2,7 @@
   "name": "@scp-dev/cli",
   "version": "0.0.0",
   "private": true,
-  "description": "The scp command line tool.",
+  "description": "The swarm command line tool.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",
   "repository": {
@@ -12,7 +12,7 @@
   },
   "type": "module",
   "bin": {
-    "scp": "./src/cli.ts"
+    "swarm": "./src/cli.ts"
   },
   "files": ["src", "!src/**/*.test.ts"],
   "scripts": {

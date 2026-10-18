@@ -82,17 +82,17 @@ export const CAPABILITIES = [
 export const QUICKSTART = {
   label: "Quickstart",
   heading: "Run a swarm in five commands.",
-  lead: "These commands use the scp CLI, the reference implementation of SCP version 1. Any conforming broker and integration can replace it.",
+  lead: "These commands use the swarm CLI, the reference implementation of SCP version 1. Any conforming broker and integration can replace it.",
 };
 
 export type Line = { comment: string } | { cmd: string };
 
 export const QUICKSTART_LINES: Line[] = [
   { comment: "once, for your harnesses" },
-  { cmd: "scp hooks install" },
+  { cmd: "swarm hooks install" },
   { comment: "from the orchestrator's shell" },
-  { cmd: 'scp spawn --name parser -- claude "Fix the parser tests"' },
-  { cmd: 'scp send parser "Also cover the empty-input case."' },
-  { cmd: "scp list --tree" },
-  { cmd: "scp inbox --wait 30" },
+  { cmd: 'swarm spawn --name parser -- claude "Fix the parser tests"' },
+  { cmd: 'swarm send parser "Also cover the empty-input case."' },
+  { cmd: "swarm list --tree" },
+  { cmd: "swarm inbox --wait 30" },
 ];

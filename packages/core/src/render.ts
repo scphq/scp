@@ -90,12 +90,12 @@ export function wrapMessage(message: Envelope): string {
   return `<relay-message ${attrs.map(([k, v]) => `${k}="${attr(v!)}"`).join(" ")}>\n${body}${attachments}\n</relay-message>\n[${expects}]`
 }
 
-/** what `scp spawn` appends to its worker's prompt: who may steer it, and the key that marks that sender's messages */
+/** what `swarm spawn` appends to its worker's prompt: who may steer it, and the key that marks that sender's messages */
 export function steerNote(parent: string, key: string): string {
-  return `\n\n[scp spawn: ${parent}, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="${key}"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]`
+  return `\n\n[swarm spawn: ${parent}, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="${key}"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]`
 }
 
-const STEER_NOTE = /\n\n\[scp spawn: [^\]]*(\]|$)/g
+const STEER_NOTE = /\n\n\[swarm spawn: [^\]]*(\]|$)/g
 
 /** the text without any {@link steerNote}, whole or cut short */
 export function stripSteerNote(text: string): string {
@@ -111,7 +111,7 @@ const REACH_TEXT: Record<Reach, string> = {
   running: "running; it sees this at its next turn boundary (next tool call, stop or inbox read)",
   ended: "its run ended; it will not see this unless it is started again",
   offline: "offline; it will not see this unless it comes back",
-  starting: "not joined yet; it sees this once your scp spawn of it starts",
+  starting: "not joined yet; it sees this once your swarm spawn of it starts",
 }
 
 type Delivery = Pick<SendResult["deliveries"][number], "address" | "offline" | "queued" | "state">

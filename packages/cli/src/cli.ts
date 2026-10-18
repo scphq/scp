@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 import pkg from "../package.json" with { type: "json" };
 
-const usage = `scp ${pkg.version}
+const usage = `swarm ${pkg.version}
 
-Usage: scp <command>
+Usage: swarm <command>
 
 Commands:
   help       Show this message

@@ -23,22 +23,22 @@ const TREE: { node: Node; harness: string }[] = [
 
 const SCRIPT: Step[] = [
   {
-    entry: { kind: "cmd", text: 'scp spawn --name parser -- claude "Fix the parser tests"' },
+    entry: { kind: "cmd", text: 'swarm spawn --name parser -- claude "Fix the parser tests"' },
     set: { parser: "working" },
     wait: 900,
   },
   {
-    entry: { kind: "cmd", text: 'scp spawn --name docs -- codex "Update the CLI reference"' },
+    entry: { kind: "cmd", text: 'swarm spawn --name docs -- codex "Update the CLI reference"' },
     set: { docs: "working" },
     wait: 900,
   },
   {
-    entry: { kind: "cmd", text: 'scp spawn --name bench -- gemini "Benchmark the new parser"' },
+    entry: { kind: "cmd", text: 'swarm spawn --name bench -- gemini "Benchmark the new parser"' },
     set: { bench: "working" },
     wait: 1600,
   },
   {
-    entry: { kind: "cmd", text: 'scp send parser "Also cover the empty-input case."' },
+    entry: { kind: "cmd", text: 'swarm send parser "Also cover the empty-input case."' },
     wait: 1100,
   },
   {
