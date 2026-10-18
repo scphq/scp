@@ -1,5 +1,11 @@
 # @scp-dev/spec
 
+## 0.1.0
+
+### Minor Changes
+
+- 22e3409: Messages wake idle Claude Code sessions that run without channels, such as `claude --bg`: the scp MCP server queues each delivery as the next turn on the session's own inbox socket and advertises wake `claude-inbox`.
+
 ## 0.0.5
 
 ### Patch Changes
