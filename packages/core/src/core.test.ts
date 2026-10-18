@@ -2410,3 +2410,17 @@ describe("asks whose recipients end", () => {
     expect(core.send(asker, { to: "poller", body: "now" }).deliveries[0]).toEqual(expect.not.objectContaining({ queued: true }))
   })
 })
+
+describe("machine label", () => {
+  test("a machine label naming the hostname names the configured machine instead; any other value, or no machine name, is kept", () => {
+    const db = new Database(":memory:")
+    const options = { hash: (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex"), hostname: "realhost" }
+    const named = new RelayCore(bunSql(db), { ...options, machine: "desk" })
+    named.migrate()
+    expect(named.claim({ handle: "a", labels: { machine: "realhost", lane: "x" } }).endpoint.labels).toEqual({ machine: "desk", lane: "x" })
+    expect(named.claim({ handle: "b", labels: { machine: "other" } }).endpoint.labels).toEqual({ machine: "other" })
+    const plain = new RelayCore(bunSql(new Database(":memory:")), options)
+    plain.migrate()
+    expect(plain.claim({ handle: "a", labels: { machine: "realhost" } }).endpoint.labels).toEqual({ machine: "realhost" })
+  })
+})

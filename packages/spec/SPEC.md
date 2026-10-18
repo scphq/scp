@@ -855,6 +855,7 @@ An offline agent's `working` or `waiting` status is cleared by the sweep. A gran
 
 - Any hook event of the holding process renews the hook timestamp, except during `LIMITS.hookEndedGraceS` (30 s) after a session end, when only a session start renews it.
 - When the last connection closes, the session binding is cleared unless a hook reported within `LIMITS.hookIdleS`.
+- An endpoint with no connection whose holding harness process (the pid in its `pid:` process key) no longer runs on this host ends its hook session as a session end would. The broker checks at every list and claim and at each presence check (default every 60 s), so presence does not wait out `LIMITS.hookIdleS`.
 
 ---
 

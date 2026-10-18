@@ -49,12 +49,10 @@ export function parseGrant(raw: string | null): HubGrant | null {
   };
 }
 
-/** whether an open socket's grant still holds: the same credential, unrevoked and unexpired, of a member with the same role */
+/** whether an open socket's grant still holds (`scoped` is set exactly for API tokens, so it names the credential's table): the same credential, unrevoked and unexpired, of a member with the same role */
 export async function grantValid(db: D1Database, grant: HubGrant, now: number): Promise<boolean> {
   if (grant.expiresAt <= now) return false;
-  const kind = grant.tokenId.startsWith("dvc_") ? "device" : grant.tokenId.startsWith("tok_") ? "token" : null;
-  if (!kind) return false;
-  const auth = await revalidate(db, { kind, credentialId: grant.tokenId }, now);
+  const auth = await revalidate(db, { kind: grant.scoped ? "token" : "device", credentialId: grant.tokenId }, now);
   if (!auth.ok) return false;
   const fresh = hubGrant(auth.grant, now);
   return fresh.userId === grant.userId && fresh.actorId === grant.actorId && fresh.role === grant.role && fresh.scoped === grant.scoped;

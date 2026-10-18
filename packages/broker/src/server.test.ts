@@ -705,10 +705,10 @@ describe("broker, hooks", () => {
     const events: Record<string, unknown>[] = []
     watcher.onNotification((method, params) => method === "fleet" && events.push(params as Record<string, unknown>))
     await watcher.request("watch")
-    const hooked = await hook(broker, { handle: "codex-repo", harness: "codex", session: "rn", process: "pid:777" })
+    const hooked = await hook(broker, { handle: "codex-repo", harness: "codex", session: "rn", process: `pid:${process.pid}` })
     const shim = await RelayClient.connect(broker.socket)
     cleanups.push(() => shim.close())
-    const claimed = await shim.hello({ claim: { handle: "renamed-lane", harness: "codex", session: "rn", process: "pid:777" } })
+    const claimed = await shim.hello({ claim: { handle: "renamed-lane", harness: "codex", session: "rn", process: `pid:${process.pid}` } })
     expect(claimed.endpoint!.id).toBe(hooked.hello.endpoint!.id)
     await Bun.sleep(50)
     expect(events.filter((e) => e.type === "presence").map((e) => e.endpoint)).toEqual(["me/codex-repo", "me/renamed-lane"])
@@ -1306,13 +1306,18 @@ describe("broker, self bind and titles", () => {
   test("an exact claim the core refuses is an error and claims nothing; from the session's own shell it binds to the session", async () => {
     const { broker } = await setup()
     const hook = await connect(broker)
-    await hook.hello({ transient: true, claim: { handle: "bo", harness: "claude-code", session: key(500), process: key(500), lineage: [key(500)] } })
+    await hook.hello({
+      transient: true,
+      claim: { handle: "bo", harness: "claude-code", session: key(process.pid), process: key(process.pid), lineage: [key(process.pid)] },
+    })
     const elsewhere = await connect(broker)
     const refused = elsewhere.hello({ claim: { handle: "bo", harness: "cli", lineage: [key(900)], exact: true }, brief: true })
     await expect(refused).rejects.toThrow(/live claude-code session/)
     expect(await code(elsewhere.hello({ claim: { handle: "bo", harness: "cli", lineage: [key(900)], exact: true }, brief: true }))).toBe("unauthorized")
     const own = await connect(broker)
-    expect((await own.hello({ claim: { handle: "bo", harness: "cli", lineage: [601, 600, 500].map(key), exact: true }, brief: true })).endpoint).toMatchObject({
+    expect(
+      (await own.hello({ claim: { handle: "bo", harness: "cli", lineage: [key(601), key(600), key(process.pid)], exact: true }, brief: true })).endpoint,
+    ).toMatchObject({
       address: "me/bo",
     })
     expect(broker.core.list({ all: true }).map((e) => e.address)).toEqual(["me/", "me/bo"])

@@ -260,6 +260,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   const known = new Map<string, Presence>()
   for (const view of localViews()) known.set(view.id, view.presence)
   const presenceTimer = setInterval(() => {
+    core.endExited()
     const live = new Set<string>()
     for (const view of localViews()) {
       live.add(view.id)

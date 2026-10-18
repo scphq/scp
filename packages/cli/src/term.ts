@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process"
+import { fstatSync } from "node:fs"
 import { CLI_NAME } from "@scp-dev/core"
 
 /** exit code for swarm's own failures, kept apart from a spawned harness's codes */
@@ -17,21 +18,33 @@ export function note(message: string): void {
   process.stderr.write(`${message.startsWith(`${CLI_NAME} `) ? "" : `${CLI_NAME}: `}${message}\n`)
 }
 
+/** whether the fd is a socket, as Node hands a child's "pipe" stdio */
+function isSocket(fd: number): boolean {
+  try {
+    return fstatSync(fd).isSocket()
+  } catch {
+    return false
+  }
+}
+
 /**
  * process.exit drops what a pipe has not taken yet, and an empty write's callback does not wait for it under Bun, so the streams
- * are ended first; a reader that never drains them gets at most `waitMs`
+ * are ended first; a reader that never drains them gets at most `waitMs`. A socket is only flushed: ending it shuts down writing
+ * for every process sharing it, so the shell that ran this command would die of SIGPIPE on its next write
  */
 export async function exitFlushed(code: number, waitMs = 10_000): Promise<never> {
-  const ended = (stream: NodeJS.WriteStream) =>
+  const ended = (stream: NodeJS.WriteStream, fd: number) =>
     new Promise<void>((resolve) => {
       try {
-        stream.end(() => resolve())
+        if (!isSocket(fd)) stream.end(() => resolve())
+        else if (stream.writableNeedDrain) stream.once("drain", () => resolve())
+        else stream.write("", () => resolve())
       } catch {
         resolve()
       }
     })
   let timer: ReturnType<typeof setTimeout> | undefined
-  await Promise.race([Promise.all([ended(process.stdout), ended(process.stderr)]), new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))])
+  await Promise.race([Promise.all([ended(process.stdout, 1), ended(process.stderr, 2)]), new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))])
   clearTimeout(timer)
   process.exit(code)
 }

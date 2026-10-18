@@ -184,6 +184,33 @@ describe("org hub", () => {
     expect(await grantValid(db, grant, Date.now())).toBe(false);
   });
 
+  test("revalidation finds a credential by its table, whatever its id looks like", async () => {
+    const { authenticate, grantValid, hubGrant } = await workerModules();
+    const owner = new Browser(relay);
+    await owner.signIn("ids-owner@example.com");
+    await owner.post("/orgs", { handle: "idsco" });
+    await owner.get("/orgs/idsco");
+    const device = await deviceLogin(owner, "desk");
+    await owner.get("/orgs/idsco/tokens");
+    const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(await (await owner.post("/orgs/idsco/tokens", { name: "ci" })).text())![0];
+
+    const db = await relay.mf.getD1Database("DB");
+    for (const [secret, table, id] of [
+      [device, "device_credentials", "legacy-device"],
+      [token, "api_tokens", "legacy-token"],
+    ] as const) {
+      const before = await authenticate(db, `Bearer ${secret}`);
+      if (!before.ok) throw new Error(before.reason);
+      await db.prepare(`UPDATE ${table} SET id = ? WHERE id = ?`).bind(id, hubGrant(before.grant, Date.now()).tokenId).run();
+      const auth = await authenticate(db, `Bearer ${secret}`);
+      if (!auth.ok) throw new Error(auth.reason);
+      const grant = hubGrant(auth.grant, Date.now());
+      expect(grant.tokenId).toBe(id);
+      expect(await grantValid(db, grant, Date.now())).toBe(true);
+      expect(await grantValid(db, { ...grant, scoped: !grant.scoped }, Date.now())).toBe(false);
+    }
+  });
+
   test("the hub refuses a missing or unknown bearer", async () => {
     const res = await relay.fetch("/v1/relay/rpc", { method: "POST", body: "{}" });
     expect(res.status).toBe(401);
