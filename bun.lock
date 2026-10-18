@@ -40,6 +40,17 @@
         "wrangler": "^4.106.0",
       },
     },
+    "packages/broker": {
+      "name": "@scp-dev/broker",
+      "version": "0.0.0",
+      "dependencies": {
+        "@scp-dev/core": "workspace:*",
+        "@scp-dev/hub": "workspace:*",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.1",
+      },
+    },
     "packages/cli": {
       "name": "@scp-dev/cli",
       "version": "0.0.0",
@@ -479,6 +490,8 @@
     "@rollup/rollup-win32-x64-gnu": ["@rollup/rollup-win32-x64-gnu@4.64.9", "", { "os": "win32", "cpu": "x64" }, "sha512-FB77txy1PiAcJgG72nOLA6R0S3PRZahs8Spx0z2yseDUkoMmJcrQghiebJ2JHZ74cCOVlX/MYd4dUbJtJJ8fow=="],
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.64.9", "", { "os": "win32", "cpu": "x64" }, "sha512-IoIgQLpK1DbOcQf1vX+i5oe5LXypsCVb1j/mU6BLAbOGmXH4E+j4kMfgZRwPYUohVBurNyVMgIKVM5dR6xA0kA=="],
+
+    "@scp-dev/broker": ["@scp-dev/broker@workspace:packages/broker"],
 
     "@scp-dev/cli": ["@scp-dev/cli@workspace:packages/cli"],
 

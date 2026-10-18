@@ -18,7 +18,7 @@
     }
   },
   "overrides": [
-    { "includes": ["packages/core/**", "packages/hub/**"], "javascript": { "formatter": { "semicolons": "asNeeded" } } },
+    { "includes": ["packages/core/**", "packages/hub/**", "packages/broker/**"], "javascript": { "formatter": { "semicolons": "asNeeded" } } },
     {
       "includes": ["packages/core/src/**", "packages/hub/src/**", "!**/*.test.ts"],
       "linter": {
