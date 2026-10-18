@@ -39,6 +39,7 @@ import {
   preset,
   RelayUsage,
   selectorList,
+  startDaemon,
   stamp,
   time,
   type Values,
@@ -125,6 +126,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   other process under an agent they may only narrow. An ancestor always reaches its descendants, and a recipient
   may always reply in the thread to a message it got; a reply to another message of the thread is checked as a send.
   ${CLI_NAME} daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground (it otherwise starts on demand)
+
+agent sessions:
+  ${CLI_NAME} hook <harness> [event]             what a harness hook runs: one event from the hook JSON on stdin; prints only the reply
 
 identity:
   --as HANDLE (or --as=HANDLE, anywhere on the line, or $SCP_NAME, a local handle; a leading me/ is dropped) acts as that agent, with --harness H
@@ -372,6 +376,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     out(pkg.version)
     return 0
   }
+  if (verb === "hook") return (await import("./hooks")).relayHookCommand(rest, startDaemon)
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
