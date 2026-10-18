@@ -43,7 +43,7 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Gemini / Antigravity (agy).** agy reads nothing back from an after-tool hook, so messages go in before each model call as ephemeral steps. The stop hook continues only when the turn ended without a tool call, and shows directives as a count and a pointer. Shown messages are marked injected, not acknowledged.
 
-**OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt.
+**OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt. `swarm opencode [--name N] [opencode args...]` starts OpenCode with your own config and arguments, wake on, and refuses to start without the current plugin. A message to an OpenCode with no session open yet opens one and runs a turn in it.
 
 **Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session.
 

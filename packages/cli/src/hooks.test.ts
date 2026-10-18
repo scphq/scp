@@ -1267,6 +1267,7 @@ describe("the OpenCode plugin", () => {
     const client = {
       session: {
         promptAsync: async (args: unknown) => void prompts.push(args),
+        create: async () => ({ data: { id: "ses_opened" } }),
         get: async ({ path }: { path: { id: string } }) => {
           lookups.push(path.id)
           if (flaky.includes(path.id) && lookups.filter((id) => id === path.id).length === 1) return { error: { name: "NotFound" } }
@@ -1331,6 +1332,22 @@ describe("the OpenCode plugin", () => {
       expect(oc.prompts).toEqual([{ path: { id: "ses_root" }, body: { parts: [{ type: "text", text: "WAKE-CONTEXT" }] } }])
     } finally {
       await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_root" } } })
+      oc.restore()
+    }
+  })
+
+  test("before any session, the waiter starts on its own and opens a session for the message it shows", async () => {
+    const oc = await load({ hookSpecificOutput: { additionalContext: "FRESH-CONTEXT" } }, {}, [], false, true)
+    try {
+      for (let i = 0; i < 100 && !oc.prompts.length; i++) await Bun.sleep(50)
+      expect(oc.calls().filter((c) => c.args.includes("--wake"))[0]).toEqual({
+        args: ["hook", "opencode", "--wake", "50"],
+        payload: { hook_event_name: "Wake", cwd: "/work/oc" },
+      })
+      expect(oc.prompts).toEqual([{ path: { id: "ses_opened" }, body: { parts: [{ type: "text", text: "FRESH-CONTEXT" }] } }])
+    } finally {
+      await oc.plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_opened", info: { id: "ses_opened" } } } })
+      await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_opened" } } })
       oc.restore()
     }
   })

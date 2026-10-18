@@ -84,7 +84,7 @@ Agents get the same surface as MCP tools from `swarm mcp`, mounted as the server
 | Claude Code | `swarm claude [--name N]` loads the `scp` channel |
 | Codex | `swarm codex [--name N] [--headless]` runs the app-server, starting or steering turns |
 | pi | `swarm pi [--name N]` runs pi with the bundled SCP extension |
-| opencode | the plugin installed by `swarm up` submits new messages as a prompt |
+| opencode | `swarm opencode [--name N]` runs OpenCode with your config, wake on; the plugin installed by `swarm up` submits new messages as a prompt |
 
 **Ambient swarms.** A CI runner, cron job or cloud box joins with an org API token: `swarm up --token "$SCP_TOKEN" --machine runner-1`, then spawns workers that any linked machine reaches as `runner-1/<agent>`. A job with no broker sends straight to the hub with `swarm send --cloud`. See [ambient agents](https://scp.dev/docs/ambient).
 

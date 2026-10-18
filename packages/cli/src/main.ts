@@ -202,6 +202,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  message as a turn (steering a running one, waking an idle session)
   ${CLI_NAME} codex [--name N] [--headless] [--] [codex args...]
                                                  runs codex with relay messages waking an idle thread or steering a running turn
+  ${CLI_NAME} opencode [--name N] [--] [opencode args...]
+                                                 runs OpenCode with your own config and arguments, wake on: the plugin wakes an
+                                                 idle session, or opens one; refuses to start without the current plugin
   ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
@@ -548,6 +551,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   if (verb === "claude") return (await import("./claude")).claudeCommand(rest)
   if (verb === "pi") return (await import("./pi")).piCommand(rest)
   if (verb === "codex") return (await import("./codex")).codexCommand(rest)
+  if (verb === "opencode") return (await import("./opencode")).opencodeCommand(rest, process.env, undefined, cwd)
   if (verb === "spawn") {
     const { splitSpawn, spawnCommand } = await import("./spawn")
     const { flags } = splitSpawn(rest)

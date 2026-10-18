@@ -944,12 +944,14 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>):
   return { ...(settings as Json), hooks: merged }
 }
 
-/** Root sessions receive context and wake while idle; failed or aborted sessions do not hold the stop. */
+/** Root sessions receive context and wake while idle, and a message to a server with no session yet opens one; failed or aborted sessions do not hold the stop. */
 export function opencodePlugin(options: { blockStop?: boolean } = {}): string {
   return `// scp: reports this session to the local SCP broker and hands it new messages
 import { spawn } from "node:child_process"
 import { text as readAll } from "node:stream/consumers"
 const BLOCK_STOP = ${options.blockStop === true}
+/** before a session exists, the waiter starts this long after load, so a session opened at launch claims the first message */
+const STARTUP_MS = 3000
 
 type Reply = { hookSpecificOutput?: { additionalContext?: unknown }; decision?: unknown; reason?: unknown }
 
@@ -996,6 +998,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
   const WAKE = process.env.SCP_WAKE !== "0"
   const busy = new Set<string>()
   let target: string | undefined
+  let fresh = true
   let waiter: ReturnType<typeof spawn> | undefined
   let looping = false
   let armed = 0
@@ -1005,7 +1008,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
     looping = true
     let version = armed
     try {
-      while (WAKE && target && busy.size === 0) {
+      while (WAKE && busy.size === 0 && (target || fresh)) {
         const id = target
         const began = Date.now()
         let text: string | undefined
@@ -1018,7 +1021,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
             child.once("close", () => resolve())
           })
           child.stdin!.on("error", () => {})
-          child.stdin!.end(JSON.stringify({ hook_event_name: "Wake", session_id: id, cwd: directory }))
+          child.stdin!.end(JSON.stringify({ hook_event_name: "Wake", ...(id ? { session_id: id } : {}), cwd: directory }))
           const [output] = await Promise.all([readAll(child.stdout!), ended])
           text = output.trim() ? context(JSON.parse(output) as Reply) : undefined
         } catch {} finally {
@@ -1026,7 +1029,8 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
         }
         if (text) {
           version = armed
-          await client.session.promptAsync({ path: { id }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
+          const into = target ?? (await client.session.create({ body: {} }).then((made: any) => made?.data?.id).catch(() => undefined))
+          if (into) await client.session.promptAsync({ path: { id: into }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
           break
         }
         if (Date.now() - began < 2000) await new Promise((resolve) => setTimeout(resolve, 5000))
@@ -1038,6 +1042,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
   }
   const arm = (id: string) => {
     target = id
+    fresh = false
     armed++
     void wake()
   }
@@ -1056,6 +1061,9 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
     if (child === undefined && children.get(id) === known) children.delete(id)
     return child === true
   }
+  setTimeout(() => {
+    if (fresh && busy.size === 0) void wake()
+  }, STARTUP_MS).unref?.()
   return {
     "tool.execute.after": async (input: { tool: string; sessionID: string; args?: unknown }, output: { output?: unknown }) => {
       const payload = { hook_event_name: "PostToolUse", session_id: input.sessionID, cwd: directory, tool_name: input.tool, tool_input: input.args }
