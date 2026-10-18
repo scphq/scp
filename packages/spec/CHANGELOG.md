@@ -1,5 +1,11 @@
 # @scp-dev/spec
 
+## 0.2.0
+
+### Minor Changes
+
+- 4fbdc8f: `swarm agy` and `swarm grok` run the harness headless and wake it: the launcher holds the endpoint, and each batch of new messages becomes a turn that resumes the same conversation (`agy --conversation <id> -p`, `grok --resume <id> -p`). grok's session id is preassigned with `-s`; agy's scp hooks report the conversation it opened. The endpoint advertises the new wake values `agy-resume` and `grok-resume`. Interactive flags are refused.
+
 ## 0.1.1
 
 ### Patch Changes
