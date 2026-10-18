@@ -1,5 +1,16 @@
 # @scp-dev/relay
 
+## 0.2.0
+
+### Minor Changes
+
+- 5be17ee: The relay dashboard's graph streams live: a member's same-origin event socket carries presence, endpoint changes and message metadata (never a body), so a message pulses along its edge as it is sent. A full-window view at `/orgs/<handle>/graph` suits a big screen. The layout settles once and holds still, machines are soft regions joined through the hub, and harnesses show their own marks. The hub gains a `dashboard` hook and `dashboardEvent`.
+
+### Patch Changes
+
+- Updated dependencies [5be17ee]
+  - @scp-dev/hub@0.4.0
+
 ## 0.1.2
 
 ### Patch Changes
