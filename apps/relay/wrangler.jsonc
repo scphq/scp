@@ -17,7 +17,7 @@
   "vars": {
     "MAILER": "cloudflare",
     "MAIL_FROM": "login@scp.dev",
-    "TURNSTILE_SITE_KEY": "1x00000000000000000000AA"
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAFaDQzRHNz0wV0wZ"
   },
   // Secrets: SESSION_SECRET, TURNSTILE_SECRET, optional RESEND_API_KEY (with MAILER=resend).
   "triggers": { "crons": ["17 3 * * *"] },
