@@ -1,4 +1,19 @@
-export { newId, RelayCore, type CoreOptions, type EndpointRow, type MessageRow } from "./core"
+export {
+  cleanLabels,
+  cleanText,
+  GONE_PREFIX,
+  HUMAN_HANDLE,
+  judgeDetailForAgents,
+  newId,
+  randomHex,
+  RelayCore,
+  seqList,
+  SYSTEM_HANDLE,
+  unreachable,
+  type CoreOptions,
+  type EndpointRow,
+  type MessageRow,
+} from "./core"
 export * from "./protocol"
 export {
   collapseTools,
@@ -100,6 +115,7 @@ export {
   clipPasses,
   clipped,
   crossFleet,
+  effectiveSelector,
   expandRules,
   groupCapKey,
   hasScope,

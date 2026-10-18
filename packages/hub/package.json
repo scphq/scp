@@ -1,0 +1,38 @@
+{
+  "name": "@scp-dev/hub",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Swarm Communication Protocol federation and account hub: mirrored endpoints across machines, bridges, direct clients and cross-account delivery.",
+  "license": "Apache-2.0",
+  "homepage": "https://scp.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scphq/scp.git",
+    "directory": "packages/hub"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "src", "!src/**/*.test.ts"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@scp-dev/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

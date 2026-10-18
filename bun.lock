@@ -54,6 +54,16 @@
         "tsup": "^8.5.1",
       },
     },
+    "packages/hub": {
+      "name": "@scp-dev/hub",
+      "version": "0.0.0",
+      "dependencies": {
+        "@scp-dev/core": "workspace:*",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.1",
+      },
+    },
     "packages/spec": {
       "name": "@scp-dev/spec",
       "version": "0.0.0",
@@ -473,6 +483,8 @@
     "@scp-dev/cli": ["@scp-dev/cli@workspace:packages/cli"],
 
     "@scp-dev/core": ["@scp-dev/core@workspace:packages/core"],
+
+    "@scp-dev/hub": ["@scp-dev/hub@workspace:packages/hub"],
 
     "@scp-dev/relay": ["@scp-dev/relay@workspace:apps/relay"],
 
