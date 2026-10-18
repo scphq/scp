@@ -38,7 +38,7 @@ function sessionOnly(actor: Actor): void {
   if (actor.orgId) throw new HttpError(403, "forbidden", "This needs a signed-in browser session.");
 }
 
-/** `GET /v1/whoami`: what a bearer is, for `scp login --token` and the hub */
+/** `GET /v1/whoami`: what a bearer is, for `swarm login --token` and the hub */
 async function whoami(req: Request, env: Env): Promise<Response> {
   const auth = await authenticate(env.DB, req.headers.get("authorization"));
   if (!auth.ok) return json({ error: auth.reason === "missing" ? "unauthorized" : auth.reason }, 401);

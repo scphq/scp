@@ -206,6 +206,34 @@ describe("device login", () => {
     expect(await after.json()).toEqual({ error: "revoked" });
   });
 
+  test("the prefilled link survives sign-in and approves in one click", async () => {
+    const a = new Browser(relay);
+    await a.signIn("one-click@example.com");
+    await a.post("/orgs", { handle: "clickorg" });
+    await a.post("/sign-out", {});
+    const start = (await (await relay.fetch("/v1/device/code", { method: "POST" })).json()) as {
+      device_code: string;
+      user_code: string;
+      verification_uri_complete: string;
+    };
+    const link = new URL(start.verification_uri_complete);
+    const bounced = await a.get(link.pathname + link.search);
+    expect(bounced.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent(`/device?code=${start.user_code}`)}`);
+    await a.follow(bounced);
+    const next = /name="next" value="([^"]+)"/.exec(a.last)?.[1] ?? "";
+    const since = relay.mails.length;
+    await a.follow(await a.post("/sign-in", { email: "one-click@example.com", next, "cf-turnstile-response": DUMMY_TOKEN }));
+    const signedIn = await a.post("/sign-in/code", { code: codeOf(await relay.mailTo("one-click@example.com", since)) });
+    expect(signedIn.headers.get("location")).toBe(`/device?code=${start.user_code}`);
+    const page = await (await a.follow(signedIn)).text();
+    expect(page).toContain('<input type="hidden" name="org" value="clickorg">');
+    expect(page).not.toContain("<select");
+    const approved = await a.post("/device", { code: start.user_code, org: "clickorg", action: "approve" });
+    expect(await approved.text()).toContain("Device approved");
+    const issued = await relay.fetch("/v1/device/token", { method: "POST", body: JSON.stringify({ device_code: start.device_code }) });
+    expect(issued.status).toBe(200);
+  });
+
   test("a denied code yields access_denied and an unknown one invalid_grant", async () => {
     const a = new Browser(relay);
     await a.signIn("denier@example.com");
@@ -240,7 +268,7 @@ describe("API tokens for ambient agents", () => {
     const page = await created.text();
     const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(page)?.[0];
     expect(token).toBeDefined();
-    expect(page).toContain(`SCP_TOKEN=${token} scp hooks install`);
+    expect(page).toContain(`SCP_TOKEN=${token} swarm hooks install`);
     expect((await (await a.get("/orgs/ciorg/tokens")).text()).includes(token!)).toBe(false);
 
     const who = await relay.fetch("/v1/whoami", bearer(token!));

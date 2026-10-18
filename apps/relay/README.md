@@ -1,6 +1,6 @@
 # scp relay
 
-The hosted demo relay: a Cloudflare Worker with D1. People sign in by email with a one-time code (Cloudflare Turnstile is the only throttle), create organizations, invite members, approve `scp login` device codes and mint API tokens for headless agents. Each organization will get one hub Durable Object.
+The hosted demo relay: a Cloudflare Worker with D1. People sign in by email with a one-time code (Cloudflare Turnstile is the only throttle), create organizations, invite members, approve `swarm login` device codes and mint API tokens for headless agents. Each organization will get one hub Durable Object.
 
 ## Develop
 
@@ -29,7 +29,7 @@ The log mailer prints each mail, sign-in codes included, as a `scp-relay mail` l
 
 | Credential | Prefix | Issued by | Acts as |
 | --- | --- | --- | --- |
-| Device credential | `scp_d_` | `scp login`, approved at `/device` | the approving user, with their role, in one org |
+| Device credential | `scp_d_` | `swarm login`, approved at `/device` | the approving user, with their role, in one org |
 | API token | `scp_t_` | an org member at `/orgs/<handle>/tokens` or `POST /v1/orgs/<handle>/tokens` | a member of one org, on its creator's behalf, labelling its endpoints `token=<name>` |
 
 Only SHA-256 hashes are stored. Both die on revocation, expiry or when the user leaves the org. `authenticate` and `revalidate` in `src/credentials.ts` turn either into the `HubGrant` the hub admits.

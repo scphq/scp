@@ -10,7 +10,7 @@
     {
       "binding": "DB",
       "database_name": "scp-relay",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ec5f912e-57ab-482f-b660-db46ba0b53a5",
       "migrations_dir": "migrations"
     }
   ],

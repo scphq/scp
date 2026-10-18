@@ -27,7 +27,7 @@ export interface HubGrant {
   org: string;
   /** a device acts with its user's role; an API token always as a member */
   role: Role;
-  /** device: the machine label from `scp login`; token: the token name */
+  /** device: the machine label from `swarm login`; token: the token name */
   label: string;
   /** true for API tokens: headless agents with no person at a terminal */
   ambient: boolean;
