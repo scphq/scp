@@ -11,110 +11,81 @@ import { HARNESS, HARNESSES, type Harness } from "../app/harnesses";
 
 const W = 1200;
 const H = 630;
-const C = {
-  bg: "#090909",
-  surface: "#111111",
-  fg: "#f2f2f0",
-  ink: "#a6a6a6",
-  dim: "#8c8c8c",
-  faint: "#575757",
-  line: "rgb(255 255 255 / 0.24)",
-  acc: "#9d9cff",
+const C = { bg: "#090909", fg: "#f2f2f0", dim: "#8c8c8c", node: "#3a3a38", edge: "#262624", acc: "#9d9cff" };
+const TINT: Partial<Record<Harness, string>> = {
+  claude: "#e08b6b",
+  codex: "#3fc6a0",
+  opencode: "#e6a43f",
+  pi: "#ec7bb8",
+  agy: "#7aa9ff",
+  grok: "#e6e6e6",
+  muse: "#3384ff",
 };
 const ROW = HARNESSES.filter((h) => h !== "gemini");
 
+function mark(h: Harness, size: number): string {
+  const m = HARNESS[h];
+  const k = ((m.scale ?? 1) * size) / 24;
+  const o = (size - 24 * k) / 2;
+  const parts = m.parts.map((p) => `<path d="${p.d}"${p.evenodd ? ' fill-rule="evenodd"' : ""}${p.alpha ? ` opacity="${p.alpha}"` : ""}/>`).join("");
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><g transform="translate(${o} ${o}) scale(${k})" fill="${TINT[h] ?? C.dim}">${parts}</g></svg>`;
+}
+
 type Pt = { x: number; y: number };
 
-const crisp = (v: number) => Math.round(v) + 0.5;
-const path = (pts: Pt[]) => pts.map((p, i) => `${i ? "L" : "M"}${crisp(p.x)} ${crisp(p.y)}`).join("");
-const sq = (p: Pt, s: number, attrs: string) => `<rect x="${Math.round(p.x - s / 2)}" y="${Math.round(p.y - s / 2)}" width="${s}" height="${s}" ${attrs}/>`;
-const label = (text: string, x: number, y: number, anchor = "start", color = C.dim) =>
-  `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${color}" class="lbl">${text.toUpperCase()}</text>`;
-const elbow = (p: Pt, n: Pt): Pt[] => {
-  const mid = Math.round((p.y + n.y) / 2);
-  return p.x === n.x ? [p, n] : [p, { x: p.x, y: mid }, { x: n.x, y: mid }, n];
-};
-
-const box = { x: 720, y: 160, w: 380, h: 96 };
-const hub = { x: 800, y: 216 };
-const gate = { x: 1020, y: 216 };
-const ROOT = 342;
-const LEAF = 446;
-const trees = [hub, gate].map((top) => {
-  const root = { x: top.x, y: ROOT };
-  return { top, root, leaves: [-56, 0, 56].map((dx) => ({ x: top.x + dx, y: LEAF })) };
-});
-const [a, b] = trees;
-const route = [...elbow(a.root, a.leaves[0]).reverse(), hub, gate, ...elbow(b.root, b.leaves[2]).slice(1)];
-
 function graph(): string {
-  const wires = trees.flatMap((t) => [path([t.top, t.root]), ...t.leaves.map((l) => path(elbow(t.root, l)))]).join("");
-  const agents = trees.flatMap((t) => [sq(t.root, 14, `fill="${C.fg}"`), ...t.leaves.map((l) => sq(l, 9, `fill="${C.ink}"`))]).join("");
-  const head = { x: Math.round((hub.x + gate.x) / 2), y: hub.y };
-  return `
-  <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
-      <radialGradient id="halo"><stop offset="0" stop-color="${C.acc}" stop-opacity="0.14"/><stop offset="1" stop-color="${C.acc}" stop-opacity="0"/></radialGradient>
-    </defs>
-    <circle cx="${head.x}" cy="${head.y}" r="240" fill="url(#halo)"/>
-    <rect x="${crisp(box.x)}" y="${crisp(box.y)}" width="${box.w}" height="${box.h}" fill="none" stroke="${C.line}"/>
-    ${label("hub", box.x + 16, box.y + 26)}
-    <path d="${wires}" fill="none" stroke="${C.line}"/>
-    <path d="${path(route)}" fill="none" stroke="${C.acc}" stroke-width="7" opacity="0.3" filter="url(#glow)"/>
-    <path d="${path(route)}" fill="none" stroke="${C.acc}" stroke-width="2.5"/>
-    ${agents}
-    ${sq(hub, 36, `fill="${C.bg}" stroke="${C.fg}" stroke-width="1.5"`)}${sq(hub, 16, `fill="${C.fg}"`)}
-    <g transform="translate(${gate.x} ${gate.y}) rotate(45)"><rect x="-12" y="-12" width="24" height="24" fill="${C.bg}" stroke="${C.fg}" stroke-width="1.5"/><rect x="-6" y="-6" width="12" height="12" fill="${C.acc}"/></g>
-    ${label("judge", gate.x, box.y + 26, "middle")}
-    ${sq(b.leaves[2], 22, `fill="none" stroke="${C.acc}" stroke-width="2"`)}
-    ${sq(a.leaves[0], 10, `fill="${C.acc}"`)}
-    ${sq(head, 24, `fill="${C.acc}" filter="url(#glow)"`)}${sq(head, 10, `fill="${C.acc}"`)}
+  const hub: Pt = { x: 940, y: 200 };
+  const roots: Pt[] = [
+    { x: 820, y: 330 },
+    { x: 1060, y: 330 },
+  ];
+  const kids: Pt[][] = [
+    [
+      { x: 770, y: 440 },
+      { x: 820, y: 440 },
+      { x: 870, y: 440 },
+    ],
+    [
+      { x: 1020, y: 440 },
+      { x: 1100, y: 440 },
+    ],
+  ];
+  const curve = (a: Pt, b: Pt) => `M${a.x} ${a.y}C${a.x} ${(a.y + b.y) / 2} ${b.x} ${(a.y + b.y) / 2} ${b.x} ${b.y}`;
+  const edges = [...roots.map((r) => curve(hub, r)), ...roots.flatMap((r, i) => kids[i].map((k) => curve(r, k)))];
+  const route = [curve(kids[0][0], roots[0]), curve(roots[0], hub), curve(hub, roots[1]), curve(roots[1], kids[1][1])];
+  const dot = (p: Pt, r: number) => `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${C.bg}" stroke="${C.node}" stroke-width="1.5"/>`;
+  return `<svg class="g" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    ${edges.map((d) => `<path d="${d}" fill="none" stroke="${C.edge}" stroke-width="1.5"/>`).join("")}
+    ${route.map((d) => `<path d="${d}" fill="none" stroke="${C.acc}" stroke-opacity=".7" stroke-width="1.5"/>`).join("")}
+    <rect x="${hub.x - 11}" y="${hub.y - 11}" width="22" height="22" fill="${C.bg}" stroke="${C.dim}" stroke-width="1.5"/>
+    ${roots.map((r) => dot(r, 9)).join("")}
+    ${kids
+      .flat()
+      .map((k) => dot(k, 6))
+      .join("")}
+    <circle cx="${kids[0][0].x}" cy="${kids[0][0].y}" r="3" fill="${C.acc}"/>
+    <circle cx="${kids[1][1].x}" cy="${kids[1][1].y}" r="3" fill="${C.acc}"/>
   </svg>`;
 }
 
-function icon(h: Harness, size: number): string {
-  const v = 24 / (HARNESS[h].scale ?? 1);
-  const o = 12 - v / 2;
-  const parts = HARNESS[h].parts
-    .map((p) => `<path d="${p.d}"${p.alpha ? ` fill-opacity="${p.alpha}"` : ""}${p.evenodd ? ` fill-rule="evenodd"` : ""}/>`)
-    .join("");
-  return `<svg width="${size}" height="${size}" viewBox="${o} ${o} ${v} ${v}" overflow="visible" fill="${C.ink}" style="position:static">${parts}</svg>`;
-}
-
-function frame(): string {
-  const rails = [56, W - 56];
-  const rules = [72, H - 72];
-  const lines = [...rails.map((x) => `M${crisp(x)} 0V${H}`), ...rules.map((y) => `M0 ${crisp(y)}H${W}`)].join("");
-  const marks = rails.flatMap((x) => rules.map((y) => sq({ x, y }, 7, `fill="${C.fg}"`))).join("");
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"><path d="${lines}" stroke="${C.line}" fill="none"/>${marks}</svg>`;
-}
-
 function html(fonts: { sans: string; mono: string }): string {
-  const icons = ROW.map((h) => icon(h, 26)).join("");
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 @font-face { font-family: Geist; src: url("${fonts.sans}") format("woff2"); font-weight: 100 900; }
 @font-face { font-family: GeistMono; src: url("${fonts.mono}") format("woff2"); font-weight: 100 900; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: ${W}px; height: ${H}px; overflow: hidden; background: ${C.bg}; color: ${C.fg}; -webkit-font-smoothing: antialiased; }
 body { position: relative; font-family: Geist, sans-serif; }
-svg { position: absolute; inset: 0; }
-.lbl { font: 500 12px GeistMono, monospace; letter-spacing: 0.14em; }
-.brand { position: absolute; left: 88px; top: 0; height: 72px; display: flex; align-items: center; gap: 16px; font-size: 30px; font-weight: 640; letter-spacing: 0.02em; }
-.ver { position: absolute; right: 88px; top: 0; height: 72px; display: flex; align-items: center; font: 500 13px GeistMono, monospace; letter-spacing: 0.14em; color: ${C.dim}; text-transform: uppercase; }
-.ver b { color: ${C.acc}; font-weight: 500; margin-left: 12px; }
-.title { position: absolute; left: 84px; top: 120px; width: 600px; font-size: 82px; line-height: 0.95; font-weight: 600; letter-spacing: -0.05em; text-wrap: balance; }
-.foot { position: absolute; left: 88px; right: 88px; bottom: 0; height: 72px; display: flex; align-items: center; justify-content: space-between; }
-.icons { display: flex; align-items: center; gap: 30px; }
-.url { font: 500 24px GeistMono, monospace; letter-spacing: 0.02em; }
-.url i { font-style: normal; color: ${C.acc}; }
+svg.g { position: absolute; inset: 0; }
+.brand { position: absolute; left: 96px; top: 84px; display: flex; align-items: center; gap: 14px; font-size: 26px; font-weight: 640; letter-spacing: 0.02em; }
+.title { position: absolute; left: 92px; top: 176px; width: 620px; font-size: 78px; line-height: 1; font-weight: 600; letter-spacing: -0.045em; text-wrap: balance; }
+.marks { position: absolute; left: 96px; top: 438px; display: flex; gap: 26px; align-items: center; }
+.url { position: absolute; left: 96px; bottom: 76px; font: 500 20px GeistMono, monospace; color: ${C.dim}; letter-spacing: 0.02em; }
 </style></head><body>
-${frame()}
 ${graph()}
-<div class="brand"><svg width="34" height="34" viewBox="0 0 32 32" fill="${C.fg}" style="position:static"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>SCP</div>
-<div class="ver">Swarm Communication Protocol<b>v1</b></div>
+<div class="brand"><svg width="28" height="28" viewBox="0 0 32 32" fill="${C.fg}"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>SCP</div>
 <h1 class="title">${HERO.title}</h1>
-<div class="foot"><div class="icons">${icons}</div><div class="url">${new URL(SITE).host.replace(".", "<i>.</i>")}</div></div>
+<div class="marks">${ROW.map((h) => mark(h, 30)).join("")}</div>
+<div class="url">${new URL(SITE).host}</div>
 </body></html>`;
 }
 
@@ -129,7 +100,7 @@ if (!existsSync(chrome)) throw new Error(`no Chrome at ${chrome}; set CHROME`);
 
 const dir = mkdtempSync(join(tmpdir(), "scp-og-"));
 const page = join(dir, "og.html");
-const out = join(import.meta.dirname, "../public/og.png");
+const out = process.env.OUT ?? join(import.meta.dirname, "../public/og.png");
 writeFileSync(page, html(fonts));
 const run = spawnSync(
   chrome,
@@ -144,7 +115,7 @@ const run = spawnSync(
     `--screenshot=${out}`,
     pathToFileURL(page).href,
   ],
-  { stdio: "inherit" },
+  { stdio: "ignore" },
 );
 if (process.env.OG_KEEP) console.log(page);
 else rmSync(dir, { recursive: true, force: true });
