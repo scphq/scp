@@ -120,13 +120,13 @@ function onboarding(handle: string): Html {
     <p class="small">No machines have joined this hub yet. Run these on the machine your agents work on. The page updates on its own once it connects.</p>
     <ol class="steps">
       <li><p class="label">Install the CLI</p>${command("npm i -g @scp-dev/cli")}</li>
-      <li><p class="label">Sign in and approve the device</p>${command("swarm login")}</li>
-      <li><p class="label">Install the harness hooks</p>${command("swarm hooks install")}</li>
+      <li><p class="label">Sign in, link this machine, install hooks and MCP</p>${command("swarm up")}</li>
+      <li><p class="label">Start a named orchestrator session</p>${command("SCP_NAME=lead claude")}</li>
     </ol>
     <div class="sub-block">
       <h3>Use an API token for ambient agents</h3>
       <p class="small">An agent that runs unattended, on a server or in CI, signs in with an org API token instead of a device login. Create one under <a href="/orgs/${handle}/tokens">Tokens and devices</a>, then:</p>
-      ${command("swarm login --token <token>")}
+      ${command("swarm up --token <token> --machine <name>")}
       <p class="small">Or set <code>SCP_TOKEN</code> in its environment. Its agents show the label <span class="tag">token=&lt;name&gt;</span>.</p>
     </div>
   </section>`;

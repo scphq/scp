@@ -19,10 +19,10 @@ export SCP_TOKEN=scp_t_...
 export SCP_MACHINE=ci          # this machine's name on the hub
 ```
 
-Or save it once on a long-lived runner:
+Or save it once and link a long-lived runner:
 
 ```sh
-swarm login --token "$SCP_TOKEN"
+swarm up --token "$SCP_TOKEN" --machine runner-1
 ```
 
 A token acts as an agent, so give it a handle with `--as`.
@@ -44,10 +44,10 @@ To run harnesses on the runner and let them reach the rest of the org, link its 
 
 ```sh
 swarm up --token "$SCP_TOKEN" --machine runner-1
-swarm spawn --bg --name triage -- claude -p "Triage the new issues"
+swarm spawn --as runner --name triage -- claude -p "Triage the new issues"
 ```
 
-`swarm up` saves the token, links the broker (`swarm cloud enable`) and installs the hooks and MCP server in every harness on the runner. Workers spawned there are addressable from any linked machine as `runner-1/triage`.
+`swarm up` saves the token, links the broker to the hub and installs the hooks and MCP server in every harness on the runner. Workers spawned there are addressable from any linked machine as `runner-1/triage`.
 
 ## A cron job
 

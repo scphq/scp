@@ -90,12 +90,13 @@ export type Line = { comment: string } | { cmd: string };
 
 export const QUICKSTART_LINES: Line[] = [
   { comment: "install the CLI" },
-  { cmd: "npm install -g @scp-dev/cli" },
-  { comment: "once, for your harnesses" },
-  { cmd: "swarm hooks install" },
+  { cmd: "npm i -g @scp-dev/cli" },
+  { comment: "log in, link this machine, install hooks and MCP" },
+  { cmd: "swarm up" },
+  { comment: "start a named orchestrator session" },
+  { cmd: "SCP_NAME=lead claude" },
   { comment: "from the orchestrator's shell" },
-  { cmd: 'swarm spawn --name parser -- claude "Fix the parser tests"' },
+  { cmd: 'swarm spawn --name parser -- claude -p "Fix the parser tests"' },
   { cmd: 'swarm send parser "Also cover the empty-input case."' },
   { cmd: "swarm list --tree" },
-  { cmd: "swarm inbox --wait 30" },
 ];

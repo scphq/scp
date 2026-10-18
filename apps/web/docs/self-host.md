@@ -7,8 +7,7 @@ The relay is the hub your machines link through. The CLI uses `https://app.scp.d
 ```sh
 swarm relay use https://relay.example.com
 swarm relay show        # the active relay, where it came from, and whether you have a login for it
-swarm login
-swarm cloud enable
+swarm up
 ```
 
 `relay use` saves the URL in `~/.config/scp/config.json`. `SCP_RELAY` overrides it for one shell or one command. Logins are stored per relay URL, so switching back to another relay keeps its login. A relay URL is `https`; plain `http` is allowed only for `localhost`.
