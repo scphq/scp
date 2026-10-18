@@ -19,8 +19,8 @@ type View = (typeof VIEWS)[number]["id"];
 type Mode = (typeof MODES)[number]["id"];
 
 const FIGURES: Record<Mode, string> = {
-  hub: "Trees under one hub: machine a on account a, machine b on account b with three fleets each, and ambient swarm a; messages between the accounts pass the judge inside the hub",
-  mesh: "Four machines of one account, each its own hub with a judge inside, whose brokers link directly to each other with no central hub",
+  hub: "Trees under one hub: machine a on account a, machine b on account b with three fleets each, and ambient swarm a; messages between the accounts pass the hub, and its judge when one is on",
+  mesh: "Four machines of one account, each its own hub with an optional judge inside, whose brokers link directly to each other with no central hub",
 };
 
 export function Showcase({ captions }: { captions: Record<View | "mesh", string> }) {

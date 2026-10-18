@@ -24,18 +24,19 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 ## Per harness
 
-| Harness | Hooks | Injection | Stop push | Subagents |
-| --- | --- | --- | --- | --- |
-| Claude Code | Settings hooks | After tools and on prompts | Yes | Yes |
-| Codex | `hooks.json` | After tools and on prompts | Yes | No |
-| Grok | Claude Code's hooks | After tools only | Yes | No |
-| Muse | A plugin | After tools and on prompts | Yes | No |
-| Gemini / Antigravity (agy) | `hooks.json` | Before each model call | No | No |
-| OpenCode | A plugin | Appended to tool output | Emulated | Child sessions as activity |
+| Harness | Hooks | Injection | Stop push | Subagents | Wakes when idle |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | Settings hooks | After tools and on prompts | Yes | Yes | Under `swarm claude` |
+| Codex | `hooks.json` | After tools and on prompts | Yes | No | Under `swarm codex` |
+| Grok | Claude Code's hooks | After tools only | Yes | No | No |
+| Muse | A plugin | After tools and on prompts | Yes | No | No |
+| Gemini / Antigravity (agy) | `hooks.json` | Before each model call | No | No | No |
+| OpenCode | A plugin | Appended to tool output | Emulated | Child sessions as activity | Yes, by the plugin |
+| Pi | An extension, no hooks | Each message as it arrives | No | No | Yes, under `swarm pi` |
 
-**Claude Code.** Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, SubagentStop and SessionEnd, in `.claude/settings.local.json` by default. Each subagent gets its own child endpoint, `<session>-<type>-<id>`, and receives messages after its tools. Hooks run only on a turn, so an idle session sees new messages at its next prompt. `swarm claude [--name N] [claude args...]` starts Claude Code with `--dangerously-load-development-channels server:scp`, and `swarm setup` mounts its MCP server with `--channels`, so messages are pushed as channel notifications and wake the idle session. The push goes only to the Claude Code that `swarm claude` started; other sessions keep the hook path.
+**Claude Code.** Hooks for SessionStart, UserPromptSubmit, PostToolUse, Stop, SubagentStop and SessionEnd, in `~/.claude/settings.json` from `swarm setup`, or `.claude/settings.local.json` from `swarm hooks install`. Each subagent gets its own child endpoint, `<session handle>-<short type>-<first 4 of its id>` (`gp` for general-purpose, else the type's first word), and receives messages after its tools. Hooks run only on a turn, so an idle session sees new messages at its next prompt. `swarm claude [--name N | --as N] [claude args...]` starts Claude Code with `--dangerously-load-development-channels server:scp`, and `swarm setup` mounts its MCP server with `--channels`, so messages are pushed as channel notifications and wake the idle session. The push goes only to the Claude Code that `swarm claude` started; other sessions keep the hook path. It refuses to start when Claude Code has no `scp` mount with `--channels`.
 
-**Codex.** The same events in `.codex/hooks.json`. Codex runs new hooks only after you review them in `/hooks`. `swarm spawn codex exec ...` hands the worker its grant through `-c` overrides; since `codex exec` runs no stop hook, a steer sent after its last step resumes the session (at most twice) before the handback.
+**Codex.** The same events in `~/.codex/hooks.json` from `swarm setup`, or `.codex/hooks.json` from `swarm hooks install`. Codex runs new hooks only after you review them in `/hooks`. `swarm spawn codex exec ...` hands the worker its grant through `-c` overrides; since `codex exec` runs no stop hook, a steer sent after its last step resumes the session (at most twice) before the handback. `swarm codex [--name N] [codex args...]` runs codex app-server with the TUI attached and pushes each message into the session: it starts a turn on an idle thread and steers a running one. `--headless` runs an ambient worker with no TUI that declines approval requests; `--resume <threadId>` reopens a thread.
 
 **Grok.** Runs Claude Code's hooks (install with `--harness claude`), labelled `grok`. It drops prompt-hook context, so messages reach it after tools.
 
@@ -43,11 +44,11 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Gemini / Antigravity (agy).** agy reads nothing back from an after-tool hook, so messages go in before each model call as ephemeral steps. The stop hook continues only when the turn ended without a tool call, and shows directives as a count and a pointer. Shown messages are marked injected, not acknowledged.
 
-**OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt. `swarm opencode [--name N] [opencode args...]` starts OpenCode with your own config and arguments, wake on, and refuses to start without the current plugin. A message to an OpenCode with no session open yet opens one and runs a turn in it.
+**OpenCode.** A plugin appends new messages to tool output; a prompt shows only the unread count. OpenCode has no stop hook: when the session goes idle, the plugin submits a held stop's text as a new prompt. While the session is idle, the plugin keeps one `swarm hook opencode --wake 50` waiting and submits the messages it returns as a new prompt, so a message wakes the session; a message to an OpenCode with no session open yet opens one and runs a turn in it. `SCP_WAKE=0` turns that off. `swarm opencode [--name N] [opencode args...]` starts OpenCode with your own config and arguments, wake on, and refuses to start without the current plugin.
 
-**Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session.
+**Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session. `SCP_PI=0` turns the extension off.
 
-An idle session wakes on a new message and runs a turn. `SCP_WAKE=0` turns it off.
+A session that a message can wake advertises how: `channels` (`swarm claude`), `codex-app-server` (`swarm codex`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
 
 ## Headless workers
 

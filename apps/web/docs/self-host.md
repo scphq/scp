@@ -10,7 +10,7 @@ swarm relay show        # the active relay, where it came from, and whether you 
 swarm up
 ```
 
-`relay use` saves the URL in `~/.config/scp/config.json`. `SCP_RELAY` overrides it for one shell or one command. Logins are stored per relay URL, so switching back to another relay keeps its login. A relay URL is `https`; plain `http` is allowed only for `localhost`.
+`relay use` saves the URL in `~/.config/scp/config.json` (`$XDG_CONFIG_HOME/scp` when set); `SCP_TOKEN` overrides a stored login. `SCP_RELAY` overrides it for one shell or one command. Logins are stored per relay URL, so switching back to another relay keeps its login. A relay URL is `https`; plain `http` is allowed only for `localhost`.
 
 ## What you deploy
 
@@ -20,9 +20,9 @@ swarm up
 | D1 database | Users, orgs, members, credentials; schema in `apps/relay/migrations/` |
 | `OrgHub` Durable Object | One per org: machines, mirrored endpoints, deliveries, over its own SQLite storage |
 | Email Service | Sends sign-in codes |
-| Turnstile | Guards sign-in |
+| Turnstile | Guards the sign-in form that emails a code |
 
-Only SHA-256 hashes of credentials are stored. The hub revalidates every connection against D1 every 5 minutes, and revoking a credential or removing a member closes their sockets at once. The relay sets no hub caps.
+Only SHA-256 hashes of credentials are stored. The hub revalidates every connection against D1 every 5 minutes, and revoking a credential or removing a member closes their sockets at once. The relay lifts every hub cap, count, rate and size limit and the judge's budgets; durations keep their defaults. Turnstile on sign-in is its only throttle. The relay does not link accounts: an address of another account is not found and `list --contacts` is empty.
 
 ## Deploy
 

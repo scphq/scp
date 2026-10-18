@@ -24,12 +24,12 @@ and in `wrangler.jsonc`:
 | Name | Kind | Purpose |
 | --- | --- | --- |
 | `JUDGE_API_KEY` | secret | The model key; `OPENROUTER_API_KEY` when unset |
-| `JUDGE_PROVIDER` | var | The model's provider, default `openrouter` |
+| `JUDGE_PROVIDER` | var | The model's provider: `openrouter` (default), `openai` or `anthropic` |
 | `JUDGE_MODEL` | var | The model name at that provider; no default |
 
-Without `JUDGE_MODEL` or a key the judge stays inert for every org: no model calls and no holds, whatever an owner turned on.
+Without `JUDGE_MODEL` or a key, or with any other `JUDGE_PROVIDER`, the judge stays inert for every org: no model calls and no holds, whatever an owner turned on.
 
-Each org starts with the judge off. An owner turns it on or off under **Members** in the org on the dashboard. While it is on, every message between the org's machines is judged before the hub delivers it, failing open when the model does not answer in 12 seconds. A held message reaches the sender as `held {hold_id}` and is not delivered; owners and admins see the held messages (sender, recipients, categories, the judge's reason and expiry, never the body) on the same page and release or refuse each one. The sender gets a notice either way. A hold no one reviews expires with the message.
+Each org starts with the judge off. An owner turns it on or off under **Members** in the org on the dashboard. While it is on, every message between the org's machines, or from a client connected straight to the hub, is judged before the hub delivers it, with effort `medium`, failing open (delivered, with the pre-filter's redactions) when the model errs, answers malformed or does not answer in 12 seconds. The relay sets no judge budgets and no cap on held messages. A held message reaches the sender as `held {hold_id, side: "local"}` and is not delivered; owners and admins see the held messages (sender, recipients, categories, the judge's reason and expiry, never the body) on the same page and release or refuse each one. The sender gets a notice either way. A hold no one reviews expires with the message.
 
 ## In a local broker
 

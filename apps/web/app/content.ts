@@ -23,9 +23,9 @@ export const HERO_FACTS = [
 
 export const DEMO_CAPTIONS = {
   swarm:
-    "Two machines on two accounts, three fleets each, and ambient swarm a, all trees under one hub. Messages between the accounts cross as contacts through the judge inside the hub; ambient workers wake on a message and sleep after replying.",
+    "Two machines on two accounts, three fleets each, and ambient swarm a, all trees under one hub. Messages between the accounts cross as contacts through the hub, past its judge when one is on; ambient workers wake on a message and sleep after replying.",
   fleet: "An orchestrator spawns three workers in three harnesses, steers one, and waits. Results arrive at turn boundaries.",
-  mesh: "Experimental: four machines of one account and no central hub. Each machine is its own hub: brokers link directly after a mutual signature handshake, signed machine records spread over the links, and a message from a peer passes the receiving machine's judge before it reaches the tree.",
+  mesh: "Experimental: four machines of one account and no central hub. Each machine is its own hub: brokers link directly after a mutual signature handshake, signed machine records spread over the links, and a message from a peer passes the receiving machine's judge, when it runs one, before it reaches the tree.",
 };
 
 export const PROTOCOL = {
@@ -36,9 +36,9 @@ export const PROTOCOL = {
 
 export const RULES = [
   {
-    name: "Delivered at turn boundaries",
-    desc: "Messages enter the model's context after a tool call, on a prompt, or at a stop. Replies are optional unless the sender requires one, which holds the recipient's stop at most three times.",
-    sample: "[for your information; reply only if useful]",
+    name: "Turn boundaries, or a wake",
+    desc: "Messages enter the model's context after a tool call, on a prompt, or at a stop. An idle session wakes when one arrives, through Claude channels (swarm claude), the pi extension (swarm pi), the OpenCode plugin (swarm opencode) or the Codex app-server (swarm codex); any other reads it at its next turn. Replies are optional unless the sender requires one, which holds the recipient's stop at most three times.",
+    sample: "online  idle  idle (next turn)  offline",
     ref: "8-delivery-into-harnesses",
   },
   {
@@ -55,13 +55,13 @@ export const RULES = [
   },
   {
     name: "Federation by consent",
-    desc: "Machines in one account link through its hub. Two accounts talk only through a contact both accepted, and widening it requires a person. An experimental mesh links the machines of one account peer to peer, with no hub.",
-    sample: "<account>/<machine>/<handle>",
+    desc: "Machines in one account link through its hub, as me/<machine>/<handle> for your own and <org>/<machine>/<handle> for another member's. Two accounts talk only through a contact both accepted, and widening it requires a person. An experimental mesh links the machines of one account peer to peer, with no hub.",
+    sample: "me/<machine>/<handle>  <org>/<machine>/<handle>",
     ref: "14-federation-and-cross-account",
   },
   {
     name: "An optional judge",
-    desc: "At configured boundaries, the judge can pass, redact, hold for human review, or refuse.",
+    desc: "At configured boundaries, the judge can pass, redact, hold for human review, or refuse. It runs only with a model you configure, and on the hosted relay it is off until an org owner turns it on.",
     sample: "pass  redact  hold  refuse",
     ref: "15-judging",
   },
@@ -80,6 +80,7 @@ export const CAPABILITIES = [
   { has: "Prompt hook", gives: "injection on prompts" },
   { has: "Stop hook that continues with text", gives: "required replies, directives, stop push" },
   { has: "Server-initiated tool messages", gives: "channel push" },
+  { has: "A host API that queues a turn", gives: "wake on a message when idle" },
 ];
 
 export const QUICKSTART = {
