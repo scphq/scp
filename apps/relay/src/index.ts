@@ -1,4 +1,6 @@
+import { api } from "./api";
 import { getCode, getSignIn, postCode, postSignIn, postSignOut } from "./auth";
+import { deviceCode, devicePage, devicePost, deviceToken } from "./device";
 import type { Env } from "./env";
 import { CSS, html, layout } from "./html";
 import { acceptPost, invitePage, orgPage, orgsPage, orgsPost } from "./orgs";
@@ -23,6 +25,7 @@ async function pages(ctx: Ctx): Promise<Response> {
     return toSignIn(ctx);
   }
 
+  if (path === "/device") return post ? devicePost(ctx, user.id) : devicePage(ctx, user.id);
   if (path === "/invites/accept" && post) return acceptPost(ctx, user);
   const invite = /^\/invites\/([A-Za-z0-9_-]{20,64})$/.exec(path);
   if (invite && !post) return invitePage(ctx, user, invite[1]!);
@@ -57,6 +60,9 @@ export default {
       if (url.pathname === "/health") return json({ ok: true, service: "scp-relay" });
       if (url.pathname === "/app.css")
         return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
+      if (url.pathname === "/v1/device/code" && req.method === "POST") return await deviceCode(req, env.DB, url.origin, Date.now());
+      if (url.pathname === "/v1/device/token" && req.method === "POST") return await deviceToken(req, env.DB, url.origin, Date.now());
+      if (url.pathname.startsWith("/v1/")) return await api(req, env, url);
       return await pages(await loadCtx(req, env));
     } catch (e) {
       return failure(e, url);

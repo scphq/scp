@@ -152,3 +152,69 @@ describe("organizations and invites", () => {
     expect((await b.post("/orgs/acme/invites", { email: "x@example.com" })).status).toBe(403);
   });
 });
+
+async function deviceLogin(browser: Browser, org: string, label: string): Promise<{ access_token: string; org: string; email: string }> {
+  const start = await relay.fetch("/v1/device/code", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label }) });
+  expect(start.status).toBe(200);
+  const code = (await start.json()) as { device_code: string; user_code: string; verification_uri_complete: string; interval: number };
+  expect(code.user_code).toMatch(/^[B-Z]{4}-[B-Z]{4}$/);
+  const poll = () => relay.fetch("/v1/device/token", { method: "POST", body: JSON.stringify({ device_code: code.device_code }) });
+
+  const pending = await poll();
+  expect(pending.status).toBe(400);
+  expect(((await pending.json()) as { error: string }).error).toBe("authorization_pending");
+
+  const approve = await browser.get(new URL(code.verification_uri_complete).pathname + new URL(code.verification_uri_complete).search);
+  expect(approve.status).toBe(200);
+  expect(await approve.text()).toContain(label);
+  const approved = await browser.post("/device", { code: code.user_code, org, action: "approve" });
+  expect(approved.status).toBe(200);
+  expect(await approved.text()).toContain("Device approved");
+
+  const issued = await poll();
+  expect(issued.status).toBe(200);
+  const cred = (await issued.json()) as { access_token: string; org: string; email: string; relay: string };
+  expect(cred.access_token).toMatch(/^scp_d_[A-Za-z0-9_-]{43}$/);
+  expect(cred.relay).toBe(relay.origin);
+  const reused = await poll();
+  expect(((await reused.json()) as { error: string }).error).toBe("invalid_grant");
+  return cred;
+}
+
+describe("device login", () => {
+  test("device code, approve in the browser, credential issued once and accepted as a bearer", async () => {
+    const a = new Browser(relay);
+    await a.signIn("dev-owner@example.com");
+    await a.post("/orgs", { handle: "devorg" });
+    const cred = await deviceLogin(a, "devorg", "laptop");
+    expect(cred.org).toBe("devorg");
+    expect(cred.email).toBe("dev-owner@example.com");
+
+    const who = await relay.fetch("/v1/whoami", bearer(cred.access_token));
+    expect(await who.json()).toMatchObject({ kind: "device", org: "devorg", role: "owner", label: "laptop", ambient: false });
+    const orgs = await relay.fetch("/v1/orgs", bearer(cred.access_token));
+    expect(await orgs.json()).toEqual({ orgs: [{ handle: "devorg", name: "devorg", role: "owner", members: 1 }] });
+  });
+
+  test("a denied code yields access_denied and an unknown one invalid_grant", async () => {
+    const a = new Browser(relay);
+    await a.signIn("denier@example.com");
+    await a.post("/orgs", { handle: "denyorg" });
+    const start = (await (await relay.fetch("/v1/device/code", { method: "POST" })).json()) as { device_code: string; user_code: string };
+    await a.get(`/device?code=${start.user_code}`);
+    expect((await a.post("/device", { code: start.user_code, org: "denyorg", action: "deny" })).status).toBe(200);
+    const denied = await relay.fetch("/v1/device/token", { method: "POST", body: JSON.stringify({ device_code: start.device_code }) });
+    expect(((await denied.json()) as { error: string }).error).toBe("access_denied");
+    const unknown = await relay.fetch("/v1/device/token", { method: "POST", body: JSON.stringify({ device_code: "nope" }) });
+    expect(((await unknown.json()) as { error: string }).error).toBe("invalid_grant");
+  });
+
+  test("approving into an org the user is not in is refused", async () => {
+    const a = new Browser(relay);
+    await a.signIn("outsider@example.com");
+    await a.post("/orgs", { handle: "outsider-org" });
+    const start = (await (await relay.fetch("/v1/device/code", { method: "POST" })).json()) as { user_code: string };
+    await a.get(`/device?code=${start.user_code}`);
+    expect((await a.post("/device", { code: start.user_code, org: "acme", action: "approve" })).status).toBe(404);
+  });
+});
