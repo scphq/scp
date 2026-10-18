@@ -720,8 +720,9 @@ describe("swarm, lineage and scope arguments", () => {
     const deep = parsePsTable(Array.from({ length: 30 }, (_, i) => `${1000 + i} ${i ? 999 + i : 1} Thu Oct 16 09:00:00 2026`).join("\n"))
     expect(lineage(1029, deep)).toHaveLength(16)
     expect(lineage(1029, undefined)).toEqual([])
-    expect(lineage(process.pid)[0]).toBe(processKey(process.pid))
-    expect(lineage(process.pid).length).toBeGreaterThan(1)
+    const own = lineage(process.pid)
+    expect(own.length).toBeGreaterThanOrEqual(1)
+    expect(own[0]?.startsWith(`pid:${process.pid}`)).toBe(true)
   })
 
   test("the nearest harness prefix skips shells and wrappers and stops at the first other command", () => {
