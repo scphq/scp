@@ -123,6 +123,29 @@ export interface HubGraph {
 export const GRAPH_MINUTES = 15
 export const GRAPH_MINUTES_MAX = 60
 
+/** what a read-only dashboard stream sees as it happens: addresses, kinds and presence, never a body, note, summary or label */
+export type DashboardEvent =
+  | { type: "presence"; at: string; machine: string | null; endpoint: string; presence: Presence }
+  | { type: "message"; at: string; kind: string; from: string; to: string[] }
+  | { type: "endpoints"; at: string; machine: string }
+
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null)
+
+/** a watcher's fleet event as a dashboard sees it, field by field; null for the kinds a dashboard does not stream */
+export function dashboardEvent(event: Record<string, unknown>, at: string): DashboardEvent | null {
+  if (event.type === "message") {
+    const from = str(event.from)
+    const to = Array.isArray(event.to) ? event.to.filter((a): a is string => typeof a === "string") : []
+    return from && to.length ? { type: "message", at, kind: str(event.kind) ?? "message", from, to } : null
+  }
+  if (event.type === "presence") {
+    const endpoint = str(event.endpoint)
+    const presence = event.presence === "online" || event.presence === "idle" || event.presence === "offline" ? event.presence : null
+    return endpoint && presence ? { type: "presence", at, machine: str(event.machine), endpoint, presence } : null
+  }
+  return null
+}
+
 export interface HubSocket {
   conn: HubConn
   send(text: string): void
@@ -142,6 +165,8 @@ export interface HubDeps {
   save(socket: HubSocket): void
   /** structured log line, e.g. relay_action; never bodies or tokens */
   log?: (event: string, fields: Record<string, unknown>) => void
+  /** live presence, endpoint and message metadata for a read-only dashboard; never a body */
+  dashboard?: (event: DashboardEvent) => void
   /** overrides of {@link HUB_LIMITS}; `Infinity` disables a cap, count or byte limit, durations stay finite */
   limits?: Partial<HubLimits>
   /** the link to other accounts' relays; without it an address of another account is not found */
@@ -1431,6 +1456,7 @@ export class RelayHub {
         this.fleet({ type: "presence", machine, endpoint: view.address, presence: view.presence, harness: view.harness, labels: view.labels })
       if (change.status && !change.added) this.fleet({ type: "status", machine, endpoint: view.address, status: view.status })
     }
+    if (full || changes.some((c) => c.added || c.was !== undefined)) this.dash({ type: "endpoints", at: new Date(this.now()).toISOString(), machine })
   }
 
   /** a direct client's endpoint changed: the other bridges mirror it */
@@ -1461,6 +1487,16 @@ export class RelayHub {
   private fleet(event: Record<string, unknown>): void {
     const at = new Date(this.now()).toISOString()
     for (const socket of this.deps.sockets()) if (socket.conn.watching) this.write(socket, { jsonrpc: "2.0", method: "fleet", params: { at, ...event } })
+    const dash = this.deps.dashboard ? dashboardEvent(event, at) : null
+    if (dash) this.dash(dash)
+  }
+
+  private dash(event: DashboardEvent): void {
+    try {
+      this.deps.dashboard?.(event)
+    } catch {
+      this.deps.log?.("relay_dashboard_failed", { account: this.account })
+    }
   }
 
   private write(socket: HubSocket, value: unknown): void {
@@ -1673,6 +1709,7 @@ export class RelayHub {
     })
     this.stored = null
     this.toBridges(name, { machine: name, endpoints: [], full: true })
+    this.dash({ type: "endpoints", at: new Date(this.now()).toISOString(), machine: name })
     this.deps.log?.("relay_action", { account: this.account, machine: name, method: "machine_release", code: "ok" })
     return { removed: name, endpoints: dropped }
   }

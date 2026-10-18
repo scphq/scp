@@ -13,6 +13,8 @@ export {
   type XEndpoint,
 } from "./federation"
 export {
+  type DashboardEvent,
+  dashboardEvent,
   GRAPH_MINUTES,
   GRAPH_MINUTES_MAX,
   type GraphEdge,

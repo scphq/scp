@@ -2,10 +2,12 @@ import { LIMITS, RelayError, sha256Hex, type Sql, type SqlValue, stripControl } 
 import { GRAPH_MINUTES, type HubConn, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
-import { GRANT_HEADER, grantValid, ORG_HEADER, parseGrant } from "./grant";
+import { DASH_HEADER, GRANT_HEADER, grantValid, ORG_HEADER, parseGrant } from "./grant";
 import { JUDGE_HEADER, judgeSetup } from "./judge";
 
 export const HUB_TAG = "hub";
+/** a dashboard's read-only event stream; its attachment names the member who opened it */
+export const DASH_TAG = "dash";
 const ORG_KEY = "hub:org";
 const JUDGE_KEY = "hub:judge";
 const HANDLE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -92,6 +94,14 @@ export class OrgHub extends DurableObject<Env> {
       save: (socket) => webSockets.get(socket)?.serializeAttachment(socket.conn),
       log: (event, fields) => console.log(JSON.stringify({ event, ...fields })),
       limits: NO_LIMITS,
+      dashboard: (event) => {
+        const text = JSON.stringify(event);
+        for (const ws of ctx.getWebSockets(DASH_TAG)) {
+          try {
+            ws.send(text);
+          } catch {}
+        }
+      },
     });
   }
 
@@ -126,8 +136,15 @@ export class OrgHub extends DurableObject<Env> {
         ...(typeof body?.actorId === "string" ? { actorId: body.actorId } : {}),
       };
       if (!match.tokenId && !match.actorId) return error(400, "invalid_request", "Name a tokenId or an actorId.");
-      if (!(await this.ready())) return Response.json({ closed: 0 });
-      const closed = this.hub.revoke(match);
+      let shut = 0;
+      if (match.actorId)
+        for (const ws of this.ctx.getWebSockets(DASH_TAG)) {
+          if ((ws.deserializeAttachment() as { dash?: string } | null)?.dash !== match.actorId) continue;
+          ws.close(4003, "membership ended");
+          shut++;
+        }
+      if (!(await this.ready())) return Response.json({ closed: shut });
+      const closed = this.hub.revoke(match) + shut;
       await this.arm();
       return Response.json({ closed });
     }
@@ -141,6 +158,17 @@ export class OrgHub extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/overview") {
       if (!(await this.ready())) return Response.json({ machines: [], endpoints: [], activity: [] });
       return Response.json(this.hub.overview());
+    }
+    if (request.method === "GET" && url.pathname === "/dash") {
+      const user = request.headers.get(DASH_HEADER);
+      if (!user) return error(403, "invalid_grant", "Name the member.");
+      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return error(426, "upgrade_required", "The event stream is a WebSocket.");
+      const pair = new WebSocketPair();
+      const [client, server] = [pair[0], pair[1]];
+      this.ctx.acceptWebSocket(server, [DASH_TAG]);
+      server.serializeAttachment({ dash: user });
+      server.send(JSON.stringify({ type: "hello", at: new Date().toISOString() }));
+      return new Response(null, { status: 101, webSocket: client });
     }
     if (request.method === "GET" && url.pathname === "/graph") {
       const minutes = Number(url.searchParams.get("minutes") ?? GRAPH_MINUTES);
@@ -182,6 +210,10 @@ export class OrgHub extends DurableObject<Env> {
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.ctx.getTags(ws).includes(DASH_TAG)) {
+      if (message === "ping") ws.send("pong");
+      return;
+    }
     const socket = hubSocketOf(ws);
     if (!socket || !(await this.ready())) return;
     await this.hub.message(socket, typeof message === "string" ? message : new TextDecoder().decode(message));

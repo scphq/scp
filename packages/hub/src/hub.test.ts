@@ -2,7 +2,7 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { LIMITS, PROTOCOL, type Sql, type SqlValue } from "@scp-dev/core"
-import { GRAPH_MINUTES, GRAPH_MINUTES_MAX, HUB_LIMITS, type HubConn, type HubGrant, type HubLimits, RelayHub, type HubSocket } from "./hub"
+import { type DashboardEvent, GRAPH_MINUTES, GRAPH_MINUTES_MAX, HUB_LIMITS, type HubConn, type HubGrant, type HubLimits, RelayHub, type HubSocket } from "./hub"
 
 const START = 1_800_000_000_000
 
@@ -36,7 +36,7 @@ class FakeSocket implements HubSocket {
 
 const grant = (tokenId: string, expiresAt = START + 3_600_000): HubGrant => ({ tokenId, userId: "usr_1", actorId: null, expiresAt, scoped: false, role: null })
 
-function setup(options: { limits?: Partial<HubLimits> } = {}) {
+function setup(options: { limits?: Partial<HubLimits>; dashboard?: (event: DashboardEvent) => void } = {}) {
   const clock = { now: START }
   const db = new Database(":memory:")
   const writes = { n: 0 }
@@ -57,6 +57,7 @@ function setup(options: { limits?: Partial<HubLimits> } = {}) {
     save: () => {},
     log: (event, fields) => logs.push({ event, fields }),
     ...(options.limits ? { limits: options.limits } : {}),
+    ...(options.dashboard ? { dashboard: options.dashboard } : {}),
   })
   hub.init({ user: "ada" })
   let nextId = 1
@@ -1231,5 +1232,39 @@ describe("graph", () => {
     expect(hub.graph().edges.map((e) => e.kind)).toEqual(["spawn"])
     expect(hub.graph(GRAPH_MINUTES_MAX).edges.filter((e) => e.kind === "message")).toHaveLength(2)
     expect(hub.graph(10_000).minutes).toBe(GRAPH_MINUTES_MAX)
+  })
+})
+
+describe("dashboard events", () => {
+  test("presence, endpoint changes and messages reach the dashboard as addresses and kinds only, never a body, note or label", async () => {
+    const events: DashboardEvent[] = []
+    const { ok, bridge, clock } = setup({ dashboard: (e) => events.push(e) })
+    const laptop = await bridge("laptop", [{ address: "me/lead", labels: { secret: "label-value" } }])
+    await bridge("desk", [{ address: "me/review" }])
+    clock.now += 1000
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "secret plan" } })
+    await ok(laptop, "mirror", {
+      endpoints: [{ address: "me/lead", kind: "agent", harness: "claude-code", presence: "online", status: { state: "working", note: "secret note" } }],
+    })
+    await ok(laptop, "mirror", { full: true, endpoints: [] })
+
+    const at = new Date(START + 1000).toISOString()
+    expect(events.find((e) => e.type === "message")).toEqual({ type: "message", at, kind: "message", from: "ada/laptop/lead", to: ["ada/desk/review"] })
+    expect(events.filter((e) => e.type === "endpoints").map((e) => e.machine)).toEqual(["laptop", "desk", "laptop"])
+    expect(events.filter((e) => e.type === "presence").at(-1)).toEqual({
+      type: "presence",
+      at,
+      machine: "laptop",
+      endpoint: "ada/laptop/lead",
+      presence: "offline",
+    })
+    const keys = {
+      message: ["at", "from", "kind", "to", "type"],
+      presence: ["at", "endpoint", "machine", "presence", "type"],
+      endpoints: ["at", "machine", "type"],
+    }
+    for (const e of events) expect(Object.keys(e).sort()).toEqual(keys[e.type])
+    const wire = JSON.stringify(events)
+    for (const leak of ["secret plan", "secret note", "label-value", "body", "status"]) expect(wire).not.toContain(leak)
   })
 })

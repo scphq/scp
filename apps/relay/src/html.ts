@@ -35,6 +35,8 @@ export interface Chrome {
   head?: Html;
   /** a full-width page for dense tables */
   wide?: boolean;
+  /** the body alone, without the header and footer, for a full-window view */
+  bare?: boolean;
 }
 
 export function layout(c: Chrome, body: Html): string {
@@ -57,7 +59,11 @@ export function layout(c: Chrome, body: Html): string {
 <link rel="stylesheet" href="/app.css?v=${stamp(CSS)}">
 ${c.head ?? ""}
 </head>
-<body${c.wide ? html` class="wide"` : ""}>
+${
+  c.bare
+    ? html`<body class="bare">${body}</body>
+</html>`
+    : html`<body${c.wide ? html` class="wide"` : ""}>
 <header class="head"><div class="wrap head-in">
 <a class="brand" href="/"><svg class="mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>scp <span class="brand-dim">relay</span></a>
 ${nav}
@@ -68,7 +74,8 @@ ${nav}
 <a class="mini-link" href="https://scp.dev/spec">Spec</a>
 </div></footer>
 </body>
-</html>`}`;
+</html>`
+}`}`;
 }
 
 export const CSS = `
@@ -162,10 +169,10 @@ tr.sub.d4 td.agent{padding-left:4.75rem}
 .caret svg{transition:transform .15s}
 .caret[aria-expanded=true] svg{transform:rotate(90deg)}
 .caret:hover{color:var(--fg)}
-:root{--h-claude:#c15f3c;--h-codex:#0f8a6c;--h-opencode:#b56a00;--h-gemini:#1a73e8;--h-grok:#3a3a3a;--h-muse:#7a4bd4;--h-pi:#c03d86}
-@media (prefers-color-scheme:dark){:root{--h-claude:#e08b6b;--h-codex:#3fc6a0;--h-opencode:#e6a43f;--h-gemini:#7aa9ff;--h-grok:#e6e6e6;--h-muse:#ab8ef6;--h-pi:#ec7bb8}}
-.hicon{display:inline-block;width:12px;height:12px;margin-right:.375rem;vertical-align:-1px;color:var(--dim)}
-.h-claude{color:var(--h-claude)}.h-codex{color:var(--h-codex)}.h-opencode{color:var(--h-opencode)}.h-gemini{color:var(--h-gemini)}.h-grok{color:var(--h-grok)}.h-muse{color:var(--h-muse)}.h-pi{color:var(--h-pi)}
+:root{--h-claude:#c15f3c;--h-codex:#0f8a6c;--h-opencode:#b56a00;--h-gemini:#1a73e8;--h-agy:#4285f4;--h-grok:#3a3a3a;--h-muse:#0866ff;--h-pi:#c03d86}
+@media (prefers-color-scheme:dark){:root{--h-claude:#e08b6b;--h-codex:#3fc6a0;--h-opencode:#e6a43f;--h-gemini:#7aa9ff;--h-agy:#8ab4f8;--h-grok:#e6e6e6;--h-muse:#3d8bff;--h-pi:#ec7bb8}}
+.hicon{display:inline-block;overflow:visible;width:12px;height:12px;margin-right:.375rem;vertical-align:-1px;color:var(--dim)}
+.h-claude{color:var(--h-claude)}.h-codex{color:var(--h-codex)}.h-opencode{color:var(--h-opencode)}.h-gemini{color:var(--h-gemini)}.h-agy{color:var(--h-agy)}.h-grok{color:var(--h-grok)}.h-muse{color:var(--h-muse)}.h-pi{color:var(--h-pi)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .wake-badge{display:inline-flex;vertical-align:middle;margin-left:.25rem;color:var(--acc)}
 .bolt{width:11px;height:11px}
