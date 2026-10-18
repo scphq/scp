@@ -4,7 +4,7 @@ import { runRelayMcp, type SpawnRequest } from "@scp-dev/mcp"
 import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
-import { harnessPid, psParent, relayIdentity } from "./identity"
+import { harnessAt, harnessPid, psParent, relayIdentity } from "./identity"
 import { membership } from "./session"
 
 type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean }
@@ -24,6 +24,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     cwd: process.cwd(),
     env: process.env,
     harnessPid: () => harnessPid(),
+    inferHarness: (pid) => harnessAt(pid),
   })
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)
   const dir = relayDir()

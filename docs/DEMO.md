@@ -51,7 +51,10 @@ Run it before you start any agent session. A broker that was already running sta
 
 ```sh
 swarm cloud status     # broker: connected to https://app.scp.dev as <machine>
+swarm setup            # nothing left to do: the hooks and MCP mounts are in place
 ```
+
+Start every session for the demo wake-enabled (`swarm claude --name N`, `swarm codex --name N`, `swarm pi --name N`, or `opencode` with its plugin), so messages wake it while it waits for input. A session that was already running joins with `swarm join <name>`, but sees messages only at turn boundaries until relaunched.
 
 Codex runs new hooks only after you review them: start `codex` once, open `/hooks` and approve them. Without that, a Codex worker still runs and hands back, but a steer sent mid-run comes back as `steer not applied`.
 

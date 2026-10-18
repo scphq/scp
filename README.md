@@ -58,9 +58,20 @@ All 14 parser tests pass.
 
 ```sh
 npm i -g @scp-dev/cli          # or: bun add -g @scp-dev/cli
-swarm up                       # sign in, link this machine to your org's hub, install hooks and MCP
-swarm claude --name orch       # Claude Code as a named orchestrator that wakes on messages
+swarm up                       # sign in, link this machine to your org's hub, install hooks and MCP (setup --write)
+swarm setup                    # check the hooks and MCP mounts: nothing left to do once installed
 ```
+
+Start each session wake-enabled, so a peer's message wakes it even while it waits for input:
+
+```sh
+swarm claude --name orch       # Claude Code with the scp channel
+swarm codex --name impl        # Codex: messages start or steer its turns
+swarm pi --name scout          # pi with the bundled SCP extension
+opencode                       # the scp plugin swarm up installed wakes it (on by default)
+```
+
+A session that is already running joins from its own shell with `swarm join <name>`. It then sees messages only at turn boundaries (after a tool call, on a prompt, at a stop) until you relaunch it as above.
 
 From the orchestrator's session:
 
@@ -109,68 +120,22 @@ Hop limits, pair and tree rate limits and ping-pong pauses stop runaway loops. C
 
 ## Architecture
 
-Harnesses connect to a local broker on their machine, the broker links to its org's hub over a bridge, and the hub forwards between machines. The diagrams are also at [scp.dev/architecture](https://scp.dev/architecture), and [section 4 of the spec](https://scp.dev/spec#4-architecture) is the normative description.
+Harnesses connect to a local broker on their machine, the broker links to its org's hub over a bridge, and the hub forwards between machines and, through contacts, to other orgs. [Section 4 of the spec](https://scp.dev/spec#4-architecture) is the normative description.
 
 ```mermaid
-flowchart TB
-  subgraph machine["Your machine"]
-    direction TB
-    subgraph harnesses["Harnesses"]
-      direction TB
-      claude["Claude Code"]
-      codex["Codex"]
-      opencode["opencode"]
-      pi["pi"]
-      muse["Muse"]
-      agy["agy"]
-      grok["Grok"]
-    end
-    subgraph integration["Harness integration"]
-      direction TB
-      hooks["turn-boundary hooks<br/>swarm hook"]
-      mcp["scp MCP server<br/>swarm mcp"]
-      wake["wakers for idle sessions<br/>Claude channels<br/>pi extension<br/>opencode plugin<br/>Codex app-server"]
-      cli["swarm CLI"]
-    end
-    subgraph broker["Local broker, one per user"]
-      direction LR
-      sock["unix socket<br/>relay.sock"]
-      core["SQLite core<br/>endpoints, inboxes, scopes, audit"]
-      policy["policy.json<br/>scopes, rules, groups"]
-      ljudge["local judge<br/>optional"]
-      sock --> core
-      policy --> core
-      core --> ljudge
-    end
-    harnesses --> integration
-    integration --> broker
-  end
-
-  subgraph relay["Hosted relay, app.scp.dev"]
-    direction LR
-    worker["Cloudflare Worker<br/>sign-in, device login, API"]
-    d1[("D1<br/>accounts, orgs, devices, tokens")]
-    hub["OrgHub Durable Object<br/>one per org: machines,<br/>mirrored endpoints, deliveries"]
-    hjudge["hub judge<br/>optional, OpenRouter"]
-    dash["dashboard<br/>overview, live graph, activity"]
-    worker --> d1
-    worker --> hub
-    worker --> dash
-    hub --> hjudge
-  end
-
-  subgraph remote["Elsewhere"]
-    direction TB
-    other["another machine<br/>or org member's broker"]
-    peer["another account's hub"]
-    meshpeer["mesh peer broker<br/>authoritative receiver"]
-  end
-
-  broker <-->|"bridge, WebSocket"| relay
-  relay <-->|bridge| other
-  relay -.->|"contact, both consent"| peer
-  broker <-.->|"mesh, experimental:<br/>signed records"| meshpeer
+flowchart LR
+  harness["Harnesses<br/>Claude Code, Codex, OpenCode,<br/>pi, Muse, agy, Grok"]
+  integ["hooks + MCP<br/>swarm hook, swarm mcp"]
+  broker["Local broker<br/>one per machine"]
+  bridge["Bridge<br/>WebSocket"]
+  hub["Hub, app.scp.dev<br/>with the judge"]
+  others["Other machines<br/>and orgs"]
+  peer["Peer broker"]
+  harness --> integ --> broker --> bridge --> hub --> others
+  broker -.->|"mesh"| peer
 ```
+
+Full architecture: [scp.dev/architecture](https://scp.dev/architecture), with the detailed topology and the end-to-end trace of one message.
 
 - **Harness integration.** Turn-boundary hooks (`swarm hook <harness>`) inject messages after a tool call, on a prompt or at a stop, and the MCP server `scp` (`swarm mcp`) sends, replies and reads the inbox. Wakers push into idle sessions.
 - **Local broker.** One daemon per user on each machine, on a unix socket (`relay.sock`). It keeps endpoints, inboxes, scopes, grants and audit in SQLite, reads `~/.config/scp/policy.json` on every send, checks scope, policy, loop guards and rate limits, and can run a local judge.
@@ -178,41 +143,6 @@ flowchart TB
 - **Hub.** One per org. On app.scp.dev it is an `OrgHub` Durable Object behind a Cloudflare Worker, with D1 for accounts, orgs, devices and tokens. It re-checks scope against mirrored rules, queues deliveries for offline machines, and runs the hub judge when the org turns it on.
 - **Contacts.** Two accounts' hubs talk only through a contact both accepted, with a per-side allowlist, after an egress gate on the sender's side and an ingress gate on the receiver's.
 - **Mesh.** Brokers of one account peer directly, each the authority for its own endpoints.
-
-### One message, end to end
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant A as Agent A, harness
-  participant BA as Broker A
-  participant H as OrgHub, app.scp.dev
-  participant BB as Broker B
-  participant B as Agent B, harness
-  A->>BA: relay_send through swarm mcp
-  BA->>BA: scope, policy.json, loop guards, rate limits
-  opt the policy sets a judge boundary
-    BA->>BA: local judge returns pass, redact, hold or refuse
-  end
-  BA->>H: forward over the bridge
-  H->>H: re-check scope on mirrored rules, hub limits
-  opt the org turned the judge on
-    H->>H: hub judge
-  end
-  H->>BB: delivery to the target machine's bridge
-  BB->>BB: admit the delivery into SQLite
-  alt the session is idle and has a waker
-    BB-->>B: push through the waker, which starts a turn
-  else at the next turn boundary
-    B->>BB: hook asks for fresh deliveries
-    BB-->>B: framed relay-message injected into context
-  end
-  B->>BB: injected, shown messages acknowledged
-  B->>BB: relay_reply
-  BB->>H: reply over the bridge
-  H->>BA: delivery
-  BA-->>A: reply at A's next turn boundary
-```
 
 ## For harness authors
 

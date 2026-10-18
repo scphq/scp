@@ -3,7 +3,7 @@ import { closeSync, openSync, statSync, truncateSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
 import { type BrokerInfo, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
-import { harnessLineage, hiddenHarness, labelsFor, lineage, readPsTable, sessionKey } from "./identity"
+import { detectHarness, harnessAt, inferring, harnessLineage, hiddenHarness, labelsFor, lineage, readPsTable, sessionKey } from "./identity"
 import { membership } from "./session"
 import { parseSeconds, SELF } from "./term"
 import type { RelayTransport } from "./remote"
@@ -190,12 +190,19 @@ export function localHandle(raw: string): string {
   return handle
 }
 
-/** this shell's process walk: the lineage keys and the harness walk it claims with */
-export type Walk = { keys: string[]; self: string[] }
+/** this shell's process walk: the lineage keys, the harness walk it claims with and the harness its nearest harness process runs */
+export type Walk = { keys: string[]; self: string[]; harness?: string | undefined }
 
 export function walkNow(): Walk {
   const table = readPsTable()
-  return { keys: lineage(process.ppid, table), self: harnessLineage(process.ppid, table) }
+  const self = harnessLineage(process.ppid, table)
+  const harness = self.length ? harnessAt(Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]), table) : undefined
+  return { keys: lineage(process.ppid, table), self, ...(harness ? { harness } : {}) }
+}
+
+/** an `--as` claim's harness: --harness or $SCP_HARNESS, else the harness this shell's walk or environment shows, else cli */
+export function claimHarness(values: Identity, env: Record<string, string | undefined>, walk: Walk | undefined): string {
+  return values.harness ?? env.SCP_HARNESS ?? (inferring(env) ? (walk?.harness ?? detectHarness(env)) : undefined) ?? "cli"
 }
 
 export async function open(verb: string, values: Identity, cwd: string, bodyFromStdin: boolean, walk?: Walk): Promise<Opened> {
@@ -224,7 +231,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
     const claim = handle
       ? {
           handle,
-          harness: values.harness ?? process.env.SCP_HARNESS ?? "cli",
+          harness: claimHarness(values, process.env, walk ?? walkNow()),
           cwd,
           ...(process.env.SCP_PARENT ? { parent: process.env.SCP_PARENT } : {}),
           labels: labelsFor(process.env, machineName(values.machine)),
@@ -244,7 +251,8 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
     }
   }
   if (values.machine !== undefined) throw new RelayUsage("--machine names the machine of the cloud transport: add --cloud")
-  const { keys, self } = walk ?? walkNow()
+  const here = walk ?? walkNow()
+  const { keys, self } = here
   const joined = !values.as && named && self.length ? membership(process.env, sessionKey(process.env, self.at(-1)!)) : {}
   const handle = "handle" in joined && joined.handle ? joined.handle : named ? localHandle(named) : undefined
   const harnessPid = self.length ? Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]) : undefined
@@ -260,7 +268,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
         claim: {
           handle,
           exact: true,
-          harness: values.harness ?? process.env.SCP_HARNESS ?? "cli",
+          harness: claimHarness(values, process.env, here),
           cwd,
           ...(process.env.SCP_PARENT ? { parent: process.env.SCP_PARENT } : {}),
           labels: labelsFor(process.env),

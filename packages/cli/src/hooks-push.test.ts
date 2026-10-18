@@ -4,7 +4,10 @@ import { type Envelope, LIMITS, PREAMBLE, PREAMBLE_BRIEF, type StopWaitResult } 
 import type { RelayClient } from "@scp-dev/broker"
 import {
   BLOCK_STOP,
+  CLAUDE_CAPS,
   DIRECTIVE_CLOSE,
+  fitText,
+  hookReply,
   injectionText,
   introText,
   PARENT_EXCEPTION,
@@ -40,6 +43,45 @@ const DONE: Envelope = {
   expires_at: new Date(0).toISOString(),
   relation: "child",
 }
+
+describe("Claude Code's hook caps", () => {
+  const reply = (body: string, id = "msg_0000000000000000000abcdef") => ({ ...DONE, id, body: { text: body, mime: "text/markdown" } })
+  const injected = (messages: Envelope[]) => injectionText({ messages, offered: [], hold: null, more: 0, unread: messages.length, block: false })!
+  const sizes = (text: string) => ({ chars: text.length, lines: text.split("\n").length })
+  const numbered = Array.from({ length: 24 }, (_, i) => `${i + 1}) ${"a point worth making in full. ".repeat(2)}`).join("\n")
+
+  test("a long reply arrives whole in the context, and one past the reason cap ends in a marker naming how to read the rest", () => {
+    expect(numbered.length).toBeGreaterThan(1500)
+    const text = injected([reply(numbered)])
+    const context = JSON.parse(hookReply("claude-code", "tool", text)).hookSpecificOutput.additionalContext as string
+    expect(context).toBe(text)
+    expect(context).toContain(numbered)
+    const reason = JSON.parse(hookReply("claude-code", "stop", text, 0, false)).reason as string
+    expect(sizes(reason).chars).toBeLessThanOrEqual(CLAUDE_CAPS.reason.chars)
+    expect(sizes(reason).lines).toBeLessThanOrEqual(CLAUDE_CAPS.reason.lines)
+    const marker = /\[truncated, (\d+) more chars: swarm show abcdef\]\n<\/relay-message>/.exec(reason)
+    expect(marker).not.toBeNull()
+    const head = reason.slice(reason.indexOf(">\n1) ") + 2, marker!.index - 1)
+    expect(numbered.startsWith(head)).toBe(true)
+    expect(head.length + Number(marker![1])).toBe(numbered.length)
+    expect(JSON.parse(hookReply("codex", "stop", text, 0, false)).reason).toBe(text)
+  })
+
+  test("text over the context cap cuts bodies from the last message back, keeping the framing and earlier messages whole", () => {
+    const first = reply("first, short", "msg_0000000000000000000aaaaaa")
+    const big = reply("x".repeat(9000), "msg_0000000000000000000bbbbbb")
+    const text = injected([first, big])
+    const fitted = fitText(text, CLAUDE_CAPS.context)
+    expect(sizes(fitted).chars).toBeLessThanOrEqual(CLAUDE_CAPS.context.chars)
+    expect(fitted).toContain("first, short\n</relay-message>")
+    expect(fitted).toMatch(/x+\n\[truncated, \d+ more chars: swarm show bbbbbb\]\n<\/relay-message>/)
+    expect(fitted.endsWith(text.slice(text.lastIndexOf("</relay-message>")))).toBe(true)
+    const tall = fitText(injected([reply(Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n"))]), CLAUDE_CAPS.context)
+    expect(sizes(tall).lines).toBeLessThanOrEqual(CLAUDE_CAPS.context.lines)
+    expect(tall).toContain("more chars: swarm show abcdef]")
+    expect(fitText("no relay message here", { chars: 5, lines: 1 })).toBe("no relay message here")
+  })
+})
 
 const EMPTY: StopWaitResult = { messages: [], offered: [], hold: null, more: 0, workers: ["me/w1"], starting: 0, others: 0, pushes_left: 20 }
 

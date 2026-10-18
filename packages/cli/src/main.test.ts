@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { LIMITS, PREAMBLE } from "@scp-dev/core"
 import { accountHome, type Broker, RelayClient, relayDir, socketPath, startBroker } from "@scp-dev/broker"
 import { RELAY_BRIEF, RELAY_HELP, verbHelp } from "./main"
-import { grantParams, localHandle, RelayUsage, selectorList, terminalAttached } from "./common"
+import { claimHarness, grantParams, localHandle, RelayUsage, selectorList, terminalAttached } from "./common"
 import { harnessLineage, hiddenHarness, lineage, parsePsCommTable, parsePsTable, processKey, relayIdentity, shortHostname } from "./identity"
 import { alive, waitFor } from "./testing/fixtures"
 
@@ -214,6 +214,20 @@ describe("swarm", () => {
     expect((await swarm(["inbox", "--as", "b", "--harness", "codex"])).stderr).toContain("no unread messages")
     const status = JSON.parse((await swarm(["status", "--json", "--all"])).stdout) as { endpoints: { address: string; labels: Record<string, string> }[] }
     expect(status.endpoints.find((e) => e.address === "me/a")!.labels).toEqual({ role: "impl", lane: "relay", machine: shortHostname() })
+  })
+
+  test("show prints one delivered message whole and leaves its read state as it was", async () => {
+    await swarm(["inbox", "--as", "show-reader"])
+    const body = `${"a long reply, ".repeat(700)}the end`
+    const sent = await swarm(["send", "show-reader", body], { SCP_NAME: "show-writer" })
+    const short = /swarm status ([0-9a-z]{6})/.exec(sent.stdout)![1]!
+    const shown = await swarm(["show", short, "--as", "show-reader"])
+    expect(shown.stdout).toContain(`${body}\n</relay-message>`)
+    expect(JSON.parse((await swarm(["show", short, "--as", "show-reader", "--json"])).stdout).message.body.text).toBe(body)
+    expect((await swarm(["inbox", "--as", "show-reader"])).stdout).toContain("the end")
+    expect((await swarm(["show", short, "--as", "show-reader"])).stdout).toContain("the end")
+    expect((await swarm(["show", "zzzzzz", "--as", "show-reader"])).stderr).toContain("no message zzzzzz was delivered to you")
+    expect((await swarm(["show", "--as", "show-reader"])).stderr).toContain("show takes one message id")
   })
 
   test("--as and --human go anywhere on the line, before the verb too", async () => {
@@ -865,6 +879,17 @@ describe("swarm, lineage and scope arguments", () => {
     expect(hiddenHarness(3, table("bwrap", [3, 2, "sh"]))).toBe(false)
     expect(hiddenHarness(3, undefined)).toBe(false)
     expect(hiddenHarness(process.pid)).toBe(false)
+  })
+
+  test("an --as claim takes --harness or $SCP_HARNESS, else the harness its walk or environment shows, else cli", () => {
+    const walk = { keys: [], self: [], harness: "codex" }
+    expect(claimHarness({}, {}, walk)).toBe("codex")
+    expect(claimHarness({}, { CLAUDECODE: "1" }, { keys: [], self: [] })).toBe("claude-code")
+    expect(claimHarness({}, { CLAUDECODE: "1" }, walk)).toBe("codex")
+    expect(claimHarness({ harness: "grok" }, { SCP_HARNESS: "pi" }, walk)).toBe("grok")
+    expect(claimHarness({}, { SCP_HARNESS: "pi" }, walk)).toBe("pi")
+    expect(claimHarness({}, {}, undefined)).toBe("cli")
+    expect(claimHarness({}, { CLAUDECODE: "1", SCP_HARNESS_DETECT: "0" }, walk)).toBe("cli")
   })
 
   test("--as names a local handle: me/ is stripped, me/ alone and other machines are refused", () => {
