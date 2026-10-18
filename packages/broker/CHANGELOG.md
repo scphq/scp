@@ -1,5 +1,18 @@
 # @scp-dev/broker
 
+## 0.2.0
+
+### Minor Changes
+
+- 868ec53: Same-machine traffic shows on the dashboard. A linked broker reports metadata of deliveries between its own endpoints to the hub in batched `local_events` notifications: sender and recipient handles, kind, time and hashed message and thread ids, never a body, note, label or title. The hub counts them in the graph's message edges and streams them to watchers and the dashboard as `message` events marked `local`. `mirror_local: false` in `cloud.json` turns it off.
+
+### Patch Changes
+
+- Updated dependencies [868ec53]
+- Updated dependencies [0a511fc]
+  - @scp-dev/hub@0.5.0
+  - @scp-dev/core@0.1.5
+
 ## 0.1.6
 
 ### Patch Changes

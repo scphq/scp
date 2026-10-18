@@ -1,5 +1,23 @@
 # @scp-dev/cli
 
+## 0.3.0
+
+### Minor Changes
+
+- 868ec53: Same-machine traffic shows on the dashboard. A linked broker reports metadata of deliveries between its own endpoints to the hub in batched `local_events` notifications: sender and recipient handles, kind, time and hashed message and thread ids, never a body, note, label or title. The hub counts them in the graph's message edges and streams them to watchers and the dashboard as `message` events marked `local`. `mirror_local: false` in `cloud.json` turns it off.
+- 241807f: `swarm opencode [--name N]` runs OpenCode with the user's own config and arguments, wake on, and refuses to start without the current plugin. The OpenCode plugin's waiter now runs from load, so a freshly started OpenCode advertises `opencode-plugin` and a message opens a session when none is open yet.
+
+### Patch Changes
+
+- 8c02d45: `swarm codex`, `swarm claude` and `swarm pi` pass every argument through untouched and honour your own config: the codex app-server now gets your `--profile`, model, sandbox and approval settings, `swarm codex --resume THREAD` reopens a thread in the TUI too, and a `--` after harness arguments reaches the harness. `swarm claude` adds the scp channel after your arguments so a prompt is never taken as a channel, accepts `--as`, and refuses to start without a wake-capable scp mount, naming `swarm setup --write`. `swarm pi` keeps pi's own `--name`.
+- 0a511fc: A claim that names no harness takes it from the harness process it runs under: `--as` commands, the MCP shim, hooks and `swarm join` infer it from the shell's process walk (claude, codex, opencode, pi, muse, agy, grok, gemini) or the harness's environment before falling back to `cli`, `hook` or `mcp`. Those generic harnesses never replace a known one, and a row created with one heals to the harness of its next claim. Claude Code hook text now fits Claude Code's caps (8000 characters and 200 lines of context, 2000 and 20 of a stop reason): bodies that would be cut end in `[truncated, N more chars: swarm show <id>]`, and the new `swarm show <id>` prints a delivered message whole. A hook shows up to 7168 bytes of wrapped messages at once (was 4096). `swarm up` ends with the wake-enabled launch of each installed harness.
+- Updated dependencies [868ec53]
+- Updated dependencies [0a511fc]
+  - @scp-dev/hub@0.5.0
+  - @scp-dev/broker@0.2.0
+  - @scp-dev/core@0.1.5
+  - @scp-dev/mcp@0.1.7
+
 ## 0.2.4
 
 ### Patch Changes
