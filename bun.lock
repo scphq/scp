@@ -60,7 +60,14 @@
       "name": "@scp-dev/cli",
       "version": "0.0.0",
       "bin": {
-        "swarm": "./src/cli.ts",
+        "swarm": "./dist/cli.js",
+      },
+      "dependencies": {
+        "@scp-dev/broker": "workspace:*",
+        "@scp-dev/core": "workspace:*",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.1",
       },
     },
     "packages/core": {

@@ -1,18 +1,6 @@
-#!/usr/bin/env bun
-import pkg from "../package.json" with { type: "json" };
+#!/usr/bin/env node
+import { quietSqliteWarning } from "./warnings"
 
-const usage = `swarm ${pkg.version}
-
-Usage: swarm <command>
-
-Commands:
-  help       Show this message
-  version    Print the version`;
-
-const command = process.argv[2];
-
-if (command === "version" || command === "--version" || command === "-v") {
-  console.log(pkg.version);
-} else {
-  console.log(usage);
-}
+quietSqliteWarning()
+const { run } = await import("./main")
+await run(process.argv.slice(2))

@@ -12,11 +12,24 @@
   },
   "type": "module",
   "bin": {
-    "swarm": "./src/cli.ts"
+    "swarm": "./dist/cli.js"
   },
-  "files": ["src", "!src/**/*.test.ts"],
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@scp-dev/core": "workspace:*",
+    "@scp-dev/broker": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
   },
   "publishConfig": {
     "access": "public",
