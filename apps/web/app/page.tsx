@@ -64,7 +64,7 @@ export default function Home() {
               <div className="works rise" style={{ "--i": 3 } as CSSProperties}>
                 <span className="works-k">works with</span>
                 <ul>
-                  {HARNESSES.map((h) => (
+                  {HARNESSES.filter((h) => h !== "gemini").map((h) => (
                     <li key={h}>
                       <HarnessIcon h={h} />
                       {HARNESS[h].label}

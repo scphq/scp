@@ -23,9 +23,9 @@ export const HERO_FACTS = [
 
 export const DEMO_CAPTIONS = {
   swarm:
-    "Two machines on two accounts, three fleets each, and ambient swarm a, all trees under one hub. Messages between the accounts cross as contacts through the judge; ambient workers wake on a message and sleep after replying.",
+    "Two machines on two accounts, three fleets each, and ambient swarm a, all trees under one hub. Messages between the accounts cross as contacts through the judge inside the hub; ambient workers wake on a message and sleep after replying.",
   fleet: "An orchestrator spawns three workers in three harnesses, steers one, and waits. Results arrive at turn boundaries.",
-  mesh: "Experimental: four machines of one account and no hub. Each pair of brokers links directly after a mutual signature handshake, and signed machine records spread over the links.",
+  mesh: "Experimental: four machines of one account and no central hub. Each machine is its own hub: brokers link directly after a mutual signature handshake, signed machine records spread over the links, and a message from a peer passes the receiving machine's judge before it reaches the tree.",
 };
 
 export const PROTOCOL = {

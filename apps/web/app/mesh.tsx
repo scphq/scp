@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { drawHarness, HARNESSES, type Harness } from "./harnesses";
-import { at, elbow, ICON, type Palette, type Pt, type Pulse, palette, pulse, rng } from "./swarm";
+import { drawHarness, type Harness } from "./harnesses";
+import { at, elbow, ICON, judge, type Palette, type Pt, type Pulse, palette, pulse, rng } from "./swarm";
 
-type Kind = "broker" | "root" | "sub" | "worker";
+type Kind = "broker" | "judge" | "root" | "sub" | "worker";
 
 interface N extends Pt {
   kind: Kind;
@@ -37,6 +37,7 @@ interface Scene {
   nodes: N[];
   boxes: Box[];
   brokers: number[];
+  judges: number[];
   wires: Wire[];
   top: number;
 }
@@ -58,6 +59,13 @@ const FLEETS: number[][][] = [
     [4, 3, 3],
     [3, 4],
   ],
+];
+
+const ROOT_HARNESS: Harness[][] = [
+  ["claude", "codex"],
+  ["pi", "agy"],
+  ["grok", "muse"],
+  ["codex", "opencode"],
 ];
 
 /** every pair of machines, with the lane each direct link runs in; only the two middle links cross */
@@ -91,15 +99,24 @@ function build(w: number, h: number): Scene {
     return wide ? { x: u, y: edge, w: size, h: h * 0.52, label } : { x: edge, y: u, w: w * 0.77, h: size, label };
   });
 
+  const judges: number[] = [];
   const brokers = boxes.map((box, m) => {
     const broker = add({ ...(wide ? { x: box.x + box.w / 2, y: box.y } : { x: box.x, y: box.y }), kind: "broker", parent: -1, alive: true, machine: m });
+    const gate = add({
+      ...(wide ? { x: box.x + box.w / 2, y: box.y + box.h * 0.16 } : { x: box.x + 22, y: box.y + box.h * 0.27 }),
+      kind: "judge",
+      parent: broker,
+      alive: true,
+      machine: m,
+    });
+    judges.push(gate);
     const fleets = FLEETS[m];
     const slot = box.w / fleets.length;
-    const top = box.y + box.h * (wide ? 0.3 : 0.4);
-    const step = Math.min(box.h * (wide ? 0.29 : 0.25), 54);
+    const top = box.y + box.h * (wide ? 0.34 : 0.48);
+    const step = Math.min(box.h * (wide ? 0.27 : 0.21), 54);
     fleets.forEach((subs, f) => {
       const fx = box.x + slot * f;
-      const root = add({ x: fx + slot / 2, y: top, kind: "root", parent: broker, alive: true, machine: m, harness: HARNESSES[(m * 3 + f) % HARNESSES.length] });
+      const root = add({ x: fx + slot / 2, y: top, kind: "root", parent: gate, alive: true, machine: m, harness: ROOT_HARNESS[m][f] });
       const subSlot = (slot * 0.86) / subs.length;
       const sx0 = fx + slot * 0.07;
       subs.forEach((n, s) => {
@@ -133,7 +150,14 @@ function build(w: number, h: number): Scene {
     return { a, b, pts: [nodes[brokers[a]], at2(ua, edge), at2(ua, v), at2(ub, v), at2(ub, edge), nodes[brokers[b]]] };
   });
 
-  return { w, h, wide, nodes, boxes, brokers, wires, top: lanes[lanes.length - 1] };
+  return { w, h, wide, nodes, boxes, brokers, judges, wires, top: lanes[lanes.length - 1] };
+}
+
+function link(nodes: N[], i: number): Pt[] {
+  const n = nodes[i];
+  const p = nodes[n.parent];
+  if (n.kind === "judge" && p.x !== n.x) return [p, { x: p.x, y: n.y }, n];
+  return elbow(p, n);
 }
 
 function ancestors(nodes: N[], i: number): number[] {
@@ -144,6 +168,7 @@ function ancestors(nodes: N[], i: number): number[] {
 
 /** the path from one node to another in the same machine's tree */
 function within(nodes: N[], from: number, to: number): Pt[] {
+  const seg = (i: number) => link(nodes, i);
   const up = ancestors(nodes, from);
   const down = ancestors(nodes, to);
   const lca = up.find((n) => down.includes(n));
@@ -155,8 +180,8 @@ function within(nodes: N[], from: number, to: number): Pt[] {
       if (!last || last.x !== p.x || last.y !== p.y) pts.push({ x: p.x, y: p.y });
     }
   };
-  for (let k = 0; up[k] !== lca; k++) push(elbow(nodes[nodes[up[k]].parent], nodes[up[k]]).reverse());
-  for (const n of down.slice(0, down.indexOf(lca)).reverse()) push(elbow(nodes[nodes[n].parent], nodes[n]));
+  for (let k = 0; up[k] !== lca; k++) push(seg(up[k]).reverse());
+  for (const n of down.slice(0, down.indexOf(lca)).reverse()) push(seg(n));
   return pts;
 }
 
@@ -223,8 +248,14 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
       const from = pick([...of("worker", true, ma), ...of("root", undefined, ma)]);
       const to = pick(of("root", undefined, mb));
       if (from === undefined || to === undefined) return;
-      const pts = [...within(scene.nodes, from, scene.brokers[ma]), ...wireBetween(ma, mb).slice(1), ...within(scene.nodes, scene.brokers[mb], to).slice(1)];
-      pulses.push(pulse(pts, "fg", 150));
+      const out = within(scene.nodes, from, scene.brokers[ma]);
+      const wire = wireBetween(ma, mb).slice(1);
+      const inbound = within(scene.nodes, scene.brokers[mb], to).slice(1);
+      const p = pulse([...out, ...wire, ...inbound], "fg", 150);
+      p.holdAt = p.cum[out.length + wire.length];
+      p.hold = 0.35 + r() * 0.5;
+      p.gate = scene.judges[mb];
+      pulses.push(p);
     };
 
     const spawnRecords = () => {
@@ -264,6 +295,7 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
       for (const p of pulses) {
         p.d = p.cum[p.cum.length - 1] * (0.35 + r() * 0.4);
         p.done = undefined;
+        p.holdAt = undefined;
       }
     };
 
@@ -285,7 +317,15 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
         n.a += ((n.alive ? 1 : 0) - n.a) * Math.min(1, dt * 3);
         n.ring = Math.max(0, n.ring - dt * 1.3);
       }
-      for (const p of pulses) p.d += p.speed * dt;
+      for (const p of pulses) {
+        if (p.holdAt !== undefined && p.d >= p.holdAt && (p.hold ?? 0) > 0) {
+          p.d = p.holdAt;
+          p.hold! -= dt;
+          if (p.gate !== undefined) scene.nodes[p.gate].ring = 1;
+          continue;
+        }
+        p.d += p.speed * dt;
+      }
       pulses = pulses.filter((p) => {
         if (p.d < p.cum[p.cum.length - 1]) return true;
         p.done?.();
@@ -294,7 +334,7 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
       timers.count -= dt;
       if (timers.count <= 0 && status.current) {
         timers.count = 1;
-        const agents = scene.nodes.filter((n) => n.kind !== "broker" && n.alive).length;
+        const agents = scene.nodes.filter((n) => n.kind !== "broker" && n.kind !== "judge" && n.alive).length;
         status.current.textContent = `${agents} agents, ${scene.boxes.length} machines`;
       }
     };
@@ -324,24 +364,27 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
       ctx.strokeStyle = pal.line;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      nodes.forEach((n) => {
-        if (n.parent >= 0) line(elbow(nodes[n.parent], n));
+      nodes.forEach((n, i) => {
+        if (n.parent >= 0) line(link(nodes, i));
       });
       for (const wire of scene.wires) line(wire.pts.slice(1, -1));
       ctx.stroke();
 
-      if (scene.wide) label("no hub, brokers peer directly", w / 2, scene.top - 14, "center");
+      if (scene.wide) label("no central hub, every machine is its own", w / 2, scene.top - 14, "center");
 
       boxes.forEach((box, m) => {
         ctx.strokeStyle = pal.line;
         ctx.strokeRect(crisp(box.x), crisp(box.y), Math.round(box.w), Math.round(box.h));
         label(box.label, box.x + 12, box.y + 16);
-        const alive = nodes.filter((n) => n.machine === m && n.alive && n.kind !== "broker").length;
-        label(`${FLEETS[m].length} fleets, ${alive} agents`, box.x + box.w - 12, scene.wide ? box.y + box.h - 16 : box.y + 16, "right", pal.faint);
+        label("own hub", box.x + box.w - 12, box.y + 16, "right");
+        const alive = nodes.filter((n) => n.machine === m && n.alive && n.kind !== "broker" && n.kind !== "judge").length;
+        const text = `${FLEETS[m].length} fleets, ${alive} agents`;
+        if (scene.wide) label(text, box.x + box.w - 12, box.y + box.h - 16, "right", pal.faint);
+        else label(text, box.x + box.w - 12, nodes[scene.judges[m]].y, "right", pal.faint);
       });
 
       for (const n of nodes) {
-        if (n.kind === "broker") continue;
+        if (n.kind === "broker" || n.kind === "judge") continue;
         const s = n.kind === "root" ? 7 : n.kind === "sub" ? 5 : 4;
         if (n.harness) {
           ctx.fillStyle = pal.bg;
@@ -378,6 +421,12 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
           ctx.globalAlpha = 1;
         }
         label("broker", n.x + 12, n.y - 10);
+      }
+
+      for (const i of scene.judges) {
+        const n = nodes[i];
+        judge(ctx, n, pal);
+        label("judge", n.x + 12, n.y);
       }
 
       for (const p of pulses) {
