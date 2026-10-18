@@ -12,7 +12,7 @@ export const MACHINE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const formatUserCode = (code: string): string => `${code.slice(0, 4)}-${code.slice(4)}`;
 const normalizeUserCode = (raw: string): string => raw.toUpperCase().replace(/[^A-Z]/g, "");
 
-/** POST /v1/device/code: starts a login for `scp login` */
+/** POST /v1/device/code: starts a login for `swarm login` */
 export async function deviceCode(req: Request, db: D1Database, origin: string, now: number): Promise<Response> {
   const input = await readJson(req);
   const label = typeof input.label === "string" && input.label ? input.label : "cli";
@@ -64,7 +64,7 @@ export async function deviceToken(req: Request, db: D1Database, origin: string, 
   const fail = (error: string, description: string) => json({ error, error_description: description }, 400);
   if (!row || row.credential_id) return fail("invalid_grant", "Unknown or already used device code.");
   if (row.denied_at) return fail("access_denied", "The login was denied.");
-  if (row.expires_at <= now) return fail("expired_token", "The device code expired. Run scp login again.");
+  if (row.expires_at <= now) return fail("expired_token", "The device code expired. Run swarm login again.");
   if (!row.approved_at) return fail("authorization_pending", "Waiting for approval in the browser.");
 
   const cred = await mint(DEVICE_PREFIX);
@@ -94,39 +94,33 @@ export async function deviceToken(req: Request, db: D1Database, origin: string, 
 
 async function pendingByUserCode(db: D1Database, code: string, now: number) {
   const row = await db.prepare("SELECT label, expires_at, approved_at, denied_at FROM device_codes WHERE user_code = ?").bind(code).first<CodeRow>();
-  if (!row || row.expires_at <= now) throw new HttpError(404, "not_found", "That code is unknown or has expired. Run scp login again.");
+  if (!row || row.expires_at <= now) throw new HttpError(404, "not_found", "That code is unknown or has expired. Run swarm login again.");
   if (row.approved_at || row.denied_at) throw new HttpError(409, "decided", "That code was already used.");
   return row;
 }
 
-export async function devicePage(ctx: Ctx, userId: string, error = "", status = 200): Promise<Response> {
-  const code = normalizeUserCode(ctx.url.searchParams.get("code") ?? "");
+export async function devicePage(ctx: Ctx, userId: string, error = "", status = 200, raw = ctx.url.searchParams.get("code") ?? ""): Promise<Response> {
+  const code = normalizeUserCode(raw);
   const head = html`<p class="label">Device login</p>`;
-  if (!code || error) {
-    return page(
+  const entry = (message: string, st: number) =>
+    page(
       ctx,
       { title: "Device login", nav: "device" },
       html`${head}<h1>Connect a terminal</h1>
-        <p class="lead">Enter the code that <code>scp login</code> printed.</p>
-        ${notice(error, true)}
+        <p class="lead">Enter the code that <code>swarm login</code> printed.</p>
+        ${notice(message, true)}
         <form class="form" method="get" action="/device">
-          <label class="field"><span>Code</span><input class="code" type="text" name="code" placeholder="BCDF-GHJK" maxlength="9" autocomplete="off" required autofocus></label>
+          <label class="field"><span>Code</span><input class="code" type="text" name="code" value="${code ? formatUserCode(code) : ""}" placeholder="BCDF-GHJK" maxlength="9" autocomplete="off" required autofocus></label>
           <div class="acts"><button class="btn btn-primary" type="submit">Continue</button></div>
         </form>`,
-      status,
+      st,
     );
-  }
+  if (!code || error) return entry(error, status);
   let row: CodeRow;
   try {
     row = await pendingByUserCode(ctx.env.DB, code, ctx.now);
   } catch (e) {
-    if (e instanceof HttpError)
-      return page(
-        ctx,
-        { title: "Device login", nav: "device" },
-        html`${head}<h1>Connect a terminal</h1>${notice(e.message, true)}<p class="small"><a href="/device">Enter another code</a></p>`,
-        e.status,
-      );
+    if (e instanceof HttpError) return entry(e.message, e.status);
     throw e;
   }
   const orgs = await listOrgs(ctx.env.DB, userId);
@@ -135,13 +129,17 @@ export async function devicePage(ctx: Ctx, userId: string, error = "", status = 
     { title: "Approve device", nav: "device" },
     html`${head}<h1>Approve this login?</h1>
       <p class="usercode">${formatUserCode(code)}</p>
-      <p class="lead">Machine <code>${row.label}</code> asks to join an organization's hub as you. Approve only if you just ran <code>scp login</code> and this code matches your terminal.</p>
+      <p class="lead">Machine <code>${row.label}</code> asks to join an organization's hub as you. Approve only if you just ran <code>swarm login</code> and this code matches your terminal.</p>
       ${
         orgs.length
           ? html`<form class="form" method="post" action="/device">
             <input type="hidden" name="csrf" value="${ctx.csrf}">
             <input type="hidden" name="code" value="${code}">
-            <label class="field"><span>Organization</span><select name="org">${orgs.map((o) => html`<option value="${o.handle}">${o.name} (${o.handle})</option>`)}</select></label>
+            ${
+              orgs.length === 1
+                ? html`<input type="hidden" name="org" value="${orgs[0]!.handle}"><p>Organization <strong>${orgs[0]!.name}</strong> (${orgs[0]!.handle})</p>`
+                : html`<label class="field"><span>Organization</span><select name="org">${orgs.map((o) => html`<option value="${o.handle}">${o.name} (${o.handle})</option>`)}</select></label>`
+            }
             <div class="acts"><button class="btn btn-primary" type="submit" name="action" value="approve">Approve</button><button class="btn btn-ghost" type="submit" name="action" value="deny">Deny</button></div>
           </form>`
           : html`<p class="empty">You are not in an organization yet. <a href="/orgs">Create one</a>, then reload this page.</p>`
@@ -173,7 +171,7 @@ export async function devicePost(ctx: Ctx, userId: string): Promise<Response> {
     if (!res.meta.changes) throw new HttpError(409, "decided", "That code was already used.");
     return done("Device approved", `The terminal joins ${m.org.name} in a few seconds. You can close this tab.`);
   } catch (e) {
-    if (e instanceof HttpError && e.status < 500) return devicePage(ctx, userId, e.message, e.status);
+    if (e instanceof HttpError && e.status < 500) return devicePage(ctx, userId, e.message, e.status, code);
     throw e;
   }
 }
