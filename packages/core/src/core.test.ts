@@ -873,6 +873,25 @@ describe("sessions and hooks", () => {
   const P2 = "pid:200:Wed-Oct-15-10:00:00-2026"
   const P3 = "pid:300:Wed-Oct-15-10:00:00-2026"
 
+  test("a named shim the same harness process starts again takes its live endpoint back instead of a -2", () => {
+    const { core } = setup()
+    const first = core.claim({ handle: "ambient-a-2", harness: "pi", session: P1, process: P1 })
+    const again = core.claim({ handle: "ambient-a-2", harness: "pi", session: P1, process: P1 })
+    expect(again.endpoint.id).toBe(first.endpoint.id)
+    expect(again.endpoint.address).toBe("me/ambient-a-2")
+    expect(core.claim({ handle: "ambient-a-2", harness: "pi", session: P2, process: P2 }).endpoint.address).toBe("me/ambient-a-2-2")
+  })
+
+  test("a named relaunch takes back an endpoint whose shim outlived its exited harness", () => {
+    const dead = new Set<number>()
+    const { core } = setup(undefined, (pid) => !dead.has(pid))
+    const first = core.claim({ handle: "ambient-a-2", harness: "pi", session: P1, process: P1 })
+    dead.add(100)
+    const relaunch = core.claim({ handle: "ambient-a-2", harness: "pi", session: P2, process: P2 })
+    expect(relaunch.endpoint.id).toBe(first.endpoint.id)
+    expect(relaunch.endpoint.address).toBe("me/ambient-a-2")
+  })
+
   test("a hook's claim joins its session's live endpoint without rotating its token or wiping its fields", () => {
     const { core, db } = setup()
     const shim = core.claim({ handle: "relay-1b", harness: "claude-code", session: "s1", model: "opus", cwd: "/w", labels: { role: "impl" } })

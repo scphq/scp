@@ -300,14 +300,20 @@ export function startBridge(options: BridgeOptions): Bridge {
     for (const fn of waitingForLink.splice(0)) fn()
   }
 
-  /** the other machines' endpoints, grouped by machine; with `full`, a known machine missing from the list goes offline */
+  /**
+   * the other machines' endpoints, grouped by machine; with `full`, a known machine the hub no longer lists was released and its rows go,
+   * as do rows mirrored under this machine's own name from before it was renamed back to it
+   */
   function applyRemote(views: RemoteView[], full: boolean) {
     const byMachine = new Map<string, RemoteView[]>()
     for (const view of views) {
       if (view.machine === machine) continue
       byMachine.set(view.machine, [...(byMachine.get(view.machine) ?? []), view])
     }
-    if (full) for (const view of core.remoteViews()) if (view.machine !== account && !byMachine.has(view.machine)) byMachine.set(view.machine, [])
+    if (full) {
+      core.dropMachine(machine)
+      for (const view of core.remoteViews()) if (view.machine !== account && !byMachine.has(view.machine)) core.dropMachine(view.machine)
+    }
     for (const [name, list] of byMachine) {
       try {
         core.mirror(name, list, { full })
@@ -423,7 +429,8 @@ export function startBridge(options: BridgeOptions): Bridge {
         if (typeof params.machine !== "string" || params.machine === machine) return
         if (typeof params.own === "boolean") core.setOther(params.machine, !params.own)
         try {
-          core.mirror(params.machine, params.endpoints, { full: params.full === true })
+          if (params.released === true) core.dropMachine(params.machine)
+          else core.mirror(params.machine, params.endpoints, { full: params.full === true })
         } catch (error) {
           log(`relay bridge: the endpoints of ${params.machine} were not applied: ${error instanceof Error ? error.message : String(error)}`)
         }

@@ -10,13 +10,15 @@ type Bands = (
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
 const graphPath = "../src/graph";
 const identityPath = "../src/identity";
-const { BANDS_JS }: { BANDS_JS: string } = await import(graphPath);
+const { BANDS_JS, DRAWN_JS }: { BANDS_JS: string; DRAWN_JS: string } = await import(graphPath);
 const {
   identities,
   identify,
 }: { identities(m: { user_id: string; email: string }[]): Map<string, Identity>; identify(g: unknown, who: Map<string, Identity>): { machines: unknown[] } } =
   await import(identityPath);
 const bands = new Function(`${BANDS_JS}; return bands;`)() as Bands;
+type Node = { address: string; kind: string; presence: string; wake: string | null };
+const drawn = new Function(`${DRAWN_JS}; return drawn;`)() as (n: Node, o: { offline: boolean; nextTurn: boolean }, talks: Set<string>) => boolean;
 
 test("each machine carries its member's identity: the email's local part, initials and a distinct tone, never the member id", () => {
   const who = identities([
@@ -82,4 +84,20 @@ test("machines without an identity take no band, and a lone machine needs no hub
   expect(L.places.get("")).toEqual({ x: 0, y: 0 });
   expect(L.bands[0]).toMatchObject({ key: "", w: 140, h: 90 });
   expect(L.hub).toBeNull();
+});
+
+test("the graph shows online and wakeable idle by default, next-turn idle and offline only when asked", () => {
+  const n = (address: string, presence: string, wake: string | null = null, kind = "agent"): Node => ({ address, kind, presence, wake });
+  const nodes = [
+    n("on", "online"),
+    n("wakes", "idle", "tmux"),
+    n("next", "idle"),
+    n("off", "offline"),
+    n("me", "offline", null, "human"),
+    n("you", "idle", null, "human"),
+  ];
+  const pick = (o: { offline: boolean; nextTurn: boolean }) => nodes.filter((x) => drawn(x, o, new Set(["me"]))).map((x) => x.address);
+  expect(pick({ offline: false, nextTurn: false })).toEqual(["on", "wakes", "me", "you"]);
+  expect(pick({ offline: false, nextTurn: true })).toEqual(["on", "wakes", "next", "me", "you"]);
+  expect(pick({ offline: true, nextTurn: false })).toEqual(["on", "wakes", "off", "me", "you"]);
 });

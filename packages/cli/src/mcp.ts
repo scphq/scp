@@ -7,6 +7,9 @@ import { mcpInstall } from "./install"
 import { harnessAt, harnessPid, psParent, relayIdentity } from "./identity"
 import { membership } from "./session"
 
+/** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
+const ORPHAN_CHECK_MS = 5000
+
 type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean }
 
 /** `swarm mcp`: the stdio MCP shim for this harness session, or `mcp install` */
@@ -28,6 +31,11 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
   })
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)
   const dir = relayDir()
+  const parent = process.ppid
+  const orphaned = setInterval(() => {
+    if (process.ppid !== parent) process.exit(0)
+  }, ORPHAN_CHECK_MS)
+  orphaned.unref()
   await runRelayMcp({
     connect: () => connectBroker(dir, () => startDaemon(dir)),
     claim,

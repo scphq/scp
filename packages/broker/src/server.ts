@@ -64,6 +64,8 @@ export interface BrokerOptions {
   link?: LinkFactory | undefined
   /** how often presence that decays without a request (a hook-only endpoint) is checked for changes (default 60 s) */
   presenceEveryMs?: number | undefined
+  /** how often the broker checks it still owns its socket and lock, stopping once another broker or a wiped state directory took them (default 2 s) */
+  ownershipEveryMs?: number | undefined
   /** where a judge model's key_env is read (default the broker's environment) */
   env?: Record<string, string | undefined> | undefined
   /** the judge model client for a policy's `judge.model` (default the provider's HTTP API) */
@@ -114,6 +116,8 @@ interface Connection {
   process?: string
   /** a one-shot CLI command's connection: its comings and goings are not fleet presence events */
   brief?: boolean
+  /** the endpoint whose wake this connection set: it counts as its waker until it closes or sets none */
+  waker?: string | undefined
   cwd?: string | undefined
   watching: boolean
   closed: boolean
@@ -126,6 +130,7 @@ interface Connection {
 
 const SWEEP_MS = 10 * 60_000
 const PRESENCE_MS = 60_000
+const OWNERSHIP_MS = 2_000
 const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "policy", "policy_check", "cloud_status", "bridge_relink"])
 const SCOPE_METHODS = new Set([
   "rules",
@@ -219,6 +224,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   let judge!: JudgeGate
   let bridge: Bridge | null = null
   let listener!: Server
+  let socketIno: number | bigint | undefined
   try {
     privateDir(dirname(socket))
     db = openDatabase(join(dir, "relay.db"))
@@ -235,6 +241,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       alive: running,
     })
     core.migrate()
+    core.relabelMachine()
     core.resetConnections()
     core.sweep()
     judge = new JudgeGate({ sql, core, now: options.now ?? Date.now, env: options.env ?? process.env, client: options.judgeClient, log, wake })
@@ -271,6 +278,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     })
     listener.on("error", (error) => log(`relay broker: the socket listener failed: ${error.message}`))
     chmodSync(socket, 0o600)
+    socketIno = lstatSync(socket).ino
   } catch (error) {
     listener?.close()
     db?.close()
@@ -294,6 +302,26 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     }
     for (const id of known.keys()) if (!live.has(id)) known.delete(id)
   }, options.presenceEveryMs ?? PRESENCE_MS)
+  const ownership = setInterval(() => {
+    if (closing || ownsState()) return
+    log(`relay broker: ${socket} or its lock was removed or taken over; stopping`)
+    void stop()
+  }, options.ownershipEveryMs ?? OWNERSHIP_MS)
+  ownership.unref?.()
+
+  /** whether the socket path is still this broker's listener */
+  function ownsSocket(): boolean {
+    return lstatSync(socket, { throwIfNoEntry: false })?.ino === socketIno
+  }
+
+  /** whether the socket path and the lock are still this broker's */
+  function ownsState(): boolean {
+    try {
+      return ownsSocket() && readFileSync(lock.path, "utf8") === lock.content
+    } catch {
+      return false
+    }
+  }
   const remoteHooks: BridgeHooks = {
     wake,
     fleet: notifyFleet,
@@ -397,6 +425,24 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   /** this host's own endpoints, mirrored rows of other machines left out */
   function localViews(): EndpointView[] {
     return core.list({ all: true }).filter((view) => core.machineOf(view.id) === null)
+  }
+
+  /** counts `s` as the waker of `endpoint`, or of none, and reports the presence that moves */
+  function setWaker(s: Conn<Connection>, endpoint: string | undefined) {
+    const was = s.data.waker
+    if (was === endpoint) return
+    s.data.waker = endpoint
+    if (was) core.waker(was, false, { grace: s.data.transient === true })
+    if (endpoint) core.waker(endpoint, true)
+    for (const id of [was, endpoint]) if (id) presenceMoved(id)
+  }
+
+  /** reports an endpoint's presence when it is not the one last reported; whether it was not */
+  function presenceMoved(id: string): boolean {
+    const view = core.whoami(id)
+    if ((known.get(id) ?? "offline") === view.presence) return false
+    presenceChanged(view)
+    return true
   }
 
   /** an endpoint's presence changed outside a connection's own hello or close: watchers and the other machines hear it */
@@ -583,6 +629,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     s.data.closed = true
     clearTimeout(s.data.lineTimer)
     connections.delete(s)
+    if (!closing) setWaker(s, undefined)
     if (s.data.endpoint && !closing && !s.data.transient && !s.data.lineage) {
       const before = core.whoami(s.data.endpoint).presence
       const settled = core.disconnect(s.data.endpoint, { settle: !s.data.brief })
@@ -891,7 +938,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "wake": {
         if (s.data.lineage && !s.data.own) throw new RelayError("unauthorized", "only the endpoint's own session says how it wakes")
         const changed = core.setWake(me, params.via, hookOf(s))
-        if (changed) bridge?.changed(me)
+        setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
+        if (!presenceMoved(me) && changed) bridge?.changed(me)
         return { changed }
       }
       case "rename": {
@@ -1210,6 +1258,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       closing = true
       clearInterval(sweeper)
       clearInterval(presenceTimer)
+      clearInterval(ownership)
       await bridge?.stop()
       if (idleTimer) clearTimeout(idleTimer)
       for (const set of [...waiters.values()]) for (const fn of [...set]) fn()
@@ -1217,10 +1266,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       while (pending > 0 && Date.now() < deadline) await sleep(5)
       await Promise.race([judge.settled(), sleep(Math.max(0, deadline - Date.now()))])
       for (const s of connections) s.end()
-      listener.close()
-      try {
-        unlinkSync(socket)
-      } catch {}
+      // closing a listener unlinks its path, which another broker may own by now
+      if (ownsSocket()) {
+        listener.close()
+        try {
+          unlinkSync(socket)
+        } catch {}
+      } else listener.unref()
       if (socket !== join(dir, "relay.sock")) {
         try {
           rmdirSync(dirname(socket))

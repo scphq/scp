@@ -1,6 +1,7 @@
 /**
- * Harness marks, each on a 24 unit grid. Paths for claude, codex, gemini, agy, muse and grok are from
- * simple-icons 15.22.0 (CC0 1.0); opencode is its project favicon, pi its project's pixel icon.
+ * Harness marks, each on a 24 unit grid. Paths for claude, codex, gemini, agy and muse are from
+ * simple-icons 15.22.0 (CC0 1.0); grok is the xAI mark from lobe-icons 1.95.1 (MIT,
+ * https://github.com/lobehub/lobe-icons, icons/xai.svg); opencode is its project favicon, pi its project's pixel icon.
  */
 
 export const HARNESSES = ["claude", "codex", "opencode", "pi", "gemini", "agy", "grok", "muse"] as const;
@@ -52,10 +53,10 @@ export const HARNESS: Record<Harness, { label: string; parts: Part[]; scale?: nu
   },
   grok: {
     label: "Grok",
-    scale: 0.8,
+    scale: 0.9,
     parts: [
       {
-        d: "M14.234 10.162 22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993zm-2.837 3.299-.929-1.329L3.076 1.56h3.182l5.965 8.532.929 1.329 7.754 11.09h-3.182z",
+        d: "M6.469 8.776 16.512 23h-4.464L2.005 8.776H6.47zm-.004 7.9 2.233 3.164L6.467 23H2l4.465-6.324zM22 2.582V23h-3.659V7.764L22 2.582zM22 1l-9.952 14.095-2.233-3.163L17.533 1H22z",
       },
     ],
   },

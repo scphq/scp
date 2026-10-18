@@ -83,4 +83,35 @@ describe("wake", () => {
     ])
     expect(sent.deliveries[1]).not.toHaveProperty("wake")
   })
+
+  test("a lasting waker keeps a wakeable endpoint idle and listed, and it goes offline once the waker closes", () => {
+    const { core, clock } = setup()
+    const id = core.claim({ handle: "cx", harness: "codex", process: key(9), session: key(9) }, { transient: true }).endpoint.id
+    core.setWake(id, "codex-app-server")
+    core.waker(id, true)
+    clock.now += (LIMITS.listOfflineWithinS + 1) * 1000
+    expect(core.list().find((e) => e.id === id)?.presence).toBe("idle")
+    core.waker(id, false)
+    expect(core.whoami(id).presence).toBe("offline")
+  })
+
+  test("a hook waker keeps it idle across the gap before the next one; a wake of none or a lapsed grace lets it go", () => {
+    const { core, clock } = setup()
+    const id = core.claim({ handle: "oc", harness: "opencode", process: key(9), session: key(9) }, { transient: true }).endpoint.id
+    core.setWake(id, "opencode-plugin", { transient: true, process: key(9) })
+    core.waker(id, true)
+    clock.now += (LIMITS.hookIdleS + 1) * 1000
+    core.waker(id, false, { grace: true })
+    clock.now += (LIMITS.restartGraceS - 1) * 1000
+    expect(core.whoami(id).presence).toBe("idle")
+    core.waker(id, true)
+    core.waker(id, false, { grace: true })
+    clock.now += (LIMITS.restartGraceS + 1) * 1000
+    expect(core.whoami(id).presence).toBe("offline")
+    core.waker(id, true)
+    core.resetConnections()
+    expect(core.whoami(id).presence).toBe("idle")
+    core.setWake(id, "none")
+    expect(core.whoami(id).presence).toBe("offline")
+  })
 })
