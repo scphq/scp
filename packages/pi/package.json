@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A pi extension that joins the session to SCP: the relay's tools, and incoming messages as turns, waking an idle session.",
   "license": "Apache-2.0",
