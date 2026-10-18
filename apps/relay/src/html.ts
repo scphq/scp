@@ -20,6 +20,13 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Html 
   return new Html(out);
 }
 
+/** a short content hash for an asset URL, so new markup never renders against a cached older stylesheet or script */
+export function stamp(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
+}
+
 export interface Chrome {
   title: string;
   email: string | null;
@@ -47,7 +54,7 @@ export function layout(c: Chrome, body: Html): string {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/app.css?v=${stamp(CSS)}">
 ${c.head ?? ""}
 </head>
 <body${c.wide ? html` class="wide"` : ""}>
@@ -145,19 +152,24 @@ table.agents,table.activity{table-layout:fixed;min-width:56rem}
 table.agents th,table.agents td,table.activity th,table.activity td{height:2.125rem;padding:.25rem .75rem;line-height:1.25rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.agents .end,table.activity .end{text-align:right}
 table.agents .tag+.tag{margin-left:.25rem}
-.c-harness{width:2.5rem}.c-agent{width:28%}.c-title{width:18%}.c-presence{width:8.5rem}.c-status{width:20%}.c-labels{width:16%}.c-seen{width:6.5rem}
+.c-agent{width:30%}.c-title{width:18%}.c-presence{width:8.5rem}.c-status{width:20%}.c-labels{width:16%}.c-seen{width:6.5rem}
 .c-when{width:7rem}.c-who{width:30%}
-tr.sub td.agent{padding-left:1.5rem}
-tr.sub.d2 td.agent{padding-left:2.25rem}
-tr.sub.d3 td.agent{padding-left:3rem}
-tr.sub.d4 td.agent{padding-left:3.75rem}
-table.agents .harness{padding-inline:.75rem 0;text-align:center}
-.hicon{display:block;width:14px;height:14px;color:var(--ink)}
+tr.sub td.agent{padding-left:1.75rem}
+tr.sub.d2 td.agent{padding-left:2.75rem}
+tr.sub.d3 td.agent{padding-left:3.75rem}
+tr.sub.d4 td.agent{padding-left:4.75rem}
+.caret{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin-right:.125rem;padding:0;border:0;background:none;color:var(--dim);vertical-align:-2px;cursor:pointer}
+.caret svg{transition:transform .15s}
+.caret[aria-expanded=true] svg{transform:rotate(90deg)}
+.caret:hover{color:var(--fg)}
+:root{--h-claude:#c15f3c;--h-codex:#0f8a6c;--h-opencode:#b56a00;--h-gemini:#1a73e8;--h-grok:#3a3a3a;--h-muse:#7a4bd4;--h-pi:#c03d86}
+@media (prefers-color-scheme:dark){:root{--h-claude:#e08b6b;--h-codex:#3fc6a0;--h-opencode:#e6a43f;--h-gemini:#7aa9ff;--h-grok:#e6e6e6;--h-muse:#ab8ef6;--h-pi:#ec7bb8}}
+.hicon{display:inline-block;width:12px;height:12px;margin-right:.375rem;vertical-align:-1px;color:var(--dim)}
+.h-claude{color:var(--h-claude)}.h-codex{color:var(--h-codex)}.h-opencode{color:var(--h-opencode)}.h-gemini{color:var(--h-gemini)}.h-grok{color:var(--h-grok)}.h-muse{color:var(--h-muse)}.h-pi{color:var(--h-pi)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .wake-badge{display:inline-flex;vertical-align:middle;margin-left:.25rem;color:var(--acc)}
 .bolt{width:11px;height:11px}
 .dot.idle.wake{border-color:var(--acc);background:var(--acc-soft)}
-.tree{margin-right:.375rem;font-family:var(--mono);font-size:.75rem;color:var(--faint)}
 details.offline{margin-top:.5rem}
 details.offline>summary{display:inline-block;padding:.125rem 0;cursor:pointer;list-style:none}
 details.offline>summary::-webkit-details-marker{display:none}

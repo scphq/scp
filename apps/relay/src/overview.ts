@@ -2,7 +2,7 @@ import { type ActivityRow, type EndpointView, GONE_PREFIX } from "@scp-dev/core"
 import type { MachineRow } from "@scp-dev/hub";
 import type { User } from "./env";
 import { type Overview, hubOverview } from "./hub/routes";
-import { Html, html } from "./html";
+import { Html, html, stamp } from "./html";
 import { notice, orgHeader, requireMember } from "./orgs";
 import { type Ctx, page } from "./web";
 
@@ -99,10 +99,13 @@ const ICON_OF: Record<string, string> = {
 /** the glyph for a harness name, generic for one this page does not know */
 export const harnessIcon = (harness: string | null): string => ICON_OF[(harness ?? "").toLowerCase()] ?? "generic";
 
-const harnessCell = (harness: string | null): Html => {
-  const name = harness ?? "unknown harness";
-  return html`<td class="harness" title="${name}"><svg class="hicon" viewBox="0 0 16 16" role="img" aria-label="${name}">${new Html(ICON_PATHS[harnessIcon(harness)]!)}</svg></td>`;
+/** sized in markup too, so a stale or missing stylesheet never blows it up */
+const hicon = (harness: string | null): Html => {
+  const key = harnessIcon(harness);
+  return html`<svg class="hicon h-${key}" width="12" height="12" viewBox="0 0 16 16" role="img" aria-label="${harness ?? "unknown harness"}">${new Html(ICON_PATHS[key]!)}</svg>`;
 };
+
+const CARET = html`<svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="M2 .75 6.5 4 2 7.25z" fill="currentColor"/></svg>`;
 
 /** a handle as people read it: a retired row's `_gone_<id>` shows as ended */
 export const shown = (handle: string): string => (handle.startsWith(GONE_PREFIX) ? "(ended)" : handle);
@@ -121,6 +124,10 @@ export interface Row {
   e: EndpointView;
   /** nesting under a parent shown in the rows above, 0 for a root */
   depth: number;
+  /** the addresses of its listed ancestors, root first */
+  anc: string[];
+  /** how many rows sit directly under it */
+  kids: number;
 }
 
 /** online, then idle, then offline, then by handle, each subagent right under its parent when the parent is listed */
@@ -134,32 +141,37 @@ export function orderRows(endpoints: EndpointView[]): Row[] {
   }
   const out: Row[] = [];
   const seen = new Set<string>();
-  const walk = (list: EndpointView[], depth: number): void => {
+  const walk = (list: EndpointView[], anc: string[]): void => {
     for (const e of list.sort(byPresence)) {
       if (seen.has(e.address)) continue;
       seen.add(e.address);
-      out.push({ e, depth });
-      walk(kids.get(e.address) ?? [], depth + 1);
+      out.push({ e, depth: anc.length, anc, kids: 0 });
+      walk(kids.get(e.address) ?? [], [...anc, e.address]);
     }
   };
-  walk(roots, 0);
+  walk(roots, []);
   walk(
     endpoints.filter((e) => !seen.has(e.address)),
-    0,
+    [],
   );
+  const byAddress = new Map(out.map((r) => [r.e.address, r]));
+  for (const r of out) if (r.anc.length) byAddress.get(r.anc.at(-1)!)!.kids++;
   return out;
 }
 
-function endpointRow({ e, depth }: { e: Listed; depth: number }, now: number): Html {
+function endpointRow({ e, depth, anc, kids }: Row & { e: Listed }, shut: Set<string>, now: number): Html {
   const handle = handleOf(e.address);
   const parent = e.parent ? handleOf(e.parent) : null;
   const tags = chips(e.labels);
   const status = e.status ? (e.status.note ? `${e.status.state}: ${e.status.note}` : e.status.state) : "none";
   const seen = e.presence === "online" ? "now" : ago(e.last_seen, now);
   const state = presence(e);
-  return html`<tr${depth ? html` class="sub d${Math.min(depth, 4)}"` : ""}>
-    ${harnessCell(e.harness)}
-    <td class="agent" title="${parent ? `${handle}, sub of ${parent}` : handle}">${depth ? html`<span class="tree" aria-hidden="true">└</span>` : ""}<span class="mono">${handle}</span>${parent && !depth ? html` <span class="mini">sub of ${parent}</span>` : ""}</td>
+  const caret = kids
+    ? html`<button class="caret" type="button" data-tree="${e.address}" aria-expanded="${String(!shut.has(e.address))}" aria-label="${kids} under ${handle}">${CARET}</button>`
+    : html`<span class="caret" aria-hidden="true"></span>`;
+  const tip = [handle, e.harness ?? "unknown harness", parent ? `sub of ${parent}` : ""].filter(Boolean).join(", ");
+  return html`<tr${depth ? html` class="sub d${Math.min(depth, 4)}" data-anc="${anc.join(" ")}"${anc.some((a) => shut.has(a)) ? " hidden" : ""}` : ""}>
+    <td class="agent" title="${tip}">${caret}${hicon(e.harness)}<span class="mono">${handle}</span>${parent && !depth ? html` <span class="mini">sub of ${parent}</span>` : ""}</td>
     <td class="small" title="${e.title ?? ""}">${e.title ?? ""}</td>
     <td title="${state.tip}">${state.cell}</td>
     <td title="${status}">${e.status ? html`<span class="role">${e.status.state}</span>${e.status.note ? html` <span class="small">${e.status.note}</span>` : ""}` : html`<span class="mini">none</span>`}</td>
@@ -168,14 +180,15 @@ function endpointRow({ e, depth }: { e: Listed; depth: number }, now: number): H
   </tr>`;
 }
 
-const COLS = html`<colgroup><col class="c-harness"><col class="c-agent"><col class="c-title"><col class="c-presence"><col class="c-status"><col class="c-labels"><col class="c-seen"></colgroup>`;
+const COLS = html`<colgroup><col class="c-agent"><col class="c-title"><col class="c-presence"><col class="c-status"><col class="c-labels"><col class="c-seen"></colgroup>`;
 
-const agentTable = (rows: Row[], now: number, head: boolean): Html =>
-  html`<div class="table"><table class="agents">${COLS}${
-    head
-      ? html`<thead><tr><th class="harness"><span class="sr">Harness</span></th><th>Agent</th><th>Title</th><th>Presence</th><th>Status</th><th>Labels</th><th class="end">Seen</th></tr></thead>`
-      : ""
-  }<tbody>${rows.map((r) => endpointRow(r, now))}</tbody></table></div>`;
+/** live parents start expanded, offline ones collapsed */
+const agentTable = (rows: Row[], now: number, head: boolean): Html => {
+  const shut = new Set(rows.filter((r) => r.kids && r.e.presence === "offline").map((r) => r.e.address));
+  return html`<div class="table"><table class="agents">${COLS}${
+    head ? html`<thead><tr><th>Agent</th><th>Title</th><th>Presence</th><th>Status</th><th>Labels</th><th class="end">Seen</th></tr></thead>` : ""
+  }<tbody>${rows.map((r) => endpointRow(r, shut, now))}</tbody></table></div>`;
+};
 
 function machineBlock(g: MachineGroup, now: number): Html {
   const m = g.machine;
@@ -274,15 +287,30 @@ export async function overviewPage(ctx: Ctx, user: User, handle: string): Promis
       title: m.org.name,
       nav: "orgs",
       wide: true,
-      head: html`<script src="/app.js" defer></script><noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>`,
+      head: html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script><noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>`,
     },
     html`${orgHeader(m, "overview")}
       <div data-live="${REFRESH_MS}">${liveRegion(o, m.org.handle, ctx.now)}</div>`,
   );
 }
 
-/** copy buttons, and a refetch of the page that swaps in its live region while the tab is visible */
+/** copy buttons, agent tree toggles, and a refetch of the page that swaps in its live region while the tab is visible */
 export const APP_JS = `
+const chosen = new Map();
+const fold = (root) => {
+  for (const b of root.querySelectorAll("[data-tree]")) {
+    const v = chosen.get(b.getAttribute("data-tree"));
+    if (v) b.setAttribute("aria-expanded", v);
+  }
+  const shut = new Set([...root.querySelectorAll('[data-tree][aria-expanded="false"]')].map((b) => b.getAttribute("data-tree")));
+  for (const r of root.querySelectorAll("tr[data-anc]")) r.hidden = r.getAttribute("data-anc").split(" ").some((a) => shut.has(a));
+};
+document.addEventListener("click", (e) => {
+  const t = e.target instanceof Element ? e.target.closest("[data-tree]") : null;
+  if (!t) return;
+  chosen.set(t.getAttribute("data-tree"), t.getAttribute("aria-expanded") === "true" ? "false" : "true");
+  fold(document);
+});
 document.addEventListener("click", async (e) => {
   const b = e.target instanceof Element ? e.target.closest("[data-copy]") : null;
   if (!b) return;
@@ -304,6 +332,7 @@ if (live) {
         if (next) {
           const open = new Set([...live.querySelectorAll("details[open][data-key]")].map((d) => d.getAttribute("data-key")));
           for (const d of next.querySelectorAll("details[data-key]")) if (open.has(d.getAttribute("data-key"))) d.open = true;
+          fold(next);
           live.replaceChildren(...next.childNodes);
         }
       } catch {}
