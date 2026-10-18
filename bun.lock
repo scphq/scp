@@ -75,6 +75,17 @@
         "tsup": "^8.5.1",
       },
     },
+    "packages/mcp": {
+      "name": "@scp-dev/mcp",
+      "version": "0.0.0",
+      "dependencies": {
+        "@scp-dev/broker": "workspace:*",
+        "@scp-dev/core": "workspace:*",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.1",
+      },
+    },
     "packages/spec": {
       "name": "@scp-dev/spec",
       "version": "0.0.0",
@@ -498,6 +509,8 @@
     "@scp-dev/core": ["@scp-dev/core@workspace:packages/core"],
 
     "@scp-dev/hub": ["@scp-dev/hub@workspace:packages/hub"],
+
+    "@scp-dev/mcp": ["@scp-dev/mcp@workspace:packages/mcp"],
 
     "@scp-dev/relay": ["@scp-dev/relay@workspace:apps/relay"],
 

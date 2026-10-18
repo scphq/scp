@@ -1,0 +1,39 @@
+{
+  "name": "@scp-dev/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The SCP stdio MCP server: gives an agent session the relay's tools.",
+  "license": "Apache-2.0",
+  "homepage": "https://scp.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scphq/scp.git",
+    "directory": "packages/mcp"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "src", "!src/**/*.test.ts"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@scp-dev/broker": "workspace:*",
+    "@scp-dev/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
