@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { codexLaunch, CodexSocket, CodexWaker } from "./codex"
+import { codexLaunch, CodexSocket, CodexWaker, serverOptions } from "./codex"
 
 type Json = Record<string, unknown>
 const cleanups: (() => void)[] = []
@@ -21,13 +21,85 @@ test("codex launch parses names, headless and passthrough without inheriting the
   for (const args of [["--as", "cx"], ["--as=me/cx"], ["--name=cx"]]) expect(codexLaunch(args, {}, []).name).toBe("cx")
   expect(codexLaunch(["-m", "mock", "--resume", "thread"], {}, [])).toEqual({
     headless: false,
-    codexArgs: ["-m", "mock", "--resume", "thread"],
+    resume: "thread",
+    codexArgs: ["resume", "thread", "-m", "mock"],
     env: { SCP_HARNESS: "codex" },
   })
+  expect(codexLaunch(["--headless", "--resume=thread", "-m", "mock"], {}, [])).toMatchObject({ resume: "thread", codexArgs: ["-m", "mock"] })
   expect(env.SCP_SESSION).toBe("s")
   expect(() => codexLaunch(["--name"], {}, [])).toThrow("takes a name")
   expect(() => codexLaunch(["--as", "Bad Name"], {}, [])).toThrow("not a valid agent handle")
   expect(() => codexLaunch(["--name="], {}, [])).toThrow("not a valid agent handle")
+})
+
+test("codex launch passes every TUI argument through untouched: prompts, resume, flags and anything after --", () => {
+  const args = ["--profile", "fast", "-m", "gpt-x", "-c", 'model_reasoning_effort="high"', "fix the bug", "--", "--name", "kept"]
+  expect(codexLaunch(["--name", "cx", ...args], {}, []).codexArgs).toEqual(args)
+  expect(codexLaunch(["resume", "--last", "-p", "fast"], {}, []).codexArgs).toEqual(["resume", "--last", "-p", "fast"])
+})
+
+test("the app-server gets the config codex would resolve: the profile file, then -c and features, then model, sandbox and approval", () => {
+  const home = mkdtempSync(join(tmpdir(), "scp-codex-home-"))
+  cleanups.push(() => rmSync(home, { recursive: true, force: true }))
+  writeFileSync(
+    join(home, "fast.config.toml"),
+    'model = "profile-model"\napproval_policy = "on-request"\n[mcp_servers.docs]\ncommand = "docs"\nargs = ["--x"]\n',
+  )
+  const warnings: string[] = []
+  const options = serverOptions(
+    [
+      "--profile",
+      "fast",
+      "-c",
+      'model_reasoning_effort="high"',
+      "--enable=web_search",
+      "-m",
+      "gpt-x",
+      "-s",
+      "workspace-write",
+      "--strict-config",
+      "a prompt",
+      "--",
+      "-c",
+      "after",
+    ],
+    { CODEX_HOME: home },
+    (line) => warnings.push(line),
+  )
+  expect(options).toEqual([
+    "-c",
+    'model="profile-model"',
+    "-c",
+    'approval_policy="on-request"',
+    "-c",
+    'mcp_servers.docs.command="docs"',
+    "-c",
+    'mcp_servers.docs.args=["--x"]',
+    "-c",
+    'model_reasoning_effort="high"',
+    "--enable",
+    "web_search",
+    "--strict-config",
+    "-c",
+    'model="gpt-x"',
+    "-c",
+    'sandbox_mode="workspace-write"',
+  ])
+  expect(warnings).toEqual([])
+  expect(serverOptions(["--dangerously-bypass-approvals-and-sandbox"], {})).toEqual([
+    "-c",
+    'approval_policy="never"',
+    "-c",
+    'sandbox_mode="danger-full-access"',
+  ])
+  expect(serverOptions(["-p", "missing"], { CODEX_HOME: home })).toEqual([])
+  expect(serverOptions(["-c", "mcp_servers.scp.enabled=false", "-c", "mcp_servers.scp.enabled=false"], {}, (line) => warnings.push(line))).toEqual([
+    "-c",
+    "mcp_servers.scp.enabled=false",
+    "-c",
+    "mcp_servers.scp.enabled=false",
+  ])
+  expect(warnings).toEqual([expect.stringContaining("override the ones swarm sets")])
 })
 
 test("unix WebSocket carries RPC, errors, notifications and all frame lengths", async () => {

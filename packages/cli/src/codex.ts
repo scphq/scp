@@ -1,17 +1,18 @@
 import { type ChildProcess, spawn } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { connect, type Socket } from "node:net"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
 import { setTimeout as sleep } from "node:timers/promises"
 import { connectBroker, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
+import { parse } from "smol-toml"
 import { RelayUsage, startDaemon } from "./common"
 import { readPsTable, relayIdentity } from "./identity"
-import { codexMount, codexOverrides } from "./spawn"
+import { CODEX_VALUED, codexMount, codexOverrides, toml } from "./spawn"
 import { SELF } from "./term"
 
 type Env = Record<string, string | undefined>
@@ -19,19 +20,21 @@ type Json = Record<string, unknown>
 type Transport = { request(method: string, params: Json): Promise<Json> }
 
 export const CODEX_HELP = `${CLI_NAME} codex [--name N | --as N] [--headless] [--resume THREAD] [--] [codex args...]
+  every codex argument, profile and config value is honoured; a -- after codex arguments is passed through.
   runs codex with relay messages waking an idle thread or steering a running turn; approvals stay with the TUI.
   --headless runs an ambient worker without a TUI; --resume THREAD reopens its thread.
   $SCP_CODEX_BIN picks the codex binary (default codex on PATH).`
 
 /** the codex arguments and environment, without the launching session's identity */
-export function codexLaunch(args: string[], env: Env, _self: string[]): { name?: string; headless: boolean; codexArgs: string[]; env: Env } {
+export function codexLaunch(args: string[], env: Env, _self: string[]): { name?: string; headless: boolean; resume?: string; codexArgs: string[]; env: Env } {
   let name: string | undefined
+  let resume: string | undefined
   let headless = false
   const codexArgs: string[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
     if (arg === "--") {
-      codexArgs.push(...args.slice(i + 1))
+      codexArgs.push(...args.slice(codexArgs.length ? i : i + 1))
       break
     }
     if (arg === "--name" || arg === "--as") {
@@ -39,6 +42,10 @@ export function codexLaunch(args: string[], env: Env, _self: string[]): { name?:
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} codex ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
     else if (arg === "--headless") headless = true
+    else if (arg === "--resume") {
+      resume = args[++i]
+      if (resume === undefined) throw new RelayUsage(`${CLI_NAME} codex --resume takes a thread`)
+    } else if (arg.startsWith("--resume=")) resume = arg.slice("--resume=".length)
     else codexArgs.push(arg)
   }
   name = name?.replace(/^me\//, "")
@@ -47,7 +54,8 @@ export function codexLaunch(args: string[], env: Env, _self: string[]): { name?:
   return {
     ...(name !== undefined ? { name } : {}),
     headless,
-    codexArgs,
+    ...(resume !== undefined ? { resume } : {}),
+    codexArgs: resume !== undefined && !headless ? ["resume", resume, ...codexArgs] : codexArgs,
     env: { ...clean, SCP_HARNESS: "codex", ...(name !== undefined ? { SCP_NAME: name } : {}) },
   }
 }
@@ -315,18 +323,59 @@ function option(args: string[], ...names: string[]): string | undefined {
   return value
 }
 
-function serverOptions(args: string[]): string[] {
-  const result: string[] = []
-  const names = ["-c", "--config", "--enable", "--disable"]
+const SERVER_CONFIG = ["-c", "--config", "--enable", "--disable"]
+const SERVER_SETTINGS: Record<string, string> = {
+  "-m": "model",
+  "--model": "model",
+  "-s": "sandbox_mode",
+  "--sandbox": "sandbox_mode",
+  "-a": "approval_policy",
+  "--ask-for-approval": "approval_policy",
+}
+
+function leaves(value: unknown, path: string[], out: string[]): void {
+  if (value && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date)) {
+    for (const [key, child] of Object.entries(value)) leaves(child, [...path, key], out)
+  } else if (path.length) out.push("-c", `${path.join(".")}=${toml(value instanceof Date ? value.toISOString() : value)}`)
+}
+
+/** the app-server options that give it the configuration `codex` would resolve from these arguments: profile, then -c and features, then model, sandbox and approval */
+export function serverOptions(args: string[], env: Env, warn: (line: string) => void = (line) => void process.stderr.write(`${line}\n`)): string[] {
+  const profile: string[] = []
+  const config: string[] = []
+  const settings: string[] = []
+  const set = (key: string, value: string) => settings.push("-c", `${key}=${toml(value)}`)
+  let conflict = false
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
-    if (names.includes(arg)) {
-      const value = args[++i]
-      if (value === undefined) throw new RelayUsage(`${CLI_NAME} codex ${arg} takes a value`)
-      result.push(arg, value)
-    } else if (names.some((name) => arg.startsWith(`${name}=`))) result.push(arg)
+    if (arg === "--") break
+    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1
+    const flag = eq > 0 ? arg.slice(0, eq) : arg
+    if (flag === "--strict-config") config.push(flag)
+    else if (flag === "--dangerously-bypass-approvals-and-sandbox" || flag === "--yolo") {
+      set("approval_policy", "never")
+      set("sandbox_mode", "danger-full-access")
+    }
+    if (!CODEX_VALUED.has(flag)) continue
+    const value = eq > 0 ? arg.slice(eq + 1) : args[++i]
+    if (value === undefined) throw new RelayUsage(`${CLI_NAME} codex ${flag} takes a value`)
+    if (SERVER_CONFIG.includes(flag)) {
+      config.push(flag, value)
+      if (/^mcp_servers\.("scp"|scp)\./.test(value)) conflict = true
+    } else if (flag === "-p" || flag === "--profile") {
+      const file = join(env.CODEX_HOME || join(env.HOME || homedir(), ".codex"), `${value}.config.toml`)
+      profile.length = 0
+      if (existsSync(file)) {
+        try {
+          leaves(parse(readFileSync(file, "utf8")), [], profile)
+        } catch (error) {
+          warn(`${CLI_NAME} codex: could not read profile ${file}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } else if (SERVER_SETTINGS[flag]) set(SERVER_SETTINGS[flag], value)
   }
-  return result
+  if (conflict) warn(`${CLI_NAME} codex: your -c mcp_servers.scp settings override the ones ${CLI_NAME} sets, so messages may not wake this session`)
+  return [...profile, ...config, ...settings]
 }
 
 async function terminate(child: ChildProcess): Promise<void> {
@@ -355,15 +404,14 @@ function appServerPid(pid: number): number {
 
 /** runs an app-server with a channel waker and either a remote TUI or an ambient thread */
 export async function codexCommand(args: string[]): Promise<number> {
-  const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args
-  if (own.includes("--help") || own.includes("-h")) {
+  if (args[0] === "--help" || args[0] === "-h") {
     process.stdout.write(`${CODEX_HELP}\n`)
     return 0
   }
   const launch = codexLaunch(args, process.env, SELF)
   const cwd = process.cwd()
   const bin = launch.env.SCP_CODEX_BIN || "codex"
-  const overrides = [...codexOverrides(launch.env, codexMount(launch.env), SELF), ...serverOptions(launch.codexArgs)]
+  const overrides = [...codexOverrides(launch.env, codexMount(launch.env), SELF), ...serverOptions(launch.codexArgs, launch.env)]
   const dir = mkdtempSync(join(tmpdir(), "scp-codex-"))
   const path = join(dir, "app.sock")
   const server = spawn(bin, ["app-server", "--listen", `unix://${path}`, ...overrides], { env: launch.env, stdio: ["ignore", "ignore", "pipe"] })
@@ -449,7 +497,7 @@ export async function codexCommand(args: string[]): Promise<number> {
     if (!socket || died) throw failure()
     let threadId: string | undefined
     if (launch.headless) {
-      const resume = option(own, "--resume")
+      const resume = launch.resume
       const model = option(launch.codexArgs, "-m", "--model")
       const sandbox = option(launch.codexArgs, "-s", "--sandbox")
       const result = await socket.request(resume ? "thread/resume" : "thread/start", {

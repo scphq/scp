@@ -113,7 +113,14 @@ for (const extension of extensions)
         for (const child of running) child.kill()
         swarm("daemon", "stop")
       })
-      await until(() => (swarm("list", "--as", "tester", "--json").stdout.includes("pidemo") ? true : undefined), 30_000, "the pi endpoint")
+      await until(
+        () => {
+          const list = swarm("list", "--as", "tester", "--json").stdout
+          return list.includes("pidemo") && /"wake":\s*"pi"/.test(list) ? true : undefined
+        },
+        30_000,
+        "the pi endpoint, waking by pi",
+      )
       await Bun.sleep(1000)
       expect(model.requests.length).toBe(0)
       expect(swarm("send", "--as", "tester", "pidemo", "ping").status).toBe(0)
