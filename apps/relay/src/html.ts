@@ -26,6 +26,8 @@ export interface Chrome {
   csrf: string;
   nav?: "orgs" | "device";
   head?: Html;
+  /** a full-width page for dense tables */
+  wide?: boolean;
 }
 
 export function layout(c: Chrome, body: Html): string {
@@ -48,7 +50,7 @@ export function layout(c: Chrome, body: Html): string {
 <link rel="stylesheet" href="/app.css">
 ${c.head ?? ""}
 </head>
-<body>
+<body${c.wide ? html` class="wide"` : ""}>
 <header class="head"><div class="wrap head-in">
 <a class="brand" href="/"><svg class="mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>scp <span class="brand-dim">relay</span></a>
 ${nav}
@@ -77,6 +79,7 @@ code,pre,kbd{font-family:var(--mono)}
 .wrap{position:relative;width:100%;max-width:56rem;margin-inline:auto;padding-inline:var(--gutter);border-inline:1px solid var(--line-soft)}
 .rule{border-top:1px solid var(--line-soft)}
 @media (max-width:48rem){.wrap{border-inline:0}}
+.wide .wrap{max-width:100rem}
 .head{position:sticky;top:0;z-index:20;border-bottom:1px solid var(--line-soft);background:var(--head);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
 .head-in{display:flex;align-items:center;justify-content:space-between;gap:1.5rem;height:var(--headh)}
 .brand{display:inline-flex;align-items:center;gap:.625rem;font-weight:600;letter-spacing:.02em;text-decoration:none}
@@ -137,10 +140,33 @@ h3{font-size:.9375rem;font-weight:560;letter-spacing:-.01em}
 .pulse{animation:pulse 2.4s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.25}}
 .tag{display:inline-block;font-family:var(--mono);font-size:.6875rem;padding:.0625rem .375rem;background:var(--surface);border:1px solid var(--line-soft);color:var(--ink);white-space:nowrap}
-.machine{margin-top:1.75rem}
-table.agents{table-layout:fixed;min-width:46rem}
-table.agents td{overflow-wrap:anywhere}
-.c-agent{width:14%}.c-harness{width:14%}.c-title{width:19%}.c-presence{width:12%}.c-status{width:20%}.c-labels{width:13%}.c-seen{width:8%}
+.machine{margin-top:1.5rem}
+table.agents,table.activity{table-layout:fixed;min-width:56rem}
+table.agents th,table.agents td,table.activity th,table.activity td{height:2.125rem;padding:.25rem .75rem;line-height:1.25rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.agents .end,table.activity .end{text-align:right}
+table.agents .tag+.tag{margin-left:.25rem}
+.c-harness{width:2.5rem}.c-agent{width:28%}.c-title{width:18%}.c-presence{width:8.5rem}.c-status{width:20%}.c-labels{width:16%}.c-seen{width:6.5rem}
+.c-when{width:7rem}.c-who{width:30%}
+tr.sub td.agent{padding-left:1.5rem}
+tr.sub.d2 td.agent{padding-left:2.25rem}
+tr.sub.d3 td.agent{padding-left:3rem}
+tr.sub.d4 td.agent{padding-left:3.75rem}
+table.agents .harness{padding-inline:.75rem 0;text-align:center}
+.hicon{display:block;width:14px;height:14px;color:var(--ink)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.wake-badge{display:inline-flex;vertical-align:middle;margin-left:.25rem;color:var(--acc)}
+.bolt{width:11px;height:11px}
+.dot.idle.wake{border-color:var(--acc);background:var(--acc-soft)}
+.tree{margin-right:.375rem;font-family:var(--mono);font-size:.75rem;color:var(--faint)}
+details.offline{margin-top:.5rem}
+details.offline>summary{display:inline-block;padding:.125rem 0;cursor:pointer;list-style:none}
+details.offline>summary::-webkit-details-marker{display:none}
+details.offline>summary::before{content:"+ ";color:var(--faint)}
+details.offline[open]>summary::before{content:"- "}
+details.offline .when-open,details.offline[open] .when-shut{display:none}
+details.offline[open] .when-open{display:inline}
+details.offline>summary:hover{color:var(--fg)}
+.machine .table{margin-top:.625rem}
 .machine-head{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem .75rem}
 .machine-head .dot{margin-right:0}
 .machine-head h3{font-family:var(--mono);font-size:.875rem;font-weight:500}
