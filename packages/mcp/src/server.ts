@@ -247,6 +247,11 @@ export const TOOLS = [
     },
   },
   {
+    name: "relay_link_accept",
+    description: "Accept a link request; you then sit under the requesting agent as its worker.",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false },
+  },
+  {
     name: "relay_leave",
     description: "Take this session off the relay: it goes offline and gets no new messages pushed; its mail is kept until relay_join.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -857,6 +862,11 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         return text(
           `joined the relay as ${me?.address}${me?.parent ? ` under ${me.parent}` : ""}: peers can message you, and new messages reach you after your tool calls`,
         )
+      }
+      case "relay_link_accept": {
+        const result = await call<{ endpoint: EndpointView; parent: string }>("link_accept", { id: str(args, "id", true) })
+        me = result.endpoint
+        return text(`${result.endpoint.address} now sits under ${result.parent} as its worker`)
       }
       case "relay_leave": {
         const view = await call<EndpointView>("leave")

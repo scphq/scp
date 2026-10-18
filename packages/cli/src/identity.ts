@@ -1,9 +1,9 @@
-import { existsSync, realpathSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { capture } from "./term"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import type { Claim } from "@scp-dev/core"
-import { shortHostname } from "@scp-dev/broker"
+import { privateDir, relayDir, shortHostname } from "@scp-dev/broker"
 import { GENERIC_HARNESSES, LIMITS, validHandle, validHarness } from "@scp-dev/core"
 
 /**
@@ -25,6 +25,72 @@ export function detectHarness(env: Env): string | undefined {
   if (env.ANTIGRAVITY_AGENT === "1" || env.ANTIGRAVITY_CONVERSATION_ID) return "agy"
   if (env.CLAUDECODE === "1") return "claude-code"
   if (env.CODEX_THREAD_ID) return "codex"
+  if (inferring(env) && (env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED)) return "codex"
+  return undefined
+}
+
+type ShimBinding = { process: string; handle: string; harness: string }
+const BINDING_KEY = /^[0-9a-f]{1,128}$/
+const BINDING_PROCESS = /^pid:([1-9][0-9]*):[A-Za-z0-9:-]{1,64}$/
+
+/** whether this shell may recover its hidden codex harness from a shim binding */
+export function codexShell(env: Env): boolean {
+  return env.SCP_HARNESS === "codex" || (inferring(env) && detectHarness(env) === "codex")
+}
+
+/** publish the codex shim's harness key for shells whose sandbox hides its process */
+export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
+  const pid = BINDING_PROCESS.exec(claim.process)?.[1]
+  if (claim.harness !== "codex" || !pid) return () => {}
+  const text = JSON.stringify({ process: claim.process, handle: claim.handle, harness: claim.harness })
+  const names = [`pid-${pid}`, ...(BINDING_KEY.test(env.SCP_SHIM_BINDING ?? "") ? [`key-${env.SCP_SHIM_BINDING}`] : [])]
+  const paths: string[] = []
+  for (const name of names) {
+    try {
+      const path = join(privateDir(join(relayDir(env), "bindings")), `${name}.json`)
+      writeFileSync(path, text, { mode: 0o600 })
+      chmodSync(path, 0o600)
+      paths.push(path)
+    } catch {}
+  }
+  return () => {
+    for (const path of paths) {
+      try {
+        if (readFileSync(path, "utf8") === text) rmSync(path)
+      } catch {}
+    }
+  }
+}
+
+/** a shim binding by launch key, else the first ancestor pid missing from the sandbox's process table */
+export function readShimBinding(env: Env, pid: number, table: PsCommTable | undefined): ShimBinding | undefined {
+  const read = (name: string, expectedPid?: number): ShimBinding | undefined => {
+    try {
+      const binding = JSON.parse(readFileSync(join(relayDir(env), "bindings", `${name}.json`), "utf8")) as ShimBinding
+      const match = typeof binding.process === "string" ? BINDING_PROCESS.exec(binding.process) : null
+      if (
+        match &&
+        Number(match[1]) > 1 &&
+        (expectedPid === undefined || Number(match[1]) === expectedPid) &&
+        binding.harness === "codex" &&
+        typeof binding.handle === "string" &&
+        validHandle(binding.handle)
+      )
+        return binding
+    } catch {}
+    return undefined
+  }
+  if (BINDING_KEY.test(env.SCP_SHIM_BINDING ?? "")) {
+    const binding = read(`key-${env.SCP_SHIM_BINDING}`)
+    if (binding) return binding
+  }
+  const seen = new Set<number>()
+  while (pid > 1 && !seen.has(pid)) {
+    seen.add(pid)
+    const entry = table?.get(pid)
+    if (!entry) return read(`pid-${pid}`, pid)
+    pid = entry.ppid
+  }
   return undefined
 }
 

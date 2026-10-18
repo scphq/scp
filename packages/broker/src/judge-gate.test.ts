@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type AuditRow, type Envelope, FakeJudgeClient, RelayError, type SendResult } from "@scp-dev/core"
+import { type AdoptResult, type AuditRow, type Envelope, FakeJudgeClient, RelayError, type SendResult } from "@scp-dev/core"
 import { RelayClient } from "./client"
 import { type Broker, type BrokerOptions, startBroker } from "./server"
 
@@ -65,6 +65,24 @@ async function judgeLog(c: { client: RelayClient }): Promise<AuditRow[]> {
 }
 
 describe("judge gate", () => {
+  test("adopt passes through judging and a held request keeps its trusted marker on release", async () => {
+    const { broker, fake } = await setup({ mode: "enforce", model: MODEL, boundaries: [{}] }, [
+      answer({ verdict: "hold", categories: ["private"], reason: "review" }),
+    ])
+    const parent = await agent(broker, "parent")
+    const child = await agent(broker, "child")
+    const requested = await parent.client.request<AdoptResult>("adopt", { endpoint: "child" })
+    expect(fake.calls).toBe(1)
+    expect(requested.held?.side).toBe("local")
+    expect(requested.requested).toBeUndefined()
+    expect(await inbox(child)).toEqual([])
+    const reviewer = await human(broker)
+    const sent = await reviewer.client.request<SendResult>("hold_release", { id: requested.held!.hold_id })
+    expect((await inbox(child))[0]).toMatchObject({ id: sent.id, kind: "request", link: { parent: "me/parent" } })
+    expect(await child.client.request("link_accept", { id: sent.id })).toMatchObject({ endpoint: { parent: "me/parent" } })
+    expect(broker.core.log({}).find((row) => row.event === "adopt_request")).toMatchObject({ ref: sent.id })
+  })
+
   test("no boundary match leaves the path unchanged and asks no model", async () => {
     const { broker, fake } = await setup({ mode: "enforce", model: MODEL, boundaries: [{ to: "ep:nobody" }] }, [
       answer({ verdict: "refuse", categories: ["spam"], reason: "x" }),

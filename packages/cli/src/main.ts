@@ -6,6 +6,7 @@ import { parseArgs } from "node:util"
 import pkg from "../package.json" with { type: "json" }
 import {
   type ActivityRow,
+  type AdoptResult,
   type AskResult,
   type AuditRow,
   deliveryText,
@@ -48,6 +49,7 @@ import {
   RelayUsage,
   selectorList,
   stamp,
+  terminalAttached,
   time,
   type Values,
 } from "./common"
@@ -70,6 +72,8 @@ results back, as with native subagents.
   ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, wake, status; --all adds offline ones
   ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
   ${CLI_NAME} join --under <parent>       link this session under an orchestrator, as a spawned worker sits: ${CLI_NAME} join --under lead
+  ${CLI_NAME} adopt <child>              ask a local root agent to link under you; it accepts with ${CLI_NAME} link accept <id>
+  ${CLI_NAME} link accept <id>           accept a link request and sit under its sender as a worker
   ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
   ${CLI_NAME} peek <ep>                   a short, redacted view of a peekable agent's last turns: ${CLI_NAME} peek rev
   ${CLI_NAME} set-status <state> [note]   working, waiting, blocked or done: ${CLI_NAME} set-status done "PR open"
@@ -261,8 +265,11 @@ agent sessions:
                                                  each other both ways
   ${CLI_NAME} adopt <child> [--parent <p>]      link a local root agent and its subtree under <p>, for the human at a terminal;
                                                  <p> may be on another machine of the account (me/<machine>/<handle>).
-                                                 From an agent's shell with a terminal attached <p> defaults to that agent.
-                                                 An agent without a terminal is refused: the session joins with --under itself
+                                                 With --parent and a terminal, inherited $SCP_NAME and $SCP_GRANT are ignored
+                                                 unless --as is explicit. An agent without a terminal asks the child to consent,
+                                                 under itself only; the child accepts with link accept or join --under
+  ${CLI_NAME} link accept <id>                  accept a link request delivered to this session and sit under its sender as a worker;
+                                                 <id> is the full or short message id. Only the session itself may accept
   ${CLI_NAME} unlink [<child>]                  put a linked agent back at the root, its subtree along and the child scope off;
                                                  widening, so the human at a terminal only (policy defaults.unlink: self lets
                                                  an agent unlink itself). A link that would put a parent under its own child
@@ -363,6 +370,7 @@ const VERBS: Record<string, Option[]> = {
   send: [...IDENTITY, "reply-to", "thread", "private", "attach", "live"],
   join: ["harness", "json", "under"],
   adopt: [...IDENTITY, "parent"],
+  link: IDENTITY,
   unlink: IDENTITY,
   leave: [...IDENTITY, "endpoint"],
   name: [...IDENTITY, "endpoint"],
@@ -638,13 +646,31 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   if (verb === "join") return (await import("./join")).joinCommand(values, positionals, cwd, out)
   if (verb === "holds") holdsArgs(values, positionals)
   const bodyFromStdin = (verb === "send" || verb === "ask" || verb === "reply") && (positionals[1] === undefined || positionals[1] === "-")
-  const opened = await open(verb, values as Identity, cwd, bodyFromStdin)
+  const humanAdopt = verb === "adopt" && values.parent !== undefined && values.as === undefined && terminalAttached(process, false)
+  const opened = humanAdopt ? await openAdoptHuman(cwd, values as Identity) : await open(verb, values as Identity, cwd, bodyFromStdin)
   const { client } = opened
   try {
     if (verb === "machines") return await (await import("./remote")).machinesVerb(client, positionals, values.json === true)
     return await runVerb(opened, verb, values, positionals, cwd)
   } finally {
     client.close()
+  }
+}
+
+async function openAdoptHuman(cwd: string, values: Identity): Promise<Opened> {
+  if (values.cloud || process.env.SCP_TRANSPORT === "cloud") {
+    const { openCloud } = await import("./remote")
+    return { ...(await openCloud({ tty: true, ...(values.machine !== undefined ? { machine: values.machine } : {}) })), broker: null, bound: "human" }
+  }
+  if (values.machine !== undefined) throw new RelayUsage("--machine names the machine of the cloud transport: add --cloud")
+  const dir = relayDir()
+  const client = await connectBroker(dir, () => startDaemon(dir))
+  try {
+    const hello = await client.hello({ human: true, tty: true, cwd, brief: true })
+    return { client, me: hello.endpoint, broker: hello.broker, where: brokerLine(hello.broker), bound: "human" }
+  } catch (error) {
+    client.close()
+    throw error
   }
 }
 
@@ -1076,10 +1102,20 @@ async function runVerb(
       const parent = values.parent as string | undefined
       if (parent === undefined && me?.kind !== "agent")
         throw new RelayUsage(`${CLI_NAME} adopt: name the parent with --parent <p> (run from an agent's shell, it defaults to that agent)`)
-      const result = await client.request<{ endpoint: EndpointView; parent: string }>("adopt", {
+      const result = await client.request<AdoptResult>("adopt", {
         endpoint: positionals[0],
         ...(parent !== undefined ? { parent } : {}),
       })
+      if (asJson) json(result)
+      else if (result.held) out(heldText(result.held))
+      else if (result.requested)
+        out(`asked ${result.endpoint.address} to link under ${result.parent}; it accepts with ${CLI_NAME} link accept ${shortId(result.requested)}`)
+      else out(`${result.endpoint.address} now sits under ${result.parent}`)
+      return 0
+    }
+    case "link": {
+      if (positionals.length !== 2 || positionals[0] !== "accept") throw new RelayUsage(`${CLI_NAME} link takes accept <id>`)
+      const result = await client.request<{ endpoint: EndpointView; parent: string }>("link_accept", { id: positionals[1] })
       if (asJson) json(result)
       else out(`${result.endpoint.address} now sits under ${result.parent}`)
       return 0

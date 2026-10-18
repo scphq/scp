@@ -3,7 +3,20 @@ import { closeSync, openSync, statSync, truncateSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
 import { type BrokerInfo, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
-import { detectHarness, harnessAt, inferring, harnessLineage, hiddenHarness, labelsFor, lineage, readPsTable, sessionKey } from "./identity"
+import {
+  codexShell,
+  detectHarness,
+  harnessAt,
+  inferring,
+  harnessLineage,
+  hiddenHarness,
+  labelsFor,
+  lineage,
+  type PsCommTable,
+  readPsTable,
+  readShimBinding,
+  sessionKey,
+} from "./identity"
 import { membership } from "./session"
 import { parseSeconds, SELF } from "./term"
 import type { RelayTransport } from "./remote"
@@ -193,11 +206,18 @@ export function localHandle(raw: string): string {
 /** this shell's process walk: the lineage keys, the harness walk it claims with and the harness its nearest harness process runs */
 export type Walk = { keys: string[]; self: string[]; harness?: string | undefined }
 
-export function walkNow(): Walk {
-  const table = readPsTable()
-  const self = harnessLineage(process.ppid, table)
+export function walkNow(env = process.env, pid = process.ppid, table: PsCommTable | undefined = readPsTable()): Walk {
+  const keys = lineage(pid, table)
+  const self = harnessLineage(pid, table)
+  if (!self.length && codexShell(env)) {
+    const binding = readShimBinding(env, pid, table)
+    if (binding) {
+      const bound = [...keys, binding.process]
+      return { keys: bound, self: bound, harness: "codex" }
+    }
+  }
   const harness = self.length ? harnessAt(Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]), table) : undefined
-  return { keys: lineage(process.ppid, table), self, ...(harness ? { harness } : {}) }
+  return { keys, self, ...(harness ? { harness } : {}) }
 }
 
 /** an `--as` claim's harness: --harness or $SCP_HARNESS, else the harness this shell's walk or environment shows, else cli */

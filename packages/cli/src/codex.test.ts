@@ -2,7 +2,10 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { codexLaunch, CodexSocket, CodexWaker, serverOptions } from "./codex"
+import { RelayClient, startBroker } from "@scp-dev/broker"
+import { codexLaunch, CodexSocket, CodexWaker, connectCodexChannel, serverOptions } from "./codex"
+import { processKey, relayIdentity } from "./identity"
+import { codexOverrides, spawnEnvironment } from "./spawn"
 
 type Json = Record<string, unknown>
 const cleanups: (() => void)[] = []
@@ -16,20 +19,78 @@ test("codex launch parses names, headless and passthrough without inheriting the
     name: "cx",
     headless: true,
     codexArgs: ["--name", "other", "--headless"],
-    env: { PATH: "/bin", SCP_NAME: "cx", SCP_CODEX_BIN: "/opt/codex", SCP_HARNESS: "codex" },
+    env: {
+      PATH: "/bin",
+      SCP_NAME: "cx",
+      SCP_GRANT: "g",
+      SCP_CODEX_BIN: "/opt/codex",
+      SCP_HARNESS: "codex",
+      SCP_SHIM_BINDING: expect.stringMatching(/^[0-9a-f]{32}$/),
+    },
   })
   for (const args of [["--as", "cx"], ["--as=me/cx"], ["--name=cx"]]) expect(codexLaunch(args, {}, []).name).toBe("cx")
   expect(codexLaunch(["-m", "mock", "--resume", "thread"], {}, [])).toEqual({
     headless: false,
     resume: "thread",
     codexArgs: ["resume", "thread", "-m", "mock"],
-    env: { SCP_HARNESS: "codex" },
+    env: { SCP_HARNESS: "codex", SCP_SHIM_BINDING: expect.stringMatching(/^[0-9a-f]{32}$/) },
   })
   expect(codexLaunch(["--headless", "--resume=thread", "-m", "mock"], {}, [])).toMatchObject({ resume: "thread", codexArgs: ["-m", "mock"] })
   expect(env.SCP_SESSION).toBe("s")
   expect(() => codexLaunch(["--name"], {}, [])).toThrow("takes a name")
   expect(() => codexLaunch(["--as", "Bad Name"], {}, [])).toThrow("not a valid agent handle")
   expect(() => codexLaunch(["--name="], {}, [])).toThrow("not a valid agent handle")
+})
+
+test("codex launch carries the grant and a fresh binding key into the app-server and shim environment", () => {
+  const env = { SCP_GRANT: `krt_${"a".repeat(64)}`, SCP_SESSION: "outer", SCP_PARENT: "outer", SCP_SHIM_BINDING: "old" }
+  const launch = codexLaunch(["--name", "worker"], env, ["swarm"])
+  expect(launch.env.SCP_GRANT).toBe(env.SCP_GRANT)
+  expect(launch.env.SCP_SESSION).toBeUndefined()
+  expect(launch.env.SCP_PARENT).toBeUndefined()
+  expect(launch.env.SCP_SHIM_BINDING).toMatch(/^[0-9a-f]{32}$/)
+  expect(codexLaunch([], env, []).env.SCP_SHIM_BINDING).not.toBe(launch.env.SCP_SHIM_BINDING)
+  expect(spawnEnvironment(launch.env, { SCP_GRANT: "child-grant" }).SCP_SHIM_BINDING).toBeUndefined()
+  for (const mount of [undefined, { env_vars: ["CUSTOM"] }]) {
+    const overrides = codexOverrides(launch.env, mount, ["swarm"])
+    const vars = overrides.find((arg) => arg.startsWith("mcp_servers.scp.env_vars="))!
+    expect(JSON.parse(vars.slice(vars.indexOf("=") + 1))).toEqual(expect.arrayContaining(["SCP_GRANT", "SCP_SHIM_BINDING"]))
+    expect(overrides.join(" ")).not.toContain(env.SCP_GRANT)
+  }
+  expect(relayIdentity({ fallbackHarness: "codex", cwd: "/tmp", env: launch.env, harnessPid: () => process.pid }).grant).toBe(env.SCP_GRANT)
+})
+
+test("codex channel waits for the shim to spend its grant and binds to that endpoint with its parent and title", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scp-codex-grant-"))
+  const broker = await startBroker({ dir, idleMs: 0, policyPath: join(dir, "policy.json"), log: () => {} })
+  const parent = await RelayClient.connect(broker.socket)
+  const shim = await RelayClient.connect(broker.socket)
+  let channel: RelayClient | undefined
+  try {
+    await parent.hello({ claim: { handle: "lead", harness: "codex" } })
+    const grant = await parent.grant({ name: "worker", title: "work title" })
+    const claim = { handle: "worker", harness: "codex", process: processKey(process.pid), session: processKey(process.pid), grant: grant.token }
+    let attempts = 0
+    channel = await connectCodexChannel(
+      async () => {
+        if (++attempts === 2) await shim.hello({ claim })
+        return RelayClient.connect(broker.socket)
+      },
+      claim,
+      dir,
+      () => attempts >= 3,
+    )
+    expect(attempts).toBe(2)
+    expect(await channel.hello({})).toMatchObject({ grant_bound: true, endpoint: { address: "me/worker", parent: "me/lead", title: "work title" } })
+    await channel.request("wake", { via: "codex-app-server" })
+    expect(broker.core.list({ all: true }).filter((endpoint) => endpoint.address.startsWith("me/worker"))).toHaveLength(1)
+  } finally {
+    channel?.close()
+    shim.close()
+    parent.close()
+    await broker.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test("codex launch passes every TUI argument through untouched: prompts, resume, flags and anything after --", () => {

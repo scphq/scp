@@ -4,7 +4,7 @@ import { runRelayMcp, sessionInboxOf, type SpawnRequest } from "@scp-dev/mcp"
 import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
-import { harnessAt, harnessPid, psParent, relayIdentity } from "./identity"
+import { harnessAt, harnessPid, psParent, relayIdentity, writeShimBinding } from "./identity"
 import { membership } from "./session"
 
 /** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
@@ -30,26 +30,34 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     inferHarness: (pid) => harnessAt(pid),
   })
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)
-  const dir = relayDir()
+  const dir = relayDir(process.env)
+  const unbind = writeShimBinding(claim, process.env)
+  process.on("exit", unbind)
   const parent = process.ppid
   const orphaned = setInterval(() => {
     if (process.ppid !== parent) process.exit(0)
   }, ORPHAN_CHECK_MS)
   orphaned.unref()
   const inbox = sessionInboxOf(process.env)
-  await runRelayMcp({
-    connect: () => connectBroker(dir, () => startDaemon(dir)),
-    claim,
-    membership: () => membership(process.env, claim.session),
-    input: process.stdin,
-    output: (line) => void process.stdout.write(line),
-    env: process.env,
-    channels: values.channels === true,
-    launchedWithChannels: values.channels === true && launchedWithChannels(process.env),
-    ...(inbox ? { sessionInbox: inbox } : {}),
-    spawn: (request) => spawnDetached(spawnWords(request), request.cwd ?? claim.cwd),
-    log: (line) => void process.stderr.write(`${line}\n`),
-  })
+  try {
+    await runRelayMcp({
+      connect: () => connectBroker(dir, () => startDaemon(dir)),
+      claim,
+      membership: () => membership(process.env, claim.session),
+      input: process.stdin,
+      output: (line) => void process.stdout.write(line),
+      env: process.env,
+      channels: values.channels === true,
+      launchedWithChannels: values.channels === true && launchedWithChannels(process.env),
+      ...(inbox ? { sessionInbox: inbox } : {}),
+      spawn: (request) => spawnDetached(spawnWords(request), request.cwd ?? claim.cwd),
+      log: (line) => void process.stderr.write(`${line}\n`),
+    })
+  } finally {
+    clearInterval(orphaned)
+    process.off("exit", unbind)
+    unbind()
+  }
   return 0
 }
 

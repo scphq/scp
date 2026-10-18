@@ -4,6 +4,7 @@ import {
   CLI_NAME,
   type ActivityKind,
   type ActivityRow,
+  type AdoptResult,
   type AuditRow,
   type Claim,
   type DataClass,
@@ -291,7 +292,10 @@ export interface MessageRow {
   expires_at: number
   sender_tty: number | null
   require_reply: number | null
+  link_parent: string | null
 }
+
+type AdoptSend = (from: string, params: SendParams, origin: { link: "session" | "self" }) => Promise<SendResult>
 
 export interface CoreOptions {
   /** the local user's address part; `me` until a login names one */
@@ -523,6 +527,7 @@ export class RelayCore {
     const messageColumns = this.sql.all<{ name: string }>(`PRAGMA table_info(messages)`).map((c) => c.name)
     if (!messageColumns.includes("sender_tty")) this.sql.all(`ALTER TABLE messages ADD COLUMN sender_tty INTEGER`)
     if (!messageColumns.includes("require_reply")) this.sql.all(`ALTER TABLE messages ADD COLUMN require_reply INTEGER`)
+    if (!messageColumns.includes("link_parent")) this.sql.all(`ALTER TABLE messages ADD COLUMN link_parent TEXT`)
     const endpointColumns = this.sql.all<{ name: string }>(`PRAGMA table_info(endpoints)`).map((c) => c.name)
     if (!endpointColumns.includes("session")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN session TEXT`)
     if (!endpointColumns.includes("hook_seen")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN hook_seen INTEGER`)
@@ -1592,30 +1597,60 @@ export class RelayCore {
     })
   }
 
-  /**
-   * links a local root agent under `parent`, as a spawned worker sits: in the parent's tree one level down, under the policy's child scope.
-   * Only the human at a terminal links another session, or an agent from its own shell with a terminal attached, under itself by default.
-   * A session links itself with {@link joinSession}'s `under`
-   */
-  adopt(actor: ScopeActor, params: { endpoint: unknown; parent?: unknown }, options: { tty?: boolean } = {}): { endpoint: EndpointView; parent: string } {
-    return this.scopeTx(() => {
+  /** the human links a local root directly; an agent asks it to consent through the normal send path */
+  adopt(actor: ScopeActor, params: { endpoint: unknown; parent?: unknown }, options?: { tty?: boolean }): AdoptResult
+  adopt(actor: ScopeActor, params: { endpoint: unknown; parent?: unknown }, options: { tty?: boolean; send: AdoptSend }): AdoptResult | Promise<AdoptResult>
+  adopt(
+    actor: ScopeActor,
+    params: { endpoint: unknown; parent?: unknown },
+    options: { tty?: boolean; send?: AdoptSend } = {},
+  ): AdoptResult | Promise<AdoptResult> {
+    const prepared: { result: AdoptResult; sender?: { from: string; auth: "session" | "self" } } = this.scopeTx(() => {
       const me = this.actorRow(actor)
       if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
-      else if (options.tty !== true)
-        throw this.scopeRefused(
-          actor,
-          me,
-          { target: String(params.endpoint), reason: "adopt" },
-          `only the human at a terminal links another session under a parent; the session links itself with ${CLI_NAME} join --under`,
-        )
+      else if (actor.auth === "lineage")
+        throw this.scopeRefused(actor, me, { target: String(params.endpoint), reason: "adopt" }, "only the session itself may request a link")
       const target = this.resolve(params.endpoint)
       if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be linked")
       const parentAddress = params.parent ?? (actor.kind === "human" ? undefined : this.address(me))
       if (parentAddress === undefined || parentAddress === null || parentAddress === "")
         throw new RelayError("invalid_params", "the human names the parent to link under")
       const parent = this.resolve(parentAddress)
-      this.link(target, parent, this.actorDetail(actor, me))
-      return { endpoint: this.whoami(target.id), parent: this.address(parent) }
+      if (actor.kind !== "human" && parent.id !== me.id)
+        throw this.scopeRefused(actor, me, { target: this.address(target), reason: "adopt" }, "an agent may request a link only under itself")
+      const result: AdoptResult = { endpoint: this.whoami(target.id), parent: this.address(parent) }
+      if (actor.kind === "human" || options.tty === true) {
+        this.link(target, parent, this.actorDetail(actor, me))
+        return { result: { ...result, endpoint: this.whoami(target.id) } }
+      }
+      if (target.parent_ep !== null || target.parent_addr !== null) throw this.alreadyLinked(target)
+      const auth = actor.auth === "self" ? "self" : "session"
+      return { result, sender: { from: me.id, auth } }
+    })
+    if (!prepared.sender) return prepared.result
+    const { result } = prepared
+    const { from, auth } = prepared.sender
+    const send: SendParams = {
+      to: result.endpoint.address,
+      kind: "request",
+      ttl_s: 86_400,
+      body: `${result.parent} asks you to link under it as its worker. To accept, run ${CLI_NAME} link accept <id> with this message's id, or ${CLI_NAME} join --under ${result.parent} (relay_link_accept {id} or relay_join {under: "${result.parent}"}).`,
+    }
+    const requested = (sent: SendResult): AdoptResult => ({ ...result, ...(sent.held ? { held: sent.held } : { requested: sent.id }) })
+    return options.send ? options.send(from, send, { link: auth }).then(requested) : requested(this.send(from, send, { link: auth }))
+  }
+
+  /** accepts a broker-issued request delivered to the caller's own session */
+  linkAccept(actor: ScopeActor, params: { id: unknown }): { endpoint: EndpointView; parent: string } {
+    return this.scopeTx(() => {
+      if (actor.kind !== "endpoint" || actor.auth === "lineage") throw new RelayError("scope_refused", "only the session itself accepts a link request")
+      const me = this.actorRow(actor)
+      const request = this.delivered(me.id, params.id)
+      if (!request?.link || request.kind !== "request") throw new RelayError("not_found", "no link request delivered to this endpoint")
+      const parent = this.mustEndpoint(request.from.endpoint)
+      if (parent.kind !== "agent") throw new RelayError("invalid_params", "the requesting parent is no longer an agent")
+      this.link(me, parent, { ...this.actorDetail(actor, me), request: request.id })
+      return { endpoint: this.whoami(me.id), parent: this.address(parent) }
     })
   }
 
@@ -1676,7 +1711,7 @@ export class RelayCore {
    * `row`, a root, and its subtree moved under `parent`, a local agent that is neither `row` nor one of its descendants; a parent on another
    * machine goes to {@link linkAcross}
    */
-  private link(row: EndpointRow, parent: EndpointRow, by: { by: string; auth: string }): void {
+  private link(row: EndpointRow, parent: EndpointRow, by: { by: string; auth: string; request?: string }): void {
     if (!this.localRow(parent)) {
       const key = this.linkAcross(row, parent)
       if (row.parent_addr === key) return
@@ -1684,7 +1719,7 @@ export class RelayCore {
       this.sql.all(`UPDATE endpoints SET parent_addr = ?, linked = ? WHERE id = ?`, key, this.now(), row.id)
       this.scopeMemo?.ancestors.clear()
       this.scopeMemo?.limited.clear()
-      this.audit("adopt", row.id, null, { ...by, target: this.address(row), parent: this.address(parent) })
+      this.audit("adopt", row.id, by.request ?? null, { ...by, target: this.address(row), parent: this.address(parent) })
       return
     }
     if (parent.kind !== "agent") throw new RelayError("invalid_params", "the parent is an agent endpoint")
@@ -1713,7 +1748,7 @@ export class RelayCore {
     )
     this.scopeMemo?.ancestors.clear()
     this.scopeMemo?.limited.clear()
-    this.audit("adopt", row.id, null, { ...by, target: this.address(row), parent: this.address(parent) })
+    this.audit("adopt", row.id, by.request ?? null, { ...by, target: this.address(row), parent: this.address(parent) })
   }
 
   /** a link of `row`, which already sits under a parent, to another one */
@@ -1829,7 +1864,8 @@ export class RelayCore {
    * `origin.tty` is recorded on messages the human inbox sends: whether its client said a terminal was attached. `origin.unverified`: the human
    * sends without a terminal, so the scopes check it like any unplaced sender
    */
-  send(from: string, params: SendParams, origin: { tty?: boolean; unverified?: boolean } = {}): SendResult {
+  send(from: string, params: SendParams, origin: { tty?: boolean; unverified?: boolean; link?: "session" | "self" } = {}): SendResult {
+    if ("link" in params) throw new RelayError("invalid_params", "link is set by the relay, not the sender")
     const sender = this.mustEndpoint(from)
     const senderTty = sender.kind === "human" ? (origin.tty === true ? 1 : 0) : null
     const unverified = sender.kind === "human" && origin.unverified === true
@@ -1897,6 +1933,17 @@ export class RelayCore {
     const pending = [...unjoined.values()].map((grant) => ({ key: pendingKey(grant.token_hash), address: `${this.user}/${grant.name}` }))
     const reached = recipients.length + pending.length
     if (reached > LIMITS.fanOutTotal) throw new RelayError("too_large", `the send reaches ${reached} endpoints, more than ${LIMITS.fanOutTotal}`)
+    if (
+      origin.link &&
+      (sender.kind !== "agent" ||
+        kind !== "request" ||
+        recipients.length !== 1 ||
+        pending.length ||
+        recipients[0]!.kind !== "agent" ||
+        !this.localRow(recipients[0]!))
+    )
+      throw new RelayError("invalid_params", "a link request is from an agent to one local root agent")
+    if (origin.link && (recipients[0]!.parent_ep !== null || recipients[0]!.parent_addr !== null)) throw this.alreadyLinked(recipients[0]!)
     const requestedThread = this.threadRef(from, cleanText(params.thread, "thread", 64))
     const payloadHash = this.hash(
       JSON.stringify([
@@ -1910,6 +1957,7 @@ export class RelayCore {
         mime,
         ttl,
         params.require_reply === true,
+        ...(origin.link ? [origin.link] : []),
       ]),
     )
     if (clientId) {
@@ -2079,8 +2127,8 @@ export class RelayCore {
       const expires = now + ttl * 1000
       const to = targets.length === 1 ? String(targets[0]) : targets.join(",")
       this.sql.all(
-        `INSERT INTO messages (id, thread, reply_to, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at, sender_tty, require_reply)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, thread, reply_to, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at, sender_tty, require_reply, link_parent)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         thread,
         parent?.id ?? null,
@@ -2096,6 +2144,7 @@ export class RelayCore {
         expires,
         senderTty,
         params.require_reply === true ? 1 : null,
+        origin.link ? this.address(sender) : null,
       )
       if (parent) this.sql.all(`UPDATE deliveries SET acked_at = ? WHERE message_id = ? AND endpoint = ? AND acked_at IS NULL`, now, parent.id, from)
       const deliveries: SendResult["deliveries"] = []
@@ -2137,6 +2186,13 @@ export class RelayCore {
         )
       }
       this.audit("send", from, id, { to: deliveries.map((d) => d.address), kind, bytes, hop, thread, data_class: dataClass })
+      if (origin.link)
+        this.audit("adopt_request", from, id, {
+          by: this.address(sender),
+          auth: origin.link,
+          target: this.address(recipients[0]!),
+          parent: this.address(sender),
+        })
       for (const recipient of recipients) this.detectPingPong(sender, recipient)
       return sent
     })
@@ -5249,6 +5305,7 @@ export class RelayCore {
       created_at: iso(row.created_at)!,
       expires_at: iso(row.expires_at)!,
       ...(row.require_reply === 1 ? { require_reply: true as const } : {}),
+      ...(row.link_parent ? { link: { parent: row.link_parent } } : {}),
       ...kin,
     }
   }

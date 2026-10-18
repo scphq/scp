@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { TOOLS } from "@scp-dev/mcp"
 import { PREAMBLE } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
-import { harnessPid } from "./identity"
+import { harnessPid, parsePsCommTable, processKey, readShimBinding, writeShimBinding } from "./identity"
 import { spawnWords } from "./mcp"
 
 setDefaultTimeout(30_000)
@@ -70,6 +70,22 @@ describe("swarm mcp", () => {
   })
   afterAll(async () => {
     await broker.stop()
+  })
+
+  test("a codex shim publishes its harness binding and removes it when stdio closes", async () => {
+    const key = "a".repeat(32)
+    const shim = spawnShim(["--as", "bound-shim", "--harness", "codex"], { ...env, SCP_SHIM_BINDING: key })
+    const paths = [join(dir, "bindings", `pid-${process.pid}.json`), join(dir, "bindings", `key-${key}.json`)]
+    try {
+      expect(textOf(await shim.call("relay_whoami"))).toContain("address: me/bound-shim")
+      for (const path of paths) {
+        expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ process: processKey(process.pid), handle: "bound-shim", harness: "codex" })
+        expect(statSync(path).mode & 0o777).toBe(0o600)
+      }
+    } finally {
+      expect((await shim.stop()).code).toBe(0)
+    }
+    for (const path of paths) expect(existsSync(path)).toBe(false)
   })
 
   test("speaks MCP over stdio as an agent, and writes nothing but JSON-RPC to stdout", async () => {
@@ -290,4 +306,40 @@ describe("swarm mcp", () => {
     expect(run(["--harness", "vim"]).code).toBe(125)
     expect(run(["--harness", "claude", "--as", "me"]).code).toBe(125)
   })
+})
+
+test("shim bindings are private, validate the process key and pid, and preserve a replacement on cleanup", () => {
+  const dir = mkdtempSync(join(process.env.HOME!, "shim-bindings-"))
+  const env = { SCP_DIR: dir, SCP_SHIM_BINDING: "b".repeat(32) }
+  const claim = { process: "pid:500:Thu-Oct-16-09:00:00-2026", handle: "worker", harness: "codex" }
+  const table = parsePsCommTable("600 500 Thu Oct 16 09:00:00 2026 sh")
+  const clear = writeShimBinding(claim, env)
+  try {
+    expect(readShimBinding(env, 600, table)).toEqual(claim)
+    expect(readShimBinding({ SCP_DIR: dir }, 600, table)).toEqual(claim)
+    expect(statSync(join(dir, "bindings")).mode & 0o777).toBe(0o700)
+    const path = join(dir, "bindings", "pid-500.json")
+    const invalid = ["pid:500", "pid:501:start", "env:session", "pid:500:bad start"]
+    for (const process of invalid) {
+      writeFileSync(path, JSON.stringify({ ...claim, process }))
+      expect(readShimBinding({ SCP_DIR: dir }, 600, table)).toBeUndefined()
+    }
+    writeFileSync(path, "{")
+    expect(readShimBinding({ SCP_DIR: dir }, 600, table)).toBeUndefined()
+    const replacement = { ...claim, process: "pid:500:new-start" }
+    const clearReplacement = writeShimBinding(replacement, env)
+    clear()
+    expect(readShimBinding(env, 600, table)).toEqual(replacement)
+    clearReplacement()
+    expect(readShimBinding(env, 600, table)).toBeUndefined()
+    writeShimBinding({ ...claim, harness: "mcp" }, env)()
+    writeShimBinding({ ...claim, process: "pid:500" }, env)()
+    expect(existsSync(path)).toBe(false)
+    const blocked = join(dir, "blocked")
+    writeFileSync(blocked, "file")
+    expect(() => writeShimBinding(claim, { SCP_DIR: blocked })()).not.toThrow()
+  } finally {
+    clear()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
