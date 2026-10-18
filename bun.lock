@@ -42,7 +42,7 @@
     },
     "packages/broker": {
       "name": "@scp-dev/broker",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@scp-dev/core": "workspace:*",
         "@scp-dev/hub": "workspace:*",
@@ -67,7 +67,7 @@
     },
     "packages/hub": {
       "name": "@scp-dev/hub",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@scp-dev/core": "workspace:*",
       },
@@ -77,7 +77,7 @@
     },
     "packages/mcp": {
       "name": "@scp-dev/mcp",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "dependencies": {
         "@scp-dev/broker": "workspace:*",
         "@scp-dev/core": "workspace:*",
