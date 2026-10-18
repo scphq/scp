@@ -315,7 +315,10 @@ h3 {
   font-family: var(--mono);
   font-size: 0.75rem;
   white-space: nowrap;
-  transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+  transition:
+    background-color 0.2s,
+    color 0.2s,
+    border-color 0.2s;
 }
 
 .btn-primary {
@@ -1076,7 +1079,9 @@ h3 {
   font-size: 0.8125rem;
   line-height: 1.4;
   color: var(--dim);
-  transition: color 0.2s, border-color 0.2s;
+  transition:
+    color 0.2s,
+    border-color 0.2s;
 }
 
 .toc a:hover {
@@ -1357,7 +1362,9 @@ h3 {
   font-size: 0.75rem;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.2s, border-color 0.2s;
+  transition:
+    color 0.2s,
+    border-color 0.2s;
 }
 
 .show-tabs button:hover,

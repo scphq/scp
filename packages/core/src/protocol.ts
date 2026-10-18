@@ -1,4 +1,4 @@
-export { PROTOCOL } from "@scp/spec"
+export { PROTOCOL } from "@scp-dev/spec"
 
 export const CAPABILITIES = ["inbox.wait", "ask", "scopes", "groups"] as const
 /** the local broker serves the peek, judge and hold review methods the hosted hub does not */

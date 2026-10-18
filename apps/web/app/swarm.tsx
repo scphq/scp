@@ -73,8 +73,16 @@ function rng(seed: number) {
 }
 
 const FLEETS: number[][][] = [
-  [[4, 3], [3, 4, 3], [3, 4]],
-  [[3, 4, 3], [4, 3], [3, 3, 4]],
+  [
+    [4, 3],
+    [3, 4, 3],
+    [3, 4],
+  ],
+  [
+    [3, 4, 3],
+    [4, 3],
+    [3, 3, 4],
+  ],
 ];
 
 function build(w: number, h: number): Scene {
@@ -292,7 +300,10 @@ export function Swarm({ status }: { status: React.RefObject<HTMLSpanElement | nu
     };
 
     const of = (kind: Kind, alive?: boolean) =>
-      scene.nodes.map((n, i) => [n, i] as const).filter(([n]) => n.kind === kind && (alive === undefined || n.alive === alive)).map(([, i]) => i);
+      scene.nodes
+        .map((n, i) => [n, i] as const)
+        .filter(([n]) => n.kind === kind && (alive === undefined || n.alive === alive))
+        .map(([, i]) => i);
 
     const descendants = (root: number) => {
       const out: number[] = [];

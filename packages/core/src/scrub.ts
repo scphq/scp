@@ -1,4 +1,4 @@
-const KEY_KIND = String.raw`[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`
+const KEY_KIND = "[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
 const KEY_END = new RegExp(String.raw`-----END ${KEY_KIND}[^\n]*\n?`)
 
 /** the prefixes, without their `_`, of the tokens this implementation issues: `kre_` resume tokens and `scp_` */
@@ -17,7 +17,10 @@ const GENERIC: [string, RegExp][] = [
   ["slack token", /\bxox[abprs]-[A-Za-z0-9-]{20,}/],
   ["bearer token", /\bbearer\s+[A-Za-z0-9._~+/=-]{16,}/i],
   ["aws secret", /aws[_-]?secret[_-]?(?:access[_-]?)?key["']?\s*[:=]\s*["']?[A-Za-z0-9+/]{40}/i],
-  ["assigned secret", /(?<![A-Za-z])(?:api[_-]?key|token|secret|password|passwd|credentials?)(?![A-Za-z])["']?\s*[:=]\s*["']?(?=[A-Za-z0-9+/._~-]*[0-9])(?=[A-Za-z0-9+/._~-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9+/._~-]{19,}/i],
+  [
+    "assigned secret",
+    /(?<![A-Za-z])(?:api[_-]?key|token|secret|password|passwd|credentials?)(?![A-Za-z])["']?\s*[:=]\s*["']?(?=[A-Za-z0-9+/._~-]*[0-9])(?=[A-Za-z0-9+/._~-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9+/._~-]{19,}/i,
+  ],
 ]
 
 export interface SecretScanner {
@@ -31,7 +34,9 @@ export interface SecretScanner {
 export function createSecretScanner(prefixes: readonly string[] = DEFAULT_IMPLEMENTATION_PREFIXES): SecretScanner {
   const names = prefixes.map((prefix) => prefix.replace(/_$/, ""))
   for (const name of names) if (!PREFIX.test(name)) throw new Error(`invalid token prefix: ${name}`)
-  const patterns: [string, RegExp][] = names.length ? [["implementation token", new RegExp(String.raw`\b(?:${names.join("|")})_[A-Za-z0-9_-]{16,}`)], ...GENERIC] : [...GENERIC]
+  const patterns: [string, RegExp][] = names.length
+    ? [["implementation token", new RegExp(String.raw`\b(?:${names.join("|")})_[A-Za-z0-9_-]{16,}`)], ...GENERIC]
+    : [...GENERIC]
   const global = patterns.map(([name, pattern]) => [name, new RegExp(pattern.source, `${pattern.flags}g`)] as const)
   return {
     findSecret(text) {
@@ -85,7 +90,7 @@ const KEY_PATH = new RegExp(
 const EMAIL = /(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])/g
 const IBAN = /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g
 const CARD = /(?<![\d+])(?:\d[ -]?){12,18}\d(?!\d)/g
-const PHONE = /(?<![\w+.\/-])(?:\+\d{8,15}(?![\w.\/:-])|(?:\+\d{1,3}[ -]?)?(?:\(\d{1,4}\)[ -]?)?\d{2,5}(?:[ -]\d{2,5}){1,5}(?![\w\/:-]|\.\d))/g
+const PHONE = /(?<![\w+./-])(?:\+\d{8,15}(?![\w./:-])|(?:\+\d{1,3}[ -]?)?(?:\(\d{1,4}\)[ -]?)?\d{2,5}(?:[ -]\d{2,5}){1,5}(?![\w/:-]|\.\d))/g
 
 function ibanValid(raw: string): boolean {
   const iban = raw.replace(/ /g, "")

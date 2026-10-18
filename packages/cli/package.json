@@ -1,12 +1,25 @@
 {
-  "name": "@scp/cli",
+  "name": "@scp-dev/cli",
   "version": "0.0.0",
   "private": true,
+  "description": "The scp command line tool.",
+  "license": "Apache-2.0",
+  "homepage": "https://scp.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scphq/scp.git",
+    "directory": "packages/cli"
+  },
   "type": "module",
   "bin": {
     "scp": "./src/cli.ts"
   },
+  "files": ["src", "!src/**/*.test.ts"],
   "scripts": {
     "typecheck": "tsc -p ."
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

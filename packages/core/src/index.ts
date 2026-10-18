@@ -1,5 +1,19 @@
 export * from "./protocol"
-export { collapseTools, deliveryText, PREAMBLE, PREAMBLE_BRIEF, reachLines, SHORT_ID, shortId, steerNote, stripControl, stripSteerNote, widenText, wrapMessage, wrapPeek } from "./render"
+export {
+  collapseTools,
+  deliveryText,
+  PREAMBLE,
+  PREAMBLE_BRIEF,
+  reachLines,
+  SHORT_ID,
+  shortId,
+  steerNote,
+  stripControl,
+  stripSteerNote,
+  widenText,
+  wrapMessage,
+  wrapPeek,
+} from "./render"
 export { clip, digestText, dropQuoted, OMITTED, PEEK, peekLevel, readText, stripRelaySpans } from "./peek"
 export {
   createSecretScanner,

@@ -1,10 +1,11 @@
 {
-  "name": "@scp/web",
+  "name": "@scp-dev/web",
   "private": true,
   "version": "0.0.1",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:worker": "opennextjs-cloudflare build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
