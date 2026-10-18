@@ -719,7 +719,7 @@ describe("swarm, lineage and scope arguments", () => {
     expect(lineage(500, table)).toEqual(["pid:500:Thu-Oct-16-09:00:00-2026", "pid:501:Thu-Oct-16-09:00:00-2026"])
     const deep = parsePsTable(Array.from({ length: 30 }, (_, i) => `${1000 + i} ${i ? 999 + i : 1} Thu Oct 16 09:00:00 2026`).join("\n"))
     expect(lineage(1029, deep)).toHaveLength(16)
-    expect(lineage(1029, undefined)).toEqual([])
+    expect(lineage(2_000_000_000, undefined)).toEqual([])
     const own = lineage(process.pid)
     expect(own.length).toBeGreaterThanOrEqual(1)
     expect(own[0]?.startsWith(`pid:${process.pid}`)).toBe(true)
