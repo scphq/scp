@@ -1,6 +1,28 @@
+import { getCode, getSignIn, postCode, postSignIn, postSignOut } from "./auth";
 import type { Env } from "./env";
 import { CSS, html, layout } from "./html";
 import { DAY, HttpError, json } from "./util";
+import { back, type Ctx, loadCtx, toSignIn } from "./web";
+
+async function pages(ctx: Ctx): Promise<Response> {
+  const { req, url, user } = ctx;
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  const post = req.method === "POST";
+  if (!post && req.method !== "GET" && req.method !== "HEAD") throw new HttpError(405, "method_not_allowed", "Method not allowed.");
+
+  if (path === "/") return back(ctx, user ? "/orgs" : "/sign-in");
+  if (path === "/sign-in") return post ? postSignIn(ctx) : getSignIn(ctx);
+  if (path === "/sign-in/code") return post ? postCode(ctx) : getCode(ctx);
+  if (path === "/sign-out" && post) return postSignOut(ctx);
+
+  const signedIn = path === "/orgs" || path.startsWith("/orgs/") || path === "/device" || path.startsWith("/invites/");
+  if (!signedIn) throw new HttpError(404, "not_found", "Not found.");
+  if (!user) {
+    if (post) throw new HttpError(401, "signed_out", "Your session ended. Sign in again.");
+    return toSignIn(ctx);
+  }
+  throw new HttpError(404, "not_found", "Not found.");
+}
 
 function failure(e: unknown, url: URL): Response {
   const known = e instanceof HttpError;
@@ -23,7 +45,7 @@ export default {
       if (url.pathname === "/health") return json({ ok: true, service: "scp-relay" });
       if (url.pathname === "/app.css")
         return new Response(CSS, { headers: { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600" } });
-      throw new HttpError(404, "not_found", "Not found.");
+      return await pages(await loadCtx(req, env));
     } catch (e) {
       return failure(e, url);
     }
