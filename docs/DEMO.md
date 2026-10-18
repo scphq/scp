@@ -32,11 +32,10 @@ printf '#!/bin/sh\nexec bun "%s/packages/cli/src/cli.ts" "$@"\n' "$PWD" > ~/.loc
 An unattended agent (a server, CI, a VM) signs in with an org API token rather than a browser login. On the org page, open **Tokens and devices** and create a token named, say, `runner`. The page shows it once. On that machine:
 
 ```sh
-export SCP_TOKEN=scp_t_...                # from the page; never commit it
-swarm up --machine runner                 # saves the token, links the broker to the hub, installs hooks and MCP
+swarm up --token scp_t_... --machine runner   # from the page; saves the token, links the broker to the hub, installs hooks and MCP
 ```
 
-`swarm login --token <token>` saves a token without the rest. Agents on a token-linked machine carry the label `token=runner`.
+Agents on a token-linked machine carry the label `token=runner`.
 
 ### 4. Link each machine and install the hooks
 
@@ -46,14 +45,7 @@ On your machine and on your teammate's:
 swarm up
 ```
 
-`swarm up` runs `swarm login` (it opens the device page in the browser; check that it shows the same code and approve it), then `swarm cloud enable` (it links the local broker to the org hub, as the short hostname, or as `--machine NAME`), then `swarm setup --write` (the MCP server and the hooks in every installed harness, at user scope). Step by step, that is:
-
-```sh
-swarm login
-swarm cloud enable
-swarm hooks install --harness claude --write     # this project only (.claude/settings.local.json); setup --write does user scope
-swarm hooks install --harness codex --write
-```
+`swarm up` logs in through the browser (check that the device page shows the same code and approve it), links the local broker to the org hub (as the short hostname, or as `--machine NAME`) and installs the MCP server and the hooks in every installed harness, at user scope.
 
 Run it before you start any agent session. A broker that was already running stays local-only until it exits. Check the link:
 
@@ -125,7 +117,7 @@ Show the org page on app.scp.dev. It lists the machines and agents live, with re
 
 | Symptom | Fix |
 | --- | --- |
-| `swarm cloud status` says local-only | The broker started before `swarm cloud enable` (any earlier `swarm` command starts one, and it stays up until 30 minutes idle). Close the agent sessions, `kill` the pid that `swarm status` prints, then run `swarm cloud status` again: the next broker links |
+| `swarm cloud status` says local-only | The broker started before `swarm up` (any earlier `swarm` command starts one, and it stays up until 30 minutes idle). Close the agent sessions, `kill` the pid that `swarm status` prints, then run `swarm cloud status` again: the next broker links |
 | The other machine's agent is missing from `swarm list` | Check `swarm cloud status` on both machines, and that both are in the same org (`swarm login --json` shows `org`) |
 | `the human names the endpoint to grant under` | `swarm spawn` from a plain terminal needs a parent: run it from inside the orchestrator, or pass `--as <agent>` or `--under <agent>` |
 | A session joins as `lead-2` | A `lead` from an earlier run is still known in another tree. Use a new name, or rehearse with a fresh `SCP_DIR` |

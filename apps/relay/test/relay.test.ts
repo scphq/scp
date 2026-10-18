@@ -296,7 +296,7 @@ describe("API tokens for ambient agents", () => {
     const page = await created.text();
     const token = /scp_t_[A-Za-z0-9_-]{43}/.exec(page)?.[0];
     expect(token).toBeDefined();
-    expect(page).toContain(`SCP_TOKEN=${token} swarm hooks install`);
+    expect(page).toContain(`swarm up --token ${token} --machine &lt;name&gt;`);
     expect((await (await a.get("/orgs/ciorg/tokens")).text()).includes(token!)).toBe(false);
 
     const who = await relay.fetch("/v1/whoami", bearer(token!));

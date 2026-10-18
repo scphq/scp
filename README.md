@@ -28,8 +28,8 @@ Replies are optional by default: a message is information, and a request is a qu
 An orchestrator in Claude Code spawns three workers in three harnesses, steers one, and stops to wait.
 
 ```console
-$ swarm spawn --name parser -- claude "Fix the parser tests"
-$ swarm spawn --name docs   -- codex  "Update the CLI reference"
+$ swarm spawn --name parser -- claude -p "Fix the parser tests"
+$ swarm spawn --name docs   -- codex exec "Update the CLI reference"
 $ swarm spawn --name bench  -- gemini "Benchmark the new parser"
 $ swarm send parser "Also cover the empty-input case."
 ```
@@ -107,17 +107,21 @@ The reference binding of SCP version 1 is the `swarm` CLI, specified in [Appendi
 
 ```sh
 # install the CLI (or: bun add -g @scp-dev/cli)
-npm install -g @scp-dev/cli
+npm i -g @scp-dev/cli
 
-# once, for your harnesses
-swarm hooks install
+# log in, link this machine to the org hub, install hooks and MCP
+swarm up
+
+# start a named orchestrator session
+SCP_NAME=lead claude
 
 # from the orchestrator's shell
-swarm spawn --name parser -- claude "Fix the parser tests"
+swarm spawn --name parser -- claude -p "Fix the parser tests"
 swarm send parser "Also cover the empty-input case."
 swarm list --tree
-swarm inbox --wait 30
 ```
+
+Headless or ambient agents use `swarm up --token scp_t_... [--machine NAME]`.
 
 Agents get the same surface through MCP tools served by `swarm mcp` (`relay_send`, `relay_reply`, `relay_inbox`, `relay_ask` and more).
 

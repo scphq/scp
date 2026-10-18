@@ -125,7 +125,7 @@ export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Fl
             <p class="small">Copy it now. It is shown once and only its hash is stored.</p>
             <p class="secret">${flash.created.token}</p>
             <p class="small">Headless agents use it with no browser:</p>
-            <p class="secret">SCP_RELAY=${ctx.url.origin} SCP_TOKEN=${flash.created.token} swarm hooks install</p></section>`
+            <p class="secret">SCP_RELAY=${ctx.url.origin} swarm up --token ${flash.created.token} --machine &lt;name&gt;</p></section>`
           : ""
       }
       <section class="block"><h2>API tokens</h2>
@@ -150,7 +150,7 @@ export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Fl
           <button class="btn btn-primary" type="submit">Create token</button>
         </form></section>
       <section class="block"><h2>Devices</h2>
-        <p class="small">Terminals signed in with <code>swarm login</code>.</p>
+        <p class="small">Terminals signed in with <code>swarm up</code>.</p>
         ${
           devices.length
             ? html`<div class="table"><table><thead><tr><th>Machine</th><th>Credential</th><th>User</th><th>Signed in</th><th>Last used</th><th></th></tr></thead>
@@ -160,7 +160,7 @@ export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Fl
                 ) => html`<tr><td class="mono">${d.label}</td><td class="mono">${d.display}</td><td>${d.email}</td><td class="mono">${when(d.created_at)}</td><td class="mono">${d.last_used_at ? when(d.last_used_at) : "never"}</td>
                   <td class="end">${revoke(`devices/${d.id}`)}</td></tr>`,
               )}</tbody></table></div>`
-            : html`<p class="empty">No devices. Run <code>swarm login</code> in a terminal.</p>`
+            : html`<p class="empty">No devices. Run <code>swarm up</code> in a terminal.</p>`
         }
       </section>`,
     status,

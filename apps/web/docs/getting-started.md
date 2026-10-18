@@ -11,41 +11,28 @@ swarm --version
 
 The broker starts on demand. A swarm on one machine needs no account; sign in to link machines through your org's hub.
 
-## Sign in
+## Sign in and link
 
 ```sh
-swarm login
-```
-
-`swarm login` opens the relay's device page in your browser and prints a code. Check that the page shows the same code, approve it, and the CLI stores the credential in `~/.config/scp/credentials.json`.
-
-| Where you are | Command |
-| --- | --- |
-| A desktop with a browser | `swarm login` |
-| SSH, a container, no browser | `swarm login --no-browser`, then open the printed URL on any device |
-| You already have a token | `swarm login --token <token>` |
-
-`--token` checks the token with the relay before saving it. `--label <name>` names the device credential, and defaults to the short hostname. `swarm logout` removes the stored credential.
-
-Then link this machine's broker to the hub:
-
-```sh
-swarm cloud enable
+swarm up
 swarm cloud status
 ```
 
-`swarm up` does all of it in one step: it logs in if needed, links the broker and runs `swarm setup --write`.
+`swarm up` logs in if needed, links this machine's broker to the org hub and runs `swarm setup --write`. The login opens the relay's device page in your browser and prints a code. Check that the page shows the same code and approve it. The credential goes in `~/.config/scp/credentials.json`. Run it before you start any agent session: a broker that was already running stays local-only until it exits.
 
-## Install the hooks
+| Where you are | Command |
+| --- | --- |
+| A desktop with a browser | `swarm up` |
+| SSH, a container, no browser | `swarm up --no-browser`, then open the printed URL on any device |
+| Headless or ambient, with a token | `swarm up --token scp_t_... [--machine NAME]` |
 
-Each harness needs the MCP server (pull: the model calls `relay_send`, `relay_inbox`, `relay_reply`) and the hooks (push: messages enter the model's context after tools, on prompts and at stops).
+`--machine` names this machine on the hub, and defaults to the short hostname. `swarm logout` removes the stored credential.
 
-```sh
-swarm setup            # print the plan for every installed harness
-swarm setup --write    # apply it, at user scope
-```
+## Hooks and MCP
 
-Or one harness at a time:
+Each harness needs the MCP server (pull: the model calls `relay_send`, `relay_inbox`, `relay_reply`) and the hooks (push: messages enter the model's context after tools, on prompts and at stops). `swarm up` installs both, at user scope, in every installed harness. `swarm setup` prints that plan without applying it.
+
+To install one harness at a time instead:
 
 ```sh
 swarm hooks install --harness claude            # print the hooks and the file they go in
@@ -57,13 +44,19 @@ swarm mcp install --harness claude              # print the command that mounts 
 
 ## A first swarm
 
-From a terminal, spawn a worker in the background:
+Start a named orchestrator session:
 
 ```sh
-swarm spawn --bg --name parser -- claude -p "Fix the parser tests"
+SCP_NAME=lead claude
 ```
 
-`spawn` runs the harness with a grant that places the worker under you, with scope `parent`. Without `--name` the worker is `<harness>-<5 random characters>`. From an agent's shell, `spawn` returns at once without `--bg`.
+Its hooks join it to the relay as `me/lead`. From its shell, spawn a worker:
+
+```sh
+swarm spawn --name parser -- claude -p "Fix the parser tests"
+```
+
+`spawn` runs the harness with a grant that places the worker under the orchestrator, with scope `parent`, and returns at once. Without `--name` the worker is `<harness>-<5 random characters>`. From a plain terminal, `spawn` needs a parent: pass `--as lead` to spawn as the orchestrator.
 
 ```sh
 swarm list --tree                                     # agents nested by parent
@@ -73,7 +66,7 @@ swarm inbox --wait 50                                 # wait for its reply or ha
 
 When the worker exits you get a handback: its exit code and final output, so it need not report back itself. `swarm status` shows the fleet in short and `swarm watch` tails it live.
 
-The same works from inside a harness. An orchestrator session runs `swarm spawn` in its shell, and while its workers run, its stop hook waits up to 600 s (`--push-wait`) for their next message or handback and continues the turn with it.
+While the orchestrator's workers run, its stop hook waits up to 600 s (`--push-wait`) for their next message or handback and continues the turn with it.
 
 ## Steer a worker
 
@@ -88,7 +81,7 @@ The message reaches the worker after its next tool call. It applies the message 
 Messages from any other sender are framed as untrusted data, never as permission or approval. To see what a worker is doing, spawn it with `--peek local` and read its last turns, redacted:
 
 ```sh
-swarm spawn --bg --peek local --name lint -- codex exec "Fix the lint errors"
+swarm spawn --peek local --name lint -- codex exec "Fix the lint errors"
 swarm peek lint --turns 2
 ```
 

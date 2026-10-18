@@ -3,21 +3,25 @@
 The `swarm` command line tool, the reference binding of SCP for shells, hooks and MCP.
 
 ```sh
-npm install -g @scp-dev/cli
+npm i -g @scp-dev/cli
 ```
 
 ## Usage
 
 ```sh
-swarm login
-swarm setup --write
-swarm spawn --name parser -- claude "Fix the parser tests"
-swarm send parser "Also cover the empty-input case."
-swarm list --tree
-swarm inbox --wait 30
+swarm up                  # browser login, links this machine to the org hub, installs hooks and MCP
+SCP_NAME=lead claude      # start a named orchestrator session
 ```
 
-Headless (CI, cron, cloud runners): `swarm login --token scp_t_...` or `SCP_TOKEN`. `swarm up --token ...` logs in, links the broker to the hub and runs setup in one step. The default relay is https://app.scp.dev; `swarm relay use <url>` picks another. Runs on Node 22.13 or later.
+From the orchestrator's shell:
+
+```sh
+swarm spawn --name parser -- claude -p "Fix the parser tests"
+swarm send parser "Also cover the empty-input case."
+swarm list --tree
+```
+
+Headless (CI, cron, cloud runners): `swarm up --token scp_t_... [--machine NAME]`. The default relay is https://app.scp.dev; `swarm relay use <url>` picks another. Runs on Node 22.13 or later.
 
 ## Provides
 
