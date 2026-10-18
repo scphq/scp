@@ -1,5 +1,5 @@
 import type { ActivityRow, EndpointView } from "@scp-dev/core";
-import type { HubGraph } from "@scp-dev/hub";
+import type { IdentifiedGraph } from "./identity";
 import type { User } from "./env";
 import { hubGraph, hubHolds, hubOverview, judgeEnabled, type Overview } from "./hub/routes";
 import { judgeSetup } from "./hub/judge";
@@ -9,6 +9,7 @@ import {
   activityBlock,
   ago,
   describe,
+  fleetStrip,
   groupByMachine,
   handleOf,
   hicon,
@@ -35,7 +36,7 @@ export interface Counts {
   minutes: number;
 }
 
-export function countsOf(o: Overview, g: HubGraph | null): Counts {
+export function countsOf(o: Overview, g: IdentifiedGraph | null): Counts {
   const agents = o.endpoints.filter((e) => e.kind === "agent");
   const idle = agents.filter((e) => e.presence === "idle");
   const groups = groupByMachine(o);
@@ -107,18 +108,6 @@ function nowList(o: Overview, now: number, handle: string): Html {
   </section>`;
 }
 
-/** each machine as a row of squares, one per agent, shaded by presence: the fleet at a glance */
-function fleetStrip(o: Overview, handle: string): Html {
-  const groups = groupByMachine(o);
-  return html`<div class="strip" aria-label="Agents per machine">${groups.map((g) => {
-    const state = g.machine?.online || g.endpoints.some((e) => e.presence === "online") ? "online" : "offline";
-    const agents = [...g.endpoints].sort((a, b) => (RANK[a.presence] ?? 3) - (RANK[b.presence] ?? 3));
-    return html`<div class="strip-row"><span class="dot ${state}" aria-hidden="true"></span><span class="mono strip-name" title="${g.name}">${g.name}</span>
-      <span class="cells">${agents.map((e) => html`<span class="cell ${e.presence}${wakeOf(e) ? " wake" : ""}" title="${handleOf(e.address)}, ${e.presence}"></span>`)}</span>
-      <span class="mini push">${g.endpoints.length}</span></div>`;
-  })}</div><p class="mini strip-key"><span class="cell online"></span>online <span class="cell idle wake"></span>wakeable <span class="cell idle"></span>next turn <span class="cell offline"></span>offline <a class="mini-link push" href="/orgs/${handle}/graph">Graph</a></p>`;
-}
-
 interface Side {
   devices: number;
   tokens: number;
@@ -138,7 +127,7 @@ async function sideOf(ctx: Ctx, m: Membership, user: User): Promise<Side> {
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
-export function overviewRegion(o: Overview | null, g: HubGraph | null, side: Side, handle: string, now: number): Html {
+export function overviewRegion(o: Overview | null, g: IdentifiedGraph | null, side: Side, handle: string, now: number): Html {
   if (!o) return hubDown();
   if (!o.machines.length && !o.endpoints.length) return onboarding(handle);
   const c = countsOf(o, g);

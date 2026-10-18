@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import type { Claim } from "@scp-dev/core"
 import { shortHostname } from "@scp-dev/broker"
-import { LIMITS, validHandle, validHarness } from "@scp-dev/core"
+import { GENERIC_HARNESSES, LIMITS, validHandle, validHarness } from "@scp-dev/core"
 
 /**
  * The fleet-agent convention the MCP shim and the hooks share: a harness session's shim and hooks
@@ -214,6 +214,50 @@ function command(args: string): string {
 const namesHarness = (words: string[]): boolean =>
   words.some((word) => !word.startsWith("-") && word.split("/").some((part) => HARNESSES.has(part.toLowerCase().replace(/\..*$/, ""))))
 
+/** harness ids by the program or package name a harness process runs as */
+const HARNESS_IDS = new Map([
+  ["claude", "claude-code"],
+  ["claude-code", "claude-code"],
+  ["codex", "codex"],
+  ["opencode", "opencode"],
+  ["opencode-ai", "opencode"],
+  ["grok", "grok"],
+  ["grok-cli", "grok"],
+  ["muse", "muse"],
+  ["agy", "agy"],
+  ["antigravity", "agy"],
+  ["gemini", "gemini"],
+  ["gemini-cli", "gemini"],
+  ["pi", "pi"],
+  ["pi-coding-agent", "pi"],
+])
+const harnessId = (name: string): string | undefined => HARNESS_IDS.get(name.toLowerCase().replace(/\..*$/, ""))
+
+/** the harness a command line runs: its program's name, else, for an interpreter or package runner, a later word naming one */
+export function harnessOf(args: string | undefined): string | undefined {
+  if (!args) return undefined
+  const name = command(args)
+  const own = harnessId(name)
+  if (own) return own
+  if (!INTERPRETERS.has(name) && !RUNNERS.has(name) && !FETCHERS.has(name) && !/^python[0-9.]*$/.test(name)) return undefined
+  for (const word of args.split(/\s+/).slice(1)) {
+    if (word.startsWith("-")) continue
+    for (const part of word.split("/").reverse()) {
+      const id = part === "pi" ? undefined : harnessId(part)
+      if (id) return id
+    }
+  }
+  return undefined
+}
+
+/** whether claims may infer an unnamed harness: off with $SCP_HARNESS_DETECT=0, as the test suite runs */
+export const inferring = (env: Env): boolean => env.SCP_HARNESS_DETECT !== "0"
+
+/** the harness process `pid` runs, from the ps table */
+export function harnessAt(pid: number, table: PsCommTable | undefined = readPsTable()): string | undefined {
+  return inferring(process.env) ? harnessOf(table?.get(pid)?.args) : undefined
+}
+
 let roots: string[] | undefined
 
 /** where an agent's own scripts live: this shell's cwd, its git toplevel and the temp dirs, real paths */
@@ -379,6 +423,8 @@ export interface IdentityInput {
   cwd: string
   env: Env
   harnessPid: (harness: string) => number
+  /** the harness the harness process runs, for a claim that names none and detects none (e.g. {@link harnessAt}) */
+  inferHarness?: (pid: number) => string | undefined
   startOf?: (pid: number) => string | undefined
   /** process keys of the harness and its ancestors (default {@link lineage}) */
   lineageOf?: (pid: number) => string[]
@@ -386,10 +432,11 @@ export interface IdentityInput {
 
 /** the claim a shim or hook makes for this harness session */
 export function relayIdentity(input: IdentityInput): Claim & { handle: string; harness: string; session: string; process: string; cwd: string } {
-  const harness = resolveHarness(input.harness, input.env, input.fallbackHarness)
+  const resolved = resolveHarness(input.harness, input.env, input.fallbackHarness)
+  const pid = input.harnessPid(resolved)
+  const harness = (GENERIC_HARNESSES.has(resolved) && input.inferHarness?.(pid)) || resolved
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
   const handle = input.as ?? input.env.SCP_NAME ?? deriveHandle(harness, cwd)
-  const pid = input.harnessPid(harness)
   const harnessProcess = processKey(pid, input.startOf)
   const keys = input.lineageOf ? input.lineageOf(pid) : lineage(pid)
   return {

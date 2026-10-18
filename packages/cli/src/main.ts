@@ -103,6 +103,8 @@ usage:
   ${CLI_NAME} inbox [--wait S] [--keep]          your unread messages, then marked read (--keep leaves them unread); --wait waits up
                                                  to S seconds (max 50)
   ${CLI_NAME} ack <id|seq>... | --all            mark messages read, by message id or seq; --all marks every unread one
+  ${CLI_NAME} show <id>                          one message delivered to you, whole, read or not; it stays as it is (a hook
+                                                 shows a long message cut, ending in [truncated, N more chars: ${CLI_NAME} show <id>])
   An <id> is a message id, its short id (the last 6 characters, shown with every message) or any unique suffix of at least 4,
   or last: the newest message you were shown, refused while a newer one is unseen.
   ${CLI_NAME} ask <to> [text|-] [--wait S]       send a request and wait for its reply (default 50 s); --require-reply holds
@@ -202,6 +204,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  message as a turn (steering a running one, waking an idle session)
   ${CLI_NAME} codex [--name N] [--headless] [--] [codex args...]
                                                  runs codex with relay messages waking an idle thread or steering a running turn
+  ${CLI_NAME} opencode [--name N] [--] [opencode args...]
+                                                 runs OpenCode with your own config and arguments, wake on: the plugin wakes an
+                                                 idle session, or opens one; refuses to start without the current plugin
   ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
@@ -265,7 +270,8 @@ agent sessions:
 relay:
   ${CLI_NAME} relay use <url> | show            select a relay, or show its source and credential status
   ${CLI_NAME} login [--no-browser] [--token T] [--label NAME]   sign in through the browser, or save a token checked with the relay
-  ${CLI_NAME} up [--token T] [--machine NAME] [--no-browser]   log in if needed, link the broker to the hub, run setup --write
+  ${CLI_NAME} up [--token T] [--machine NAME] [--no-browser]   log in if needed, link the broker to the hub, run setup --write,
+                                                 then print the wake-enabled launch of each installed harness
   ${CLI_NAME} logout                             remove the stored credential for the active relay
   ${CLI_NAME} cloud enable [--machine NAME] | disable | status   link the local broker to the hub, or inspect its link
   ${CLI_NAME} machines [rm NAME]                 list the hub's machines, or release one
@@ -274,8 +280,8 @@ relay:
 
 identity:
   --as HANDLE (or --as=HANDLE, anywhere on the line, or $SCP_NAME, a local handle; a leading me/ is dropped) acts as that agent, with --harness H
-  ($SCP_HARNESS, default cli), $SCP_LABELS (role=impl,lane=relay) and $SCP_PARENT. An offline
-  agent of the same handle and harness is taken back with its inbox; a handle a live session holds is refused, never
+  ($SCP_HARNESS, default the harness this shell runs under, else cli), $SCP_LABELS (role=impl,lane=relay) and $SCP_PARENT. An offline
+  agent of the same handle and harness (or a generic one: cli, hook, mcp) is taken back with its inbox; a handle a live session holds is refused, never
   suffixed. Run from that agent's own process, it acts as the agent, narrowing only. A session renamed with join or
   name keeps its new handle: its hooks, its shim and commands with $SCP_NAME from its shell claim that one.
   Without --as, at a terminal or with --human you are your own human inbox (me/); messages sent with --human and no
@@ -343,6 +349,7 @@ const VERBS: Record<string, Option[]> = {
   inbox: [...IDENTITY, "wait", "ack", "keep"],
   reply: IDENTITY,
   ack: [...IDENTITY, "all"],
+  show: IDENTITY,
   ask: [...IDENTITY, "wait", "require-reply", "thread", "private", "attach"],
   "ask-wait": [...IDENTITY, "wait"],
   status: [...IDENTITY, "all", "activity"],
@@ -548,6 +555,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   if (verb === "claude") return (await import("./claude")).claudeCommand(rest)
   if (verb === "pi") return (await import("./pi")).piCommand(rest)
   if (verb === "codex") return (await import("./codex")).codexCommand(rest)
+  if (verb === "opencode") return (await import("./opencode")).opencodeCommand(rest, process.env, undefined, cwd)
   if (verb === "spawn") {
     const { splitSpawn, spawnCommand } = await import("./spawn")
     const { flags } = splitSpawn(rest)
@@ -897,6 +905,18 @@ async function runVerb(
         for (const message of messages) printMessage(message)
       }
       if (!values.keep && messages.length) await client.request("ack", { seqs: messages.map((m) => m.seq) })
+      return 0
+    }
+    case "show": {
+      if (positionals.length !== 1) throw new RelayUsage(`${CLI_NAME} show takes one message id`)
+      const message = await lookup(client, positionals[0]!)
+      if (!message) throw new RelayUsage(`no message ${positionals[0]} was delivered to you`)
+      if (asJson) json({ preamble: PREAMBLE, message })
+      else {
+        out(PREAMBLE)
+        out()
+        printMessage(message)
+      }
       return 0
     }
     case "ack": {

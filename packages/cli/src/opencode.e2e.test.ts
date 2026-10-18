@@ -70,9 +70,12 @@ async function until<T>(probe: () => T | undefined | Promise<T | undefined>, ms:
   throw new Error(`timed out waiting for ${what}`)
 }
 
-test.skipIf(!bin)(
-  "a message to an idle OpenCode session wakes it to run a turn and reply, shown once (skipped without the opencode-ai devDependency)",
-  async () => {
+test.skipIf(!bin).each([
+  ["an idle OpenCode session wakes it", true],
+  ["an OpenCode server with no session yet opens one", false],
+] as const)(
+  "a message to %s to run a turn and reply, shown once (skipped without the opencode-ai devDependency)",
+  async (_, opened) => {
     const root = mkdtempSync(join(tmpdir(), "scp-opencode-"))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }))
     const model = mockModel()
@@ -129,11 +132,20 @@ test.skipIf(!bin)(
     let out = ""
     server.stdout!.on("data", (data) => (out += String(data)))
     const base = await until(() => /listening on (http:\/\/\S+)/.exec(out)?.[1], 60_000, "opencode serve")
-    const session = (await (await fetch(`${base}/session`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as {
-      id: string
+    if (opened) {
+      const session = (await (await fetch(`${base}/session`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as {
+        id: string
+      }
+      expect(session.id).toBeString()
+    } else expect((await fetch(`${base}/session`)).ok).toBe(true)
+    type Listed = { address: string; harness: string; wake: string | null }
+    const endpoint = () => JSON.parse(swarm("list", "--as", "tester", "--json").stdout || "[]") as Listed[] | { endpoints?: Listed[] }
+    const ocdemo = () => {
+      const listed = endpoint()
+      return (Array.isArray(listed) ? listed : (listed.endpoints ?? [])).find((e) => e.address === "me/ocdemo")
     }
-    expect(session.id).toBeString()
-    await until(() => (swarm("list", "--as", "tester", "--json").stdout.includes("ocdemo") ? true : undefined), 30_000, "the opencode endpoint")
+    await until(() => (ocdemo()?.wake === "opencode-plugin" ? true : undefined), 30_000, "the opencode endpoint, wake on")
+    expect(ocdemo()?.harness).toBe("opencode")
     await Bun.sleep(1500)
     expect(model.requests.length).toBe(0)
 

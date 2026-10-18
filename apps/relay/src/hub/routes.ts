@@ -2,6 +2,7 @@ import type { ActivityRow, EndpointView } from "@scp-dev/core";
 import type { HoldView, HubGraph, MachineRow } from "@scp-dev/hub";
 import { authenticate } from "../credentials";
 import type { Env } from "../env";
+import { type IdentifiedGraph, identify, orgIdentities } from "../identity";
 import { json } from "../util";
 import { DASH_HEADER, GRANT_HEADER, hubGrant, ORG_HEADER } from "./grant";
 import { JUDGE_HEADER } from "./judge";
@@ -62,15 +63,16 @@ export async function hubOverview(env: Env, orgId: string): Promise<Overview | n
   }
 }
 
-/** the org hub's live graph: endpoints, spawn edges and message counts over the last `minutes`, no bodies; null when the hub does not answer */
-export async function hubGraph(env: Env, orgId: string, minutes?: number): Promise<HubGraph | null> {
+/** the org hub's live graph: endpoints, spawn edges and message counts over the last `minutes`, no bodies, each machine with its member's identity; null when the hub does not answer */
+export async function hubGraph(env: Env, orgId: string, minutes?: number): Promise<IdentifiedGraph | null> {
   try {
     const res = await hubStub(env, orgId).fetch(`${INTERNAL}/graph${minutes === undefined ? "" : `?minutes=${minutes}`}`);
     if (!res.ok) {
       await res.body?.cancel();
       return null;
     }
-    return (await res.json()) as HubGraph;
+    const [g, who] = await Promise.all([res.json() as Promise<HubGraph>, orgIdentities(env.DB, orgId)]);
+    return identify(g, who);
   } catch (e) {
     console.error("scp-relay hub graph failed", e);
     return null;

@@ -22,7 +22,7 @@ import {
 } from "@scp-dev/core"
 import { connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
 import { prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
-import { hookHarness, hookHarnessPid, normalizeHarness, processKey, psStart, relayIdentity, sessionKey } from "./identity"
+import { harnessAt, hookHarness, hookHarnessPid, normalizeHarness, processKey, psStart, relayIdentity, sessionKey } from "./identity"
 import { membership } from "./session"
 
 export { SUBAGENT }
@@ -505,10 +505,55 @@ function launchedSubagent(harness: string, event: HookEvent, payload: Json): { i
   return id && title && /^[A-Za-z0-9_-]{1,64}$/.test(id) ? { id, title } : undefined
 }
 
-/** Formats harness replies; older Claude Code needs a blocking reason instead of Stop context. */
-export function hookReply(harness: string, kind: HookEvent["kind"], text: string, unread = 0, continues = true): string {
-  if (kind === "stop" && harness === "claude-code" && continues)
-    return JSON.stringify({ hookSpecificOutput: { hookEventName: "Stop", additionalContext: text } })
+/** what Claude Code passes on of a hook's text per field, characters and lines; it cuts longer text there, mid-message */
+export const CLAUDE_CAPS = { context: { chars: 8000, lines: 200 }, reason: { chars: 2000, lines: 20 } } as const
+const MARKER_ROOM = 80
+const BLOCK = /(<relay-message [^>]*?\bshort="([^"]*)"[^>]*>\n)([\s\S]*?)(\n<\/relay-message>)/g
+
+const cutAt = (text: string, chars: number): string => text.slice(0, chars > 0 && /[\ud800-\udbff]/.test(text[chars - 1] ?? "") ? chars - 1 : chars)
+
+/**
+ * `text` within `cap`: relay message bodies cut from the last one back, each cut one ending in
+ * `[truncated, N more chars: swarm show <short id>]`; past every body, the text as it is
+ */
+export function fitText(text: string, cap: { chars: number; lines: number }): string {
+  const parts: (string | { short: string; body: string; chars: number; lines: number })[] = []
+  let at = 0
+  for (const match of text.matchAll(BLOCK)) {
+    parts.push(text.slice(at, match.index) + match[1]!, { short: match[2]!, body: match[3]!, chars: match[3]!.length, lines: match[3]!.split("\n").length })
+    at = match.index + match[0].length - match[4]!.length
+  }
+  parts.push(text.slice(at))
+  const blocks = parts.filter((part) => typeof part !== "string")
+  const render = () =>
+    parts
+      .map((part) => {
+        if (typeof part === "string") return part
+        if (part.chars >= part.body.length && part.lines >= part.body.split("\n").length) return part.body
+        const head = cutAt(part.body.split("\n").slice(0, part.lines).join("\n"), part.chars).trimEnd()
+        const marker = `[truncated, ${part.body.length - head.length} more chars: ${CLI_NAME} show ${part.short}]`
+        return head ? `${head}\n${marker}` : marker
+      })
+      .join("")
+  for (let i = blocks.length - 1, rendered = render(); ; rendered = render()) {
+    const chars = rendered.length - cap.chars
+    const lines = rendered.split("\n").length - cap.lines
+    if (chars <= 0 && lines <= 0) return rendered
+    while (i >= 0 && blocks[i]!.chars === 0 && blocks[i]!.lines === 0) i--
+    if (i < 0) return rendered
+    const block = blocks[i]!
+    if (chars > 0) block.chars = Math.max(0, Math.min(block.chars, block.body.length) - chars - MARKER_ROOM)
+    if (lines > 0) block.lines = Math.max(0, Math.min(block.lines, block.body.split("\n").length) - lines - 1)
+    if (chars <= 0 && block.lines === 0) block.chars = 0
+    if (lines <= 0 && block.chars === 0) block.lines = 0
+  }
+}
+
+/** Formats harness replies; older Claude Code needs a blocking reason instead of Stop context, and its text is fitted to Claude Code's caps. */
+export function hookReply(harness: string, kind: HookEvent["kind"], raw: string, unread = 0, continues = true): string {
+  const claude = harness === "claude-code"
+  const text = claude ? fitText(raw, kind === "stop" && !continues ? CLAUDE_CAPS.reason : CLAUDE_CAPS.context) : raw
+  if (kind === "stop" && claude && continues) return JSON.stringify({ hookSpecificOutput: { hookEventName: "Stop", additionalContext: text } })
   if (kind === "stop")
     return JSON.stringify(
       harness === "agy" ? { decision: "continue", reason: text } : { decision: "block", reason: text, ...(harness === "opencode" ? { unread } : {}) },
@@ -577,6 +622,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     cwd: event.cwd ?? options.cwd,
     env: options.env,
     harnessPid: () => pid,
+    ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
     startOf: () => started,
   })
   if (!validHandle(claim.handle)) return
@@ -687,6 +733,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     cwd: asString(payload.cwd) ?? options.cwd,
     env: options.env,
     harnessPid: options.harnessPid ?? ((harness) => hookHarnessPid(options.env, harness)),
+    ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
   })
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
@@ -944,12 +991,14 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>):
   return { ...(settings as Json), hooks: merged }
 }
 
-/** Root sessions receive context and wake while idle; failed or aborted sessions do not hold the stop. */
+/** Root sessions receive context and wake while idle, and a message to a server with no session yet opens one; failed or aborted sessions do not hold the stop. */
 export function opencodePlugin(options: { blockStop?: boolean } = {}): string {
   return `// scp: reports this session to the local SCP broker and hands it new messages
 import { spawn } from "node:child_process"
 import { text as readAll } from "node:stream/consumers"
 const BLOCK_STOP = ${options.blockStop === true}
+/** before a session exists, the waiter starts this long after load, so a session opened at launch claims the first message */
+const STARTUP_MS = 3000
 
 type Reply = { hookSpecificOutput?: { additionalContext?: unknown }; decision?: unknown; reason?: unknown }
 
@@ -996,6 +1045,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
   const WAKE = process.env.SCP_WAKE !== "0"
   const busy = new Set<string>()
   let target: string | undefined
+  let fresh = true
   let waiter: ReturnType<typeof spawn> | undefined
   let looping = false
   let armed = 0
@@ -1005,7 +1055,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
     looping = true
     let version = armed
     try {
-      while (WAKE && target && busy.size === 0) {
+      while (WAKE && busy.size === 0 && (target || fresh)) {
         const id = target
         const began = Date.now()
         let text: string | undefined
@@ -1018,7 +1068,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
             child.once("close", () => resolve())
           })
           child.stdin!.on("error", () => {})
-          child.stdin!.end(JSON.stringify({ hook_event_name: "Wake", session_id: id, cwd: directory }))
+          child.stdin!.end(JSON.stringify({ hook_event_name: "Wake", ...(id ? { session_id: id } : {}), cwd: directory }))
           const [output] = await Promise.all([readAll(child.stdout!), ended])
           text = output.trim() ? context(JSON.parse(output) as Reply) : undefined
         } catch {} finally {
@@ -1026,7 +1076,8 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
         }
         if (text) {
           version = armed
-          await client.session.promptAsync({ path: { id }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
+          const into = target ?? (await client.session.create({ body: {} }).then((made: any) => made?.data?.id).catch(() => undefined))
+          if (into) await client.session.promptAsync({ path: { id: into }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
           break
         }
         if (Date.now() - began < 2000) await new Promise((resolve) => setTimeout(resolve, 5000))
@@ -1038,6 +1089,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
   }
   const arm = (id: string) => {
     target = id
+    fresh = false
     armed++
     void wake()
   }
@@ -1056,6 +1108,9 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
     if (child === undefined && children.get(id) === known) children.delete(id)
     return child === true
   }
+  setTimeout(() => {
+    if (fresh && busy.size === 0) void wake()
+  }, STARTUP_MS).unref?.()
   return {
     "tool.execute.after": async (input: { tool: string; sessionID: string; args?: unknown }, output: { output?: unknown }) => {
       const payload = { hook_event_name: "PostToolUse", session_id: input.sessionID, cwd: directory, tool_name: input.tool, tool_input: input.args }

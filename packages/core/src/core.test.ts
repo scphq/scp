@@ -1595,7 +1595,7 @@ describe("hook injection", () => {
         taken === "live agent"
           ? core.claim({ handle: "named", harness: "claude-code", session: "pid:9999", process: "pid:9999:Mon-Oct-12-09:00:00-2026" })
           : taken === "other harness"
-            ? core.claim({ handle: "named" })
+            ? core.claim({ handle: "named", harness: "codex" })
             : undefined
       if (taken === "other harness") core.disconnect(other!.endpoint.id)
       const hook = () => core.claim({ handle: "claude-repo", harness: "claude-code", session: "pid:4242", process: P1 }, { transient: true })
@@ -1622,6 +1622,22 @@ describe("hook injection", () => {
       expect(shimFirst).toBe(taken === "free" ? "me/named" : "me/named-2")
       expect(settle("hooks first", taken)).toBe(shimFirst)
     }
+  })
+
+  test("a generic row heals to the harness of its next claim, and a generic claim never replaces a known harness", () => {
+    const { core } = setup()
+    const shell = core.claim({ handle: "worker", harness: "cli", exact: true })
+    expect(core.whoami(shell.endpoint.id).harness).toBe("cli")
+    core.disconnect(shell.endpoint.id)
+    const healed = core.claim({ handle: "worker", harness: "claude-code", exact: true })
+    expect([healed.endpoint.id, core.whoami(healed.endpoint.id).harness]).toEqual([shell.endpoint.id, "claude-code"])
+    core.disconnect(healed.endpoint.id)
+    expect(() => core.claim({ handle: "worker", harness: "cli", exact: true })).toThrow(/claude-code endpoint/)
+    expect(core.whoami(healed.endpoint.id).harness).toBe("claude-code")
+    const shim = core.claim({ handle: "named", harness: "mcp", session: "pid:4242", process: P1 })
+    core.disconnect(shim.endpoint.id)
+    const hook = core.claim({ handle: "named", harness: "codex", session: "pid:4242", process: P1 }, { transient: true })
+    expect([hook.endpoint.id, core.whoami(hook.endpoint.id).harness]).toEqual([shim.endpoint.id, "codex"])
   })
 
   test("a long-dead endpoint of the same harness that the claim would not restart keeps its handle whether hooks or the shim claim first", () => {

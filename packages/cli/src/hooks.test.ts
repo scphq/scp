@@ -24,6 +24,8 @@ import { readCapped, STDIN_CAP, subagentSkip } from "./hook-fast"
 import {
   deriveHandle,
   detectHarness,
+  harnessAt,
+  harnessOf,
   hookHarness,
   hookHarnessPid,
   labelsFor,
@@ -92,6 +94,49 @@ describe("relay identity", () => {
     expect(resolveHarness(undefined, { SCP_HARNESS: "Rev Agent" }, "mcp")).toBe("rev-agent")
     expect(resolveHarness("codex", { CLAUDECODE: "1" }, "mcp")).toBe("codex")
     expect(resolveHarness(undefined, {}, "mcp")).toBe("mcp")
+  })
+
+  test("a harness process's command line names its harness: its program, or the script an interpreter runs", () => {
+    expect(harnessOf("claude --dangerously-skip-permissions")).toBe("claude-code")
+    expect(harnessOf("/opt/homebrew/bin/codex exec hi")).toBe("codex")
+    expect(harnessOf("node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")).toBe("claude-code")
+    expect(harnessOf("node /usr/local/lib/node_modules/@openai/codex/bin/codex.js")).toBe("codex")
+    expect(harnessOf("bun /home/u/.bun/install/global/node_modules/opencode-ai/bin/opencode")).toBe("opencode")
+    expect(harnessOf("pi --model x")).toBe("pi")
+    expect(harnessOf("node /usr/lib/node_modules/pi-coding-agent/dist/cli.js")).toBe("pi")
+    for (const name of ["muse", "agy", "grok", "gemini"]) expect(harnessOf(`${name} chat`)).toBe(name)
+    expect(harnessOf("node /home/pi/scripts/run.js")).toBeUndefined()
+    expect(harnessOf("vim claude.md")).toBeUndefined()
+    expect(harnessOf("node constructor")).toBeUndefined()
+    expect(harnessOf(undefined)).toBeUndefined()
+    const table = new Map([[4242, { ppid: 1, start: "Mon", args: "codex resume" }]])
+    const detect = process.env.SCP_HARNESS_DETECT
+    try {
+      delete process.env.SCP_HARNESS_DETECT
+      expect(harnessAt(4242, table)).toBe("codex")
+    } finally {
+      process.env.SCP_HARNESS_DETECT = detect
+    }
+    expect(harnessAt(4242, table)).toBeUndefined()
+  })
+
+  test("a claim that names and detects no harness takes the harness process's, never over a named or detected one", () => {
+    const claim = (harness: string | undefined, env: Record<string, string>) =>
+      relayIdentity({
+        ...(harness ? { harness } : {}),
+        fallbackHarness: "mcp",
+        cwd: "/tmp/repo",
+        env,
+        harnessPid: () => 4242,
+        startOf: () => "Mon",
+        lineageOf: () => [],
+        inferHarness: () => "codex",
+      })
+    expect(claim(undefined, {})).toMatchObject({ harness: "codex", handle: "codex-repo" })
+    expect(claim("hook", {})).toMatchObject({ harness: "codex" })
+    expect(claim(undefined, { CLAUDECODE: "1" }).harness).toBe("claude-code")
+    expect(claim("opencode", {}).harness).toBe("opencode")
+    expect(claim(undefined, { SCP_HARNESS: "pi" }).harness).toBe("pi")
   })
 
   test("a hook's harness is its argument; only Grok's markers relabel a Claude Code hook", () => {
@@ -712,7 +757,7 @@ describe("swarm hook", () => {
   test("a message too big to inline becomes a pointer to relay_inbox and stays unread, while one shown in full is read", async () => {
     const env = { SCP_DIR: dir, SCP_SESSION: "inject-big", CLAUDECODE: "1", SCP_NAME: "inject-big" }
     await hook(["claude"], { hook_event_name: "SessionStart", cwd: project }, env)
-    const big = sendTo("inject-big", "z".repeat(6000))
+    const big = sendTo("inject-big", "z".repeat(LIMITS.injectBytes + 1000))
     const result = await hook(["claude"], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Read", tool_input: {} }, env)
     const text = json(result.stdout).hookSpecificOutput!.additionalContext as string
     expect(text).toBe("1 more is unread: call relay_inbox, or run swarm inbox from a shell, to read it.")
@@ -1267,6 +1312,7 @@ describe("the OpenCode plugin", () => {
     const client = {
       session: {
         promptAsync: async (args: unknown) => void prompts.push(args),
+        create: async () => ({ data: { id: "ses_opened" } }),
         get: async ({ path }: { path: { id: string } }) => {
           lookups.push(path.id)
           if (flaky.includes(path.id) && lookups.filter((id) => id === path.id).length === 1) return { error: { name: "NotFound" } }
@@ -1331,6 +1377,22 @@ describe("the OpenCode plugin", () => {
       expect(oc.prompts).toEqual([{ path: { id: "ses_root" }, body: { parts: [{ type: "text", text: "WAKE-CONTEXT" }] } }])
     } finally {
       await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_root" } } })
+      oc.restore()
+    }
+  })
+
+  test("before any session, the waiter starts on its own and opens a session for the message it shows", async () => {
+    const oc = await load({ hookSpecificOutput: { additionalContext: "FRESH-CONTEXT" } }, {}, [], false, true)
+    try {
+      for (let i = 0; i < 100 && !oc.prompts.length; i++) await Bun.sleep(50)
+      expect(oc.calls().filter((c) => c.args.includes("--wake"))[0]).toEqual({
+        args: ["hook", "opencode", "--wake", "50"],
+        payload: { hook_event_name: "Wake", cwd: "/work/oc" },
+      })
+      expect(oc.prompts).toEqual([{ path: { id: "ses_opened" }, body: { parts: [{ type: "text", text: "FRESH-CONTEXT" }] } }])
+    } finally {
+      await oc.plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_opened", info: { id: "ses_opened" } } } })
+      await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_opened" } } })
       oc.restore()
     }
   })

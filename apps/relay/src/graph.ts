@@ -1,7 +1,7 @@
-import type { HubGraph } from "@scp-dev/hub";
 import type { User } from "./env";
 import { hubEvents, hubGraph } from "./hub/routes";
 import { Html, html, stamp } from "./html";
+import type { IdentifiedGraph } from "./identity";
 import { orgHeader, requireMember } from "./orgs";
 import { APP_JS, harnessIcon, ICON_PATHS, REFRESH_MS, shown } from "./overview";
 import { HttpError } from "./util";
@@ -22,7 +22,7 @@ export function placeOf(address: string): { machine: string; handle: string } {
 }
 
 /** the graph as the page script draws it, in a JSON block inside the live region so each refresh carries it */
-export function graphData(g: HubGraph | null): Html {
+export function graphData(g: IdentifiedGraph | null): Html {
   if (!g) return html``;
   const nodes = g.nodes.map((n) => {
     const { machine, handle } = placeOf(n.address);
@@ -40,12 +40,16 @@ export function graphData(g: HubGraph | null): Html {
       parent: n.parent,
     };
   });
-  const machines = g.machines.filter((m) => m.kind !== "revoked").map((m) => ({ name: m.name, online: m.online }));
+  const machines = g.machines.filter((m) => m.kind !== "revoked").map((m) => ({ name: m.name, online: m.online, identity: m.identity ?? null }));
   const json = JSON.stringify({ minutes: g.minutes, machines, nodes, edges: g.edges }).replace(/</g, "\\u003c");
   return html`<script type="application/json" data-graph-data>${new Html(json)}</script>`;
 }
 
 const canvas = html`<div class="graph-canvas"><svg class="graph-svg" role="group" aria-label="Agents by machine"></svg><div class="graph-tip" role="tooltip" hidden></div></div>`;
+
+const trails = html`<span class="trails" role="group" aria-label="Message trail speed">trails <span class="seg">${["1", "0.5", "0.25"].map(
+  (v) => html`<button type="button" data-trail="${v}" aria-pressed="${v === "1" ? "true" : "false"}">${v}x</button>`,
+)}</span></span>`;
 
 const legend = html`<p class="mini graph-legend"><span class="key spawn" aria-hidden="true"></span>spawned <span class="key msg" aria-hidden="true"></span>messages, last <span data-graph-minutes>15</span> min</p>`;
 
@@ -54,7 +58,7 @@ export const graphAssets = (): Html =>
   html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script><script src="/graph.js?v=${stamp(graphScript())}" defer></script><link rel="stylesheet" href="/graph.css?v=${stamp(GRAPH_CSS)}">`;
 
 /** the full-window view's body: the canvas under a small overlay, and a hidden live region the refresh swaps */
-export function graphFull(org: { handle: string; name: string }, g: HubGraph | null): Html {
+export function graphFull(org: { handle: string; name: string }, g: IdentifiedGraph | null): Html {
   return html`<div class="graph gfull" data-graph data-full data-events="/orgs/${org.handle}/events" aria-label="Live graph of agents and their links">
       ${canvas}
       <header class="g-over g-left">
@@ -66,6 +70,7 @@ export function graphFull(org: { handle: string; name: string }, g: HubGraph | n
       <div class="g-over g-right">
         ${legend}
         <label class="mini"><input type="checkbox" data-graph-offline> show offline</label>
+        <span class="mini">${trails}</span>
       </div>
       <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
       ${g ? "" : html`<p class="g-empty mini">The hub did not answer. This page retries on its own.</p>`}
@@ -95,6 +100,7 @@ export async function graphTabPage(ctx: Ctx, user: User, handle: string): Promis
         <div class="g-over g-right">
           ${legend}
           <span class="g-acts"><label class="mini"><input type="checkbox" data-graph-offline> show offline</label><a class="mini-link" href="/orgs/${m.org.handle}/graph/full">Full screen</a></span>
+          <span class="mini">${trails}</span>
         </div>
         <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
         ${g ? "" : html`<p class="g-empty mini">The hub did not answer. This page retries on its own.</p>`}
@@ -111,7 +117,14 @@ export async function eventsRoute(ctx: Ctx, user: User, handle: string): Promise
 }
 
 export const GRAPH_CSS = `
+:root{--id-0:#2f6fdb;--id-1:#c2410c;--id-2:#0f8a6c;--id-3:#a3369e;--id-4:#a16207;--id-5:#6d4fd6;--id-6:#be123c;--id-7:#3f7d20}
+@media (prefers-color-scheme:dark){:root{--id-0:#7aa9ff;--id-1:#f59a63;--id-2:#3fc6a0;--id-3:#e27ad9;--id-4:#e3b341;--id-5:#a991ff;--id-6:#fb7185;--id-7:#8fd16a}}
 .g-over label{display:inline-flex;align-items:center;gap:.375rem;cursor:pointer}
+.trails{display:inline-flex;align-items:center;gap:.375rem}
+.trails .seg{display:inline-flex;border:1px solid var(--line)}
+.trails .seg button{height:1.375rem;padding-inline:.4375rem;border:0;background:transparent;color:var(--ink);font-family:var(--mono);font-size:.625rem;cursor:pointer}
+.trails .seg button+button{border-left:1px solid var(--line)}
+.trails .seg button[aria-pressed=true]{background:var(--fg);color:var(--bg)}
 .graph{margin-top:1.25rem}
 .graph-legend{display:flex;flex-wrap:wrap;align-items:center;gap:.375rem}
 .graph-legend .key{display:inline-block;width:1.25rem;height:0;margin-left:.5rem;border-top:1.5px solid var(--faint)}
@@ -124,6 +137,12 @@ export const GRAPH_CSS = `
 .graph-svg{display:block;width:100%;height:420px;font-family:var(--mono);user-select:none;-webkit-user-select:none}
 .graph-svg .hull{fill:var(--surface);stroke:var(--surface);stroke-linejoin:round;stroke-linecap:round}
 .graph-svg .hull-rim{fill:none;stroke:var(--line-soft);stroke-linejoin:round;stroke-linecap:round}
+.graph-svg .region.ided .hull-rim{stroke:color-mix(in srgb,var(--id) 30%,var(--line-soft))}
+.graph-svg .band-box{fill:color-mix(in srgb,var(--id) 4%,transparent);stroke:color-mix(in srgb,var(--id) 22%,transparent);stroke-width:1}
+.graph-svg .avatar{fill:color-mix(in srgb,var(--id) 16%,var(--bg));stroke:var(--id);stroke-width:1.25}
+.graph-svg .initials{font-size:9.5px;font-weight:600;fill:var(--id);text-anchor:middle;letter-spacing:.02em}
+.graph-svg .blabel{font-size:11.5px;font-weight:600;fill:var(--fg);paint-order:stroke;stroke:var(--bg);stroke-width:5px;stroke-linejoin:round}
+.graph-svg .blabel .n{fill:var(--dim);font-weight:400}
 .graph-svg .region.offline,.graph-svg .region-head.offline{opacity:.55}
 .graph-svg .mlabel{font-size:11px;font-weight:500;fill:var(--fg);paint-order:stroke;stroke:var(--surface);stroke-width:5px;stroke-linejoin:round}
 .graph-svg .mlabel .n{fill:var(--dim);font-weight:400}
@@ -133,7 +152,7 @@ export const GRAPH_CSS = `
 .graph-svg .hub circle{fill:var(--bg);stroke:var(--line)}
 .graph-svg .hub svg{color:var(--dim)}
 .graph-svg .hub text{font-size:10.5px;fill:var(--dim);text-anchor:middle;paint-order:stroke;stroke:var(--bg);stroke-width:5px;stroke-linejoin:round}
-.graph-svg .edge{fill:none;stroke-linecap:round;transition:opacity .25s}
+.graph-svg .edge{fill:none;stroke-linecap:round;transition:opacity calc(.25s / var(--trail,1))}
 .graph-svg .edge.spawn{stroke:var(--faint);stroke-width:1.25}
 .graph-svg .edge.msg{stroke:var(--acc)}
 .graph-svg .edge.msg.live{opacity:1!important}
@@ -188,6 +207,51 @@ body.bare{overflow:hidden;height:100dvh;min-height:0}
 `;
 
 /**
+ * lays machine regions out in identity bands, plain JS so the page script and the tests share it. `items` are
+ * `{ name, key, w, h }`, `key` the identity ("" for none, drawn without a band); a band holds its machines side by side
+ * under a badge strip, bands wrap into rows near the `aspect` the view wants, and with `hub` set the hub sits above a
+ * single row or between the middle rows. Returns each machine's top left, each band's rect and the hub point
+ */
+export const BANDS_JS = `function bands(items, o) {
+  const byKey = new Map();
+  for (const it of items) { if (!byKey.has(it.key)) byKey.set(it.key, { key: it.key, items: [] }); byKey.get(it.key).items.push(it); }
+  const groups = [...byKey.values()];
+  for (const g of groups) {
+    g.inset = g.key ? o.pad : 0;
+    g.top = g.key ? o.badge : 0;
+    g.w = g.items.reduce((w, it) => w + it.w, 0) + o.gap * (g.items.length - 1) + 2 * g.inset;
+    g.h = Math.max(...g.items.map((it) => it.h)) + g.top + 2 * g.inset;
+  }
+  const area = groups.reduce((a, g) => a + (g.w + o.groupGap) * (g.h + o.groupGap), 0);
+  const target = Math.max(Math.sqrt(area * o.aspect), ...groups.map((g) => g.w));
+  const rows = [];
+  for (const g of groups) {
+    const row = rows[rows.length - 1];
+    if (row && row.w + o.groupGap + g.w <= target) { row.groups.push(g); row.w += o.groupGap + g.w; }
+    else rows.push({ groups: [g], w: g.w });
+  }
+  const width = Math.max(1, ...rows.map((r) => r.w));
+  const mid = Math.floor(rows.length / 2);
+  const places = new Map(), rects = [];
+  let y = 0, hub = null;
+  rows.forEach((row, r) => {
+    if (o.hub && r === mid) {
+      hub = { x: width / 2, y: rows.length === 1 ? o.hub / 2 - 10 : y + o.hub / 2 - o.groupGap / 2 };
+      y += o.hub;
+    }
+    let x = (width - row.w) / 2;
+    for (const g of row.groups) {
+      rects.push({ key: g.key, x, y, w: g.w, h: g.h, n: g.items.length });
+      let ix = x + g.inset;
+      for (const it of g.items) { places.set(it.name, { x: ix, y: y + g.inset + g.top }); ix += it.w + o.gap; }
+      x += g.w + o.groupGap;
+    }
+    y += Math.max(...row.groups.map((g) => g.h)) + o.groupGap;
+  });
+  return { places, bands: rects, hub, width, height: Math.max(y - o.groupGap, 1) };
+}`;
+
+/**
  * draws the live graph: each machine a soft region with its own small force layout, run to rest on a change so nothing drifts;
  * a new node starts by its parent while settled ones barely move, and a message pulses along its edge as the hub streams it
  */
@@ -202,7 +266,9 @@ const ICONS = ${JSON.stringify({ ...ICON_PATHS, human: HUMAN_ICON })};
 const MARK = ${JSON.stringify(MARK)};
 const COLORED = new Set(${JSON.stringify(COLORED)});
 const BOLT = "M9.5 1 3 9h4.5L6.5 15 13 7H8.5z";
-const R = 16, PAD = 20, HEAD = 26, GAP = 44, LABEL_MAX = 132, CAP = 1.6;
+const R = 16, PAD = 20, HEAD = 26, GAP = 26, BAND_GAP = 52, BAND_PAD = 14, BADGE = 30, LABEL_MAX = 132, CAP = 1.6;
+const TRAILS = [1, 0.5, 0.25];
+${BANDS_JS}
 const svg = root.querySelector(".graph-svg");
 const canvas = root.querySelector(".graph-canvas");
 const tip = root.querySelector(".graph-tip");
@@ -220,7 +286,7 @@ const machineOf = (a) => { const p = a.split("/"); return p.length >= 3 ? p[1] :
 const defs = el("defs", {}, svg);
 el("path", { d: "M0 0L7 3.5L0 7z", class: "arrow" }, el("marker", { id: "graph-arrow", viewBox: "0 0 7 7", refX: "1", refY: "3.5", markerWidth: "6", markerHeight: "6", markerUnits: "userSpaceOnUse", orient: "auto" }, defs));
 const layers = {};
-for (const k of ["regions", "edges", "hub", "labels", "pulses", "nodes"]) layers[k] = el("g", { class: "layer-" + k }, svg);
+for (const k of ["bands", "regions", "edges", "hub", "labels", "pulses", "nodes"]) layers[k] = el("g", { class: "layer-" + k }, svg);
 
 let data = null;
 let focus = null;
@@ -232,12 +298,14 @@ const shown = new Map();
 const nodeEls = new Map();
 const edgeEls = new Map();
 const regionEls = new Map();
+const bandEls = new Map();
 let place = new Map();
 let hubAt = null;
 let hubEl = null;
 let viewTarget = null;
 let viewShown = null;
 let anim = 0;
+let trail = TRAILS.includes(Number(load("scp.graph.trails"))) ? Number(load("scp.graph.trails")) : 1;
 
 const measure = document.createElement("canvas").getContext("2d");
 const widths = new Map();
@@ -277,13 +345,14 @@ function visible(g) {
   const on = new Set(nodes.map((n) => n.address));
   const edges = g.edges.filter((e) => on.has(e.from) && on.has(e.to));
   const byName = new Map();
-  for (const m of g.machines) byName.set(m.name, { name: m.name, online: m.online, nodes: [] });
+  for (const m of g.machines) byName.set(m.name, { name: m.name, online: m.online, identity: m.identity || null, nodes: [] });
   for (const n of nodes) {
-    if (!byName.has(n.machine)) byName.set(n.machine, { name: n.machine, online: n.presence === "online", nodes: [] });
+    if (!byName.has(n.machine)) byName.set(n.machine, { name: n.machine, online: n.presence === "online", identity: null, nodes: [] });
     byName.get(n.machine).nodes.push(n);
   }
   const groups = [...byName.values()].filter((gr) => gr.nodes.length || gr.online);
-  groups.sort((a, b) => (a.name === "") - (b.name === "") || a.name.localeCompare(b.name));
+  const who = (gr) => (gr.identity ? gr.identity.name : "");
+  groups.sort((a, b) => (a.name === "") - (b.name === "") || !who(a) - !who(b) || who(a).localeCompare(who(b)) || a.name.localeCompare(b.name));
   return { nodes, edges, groups };
 }
 
@@ -381,35 +450,21 @@ function extent(g) {
   return { x0, x1: Math.max(x1, x0 + headOf(g).w), y0: y0 - HEAD, y1 };
 }
 
-/** regions in rows, as many as the window's shape wants; the hub sits above a single row, else between the middle rows */
+/** regions in identity bands, wrapped to the window's shape; the hub sits above a single row, else between the middle rows */
 function pack(list) {
   const cw = Math.max(280, canvas.clientWidth), ch = full ? Math.max(240, canvas.clientHeight) : 0;
   const aspect = full ? cw / ch : Math.max(1.4, cw / 560);
-  const k = list.length;
-  const rows = Math.max(1, Math.min(k, 2, Math.round(Math.sqrt(k / (aspect * 0.9)))));
-  const per = Math.ceil(k / rows);
   const ext = list.map(extent);
-  const lines = [];
-  for (let r = 0; r < rows; r++) lines.push(list.map((g, i) => [g, ext[i]]).slice(r * per, (r + 1) * per));
-  const widthOf = (line) => line.reduce((w, [, e]) => w + (e.x1 - e.x0) + 2 * PAD, 0) + GAP * Math.max(0, line.length - 1);
-  const widest = Math.max(...lines.map(widthOf), 1);
-  const hubGap = k > 1 ? 96 : 0;
+  const items = list.map((g, i) => ({ name: g.name, key: g.identity ? g.identity.name : "", w: ext[i].x1 - ext[i].x0 + 2 * PAD, h: ext[i].y1 - ext[i].y0 + 2 * PAD }));
+  const L = bands(items, { gap: GAP, groupGap: BAND_GAP, pad: BAND_PAD, badge: BADGE, hub: list.length > 1 ? 96 : 0, aspect: aspect * 1.15 });
   const out = new Map();
-  let y = rows === 1 ? hubGap : 0;
-  let hubY = 0;
-  lines.forEach((line, r) => {
-    if (rows > 1 && r === Math.floor(rows / 2)) { hubY = y + hubGap / 2 - GAP / 2; y += hubGap; }
-    const h = Math.max(...line.map(([, e]) => e.y1 - e.y0)) + 2 * PAD;
-    let x = (widest - widthOf(line)) / 2;
-    for (const [g, e] of line) {
-      const w = e.x1 - e.x0 + 2 * PAD, hh = e.y1 - e.y0 + 2 * PAD, top = y;
-      out.set(g.name, { ox: x + PAD - e.x0, oy: top + PAD - e.y0, x, y: top, w, h: hh });
-      x += w + GAP;
-    }
-    y += h + GAP;
+  list.forEach((g, i) => {
+    const p = L.places.get(g.name), e = ext[i];
+    out.set(g.name, { ox: p.x + PAD - e.x0, oy: p.y + PAD - e.y0, x: p.x, y: p.y, w: items[i].w, h: items[i].h });
   });
-  hubAt = k > 1 ? { x: widest / 2, y: rows === 1 ? hubGap / 2 - 10 : hubY } : null;
-  const height = Math.max(y - GAP, 1);
+  hubAt = L.hub;
+  const widest = L.width;
+  const height = L.height;
   const margin = full ? Math.min(120, cw * 0.06) : 24;
   let top = margin, bottom = margin;
   const at = full ? canvas.getBoundingClientRect().top : 0;
@@ -480,9 +535,38 @@ function sync(v) {
     r.name.textContent = head.name;
     r.n.textContent = head.count;
     r.note.textContent = g.nodes.length ? "" : "no agents";
+    r.g.classList.toggle("ided", !!g.identity);
+    r.g.style.setProperty("--id", g.identity ? "var(--id-" + g.identity.tone + ")" : "");
     r.group = g;
   }
   for (const [k, r] of regionEls) if (!keep.has(k)) { r.g.remove(); r.head.remove(); regionEls.delete(k); }
+
+  const ids = new Map();
+  for (const g of v.groups) if (g.identity) {
+    if (!ids.has(g.identity.name)) ids.set(g.identity.name, { identity: g.identity, names: [] });
+    ids.get(g.identity.name).names.push(g.name);
+  }
+  for (const [k, b] of ids) {
+    let e = bandEls.get(k);
+    if (!e) {
+      e = { g: el("g", { class: "band" }, layers.bands), badge: el("g", { class: "badge" }, layers.labels) };
+      e.box = el("rect", { class: "band-box", rx: "18" }, e.g);
+      e.av = el("circle", { class: "avatar", r: "10" }, e.badge);
+      e.ini = el("text", { class: "initials" }, e.badge);
+      e.label = el("text", { class: "blabel" }, e.badge);
+      e.name = el("tspan", {}, e.label);
+      e.n = el("tspan", { class: "n" }, e.label);
+      bandEls.set(k, e);
+    }
+    const n = b.names.length, tone = "var(--id-" + b.identity.tone + ")";
+    e.names = b.names;
+    e.g.style.setProperty("--id", tone);
+    e.badge.style.setProperty("--id", tone);
+    e.ini.textContent = b.identity.initials;
+    e.name.textContent = b.identity.name;
+    e.n.textContent = " · " + n + (n === 1 ? " machine" : " machines");
+  }
+  for (const [k, e] of bandEls) if (!ids.has(k)) { e.g.remove(); e.badge.remove(); bandEls.delete(k); }
 
   const on = new Set();
   for (const n of v.nodes) {
@@ -633,6 +717,27 @@ function draw() {
     r.label.setAttribute("y", r1(ly));
     r.note.setAttribute("x", r1(lx));
     r.note.setAttribute("y", r1(ly + 30));
+    r.box = { x0: x0 - PAD, y0: y0 - HEAD - PAD, x1: x1 + PAD, y1: y1 + PAD };
+  }
+  for (const [, e] of bandEls) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const name of e.names) {
+      const b = regionEls.get(name)?.box;
+      if (b) { x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1); }
+    }
+    if (x0 === Infinity) continue;
+    const bx = x0 - BAND_PAD, by = y0 - BAND_PAD - BADGE;
+    e.box.setAttribute("x", r1(bx));
+    e.box.setAttribute("y", r1(by));
+    e.box.setAttribute("width", r1(x1 - x0 + 2 * BAND_PAD));
+    e.box.setAttribute("height", r1(y1 - by + BAND_PAD));
+    const ax = bx + BAND_PAD + 10, ay = by + BAND_PAD + 8;
+    e.av.setAttribute("cx", r1(ax));
+    e.av.setAttribute("cy", r1(ay));
+    e.ini.setAttribute("x", r1(ax));
+    e.ini.setAttribute("y", r1(ay + 3.5));
+    e.label.setAttribute("x", r1(ax + 17));
+    e.label.setAttribute("y", r1(ay + 4));
   }
   if (hubEl && hubAt) hubEl.setAttribute("transform", "translate(" + r1(hubAt.x) + " " + r1(hubAt.y) + ")");
   if (viewShown) {
@@ -674,7 +779,7 @@ function pulse(from, to, kind, bump) {
   if (!p) return;
   paintEdge(p);
   p.classList.add("live");
-  setTimeout(() => p.classList.remove("live"), 1600);
+  setTimeout(() => p.classList.remove("live"), 1600 / trail);
   const dest = nodeEls.get(to);
   const hit = () => {
     if (!dest) return;
@@ -687,7 +792,7 @@ function pulse(from, to, kind, bump) {
   const cls = kind === "reply" ? " reply" : "";
   const halo = el("circle", { class: "pulse-halo" + cls, r: "11" }, layers.pulses);
   const dot = el("circle", { class: "pulse" + cls, r: "4.5" }, layers.pulses);
-  const t0 = performance.now(), dur = 950;
+  const t0 = performance.now(), dur = 950 / trail;
   const step = (now) => {
     const k = Math.min(1, (now - t0) / dur);
     let q = null;
@@ -730,6 +835,7 @@ function showTip(g) {
     ["status", n.status ? n.status.state + (n.status.note ? ": " + n.status.note : "") : ""],
     ["harness", n.kind === "agent" ? n.harness || "unknown" : ""],
     ["machine", n.machine],
+    ["member", (data.machines.find((m) => m.name === n.machine)?.identity || {}).name || ""],
     ["parent", n.parent ? n.parent.split("/").slice(2).join("/") : ""],
     ["messages", out || inn ? out + " sent, " + inn + " received in " + data.minutes + " min" : ""],
   ].filter((r) => r[1]);
@@ -814,6 +920,13 @@ svg.addEventListener("pointerout", (e) => { const g = nodeAt(e); if (g && !g.con
 svg.addEventListener("focusin", (e) => { const g = nodeAt(e); if (g) showTip(g); });
 svg.addEventListener("focusout", hideTip);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && focus) { focus = null; applyFocus(); } });
+const trailButtons = document.querySelectorAll("[data-trail]");
+function paintTrail() {
+  svg.style.setProperty("--trail", String(trail));
+  for (const b of trailButtons) b.setAttribute("aria-pressed", String(Number(b.getAttribute("data-trail")) === trail));
+}
+for (const b of trailButtons) b.addEventListener("click", () => { trail = Number(b.getAttribute("data-trail")); save("scp.graph.trails", String(trail)); paintTrail(); });
+paintTrail();
 if (bar) for (const b of bar.querySelectorAll("[data-view-set]")) b.addEventListener("click", () => setView(b.getAttribute("data-view-set")));
 if (offline) {
   offline.checked = load("scp.overview.offline") === "1";

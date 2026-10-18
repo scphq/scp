@@ -37,7 +37,7 @@ export const PROTOCOL = {
 export const RULES = [
   {
     name: "Turn boundaries, or a wake",
-    desc: "Messages enter the model's context after a tool call, on a prompt, or at a stop. An idle session wakes when one arrives, through Claude channels (swarm claude), the pi extension (swarm pi), the OpenCode plugin or the Codex app-server (swarm codex); any other reads it at its next turn. Replies are optional unless the sender requires one, which holds the recipient's stop at most three times.",
+    desc: "Messages enter the model's context after a tool call, on a prompt, or at a stop. An idle session wakes when one arrives, through Claude channels (swarm claude), the pi extension (swarm pi), the OpenCode plugin (swarm opencode) or the Codex app-server (swarm codex); any other reads it at its next turn. Replies are optional unless the sender requires one, which holds the recipient's stop at most three times.",
     sample: "online  idle  idle (next turn)  offline",
     ref: "8-delivery-into-harnesses",
   },
@@ -85,7 +85,7 @@ export const CAPABILITIES = [
 
 export const QUICKSTART = {
   label: "Quickstart",
-  heading: "Run a swarm in six commands.",
+  heading: "Run a swarm in eight commands.",
   lead: "These commands use the swarm CLI, the reference implementation of SCP version 1. Any conforming broker and integration can replace it.",
 };
 
@@ -94,10 +94,14 @@ export type Line = { comment: string } | { cmd: string };
 export const QUICKSTART_LINES: Line[] = [
   { comment: "install the CLI" },
   { cmd: "npm i -g @scp-dev/cli" },
-  { comment: "log in, link this machine, install hooks and MCP" },
+  { comment: "log in, link this machine, install hooks and MCP (runs swarm setup --write)" },
   { cmd: "swarm up" },
-  { comment: "start a named orchestrator that wakes on peer messages" },
+  { comment: "check the hooks and MCP mounts: nothing left to do once installed" },
+  { cmd: "swarm setup" },
+  { comment: "start a named orchestrator that wakes on peer messages (also swarm codex, swarm pi; opencode's plugin wakes it)" },
   { cmd: "swarm claude --name lead" },
+  { comment: "or, in a session already running: messages reach it at turn boundaries only" },
+  { cmd: "swarm join reviewer" },
   { comment: "from the orchestrator's shell" },
   { cmd: 'swarm spawn --name parser -- claude -p "Fix the parser tests"' },
   { cmd: 'swarm send parser "Also cover the empty-input case."' },
