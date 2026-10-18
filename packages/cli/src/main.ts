@@ -299,6 +299,12 @@ a sender, it does not prove one.`
 type HelpItem = { verb?: string; heading?: string; lines: string[] }
 
 /** A verb's entries, continuation lines and placeholder definitions from the full reference. */
+/** a reader that went away (`swarm status | head -1`) ends the command quietly; any other stdout failure still throws */
+export function closedPipe(error: NodeJS.ErrnoException): void {
+  if (error.code === "EPIPE") process.exit(0)
+  throw error
+}
+
 /** the version of the installed package, read from its package.json next to the build, so it never lags a version bump */
 export function cliVersion(base: string | URL = import.meta.url): string {
   try {
@@ -1534,6 +1540,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
 }
 
 export async function run(argv: string[]): Promise<never> {
+  process.stdout.on("error", closedPipe)
   let code: number
   try {
     code = await relayMain(argv)
