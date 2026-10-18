@@ -67,7 +67,7 @@ export function codexMount(env: Env): Json | undefined {
   }
 }
 
-function toml(value: unknown): string {
+export function toml(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value).replaceAll("\u007f", "\\u007f")
   if (Array.isArray(value)) return `[${value.map(toml).join(", ")}]`
   if (value && typeof value === "object")
@@ -92,7 +92,7 @@ export function codexOverrides(env: Env, mount: Json | undefined, self: string[]
 }
 
 /** codex's top-level options that take a value */
-const CODEX_VALUED = new Set([
+export const CODEX_VALUED = new Set([
   "-c",
   "--config",
   "--enable",

@@ -234,7 +234,7 @@ agent sessions:
   A Claude Code subagent's hooks give it a child endpoint, <session handle>-<short type>-<first 4 of its id>, whose messages
   reach it after its tools; its shell is the session's, so it acts as that child with --as.
   Grok runs the Claude Code hooks, labelled grok; Muse takes them as a plugin; Codex runs new hooks after /hooks review.
-  ${CLI_NAME} claude [--name N] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake
+  ${CLI_NAME} claude [--name N | --as N] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake
                                                  it while idle (claude --dangerously-load-development-channels server:scp; SCP_NAME=N)
   --channels pushes messages into a Claude Code that ${CLI_NAME} claude started; setup mounts claude's shim with it.
   Without --name, ${CLI_NAME} claude asks the session to pick its own name with ${CLI_NAME} name <name>.

@@ -5,14 +5,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const cli = join(import.meta.dir, "cli.ts")
-const bin = join(import.meta.dir, "..", "node_modules", ".bin", "codex")
+const bin = process.env.SCP_TEST_CODEX_BIN || join(import.meta.dir, "..", "node_modules", ".bin", "codex")
 const cleanups: (() => void | Promise<void>)[] = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
 type Json = Record<string, unknown>
-type ModelRequest = { input: Json[] }
+type ModelRequest = { model?: string; input: Json[] }
 
 function mockModel() {
   const requests: ModelRequest[] = []
@@ -92,7 +92,7 @@ function fixture(interactive: boolean) {
   mkdirSync(home)
   writeFileSync(
     join(home, "config.toml"),
-    `model = "mock-model"
+    `model = "base-model"
 model_provider = "mock"
 approval_policy = "never"
 sandbox_mode = "read-only"
@@ -105,6 +105,7 @@ command = ${JSON.stringify(process.execPath)}
 args = [${JSON.stringify(cli)}, "mcp", "--harness", "codex"]
 `,
   )
+  writeFileSync(join(home, "mock.config.toml"), `model = "mock-model"\n`)
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: root,
@@ -119,6 +120,7 @@ args = [${JSON.stringify(cli)}, "mcp", "--harness", "codex"]
   }
   for (const key of ["SCP_SESSION", "SCP_GRANT", "SCP_PARENT", "SCP_NAME", "SCP_HARNESS", "CODEX_THREAD_ID"]) delete env[key]
   const log = join(root, "tui.log")
+  const tuiArgs = join(root, "tui.args")
   const pids = join(root, "pids")
   if (interactive) {
     const tui = join(root, "tui.ts")
@@ -145,7 +147,7 @@ process.on("SIGTERM", () => { socket.close(); process.exit(0) })
       `#!/bin/sh
 remote=0
 for arg in "$@"; do
-  if [ "$remote" = 1 ]; then exec ${quote(process.execPath)} ${quote(tui)} "$arg"; fi
+  if [ "$remote" = 1 ]; then printf '%s\n' "$@" > ${quote(tuiArgs)}; exec ${quote(process.execPath)} ${quote(tui)} "$arg"; fi
   if [ "$arg" = --remote ]; then remote=1; fi
 done
 echo $$ >> ${quote(pids)}
@@ -176,7 +178,7 @@ exec ${quote(bin)} "$@"
     return { stdout, stderr, code }
   }
   let diagnostics = ""
-  const launcher = spawn(process.execPath, ["--no-env-file", cli, "codex", ...(!interactive ? ["--headless"] : []), "--name", "cx"], {
+  const launcher = spawn(process.execPath, ["--no-env-file", cli, "codex", ...(!interactive ? ["--headless"] : []), "--name", "cx", "--profile", "mock"], {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -220,7 +222,7 @@ exec ${quote(bin)} "$@"
   const alive = () => {
     if (launcher.exitCode !== null || launcher.signalCode !== null) throw new Error(`launcher exited: ${diagnostics}`)
   }
-  return { model, swarm, logItems, diagnostics: () => diagnostics, output: () => output, alive }
+  return { model, tuiArgs, swarm, logItems, diagnostics: () => diagnostics, output: () => output, alive }
 }
 
 for (const interactive of [false, true]) {
@@ -234,6 +236,7 @@ for (const interactive of [false, true]) {
           const list = await f.swarm("list", "--as", "tester", "--all", "--json")
           return (
             list.stdout.includes('"me/cx"') &&
+            /"wake":\s*"codex-app-server"/.test(list.stdout) &&
             (interactive ? f.logItems().some((item) => item.method === "test/ready") : f.diagnostics().includes("waiting for messages"))
           )
         },
@@ -241,6 +244,7 @@ for (const interactive of [false, true]) {
         "the codex endpoint and thread",
       )
       expect(f.model.requests).toHaveLength(0)
+      if (interactive) expect(readFileSync(f.tuiArgs, "utf8")).toContain("--profile\nmock\n")
       const send = await f.swarm("send", "--as", "tester", "cx", "ping")
       expect(send.code, send.stderr).toBe(0)
       await until(
@@ -266,6 +270,7 @@ for (const interactive of [false, true]) {
         request.input.filter((item) => item.role === "user" && JSON.stringify(item).includes("<relay-message")),
       )
       expect(deliveries).toHaveLength(1)
+      expect(new Set(f.model.requests.map((request) => request.model))).toEqual(new Set(["mock-model"]))
     },
     120_000,
   )

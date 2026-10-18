@@ -8,24 +8,23 @@ type Env = Record<string, string | undefined>
 
 export const PI_HELP = `${CLI_NAME} pi [--name NAME | --as NAME] [--] [pi args...]
   runs pi with the bundled SCP extension: the relay tools, and each new message as a turn, waking the session when idle.
+  pi's own --name and every other argument after the leading launcher flags go to pi untouched.
   $SCP_PI_BIN picks the pi binary (default pi on PATH), $SCP_PI_EXTENSION the extension file.`
 
-/** the pi argv and the env it runs with: the name becomes $SCP_NAME, the harness pi */
+/** the pi argv and the env it runs with: a leading name becomes $SCP_NAME, the harness pi, and everything after it goes to pi untouched */
 export function piLaunch(args: string[], env: Env, extension: string): { argv: string[]; env: Env } {
   let name: string | undefined
-  const rest: string[] = []
-  for (let i = 0; i < args.length; i++) {
+  let i = 0
+  for (; i < args.length; i++) {
     const arg = args[i]!
-    if (arg === "--") {
-      rest.push(...args.slice(i + 1))
-      break
-    }
     if (arg === "--name" || arg === "--as") {
       name = args[++i]
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} pi ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
-    else rest.push(arg)
+    else break
   }
+  if (args[i] === "--") i++
+  const rest = args.slice(i)
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
   return {
@@ -46,8 +45,7 @@ export function extensionPath(env: Env, base: string | URL = import.meta.url): s
 
 /** `swarm pi`: runs pi in the foreground with the extension loaded, exiting with its code */
 export async function piCommand(args: string[]): Promise<number> {
-  const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args
-  if (own.includes("--help") || own.includes("-h")) {
+  if (args[0] === "--help" || args[0] === "-h") {
     process.stdout.write(`${PI_HELP}\n`)
     return 0
   }

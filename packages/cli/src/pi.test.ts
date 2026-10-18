@@ -26,6 +26,9 @@ test("swarm pi names the session, marks the harness pi and passes the rest to pi
   expect(piLaunch([], {}, "/e").env.SCP_NAME).toBeUndefined()
   expect(() => piLaunch(["--name", "Bad Name"], {}, "/e")).toThrow("not a valid agent handle")
   expect(() => piLaunch(["--name"], {}, "/e")).toThrow("takes a name")
+  const args = ["--provider", "anthropic", "--model", "sonnet:high", "--name", "session", "--continue", "a prompt", "--", "-x"]
+  expect(piLaunch(["--as", "demo", ...args], {}, "/e").argv).toEqual(["pi", "--extension", "/e", ...args])
+  expect(piLaunch(args, {}, "/e").env.SCP_NAME).toBeUndefined()
 })
 
 test("the extension is $SCP_PI_EXTENSION, else the file bundled next to the CLI, else the workspace source", () => {
