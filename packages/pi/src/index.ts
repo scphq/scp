@@ -32,9 +32,15 @@ export class McpLink {
   private readonly pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void }>()
   private next = 1
   private closed = false
+  /** resolves once the shim process is gone */
+  readonly exited: Promise<void>
 
   constructor(argv: string[], env: Env, onPush: (content: string, meta: Json) => void, onExit: (code: number | null) => void) {
     this.child = spawn(argv[0]!, argv.slice(1), { env: env as NodeJS.ProcessEnv, stdio: ["pipe", "pipe", "ignore"] })
+    this.exited = new Promise((resolve) => {
+      this.child.once("exit", () => resolve())
+      this.child.once("error", () => resolve())
+    })
     this.child.stdin!.on("error", () => {})
     createInterface({ input: this.child.stdout! }).on("line", (line) => {
       let message: Json
@@ -81,11 +87,15 @@ export class McpLink {
     if (!this.closed) this.child.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`)
   }
 
-  close() {
-    if (this.closed) return
-    this.closed = true
-    this.child.stdin!.end()
-    this.child.kill()
+  /** ends the shim, resolving once it exited (or after `ms`), so a shim started next never races it for the endpoint */
+  close(ms = 3000): Promise<void> {
+    if (!this.closed) {
+      this.closed = true
+      this.child.stdin!.end()
+      this.child.kill()
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    return Promise.race([this.exited, new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)))]).finally(() => clearTimeout(timer))
   }
 }
 
@@ -111,7 +121,9 @@ export default function scp(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     if (process.env.SCP_PI === "0") return
-    link?.close()
+    const previous = link
+    link = undefined
+    await previous?.close()
     const current = new McpLink(
       shimArgv(process.env),
       process.env,
@@ -143,13 +155,16 @@ export default function scp(pi: ExtensionAPI) {
         })
       }
       current.notify("notifications/initialized")
+      const whoami = (await current.request("tools/call", { name: "relay_whoami", arguments: {} })) as CallResult
+      if (whoami.isError) warn(ctx, `scp: not on the relay: ${(whoami.content ?? []).map((part) => part.text ?? "").join(" ")}`)
     } catch (error) {
       warn(ctx, `scp: could not start the relay shim: ${error instanceof Error ? error.message : String(error)}`)
     }
   })
 
   pi.on("session_shutdown", async () => {
-    link?.close()
+    const current = link
     link = undefined
+    await current?.close()
   })
 }

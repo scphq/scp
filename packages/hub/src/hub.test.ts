@@ -203,7 +203,7 @@ describe("machines", () => {
     ])
     expect(await ok(cli, "machines_rm", { name: "desk" })).toEqual({ removed: "desk", endpoints: 1 })
     expect(desk.closedWith?.code).toBe(1008)
-    expect(laptop.pushes("endpoints").at(-1)).toEqual({ machine: "desk", endpoints: [], full: true })
+    expect(laptop.pushes("endpoints").at(-1)).toEqual({ machine: "desk", endpoints: [], full: true, released: true })
     expect((await ok(cli, "list", { all: true })).endpoints.map((e: any) => e.address)).toEqual(["ada/", "ada/laptop/impl"])
     await ok(connect("tok_b"), "hello", { protocol: PROTOCOL, machine: "desk", bridge: true })
   })
@@ -760,7 +760,7 @@ describe("machine ownership", () => {
       clock.now += 86_400_000
       await hub.alarm(async () => true)
     }
-    expect(owner.pushes("endpoints").at(-1)).toEqual({ machine: "desk", endpoints: [], full: true })
+    expect(owner.pushes("endpoints").at(-1)).toEqual({ machine: "desk", endpoints: [], full: true, released: true })
     for (const to of ["desk/", "desk/review"])
       expect(await fails(owner, "forward", { from: "impl", params: { to, body: "after the sweep" } })).toBe("not_found")
     const scoped = await bridge("desk", [], "tok_vs", "usr_v", { role: "member", scoped: true, expiresAt: FAR })
@@ -1150,7 +1150,7 @@ describe("machine slots", () => {
     clock.now += HUB_LIMITS.clientMachineIdleS * 1000
     await hub.alarm(async () => true)
     expect((await ok(live, "machines")).machines.map((m: any) => m.name)).toEqual(["busy", "desk", "laptop", "queued"])
-    expect(desk.pushes("endpoints").at(-1)).toEqual({ machine: "ci", endpoints: [], full: true })
+    expect(desk.pushes("endpoints").at(-1)).toEqual({ machine: "ci", endpoints: [], full: true, released: true })
     expect((await ok(live, "log", { limit: 1000 })).rows.filter((r: any) => r.event === "machine_expire").map((r: any) => r.detail.machine)).toEqual(["ci"])
   })
   test("the sweep keeps a client binding whose endpoint waits on an unexpired ask", async () => {

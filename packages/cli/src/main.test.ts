@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { LIMITS, PREAMBLE } from "@scp-dev/core"
 import { accountHome, type Broker, RelayClient, relayDir, socketPath, startBroker } from "@scp-dev/broker"
-import { RELAY_BRIEF, RELAY_HELP, verbHelp } from "./main"
+import { cliVersion, RELAY_BRIEF, RELAY_HELP, verbHelp } from "./main"
 import { claimHarness, grantParams, localHandle, RelayUsage, selectorList, terminalAttached } from "./common"
 import { harnessLineage, hiddenHarness, lineage, parsePsCommTable, parsePsTable, processKey, relayIdentity, shortHostname } from "./identity"
 import { alive, waitFor } from "./testing/fixtures"
@@ -108,6 +110,17 @@ describe("swarm, an empty fleet", () => {
       await watch.exited
       await done
     }
+  })
+})
+
+describe("swarm --version", () => {
+  test("prints the version of the package.json next to the build, not one embedded at build time", () => {
+    const own = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as { version: string }
+    expect(cliVersion()).toBe(own.version)
+    const root = mkdtempSync(join(tmpdir(), "swarm-version-"))
+    mkdirSync(join(root, "dist"))
+    writeFileSync(join(root, "package.json"), JSON.stringify({ version: "9.8.7" }))
+    expect(cliVersion(pathToFileURL(join(root, "dist", "main-abc.js")))).toBe("9.8.7")
   })
 })
 

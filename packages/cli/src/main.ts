@@ -1,4 +1,5 @@
 import { text as readAll } from "node:stream/consumers"
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { resolve } from "node:path"
 import { parseArgs } from "node:util"
@@ -298,6 +299,15 @@ a sender, it does not prove one.`
 type HelpItem = { verb?: string; heading?: string; lines: string[] }
 
 /** A verb's entries, continuation lines and placeholder definitions from the full reference. */
+/** the version of the installed package, read from its package.json next to the build, so it never lags a version bump */
+export function cliVersion(base: string | URL = import.meta.url): string {
+  try {
+    const version = (JSON.parse(readFileSync(new URL("../package.json", base), "utf8")) as { version?: unknown }).version
+    if (typeof version === "string") return version
+  } catch {}
+  return pkg.version
+}
+
 export function verbHelp(verb: string): string | undefined {
   if (verb === "spawn") return SPAWN_HELP
   const items: HelpItem[] = []
@@ -547,7 +557,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     return 0
   }
   if (verb === "version" || verb === "--version") {
-    out(pkg.version)
+    out(cliVersion())
     return 0
   }
   if (verb === "hook") return (await import("./hooks")).relayHookCommand(rest, startDaemon)

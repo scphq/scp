@@ -496,6 +496,20 @@ export class RelayCore {
     return labels
   }
 
+  /** this host's own agent rows labelled with another machine (its name before a rename, or its hostname) take its machine name */
+  relabelMachine(): number {
+    const machine = this.namedMachine
+    if (machine === null) return 0
+    let changed = 0
+    for (const row of this.sql.all<EndpointRow>(`SELECT * FROM endpoints WHERE kind = 'agent' AND labels LIKE '%"machine"%'`)) {
+      const labels = json<Record<string, string>>(row.labels, {})
+      if (labels.machine === undefined || labels.machine === machine || !this.localRow(row)) continue
+      this.sql.all(`UPDATE endpoints SET labels = ? WHERE id = ?`, JSON.stringify({ ...labels, machine }), row.id)
+      changed++
+    }
+    return changed
+  }
+
   migrate(): void {
     for (const statement of MIGRATION) this.sql.all(statement)
     const columns = this.sql.all<{ name: string }>(`PRAGMA table_info(idempotency)`).map((c) => c.name)
@@ -834,7 +848,7 @@ export class RelayCore {
     if (row && presenceOf(row, now) === "offline") {
       this.sql.all(`UPDATE endpoints SET session = NULL WHERE id = ?`, row.id)
       row = undefined
-    } else if (row && !transient && !sameProcess(row, fields.process)) {
+    } else if (row && !transient && !sameProcess(row, fields.process) && !(row.handle === wanted && reclaims(row, fields.process))) {
       row = undefined
       session = null
     } else if (
@@ -884,8 +898,7 @@ export class RelayCore {
         created = true
       } else if (
         held.kind === "agent" &&
-        held.connections === 0 &&
-        presenceOf(held, now) === "offline" &&
+        ((held.connections === 0 && presenceOf(held, now) === "offline") || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
         held.id !== scope.subagent?.root &&
         !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
@@ -1124,6 +1137,12 @@ export class RelayCore {
    * whether a claim placed under `parent` restarts `row`: it lands where `row` sits (under `row`'s parent, or a root with no placement), or on
    * `row` itself from `row`'s own process; never under `row` or elsewhere in its tree
    */
+  /** a local row held only by connections whose harness process exited, as a shim that outlived its harness leaves it */
+  private outlived(row: EndpointRow): boolean {
+    const pid = Number(/^pid:(\d+):/.exec(row.process ?? "")?.[1])
+    return row.connections > 0 && pid > 0 && this.localRow(row) && !this.alive(pid)
+  }
+
   private restarts(row: EndpointRow, parent: EndpointRow | null, process: string | null): boolean {
     if (parent?.id === row.id) return process !== null && row.process !== null && sameHarness(row.process, process)
     return (parent?.id ?? null) === row.parent_ep || (parent === null && row.linked !== null)
@@ -5315,6 +5334,11 @@ const ANY_PROCESS_KEY = /^pid:\d+(:[A-Za-z0-9:-]{1,64})?$/
  * whether a connecting claim from the harness process `key` may join a session endpoint: no connection holds it, the harness process that last
  * claimed it claims again, and, once a connection held it (a token was handed out), with the same full key, which a recycled pid cannot match
  */
+/** a claim from the very harness process that holds the live `row`, such as a session it restarted in process */
+function reclaims(row: EndpointRow, key: string | null): boolean {
+  return row.connections > 0 && key !== null && row.process === key && PROCESS_KEY.test(key)
+}
+
 function sameProcess(row: EndpointRow, key: string | null): boolean {
   if (row.connections > 0 || key === null || row.process === null) return false
   return row.token_hash === null ? sameHarness(row.process, key) : row.process === key && PROCESS_KEY.test(key)

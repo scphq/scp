@@ -48,9 +48,10 @@ async function machine(
     presenceEveryMs?: number
     forwardWaitMs?: number
     credentials?: () => Promise<string | null>
+    root?: string
   } = {},
 ): Promise<Broker> {
-  const root = mkdtempSync(join(tmpdir(), `relay-bridge-${name}-`))
+  const root = options.root ?? mkdtempSync(join(tmpdir(), `relay-bridge-${name}-`))
   const policyPath = join(root, "policy.json")
   if (options.policy !== undefined) writeFileSync(policyPath, JSON.stringify(options.policy))
   const broker = await startBroker({
@@ -185,6 +186,55 @@ describe("bridge", () => {
     await human.request("unlink", { endpoint: "app" })
     await waitFor(() => (on("app")?.parent_ep === null ? true : undefined), "a/app a root again on b")
     expect(hub.list({ all: true }).find((v) => v.address.endsWith("app"))?.parent ?? null).toBeNull()
+  })
+
+  test("a broker linked again under a new machine name relabels its endpoints, mirrors them there, and the old name leaves nothing behind", async () => {
+    const fake = hubServer()
+    const root = mkdtempSync(join(tmpdir(), "relay-bridge-rename-"))
+    const peer = await machine(fake, "peer")
+    const before = await machine(fake, "old", { root })
+    const client = await RelayClient.connect(before.socket)
+    const shim = { handle: "worker", harness: "pi", session: `pid:${process.pid}:start`, process: `pid:${process.pid}:start` }
+    await client.hello({ claim: { ...shim, labels: { machine: "old" } } })
+    await waitFor(() => peer.core.remoteViews({ machine: "old" }).some((v) => v.address.endsWith("/worker")), "the peer to see old/worker")
+    client.close()
+    await before.stop()
+
+    const after = await machine(fake, "new", { root })
+    expect(after.core.list({ all: true }).find((v) => v.address === "me/worker")?.labels.machine).toBe("new")
+    const again = await RelayClient.connect(after.socket)
+    cleanups.push(() => again.close())
+    const hello = await again.hello({ claim: shim })
+    expect(hello.endpoint?.address).toBe("me/worker")
+    await waitFor(
+      () => peer.core.remoteViews({ machine: "new" }).find((v) => v.address.endsWith("/worker") && v.presence !== "offline"),
+      "the peer to see new/worker",
+    )
+    expect(after.core.remoteViews({ machine: "old" }).length).toBeGreaterThan(0)
+
+    const raw = await rawSocket(fake, TOKEN)
+    expect((await raw("hello", { protocol: PROTOCOL, machine: "admin", claim: { handle: "admin", harness: "cli" } })).error).toBeUndefined()
+    expect((await raw("machines_rm", { name: "old" })).error).toBeUndefined()
+    await waitFor(() => (!after.core.remoteViews({ machine: "old" }).length && !peer.core.remoteViews({ machine: "old" }).length) || null, "old's rows to go")
+    expect(
+      after.core
+        .list({ all: true })
+        .filter((v) => v.address.includes("worker"))
+        .map((v) => v.address),
+    ).toEqual(["me/worker"])
+  })
+
+  test("a bridge drops rows the hub no longer lists and rows mirrored under its own name", async () => {
+    const fake = hubServer()
+    const root = mkdtempSync(join(tmpdir(), "relay-bridge-self-"))
+    const first = await machine(fake, "self", { root })
+    first.core.mirror("gone", [{ address: "gone/ghost", kind: "agent", harness: "pi", presence: "offline" }])
+    first.core.mirror("self", [{ address: "self/echo", kind: "agent", harness: "pi", presence: "offline" }])
+    await first.stop()
+    const second = await machine(fake, "self", { root })
+    await waitFor(() => second.bridge!.status().connected, "the bridge")
+    expect(second.core.remoteViews({ machine: "gone" })).toEqual([])
+    expect(second.core.remoteViews({ machine: "self" })).toEqual([])
   })
 
   test("a rename reaches the other machines in place: the new handle is live there and the old one is gone", async () => {
