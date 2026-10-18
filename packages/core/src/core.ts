@@ -1598,7 +1598,7 @@ export class RelayCore {
       (r) =>
         r.kind === "agent" &&
         presenceOf(r, now) === "offline" &&
-        now - Math.max(r.last_seen ?? 0, r.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS &&
+        (now - Math.max(r.last_seen ?? 0, r.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS || (r.session === null && r.token_hash === null && r.hook_ended !== null)) &&
         !this.unjoinedSpawn(sender, r.handle, now),
     )
     if (params.live === true && dark.length)

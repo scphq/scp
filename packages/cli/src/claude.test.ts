@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { CHANNEL_FLAGS, claudeArgv, claudeCommand, mountHint } from "./claude"
+import { setJoinMode } from "./relay"
 import { CHANNELS_ENV } from "./common"
 import { launchedWithChannels } from "./mcp"
 
@@ -37,6 +38,22 @@ describe("swarm claude", () => {
     expect(f.args()).toBe(`${[...CHANNEL_FLAGS, "-c"].join("\n")}\n`)
     expect(f.vars()).toBe(`lead\n${process.pid}\n`)
     expect(lines).toEqual([])
+  })
+
+  test("without --name, claude is asked to name itself with swarm name; --name, a system prompt of its own or manual join mode skip it", async () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const work = mkdtempSync(join(f.home, "lane-"))
+    mkdirSync(join(work, ".git"))
+    const prompt = `You are on the SCP network as claude-${work.split("/").at(-1)!.toLowerCase()}. Pick a short descriptive name for yourself with \`swarm name <name>\` when you know what you're working on.`
+    expect(await claudeCommand(["-c"], f.env, () => {}, work)).toBe(7)
+    expect(f.args()).toBe(`${[...CHANNEL_FLAGS, "--append-system-prompt", prompt, "-c"].join("\n")}\n`)
+    expect(await claudeCommand(["--name", "lead", "-c"], f.env, () => {}, work)).toBe(7)
+    expect(f.args()).toBe(`${[...CHANNEL_FLAGS, "-c"].join("\n")}\n`)
+    expect(await claudeCommand(["--append-system-prompt", "mine"], f.env, () => {}, work)).toBe(7)
+    expect(f.args()).toBe(`${[...CHANNEL_FLAGS, "--append-system-prompt", "mine"].join("\n")}\n`)
+    setJoinMode(f.env, "manual")
+    expect(await claudeCommand([], f.env, () => {}, work)).toBe(7)
+    expect(f.args()).toBe(`${CHANNEL_FLAGS.join("\n")}\n`)
   })
 
   test("hints at setup when the scp mount is missing or lacks --channels", async () => {

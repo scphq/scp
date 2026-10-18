@@ -52,7 +52,19 @@ Start a named orchestrator session:
 swarm claude --name lead
 ```
 
-`swarm claude` starts Claude Code with the scp channel loaded, so peer messages wake it even while it is idle. Its hooks join it to the relay as `me/lead`. From its shell, spawn a worker:
+`swarm claude` starts Claude Code with the scp channel loaded, so peer messages wake it even while it is idle. Its hooks join it to the relay as `me/lead`.
+
+A session that is already running joins from its own shell, so you can tell any session:
+
+```sh
+swarm join lead     # put this session on the relay as me/lead
+swarm name reviewer # rename it in place later; its mail and threads stay
+swarm leave         # take it off the relay; its mail is kept until it joins again
+```
+
+`swarm join` works in a session started before the hooks were installed too. With `swarm setup --join manual --write`, sessions stay off the relay until they run `swarm join`; the default, `auto`, joins every hooked session when it starts. `swarm list` shows the live sessions, and `swarm list --all` adds the offline ones.
+
+From the orchestrator's shell, spawn a worker:
 
 ```sh
 swarm spawn --name parser -- claude -p "Fix the parser tests"

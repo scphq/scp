@@ -88,6 +88,20 @@ describe("mirror", () => {
     ])
   })
 
+  test("a renamed endpoint's mirror is renamed in place: its id and queued mail stay, and the old handle is gone, not a live ghost", () => {
+    const { hub } = pair()
+    hub.mirror("desk", [view("me/claude-app")], { full: true, auth: "account+bridge" })
+    const [before] = hub.remoteRowsOf("desk")
+    const sender = hub.claim({ handle: "hub-peer", harness: "cli" }).endpoint
+    hub.send(sender.id, { to: "desk/claude-app", body: "queued before the rename" })
+    const changes = hub.mirror("desk", [view("me/lead", { was: "claude-app" })], { auth: "account+bridge" })
+    expect(changes.map((c) => [c.view.address, c.was])).toEqual([["ada/desk/lead", "claude-app"]])
+    expect(hub.remoteRowsOf("desk").map((v) => [v.id, v.address, v.presence])).toEqual([[before!.id, "ada/desk/lead", "online"]])
+    expect(hub.inbox(before!.id).map((m) => m.body.text)).toEqual(["queued before the rename"])
+    expect(code(() => hub.send(sender.id, { to: "desk/claude-app", body: "old" }))).toBe("not_found")
+    expect(hub.mirror("desk", [view("me/lead", { was: "claude-app" })], { auth: "account+bridge" })).toEqual([])
+  })
+
   test("a machine's mirror never touches another machine's rows, whatever address its views carry", () => {
     const { hub } = pair()
     hub.mirror("laptop", [view("ada/laptop/impl", { harness: "codex" })], { full: true })

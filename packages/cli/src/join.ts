@@ -1,8 +1,7 @@
 import { CLI_NAME } from "@scp-dev/core"
-import { connectBroker, relayDir } from "@scp-dev/broker"
+import { connectBroker, readSessionMarker, relayDir } from "@scp-dev/broker"
 import { localHandle, RelayUsage, startDaemon, walkNow } from "./common"
 import { relayIdentity, sessionKey } from "./identity"
-import { membership } from "./session"
 
 type Values = { harness?: unknown; json?: unknown }
 
@@ -17,9 +16,10 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
   const key = self.at(-1)
   const match = key === undefined ? null : /^pid:(\d+):(.+)$/.exec(key)
   if (!match) throw new RelayUsage(`${CLI_NAME} join runs in an agent session's shell: no harness process runs this shell`)
-  const joined = membership(process.env, sessionKey(process.env, key!))
+  const dir = relayDir()
+  const known = readSessionMarker(dir, sessionKey(process.env, key!))?.handle
   const claim = relayIdentity({
-    ...("handle" in joined && joined.handle ? { as: joined.handle } : {}),
+    ...(known ? { as: known } : {}),
     ...(typeof values.harness === "string" ? { harness: values.harness } : {}),
     fallbackHarness: "cli",
     cwd,
@@ -28,7 +28,6 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
     startOf: () => match[2],
     lineageOf: () => keys.slice(Math.max(0, keys.indexOf(key!))),
   })
-  const dir = relayDir()
   const client = await connectBroker(dir, () => startDaemon(dir))
   try {
     const hello = await client.hello({ transient: true, claim, join: handle ? { handle } : {} })

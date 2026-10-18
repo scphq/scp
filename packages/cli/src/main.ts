@@ -64,7 +64,8 @@ results back, as with native subagents.
   ${CLI_NAME} reply <id> [text|-]         answer a message in its thread: ${CLI_NAME} reply 5af1f2 "done"
   ${CLI_NAME} ask <to> [text|-] [--wait S]   send a request and wait for its reply: ${CLI_NAME} ask lead "which branch?"
   ${CLI_NAME} inbox [--wait S]            your unread messages, then marked read: ${CLI_NAME} inbox
-  ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, status
+  ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, status; --all adds offline ones
+  ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
   ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
   ${CLI_NAME} peek <ep>                   a short, redacted view of a peekable agent's last turns: ${CLI_NAME} peek rev
   ${CLI_NAME} set-status <state> [note]   working, waiting, blocked or done: ${CLI_NAME} set-status done "PR open"
@@ -90,8 +91,10 @@ usage:
                                                  sessions nobody spawned that spawned nobody fold into one line, --roots (or --all) lists
                                                  them; --tree nests them by parent; (you) marks your own
   ${CLI_NAME} list --contacts                    the endpoints of other accounts your contacts let you reach: address, harness, presence
-  ${CLI_NAME} send <to> [text|-]                 send a message (- or no text reads stdin); a line per recipient says when it sees it
-        [--reply-to ID] [--thread ID] [--private] [--attach PATH]...   --thread takes a thread id or the <id> of a message in it
+  ${CLI_NAME} send <to> [text|-]                 send a message (- or no text reads stdin); a line per recipient says when it sees it,
+        [--reply-to ID] [--thread ID] [--private] [--attach PATH]... [--live]   and "queued: no live session holds <addr>" for one
+                                                 that is offline; --live refuses those (not_live) and queues nothing;
+                                                 --thread takes a thread id or the <id> of a message in it
   ${CLI_NAME} reply <id> [text|-]                reply to message <id>: to its sender, in its thread, marking it read; <id> may
                                                  also be another's message in a thread you sent or got a message in
   ${CLI_NAME} inbox [--wait S] [--keep]          your unread messages, then marked read (--keep leaves them unread); --wait waits up
@@ -231,6 +234,19 @@ agent sessions:
   ${CLI_NAME} claude [--name N] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake
                                                  it while idle (claude --dangerously-load-development-channels server:scp; SCP_NAME=N)
   --channels pushes messages into a Claude Code that ${CLI_NAME} claude started; setup mounts claude's shim with it.
+  Without --name, ${CLI_NAME} claude asks the session to pick its own name with ${CLI_NAME} name <name>.
+  ${CLI_NAME} join [<handle>]                    put the session that runs this shell on the relay (it then shows in list,
+                                                 peers can message it, and its hooks hand it new messages), named <handle>
+                                                 when given; on a joined session it renames it in place. Works for a session
+                                                 started before the hooks were installed too. Tell any session: ${CLI_NAME} join <name>
+  ${CLI_NAME} name [<handle>] [--endpoint EP]    print this session's address, or rename it in place: id, mail, threads, status
+                                                 and title stay; a handle another endpoint holds, live or offline, is refused;
+                                                 a spawned worker is named by its spawner (policy defaults.rename: self lets it);
+                                                 --endpoint renames another agent, for the human at a terminal
+  ${CLI_NAME} leave [--endpoint EP]              take this session off the relay: offline, no messages pushed, mail kept until
+                                                 ${CLI_NAME} join; a spawned worker stays joined while it runs
+  With setup --join manual a session stays off the relay until it runs ${CLI_NAME} join; the default, auto, joins every
+  hooked session when it starts.
 
 relay:
   ${CLI_NAME} relay use <url> | show            select a relay, or show its source and credential status
@@ -246,7 +262,8 @@ identity:
   --as HANDLE (or --as=HANDLE, anywhere on the line, or $SCP_NAME, a local handle; a leading me/ is dropped) acts as that agent, with --harness H
   ($SCP_HARNESS, default cli), $SCP_LABELS (role=impl,lane=relay) and $SCP_PARENT. An offline
   agent of the same handle and harness is taken back with its inbox; a handle a live session holds is refused, never
-  renamed. Run from that agent's own process, it acts as the agent, narrowing only.
+  suffixed. Run from that agent's own process, it acts as the agent, narrowing only. A session renamed with join or
+  name keeps its new handle: its hooks, its shim and commands with $SCP_NAME from its shell claim that one.
   Without --as, at a terminal or with --human you are your own human inbox (me/); messages sent with --human and no
   terminal are marked tty="false" and get no scope exemption. From an agent's process, --human acts as that agent.
   Without either and without a terminal, a command acts as the agent whose harness process runs this shell (the
