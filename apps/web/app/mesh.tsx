@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { at, elbow, type Palette, type Pt, type Pulse, palette, pulse, rng } from "./swarm";
+import { drawHarness, HARNESSES, type Harness } from "./harnesses";
+import { at, elbow, ICON, type Palette, type Pt, type Pulse, palette, pulse, rng } from "./swarm";
 
 type Kind = "broker" | "root" | "sub" | "worker";
 
@@ -12,6 +13,7 @@ interface N extends Pt {
   a: number;
   ring: number;
   machine: number;
+  harness?: Harness;
 }
 
 interface Box {
@@ -97,7 +99,7 @@ function build(w: number, h: number): Scene {
     const step = Math.min(box.h * (wide ? 0.29 : 0.25), 54);
     fleets.forEach((subs, f) => {
       const fx = box.x + slot * f;
-      const root = add({ x: fx + slot / 2, y: top, kind: "root", parent: broker, alive: true, machine: m });
+      const root = add({ x: fx + slot / 2, y: top, kind: "root", parent: broker, alive: true, machine: m, harness: HARNESSES[(m * 3 + f) % HARNESSES.length] });
       const subSlot = (slot * 0.86) / subs.length;
       const sx0 = fx + slot * 0.07;
       subs.forEach((n, s) => {
@@ -341,12 +343,18 @@ export function Mesh({ status }: { status: React.RefObject<HTMLSpanElement | nul
       for (const n of nodes) {
         if (n.kind === "broker") continue;
         const s = n.kind === "root" ? 7 : n.kind === "sub" ? 5 : 4;
-        ctx.fillStyle = pal.faint;
-        square(n.x, n.y, s);
-        ctx.globalAlpha = n.a;
-        ctx.fillStyle = pal.fg;
-        square(n.x, n.y, s);
-        ctx.globalAlpha = 1;
+        if (n.harness) {
+          ctx.fillStyle = pal.bg;
+          square(n.x, n.y, ICON + 4);
+          drawHarness(ctx, n.harness, n.x, n.y, ICON, pal.h[n.harness]);
+        } else {
+          ctx.fillStyle = pal.faint;
+          square(n.x, n.y, s);
+          ctx.globalAlpha = n.a;
+          ctx.fillStyle = pal.fg;
+          square(n.x, n.y, s);
+          ctx.globalAlpha = 1;
+        }
         if (n.ring > 0) {
           ctx.strokeStyle = pal.acc;
           ctx.globalAlpha = n.ring;
