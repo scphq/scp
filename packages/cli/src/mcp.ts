@@ -1,10 +1,10 @@
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { connectBroker, relayDir } from "@scp-dev/broker"
 import { runRelayMcp, type SpawnRequest } from "@scp-dev/mcp"
-import { RelayUsage, startDaemon } from "./common"
+import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
-import { harnessPid, relayIdentity } from "./identity"
+import { harnessPid, psParent, relayIdentity } from "./identity"
 
 type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean }
 
@@ -33,6 +33,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     output: (line) => void process.stdout.write(line),
     env: process.env,
     channels: values.channels === true,
+    launchedWithChannels: values.channels === true && launchedWithChannels(process.env),
     spawn: (request) => spawnDetached(spawnWords(request), request.cwd ?? claim.cwd),
     log: (line) => void process.stderr.write(`${line}\n`),
   })
@@ -53,4 +54,10 @@ export function spawnWords(request: SpawnRequest): string[] {
     "--",
     ...request.command,
   ]
+}
+
+/** whether this shim's harness is the process `swarm claude` started with channels loaded: its parent is the launcher named in the environment */
+export function launchedWithChannels(env: NodeJS.ProcessEnv, harness = harnessPid, parentOf = psParent): boolean {
+  const launcher = Number(env[CHANNELS_ENV])
+  return Number.isInteger(launcher) && launcher > 1 && parentOf(harness())?.ppid === launcher
 }

@@ -22,6 +22,7 @@ function shim(
   options: {
     handle: string
     channels?: boolean
+    launched?: boolean
     session?: string
     initialize?: false
     claim?: Partial<Claim>
@@ -56,6 +57,7 @@ function shim(
     input: input(),
     output: (line) => lines.push(line),
     env: { HOME: "/work" },
+    ...(options.launched === undefined ? {} : { launchedWithChannels: options.launched }),
     ...(options.channels === undefined ? {} : { channels: options.channels }),
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
   })
@@ -603,7 +605,7 @@ describe("relay MCP shim, in process", () => {
   })
 
   test("--channels skips what a hook already showed, and what it pushes no hook offers again", async () => {
-    const a = shim(broker, { handle: "channel-hooked", channels: true })
+    const a = shim(broker, { handle: "channel-hooked", channels: true, launched: true })
     const peer = await RelayClient.connect(broker.socket)
     try {
       await a.request("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code", version: "2" } })
@@ -688,8 +690,28 @@ describe("relay MCP shim, in process", () => {
     }
   })
 
+  test("--channels pushes nothing to Claude Code started without channels, so the hooks still inject its mail", async () => {
+    const a = shim(broker, { handle: "channel-plain", channels: true })
+    const peer = await RelayClient.connect(broker.socket)
+    try {
+      const init = await a.request("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code", version: "2" } })
+      expect(init.result!.capabilities).toMatchObject({ experimental: { "claude/channel": {} } })
+      a.notify("notifications/initialized")
+      await peer.hello({ claim: { handle: "plain-pusher", harness: "codex" } })
+      await peer.request("send", { to: "channel-plain", body: "for the hooks" })
+      await Bun.sleep(300)
+      expect(a.messages().filter((m) => m.method === "notifications/claude/channel")).toEqual([])
+      const me = broker.core.list({ all: true }).find((e) => e.address === "me/channel-plain")!.id
+      expect(broker.core.inject(me).messages.map((m) => m.body.text)).toEqual(["for the hooks"])
+    } finally {
+      peer.close()
+      a.close()
+      await a.done
+    }
+  })
+
   test("--channels declares the capability and pushes each delivery once, wrapped, without acking it", async () => {
-    const a = shim(broker, { handle: "channel-mcp", channels: true })
+    const a = shim(broker, { handle: "channel-mcp", channels: true, launched: true })
     const peer = await RelayClient.connect(broker.socket)
     try {
       const init = await a.request("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code", version: "2" } })

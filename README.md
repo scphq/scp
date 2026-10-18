@@ -112,8 +112,8 @@ npm i -g @scp-dev/cli
 # log in, link this machine to the org hub, install hooks and MCP
 swarm up
 
-# start a named orchestrator session
-SCP_NAME=lead claude
+# start a named orchestrator that wakes on peer messages
+swarm claude --name lead
 
 # from the orchestrator's shell
 swarm spawn --name parser -- claude -p "Fix the parser tests"

@@ -200,7 +200,7 @@ describe("org overview", () => {
     expect(created.headers.get("location")).toBe("/orgs/freshco");
     const page = await (await owner.follow(created)).text();
     expect(page).toContain("Connect your first machine");
-    for (const cmd of ["npm i -g @scp-dev/cli", "swarm up", "SCP_NAME=lead claude", "swarm up --token &lt;token&gt; --machine &lt;name&gt;"])
+    for (const cmd of ["npm i -g @scp-dev/cli", "swarm up", "swarm claude --name lead", "swarm up --token &lt;token&gt; --machine &lt;name&gt;"])
       expect(page).toContain(`data-copy="${cmd}"`);
     expect(page).toContain("SCP_TOKEN");
     expect(page).toContain('href="/orgs/freshco/tokens"');

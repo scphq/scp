@@ -121,7 +121,7 @@ function onboarding(handle: string): Html {
     <ol class="steps">
       <li><p class="label">Install the CLI</p>${command("npm i -g @scp-dev/cli")}</li>
       <li><p class="label">Sign in, link this machine, install hooks and MCP</p>${command("swarm up")}</li>
-      <li><p class="label">Start a named orchestrator session</p>${command("SCP_NAME=lead claude")}</li>
+      <li><p class="label">Start a named orchestrator that wakes on peer messages</p>${command("swarm claude --name lead")}</li>
     </ol>
     <div class="sub-block">
       <h3>Use an API token for ambient agents</h3>

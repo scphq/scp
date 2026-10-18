@@ -210,7 +210,7 @@ export function mountedEntry(harness: SetupHarness, file: string): Json | undefi
   return isObject(entry) ? entry : undefined
 }
 
-function entryArgv(harness: SetupHarness, entry: Json): string[] {
+export function entryArgv(harness: SetupHarness, entry: Json): string[] {
   if (harness === "opencode") return Array.isArray(entry.command) ? entry.command.map(String) : []
   return [String(entry.command ?? ""), ...(Array.isArray(entry.args) ? entry.args.map(String) : [])]
 }
@@ -236,7 +236,7 @@ const withoutRemote = (entry: Json): Json => Object.fromEntries(Object.entries(e
 
 /** the command a harness's mount runs */
 export function mountArgv(harness: SetupHarness, bin: string): string[] {
-  return [bin, "mcp", "--harness", harness]
+  return [bin, "mcp", "--harness", harness, ...(harness === "claude" ? ["--channels"] : [])]
 }
 
 export function agyRules(): string[] {

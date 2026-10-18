@@ -680,7 +680,7 @@ Pull is sufficient for conformance. Push is what makes delivery native and is RE
 
 ### 8.4 Channel push
 
-A harness whose tool protocol supports server-initiated messages MAY receive messages as they arrive. The reference MCP server, when started with channels enabled and connected to a client that declares the `claude/channel` experimental capability, polls `inbox {wait_s: LIMITS.injectHoldS, offer: true}`, emits `notifications/claude/channel` with `{content: <preamble and block>, meta: {from, id, seq, thread}}`, and confirms with `injected {seqs, hold}`. Channel pushes do not acknowledge.
+A harness whose tool protocol supports server-initiated messages MAY receive messages as they arrive. The reference MCP server, when started with channels enabled and connected to a client that declares the `claude/channel` experimental capability, or to one the reference launcher started with channels loaded, polls `inbox {wait_s: LIMITS.injectHoldS, offer: true}`, emits `notifications/claude/channel` with `{content: <preamble and block>, meta: {from, id, seq, thread}}`, and confirms with `injected {seqs, hold}`. Channel pushes do not acknowledge.
 
 ### 8.5 Stop handling: required replies and nudges
 
@@ -1585,7 +1585,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `policy show or path or check <from> <to>` | `policy`, `policy_check` |
 | `cloud enable or disable or status [--machine]`, `machines [rm <name>]`, `contacts ...` | bridge configuration, hub |
 | `daemon [--idle] [--policy]`, `daemon stop or restart` | runs the broker; stops it (SIGTERM to the lock's pid, checked against its command line) or replaces it |
-| `mcp [--channels]`, `hooks install`, `setup`, `hook <harness> [event]` | integration (Appendices F, G) |
+| `mcp [--channels]`, `hooks install`, `setup`, `hook <harness> [event]`, `claude [--name N]` | integration (Appendices F, G) |
 
 ## Appendix F. Reference binding: MCP tools
 
@@ -1615,7 +1615,7 @@ The MCP server speaks JSON-RPC 2.0 over stdio (lines up to 4 MiB; protocol versi
 - `relay_send` adds a line pointing to `relay_status` with the message's short id when a recipient's state is `running` or `starting`.
 - `relay_inbox` precedes a message with `shown_at` by the line `(a hook already showed you this at <HH:MM:SS>; that copy may reach you after this call)`.
 
-With `--channels`, the server advertises the `claude/channel` experimental capability and pushes messages as `notifications/claude/channel` (section 8.4).
+With `--channels`, the server advertises the `claude/channel` experimental capability and pushes messages as `notifications/claude/channel` (section 8.4). It pushes only to a client that declares the capability, or to the Claude Code that `swarm claude [--name N] [claude args...]` started: the launcher runs `claude --dangerously-load-development-channels server:scp` with `SCP_NAME=N` and `SCP_CHANNELS=<its pid>`, and the server pushes when its harness's parent is that pid. Any other client keeps the hook path, since a push marks the delivery injected. `setup` mounts Claude Code's server with `--channels`.
 
 ## Appendix G. Harness hook bindings
 
