@@ -51,7 +51,7 @@ PR bodies follow `.github/pull_request_template.md`:
 
 ## Co-authors
 
-Commits and squash merges end with these trailers:
+Every model that worked on a change (implemented, reviewed, scouted or wrote copy) is credited as a co-author in the PR body, so the squash merge carries it onto main. Models with a GitHub identity use their address; models without one are credited by name only:
 
 ```
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -59,3 +59,7 @@ Co-Authored-By: GPT 6.1 Sol <codex@openai.com>
 Co-Authored-By: Muse Wonder
 Co-Authored-By: Argon 4
 ```
+
+Add any other model that took part the same way, for example `Co-Authored-By: Grok 4.7`. Credit the model, never the tool or CLI.
+
+The trailers must be the last paragraph of the PR body, after the `Generated with` line, with nothing below them. Git and GitHub only read trailers from the final paragraph, so co-authors placed earlier are silently dropped from the squash commit.
