@@ -248,6 +248,9 @@ agent sessions:
                                                  it while idle (claude --dangerously-load-development-channels server:scp; SCP_NAME=N)
   --channels pushes messages into a Claude Code that ${CLI_NAME} claude started; setup mounts claude's shim with it.
   Without --name, ${CLI_NAME} claude asks the session to pick its own name with ${CLI_NAME} name <name>.
+  ${CLI_NAME} claude --bg [--name N] [--] [claude args...]   the same in the background (claude --bg): an scp mount claims N and
+                                                 $SCP_GRANT, so under env $(${CLI_NAME} spawn-env --name N) it links under you; prints its short id
+  ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first; --resume of a live bg session attaches
   ${CLI_NAME} join [<handle>]                    put the session that runs this shell on the relay (it then shows in list,
                                                  peers can message it, and its hooks hand it new messages), named <handle>
                                                  when given; on a joined session it renames it in place. Works for a session
