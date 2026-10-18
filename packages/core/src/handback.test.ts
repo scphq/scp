@@ -7,10 +7,15 @@ const size = (text: string) => new TextEncoder().encode(text).length
 /** a line of `chars` characters: prose with markup, `<`, `&` and non-ASCII, ending mid-thought */
 const line = (n: number, chars: number) => {
   const words = `- ${n}: the parser keeps <XlsxEditor> & a < b && c > d; but it isn't the prompt, ç'est la vie, see src/relay-spawn.ts:42 `
-  return words.repeat(Math.ceil(chars / words.length)).slice(0, chars).trimEnd()
+  return words
+    .repeat(Math.ceil(chars / words.length))
+    .slice(0, chars)
+    .trimEnd()
 }
 
-const REPORT = ["Summary:", line(1, 80), line(2, 250), line(3, 120), line(4, 600), line(5, 60), line(6, 1200), line(7, 300), line(8, 900), "", "Done."].join("\n")
+const REPORT = ["Summary:", line(1, 80), line(2, 250), line(3, 120), line(4, 600), line(5, 60), line(6, 1200), line(7, 300), line(8, 900), "", "Done."].join(
+  "\n",
+)
 
 describe("a handback's output", () => {
   test("a 4 KB report with lines past 200, 500 and 1000 characters comes back byte for byte; escape sequences alone are cleaned", () => {

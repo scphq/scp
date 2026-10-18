@@ -3,18 +3,7 @@ import Link from "next/link";
 import { Header } from "./chrome";
 import { CopyButton } from "./copy-button";
 import { Showcase } from "./showcase";
-import {
-  AUTHORS,
-  CAPABILITIES,
-  DEMO_CAPTIONS,
-  HERO,
-  HERO_FACTS,
-  PROTOCOL,
-  QUICKSTART,
-  QUICKSTART_LINES,
-  RULES,
-  SPEC,
-} from "./content";
+import { AUTHORS, CAPABILITIES, DEMO_CAPTIONS, HERO, HERO_FACTS, PROTOCOL, QUICKSTART, QUICKSTART_LINES, RULES, SPEC } from "./content";
 
 const SECTIONS = 3;
 const pad = (n: number) => String(n).padStart(2, "0");

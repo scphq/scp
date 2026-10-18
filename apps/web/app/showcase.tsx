@@ -33,7 +33,10 @@ export function Showcase({ captions }: { captions: Record<View, string> }) {
       </div>
       <div id="showcase-panel" role="tabpanel" aria-labelledby={`tab-${view}`}>
         {view === "swarm" ? (
-          <figure className="demo" aria-label="Two machines with several fleets each and an ambient swarm, linked through their account's hub, with a contact to another account">
+          <figure
+            className="demo"
+            aria-label="Two machines with several fleets each and an ambient swarm, linked through their account's hub, with a contact to another account"
+          >
             <div className="d-bar">
               <span className="d-lights" aria-hidden="true" />
               <span className="d-title">one account</span>

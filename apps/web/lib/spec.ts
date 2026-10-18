@@ -14,7 +14,7 @@ export function slug(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-const escape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /** packages/spec/SPEC.md, rendered once at build: the title, the body as HTML, and the h2/h3 outline. */
 export function loadSpec(): { title: string; html: string; toc: TocEntry[] } {
@@ -35,8 +35,8 @@ export function loadSpec(): { title: string; html: string; toc: TocEntry[] } {
         return `<h${token.depth} id="${id}"><a class="anchor" href="#${id}" aria-hidden="true" tabindex="-1">#</a>${inner}</h${token.depth}>\n`;
       },
       code(token: Tokens.Code) {
-        const lang = token.lang ? ` data-lang="${escape(token.lang)}"` : "";
-        return `<pre${lang}><code>${escape(token.text)}</code></pre>\n`;
+        const lang = token.lang ? ` data-lang="${escapeHtml(token.lang)}"` : "";
+        return `<pre${lang}><code>${escapeHtml(token.text)}</code></pre>\n`;
       },
       hr() {
         return "";

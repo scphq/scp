@@ -2,9 +2,35 @@
   "name": "@scp/spec",
   "version": "0.0.0",
   "private": true,
+  "description": "The Swarm Communication Protocol specification and protocol identifier.",
+  "license": "Apache-2.0",
+  "homepage": "https://scp.dev/spec",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scphq/scp.git",
+    "directory": "packages/spec"
+  },
   "type": "module",
-  "exports": "./src/index.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./SPEC.md": "./SPEC.md",
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "src", "!src/**/*.test.ts", "SPEC.md"],
   "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

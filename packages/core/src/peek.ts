@@ -129,4 +129,3 @@ export function peekLevel(value: unknown): PeekLevel | null | undefined {
   if (value === "off") return null
   return undefined
 }
-

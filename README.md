@@ -152,8 +152,10 @@ apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders 
 
 ```sh
 bun install
+bun run lint             # Biome lint and format check
 bun run typecheck        # every workspace
 bun test
+bun run build            # package builds
 
 cd apps/web
 bun run dev              # http://localhost:3000
@@ -163,7 +165,7 @@ bun run preview          # OpenNext build, then wrangler dev serving the Worker 
 
 ## Contributing
 
-PRs target `main` and are squash merged. Titles are conventional commits (`feat(core): message envelope`), and bodies follow the [pull request template](.github/pull_request_template.md). Run `bun run typecheck` and `bun test` before opening a PR. A change to the wire format, addressing or semantics updates [SPEC.md](packages/spec/SPEC.md) and the code in the same PR. See [AGENTS.md](AGENTS.md) for the full conventions.
+PRs target `main` and are squash merged. Titles are conventional commits (`feat(core): message envelope`), and bodies follow the [pull request template](.github/pull_request_template.md). Run `bun run lint`, `bun run typecheck` and `bun test` before opening a PR. A change to the wire format, addressing or semantics updates [SPEC.md](packages/spec/SPEC.md) and the code in the same PR. See [AGENTS.md](AGENTS.md) for the full conventions.
 
 ## License
 
