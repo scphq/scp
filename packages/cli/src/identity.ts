@@ -62,6 +62,45 @@ export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
   }
 }
 
+type MuseLaunch = { name?: string; grant?: string }
+
+/** the file where `swarm muse` leaves the name and grant for the shim and hooks of its muse serve process, which Muse starts without SCP_* variables */
+function museLaunchFile(key: string, env: Env): string | undefined {
+  const pid = BINDING_PROCESS.exec(key)?.[1]
+  return pid ? join(relayDir(env), "launch", `muse-${pid}.json`) : undefined
+}
+
+/** leave `launch` for the muse serve process `key`; the returned function removes it */
+export function writeMuseLaunch(key: string, launch: MuseLaunch, env: Env): () => void {
+  const pid = BINDING_PROCESS.exec(key)?.[1]
+  if (!pid) throw new Error(`muse serve has no process key (${key})`)
+  const path = join(privateDir(join(relayDir(env), "launch")), `muse-${pid}.json`)
+  const text = JSON.stringify({ process: key, ...launch })
+  writeFileSync(path, text, { mode: 0o600 })
+  chmodSync(path, 0o600)
+  return () => {
+    try {
+      if (readFileSync(path, "utf8") === text) rmSync(path)
+    } catch {}
+  }
+}
+
+/** what `swarm muse` left for this muse serve process, when the file names exactly that process */
+export function readMuseLaunch(key: string, env: Env): MuseLaunch | undefined {
+  const path = museLaunchFile(key, env)
+  if (!path) return undefined
+  try {
+    const launch = JSON.parse(readFileSync(path, "utf8")) as MuseLaunch & { process?: unknown }
+    if (launch.process !== key) return undefined
+    return {
+      ...(typeof launch.name === "string" && validHandle(launch.name) ? { name: launch.name } : {}),
+      ...(typeof launch.grant === "string" && launch.grant ? { grant: launch.grant } : {}),
+    }
+  } catch {
+    return undefined
+  }
+}
+
 /** a shim binding by launch key, else the first ancestor pid missing from the sandbox's process table */
 export function readShimBinding(env: Env, pid: number, table: PsCommTable | undefined): ShimBinding | undefined {
   const read = (name: string, expectedPid?: number): ShimBinding | undefined => {
@@ -513,8 +552,10 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const pid = input.harnessPid(resolved)
   const harness = (GENERIC_HARNESSES.has(resolved) && input.inferHarness?.(pid)) || resolved
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
-  const handle = input.as ?? input.env.SCP_NAME ?? deriveHandle(harness, cwd)
   const harnessProcess = processKey(pid, input.startOf)
+  const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(harnessProcess, input.env) : undefined
+  const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? deriveHandle(harness, cwd)
+  const grant = input.env.SCP_GRANT || launched?.grant
   const keys = input.lineageOf ? input.lineageOf(pid) : lineage(pid)
   const harnessSession =
     harness === "claude-code" ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id)) : undefined
@@ -527,7 +568,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     labels: labelsFor(input.env),
     ...(input.env.SCP_PARENT ? { parent: input.env.SCP_PARENT } : {}),
     ...(keys.length ? { lineage: keys } : {}),
-    ...(input.env.SCP_GRANT ? { grant: input.env.SCP_GRANT } : {}),
+    ...(grant ? { grant } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),
   }
 }

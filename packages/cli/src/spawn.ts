@@ -218,14 +218,14 @@ const MUSE_VALUED = new Set([
   "--sandbox-network",
   "--echo-delay-ms",
 ])
-const MUSE_MODE = "--contributor-mode"
+export const MUSE_MODE = "--contributor-mode"
 
 /** muse's options whose value is optional: the next word is theirs only when it is one of their values */
 const MUSE_OPTIONAL: Record<string, Set<string>> = { "-w": new Set(["off", "create", "existing"]), "--worktree": new Set(["off", "create", "existing"]) }
 const MUSE_CONFIG = new Set(["-c", "--config"])
 
 /** the contributor modes a spawned muse may name: off, its default, or on, passed explicitly */
-const MUSE_MODES_ALLOWED: ReadonlySet<string> = new Set(["off", "on"])
+export const MUSE_MODES_ALLOWED: ReadonlySet<string> = new Set(["off", "on"])
 
 /** where muse's options from `start` end: the index of its subcommand, its prompt or a `--` */
 function museOptionsEnd(args: string[], start = 0): number {
@@ -254,7 +254,7 @@ function configMode(value: string): string {
 }
 
 /** every contributor mode muse's words up to a `--` set, by --contributor-mode or a `-c` setting whose key names contributor mode; undefined for a bare flag */
-function museModes(args: string[]): (string | undefined)[] {
+export function museModes(args: string[]): (string | undefined)[] {
   const end = args.indexOf("--")
   const words = end < 0 ? args : args.slice(0, end)
   const modes: (string | undefined)[] = []

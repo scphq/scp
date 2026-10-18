@@ -40,7 +40,7 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Grok.** Runs Claude Code's hooks (install with `--harness claude`), labelled `grok`. It drops prompt-hook context, so messages reach it after tools. `swarm grok [--name N] [grok args...]` runs grok headless and wakes it: see [Headless wake](#headless-wake).
 
-**Muse.** Loads hooks only from plugins. `hooks install --harness muse` writes the plugin; install it with `muse plugins install`, then approve its hooks with `muse plugins approve scp` (`swarm setup --write` runs both). A headless `muse exec`, which is what `swarm spawn -- muse exec ...` runs, has no review prompt and runs no hook Muse holds for review. Muse passes hooks only a fixed set of environment variables, so the hooks find the broker at its default path, not through `SCP_DIR` or `XDG_STATE_HOME`.
+**Muse.** Loads hooks only from plugins. `hooks install --harness muse` writes the plugin; install it with `muse plugins install`, then approve its hooks with `muse plugins approve scp` (`swarm setup --write` runs both). A headless `muse exec`, which is what `swarm spawn -- muse exec ...` runs, has no review prompt and runs no hook Muse holds for review. Muse passes hooks only a fixed set of environment variables, so the hooks find the broker at its default path, not through `SCP_DIR` or `XDG_STATE_HOME`. `swarm muse [--name N] [--approval-mode never] [-- muse serve args...]` runs a headless Muse session that messages wake: it hosts the session through `muse serve`, starts a turn on the idle session or steers a running one with each message, and prints the agent's replies. Muse's TUI cannot attach to that session, and Muse wakes no session from a hook, so an interactive `muse` reads new messages at its next turn.
 
 **Gemini / Antigravity (agy).** agy reads nothing back from an after-tool hook, so messages go in before each model call as ephemeral steps. The stop hook continues only when the turn ended without a tool call, and shows directives as a count and a pointer. Shown messages are marked injected, not acknowledged. `swarm agy [--name N] [agy args...]` runs agy headless and wakes it: see [Headless wake](#headless-wake).
 
@@ -48,16 +48,16 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Pi.** Install pi with `npm i -g @earendil-works/pi-coding-agent`, then run `swarm pi --name N`. It starts pi with the extension that ships inside the CLI: the relay tools, and each new message as a turn that steers a running one or wakes an idle session. `SCP_PI=0` turns the extension off.
 
-A session that a message can wake advertises how: `channels` (`swarm claude`), `claude-inbox` (a Claude Code session without channels, such as `claude --bg`, through its own inbox socket), `codex-app-server` (`swarm codex`), `agy-resume` (`swarm agy`), `grok-resume` (`swarm grok`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
+A session that a message can wake advertises how: `channels` (`swarm claude`), `claude-inbox` (a Claude Code session without channels, such as `claude --bg`, through its own inbox socket), `codex-app-server` (`swarm codex`), `agy-resume` (`swarm agy`), `grok-resume` (`swarm grok`), `muse-serve` (`swarm muse`), `opencode-plugin` or `pi`. `swarm list` shows it in the `WAKE` column, and `turn` for a session that reads new messages at its next turn.
 
 ## Headless workers
 
 | Harness | Spawn |
 | --- | --- |
-| Muse | `swarm spawn -- muse exec --approval-mode never "<task>"`; spawn adds `--contributor-mode off` unless you pass `on` |
+| Muse | `swarm spawn -- muse exec --approval-mode never "<task>"`; spawn adds `--contributor-mode off` unless you pass `on`. `swarm spawn -- swarm muse --approval-mode never` keeps a worker that each message wakes |
 | Gemini / Antigravity (agy) | `swarm spawn -- agy -p "<task>"`; needs the `mcp(scp/...)` allow rules `swarm setup` writes |
 
-A spawned Muse or agy worker takes late messages through its stop hook (agy: its stop hook's continue), and an idle interactive session sees them at its next turn.
+A `muse exec` worker takes late messages through its stop hook, an agy worker through its stop hook's continue, and an idle interactive session sees them at its next turn. `swarm muse` keeps a Muse worker that each message wakes; `swarm agy` and `swarm grok` wake headless, below.
 
 ## Headless wake
 

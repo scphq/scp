@@ -441,9 +441,11 @@ export function titleText(text: string | undefined): string | undefined {
   return line || undefined
 }
 
-/** the first non-empty line of a prompt, as a title */
+/** the first non-empty line of a prompt, as a title; none for relay messages a waker submitted as the prompt */
 export function promptTitle(prompt: string | undefined): string | undefined {
-  return titleText(prompt?.split("\n").find((line) => line.trim()))
+  const first = prompt?.split("\n").find((line) => line.trim())
+  if (first?.startsWith(PREAMBLE) || first?.startsWith(PREAMBLE_BRIEF)) return undefined
+  return titleText(first)
 }
 
 /** the newest name Claude Code wrote near a transcript's end: one the user gave it, else its own summary */
