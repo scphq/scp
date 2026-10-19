@@ -2,17 +2,16 @@ import type { Metadata } from "next";
 import { Header } from "../chrome";
 import { MermaidBlocks } from "../mermaid";
 import { shareMetadata } from "../share";
+import { ARCHITECTURE_DESCRIPTION as description } from "../../lib/docs";
 import { renderMarkdown } from "../../lib/spec";
 import "./architecture.css";
 
 export const dynamic = "force-static";
 
-const description = "How SCP fits together: harnesses, the local broker, the bridge, the hosted relay and the experimental mesh, and the path of one message.";
-
 export const metadata: Metadata = {
   title: "Architecture",
   description,
-  alternates: { canonical: "/architecture" },
+  alternates: { canonical: "/architecture", types: { "text/markdown": "/architecture.md" } },
   ...shareMetadata("Architecture, SCP", description, "/architecture"),
 };
 

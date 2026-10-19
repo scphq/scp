@@ -55,6 +55,7 @@ export function Footer() {
           <Link href={`${DOCS}/self-host`}>Self-host</Link>
           <a href={DEMO}>Dashboard</a>
           <a href={REPO}>GitHub</a>
+          <a href="/llms.txt">llms.txt</a>
         </nav>
       </div>
     </footer>

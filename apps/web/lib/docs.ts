@@ -53,6 +53,9 @@ export const DOCS: Doc[] = [
   },
 ];
 
+export const ARCHITECTURE_DESCRIPTION =
+  "How SCP fits together: harnesses, the local broker, the bridge, the hosted relay and the experimental mesh, and the path of one message.";
+
 export const docHref = (slug: string) => (slug ? `/docs/${slug}` : "/docs");
 
 /** One page of apps/web/docs, rendered at build. */

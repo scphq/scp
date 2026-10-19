@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Header } from "../chrome";
 import { DOCS, docHref, loadDoc } from "../../lib/docs";
+import { mdHref } from "../../lib/markdown";
 import { MermaidBlocks } from "../mermaid";
 import { shareMetadata } from "../share";
 
@@ -12,7 +13,7 @@ export function docMetadata(slug: string): Metadata {
   return {
     title: doc.title,
     description: doc.description,
-    alternates: { canonical: docHref(slug) },
+    alternates: { canonical: docHref(slug), types: { "text/markdown": mdHref(docHref(slug)) } },
     ...shareMetadata(`${doc.title}, SCP`, doc.description, docHref(slug)),
   };
 }

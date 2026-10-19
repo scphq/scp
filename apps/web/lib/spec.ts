@@ -1,5 +1,8 @@
 import { Marked, type Tokens } from "marked";
 
+export const SPEC_DESCRIPTION =
+  "The Swarm Communication Protocol, version 1: identity, messages, delivery into harnesses, authorization, federation and judging.";
+
 export interface TocEntry {
   id: string;
   text: string;
