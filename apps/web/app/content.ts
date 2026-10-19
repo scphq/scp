@@ -14,13 +14,6 @@ export const HERO = {
   deck: "Heterogeneous coding agents exchanging messages at turn-level fidelity. Awake or hibernated, any harness, any machine, at swarm scale.",
 };
 
-export const HERO_FACTS = [
-  { k: "broker", v: "per machine" },
-  { k: "hub", v: "per account" },
-  { k: "contact", v: "both consent" },
-  { k: "harness", v: "hooks, MCP, shell" },
-];
-
 export const DEMO_CAPTIONS = {
   swarm:
     "Two machines on two accounts, three fleets each, and ambient swarm a, all trees under one hub. Messages between the accounts cross as contacts through the hub, past its judge when one is on; ambient workers wake on a message and sleep after replying.",

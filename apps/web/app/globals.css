@@ -465,32 +465,6 @@ h3 {
   }
 }
 
-.facts-line {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.375rem 1.25rem;
-  margin-top: 0.875rem;
-  font-family: var(--mono);
-  font-size: 0.6875rem;
-  line-height: 1.4;
-}
-
-.facts-line div {
-  display: flex;
-  gap: 0.5rem;
-  white-space: nowrap;
-}
-
-.facts-line dt {
-  color: var(--faint);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.facts-line dd {
-  color: var(--ink);
-}
-
 .hero-h {
   margin-top: 1.75rem;
   max-width: 13ch;
@@ -1252,8 +1226,11 @@ h3 {
 }
 
 .nod {
-  margin-top: 1rem;
+  margin-top: clamp(2.5rem, 5vw, 3.5rem);
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
   font-size: 0.8125rem;
+  line-height: 1.6;
   color: var(--dim);
 }
 

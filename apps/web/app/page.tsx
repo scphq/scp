@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Header } from "./chrome";
 import { CopyButton } from "./copy-button";
 import { Showcase } from "./showcase";
-import { CLAIMS, DEMO, DEMO_CAPTIONS, DOCS, HARNESS_ROWS, HERO, HERO_FACTS, QUICKSTART_CMDS, RULES, SPEC } from "./content";
+import { CLAIMS, DEMO, DEMO_CAPTIONS, DOCS, HARNESS_ROWS, HERO, QUICKSTART_CMDS, RULES, SPEC } from "./content";
 import { HARNESS, HARNESSES, HarnessIcon } from "./harnesses";
 
 const SECTIONS = 4;
@@ -71,14 +71,6 @@ export default function Home() {
                   ))}
                 </ul>
               </div>
-              <dl className="facts-line rise" style={{ "--i": 3 } as CSSProperties}>
-                {HERO_FACTS.map((f) => (
-                  <div key={f.k}>
-                    <dt>{f.k}</dt>
-                    <dd>{f.v}</dd>
-                  </div>
-                ))}
-              </dl>
             </div>
           </div>
           <div className="wrap demo-wrap rise" style={{ "--i": 4 } as CSSProperties}>
