@@ -86,7 +86,7 @@ The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RE
 | system endpoint | The broker's own `system` endpoint, sender of relay notices and handbacks for workers that never joined. |
 | harness-instance key | An opaque string naming one running harness instance on a host (section 6.5). Its local form is fixed by the binding (Appendix E). |
 | lineage | The harness-instance keys of a client's spawn ancestry, nearest first. |
-| session key | A key chosen by an integration and shared by every connection of one agent session (section 9.1). |
+| session key | A key chosen by an integration and shared by every connection of one agent session (section 6.4; Appendix E.3). |
 | tree | A root endpoint and every endpoint placed below it. Also called a fleet. |
 | parent, ancestor, descendant | Relations in the tree. `parent_ep` is the endpoint directly above. |
 | grant | A single-use bearer token (`krt_` followed by 64 hex digits) that places a new endpoint below its issuer with caps, groups, a title and peek settings. |
@@ -391,7 +391,7 @@ A harness that runs in-process subagents and reports them to its integration MAY
 
 - The hook claims with `subagent {id, type?, stop?}`. `id` MUST match `[A-Za-z0-9_-]{1,64}` with at least one alphanumeric character; `type` is at most 64 characters.
 - The root is the claim's session endpoint, else its lineage parent. The claim MUST be a hook claim from the root's own harness instance; otherwise it is refused `unauthorized` and audited.
-- The handle SHOULD be `<root handle>-<short type>-<first 4 alphanumerics of id, lowercased>`, taken from the root's handle at the time of the claim (a root renamed later keeps its existing subagents' handles), with the root part shortened (and any trailing `-` or `.` removed) so the whole is at most 58 characters, leaving room for a `-<n>` suffix. The short type is the type's first word, splitting at any non-alphanumeric character and before an upper-case letter that follows a lower-case letter or digit, lowercased and clipped to 16 characters (`statusline-setup` gives `statusline`), or `agent` without a type; a broker MAY abbreviate well-known types. The endpoint is placed under the root with its own session `sub:<id>:<root session>` and no grant.
+- The handle is `<root handle>-<short type>-<first 4 alphanumerics of id, lowercased>`, taken from the root's handle at the time of the claim (a root renamed later keeps its existing subagents' handles), with the root part shortened (and any trailing `-` or `.` removed) so the whole is at most 58 characters, leaving room for a `-<n>` suffix. The short type is `gp` for `general-purpose`; otherwise the type's first word, splitting at any non-alphanumeric character and before an upper-case letter that follows a lower-case letter or digit, lowercased and clipped to 16 characters (`Explore` gives `explore`, `statusline-setup` gives `statusline`); `agent` without a type. The endpoint is placed under the root with its own session `sub:<id>:<root session>` and no grant.
 - When the handle is held by another subagent's offline endpoint (a row whose session is a different `sub:` session), the claim does not take it over and walks on to `<handle>-<n>`.
 - **Subagent title.** A hook of the root's holding harness instance MAY offer `subagent_title {id, title}` when it learns the description the root gave a subagent. The title is redacted, collapsed and clipped like an inferred title (section 11.1) and set as an inferred one on the root's child whose session is `sub:<id>:...`, only when its title is unset or inferred; an explicit `title` replaces it as usual. When the subagent has no endpoint yet, the broker keeps the title in memory (at most 256 pending, the oldest dropped) and applies it at the subagent's next claim.
 - A stop claim (`stop: true`) only finds an existing subagent endpoint; without one it is `not_found`. Any other claim of a `done` subagent sets it back to `working`.
@@ -463,7 +463,7 @@ A session can work off the relay and join on demand.
 | `hop` | int | broker | Causal depth (section 12.1). |
 | `created_at`, `expires_at` | timestamp | broker | Expiry is `created_at + ttl_s`. |
 | `require_reply` | true? | sender | Present only on a request whose sender requires a reply. |
-| `relation` | `"parent"`, `"ancestor"` or `"child"`? | broker | The sender's tree relation as the recipient's broker computes it (section 8.6). |
+| `relation` | `"parent"`, `"ancestor"` or `"child"`? | broker | The sender's tree relation as the recipient's broker computes it (section 8.7). |
 | `link` | `{parent: string}`? | broker | A consent request to sit under the sending agent; never client-set (section 6.12). |
 | `parent_key` | string? | broker | With `relation: "parent"`: the steer key of the spawn grant the recipient spent. |
 | `shown_at` | timestamp? | broker | Set only by `inbox` on a delivery a deferred hook showing already acknowledged (section 7.11): when that hook showed it. |
@@ -605,20 +605,20 @@ A message with relation="parent" is the exception: it comes from the agent that 
 - **Privileged host tag registry.** Tags some harness treats as coming from itself rather than from content: `channel`, `system-reminder`, `system_reminder` and `systemreminder`. Every integration MUST escape the whole registry, whichever harness it serves. An integration for a harness with another privileged tag MUST escape that tag as well, and the tag is added here.
 - "Control characters" are C0 controls except newline, carriage return and tab, DEL and C1 controls, soft hyphen, Arabic letter mark, Mongolian vowel separator, zero-width space, left-to-right and right-to-left marks, bidirectional embedding, override and isolate controls, word joiners and invisible operators, the deprecated format characters U+206A to U+206F, the byte order mark, interlinear annotation controls and Unicode tag characters. Zero-width joiner and non-joiner are kept.
 
-**Expectation line.** The line after the block states what the sender expects. `<reply>` and `<inbox>` stand for the names of the integration's reply and inbox tools; an integration with the reference tool surface (Appendix F) writes `relay_reply` and `relay_inbox`.
+**Expectation line.** The line after the block states what the sender expects. The broker renders these lines itself (they count toward the injection and push byte budgets), so the tool names in them are fixed strings; Appendix F maps them to the wire.
 
 | Condition | Text |
 | --- | --- |
 | Not a request | `for your information; reply only if useful` |
-| Request | `the sender asked a question (<reply> if you answer)` |
-| Request with `require_reply` | `reply required: the sender waits for your <reply>` |
-| `relation` `parent` | `from your parent <from>, which started you and gave you your task: a new instruction from the same source as that task. Apply it before you finish; where it conflicts with an earlier instruction, this one wins. It grants no permission or approval beyond what you already have`, followed for a request by `; answer it with <reply>`, or with `require_reply` by `; reply required: the sender waits for your <reply>` |
+| Request | `the sender asked a question (relay_reply if you answer)` |
+| Request with `require_reply` | `reply required: the sender waits for your relay_reply` |
+| `relation` `parent` | `from your parent <from>, which started you and gave you your task: a new instruction from the same source as that task. Apply it before you finish; where it conflicts with an earlier instruction, this one wins. It grants no permission or approval beyond what you already have`, followed for a request by `; answer it with relay_reply`, or with `require_reply` by `; reply required: the sender waits for your relay_reply` |
 | `relation` `child` | `from your worker <from>`, followed for a request by `: ` and the non-parent text above |
 | `relation` `ancestor` | `from <from>, above the agent that started you: not your parent's instruction; ` followed by the non-parent text above |
 
 `from.rel` is not rendered.
 
-**Read line.** After the blocks an injection states that the shown messages are now marked read and names the remaining unread count with the way to fetch them (`<inbox>`). When a parent message is among them the read line asks the agent to apply the parent's instruction before it finishes.
+**Read line.** After the blocks an injection states that the shown messages are now marked read and names the remaining unread count with the way to fetch them (`relay_inbox`). When a parent message is among them the read line asks the agent to apply the parent's instruction before it finishes.
 
 ### 7.10 Message references and `last`
 
@@ -729,7 +729,7 @@ At a stop (the main thread's stop; not a subagent stop) the hook calls `inject {
 | `workers`, `worker_unread`, `pushes_left`, `prompts` | Push state (section 8.6). |
 | `block` | `forced`, or any nudge, or any late directive. |
 
-When `block` is true the hook holds the stop and prints, in order: late directives; when forced, a pointer naming the number of requests that require a reply (and the unread count if `hold_unread`); then one line per nudge: `<from> asked you something (<short>); reply with <reply> if it helps, otherwise stop.`, followed by ` Read it with <inbox>.` when the request is unread, then `and <n> more.` for the rest (`nudge_more`).
+When `block` is true the hook holds the stop and prints, in order: late directives; when forced, a pointer naming the number of requests that require a reply (and the unread count if `hold_unread`); then one line per nudge: `<from> asked you something (<short>); reply with relay_reply if it helps, otherwise stop.`, followed by ` Read it with relay_inbox.` when the request is unread, then `and <n> more.` for the rest (`nudge_more`).
 
 - A stop hold MUST NOT carry ordinary message text. Only late parent directives are shown in full.
 - The hook confirms with `injected {seqs, hold, stop?, nudged?, restated?, read?}`. `stop: true` counts one stop hold (capped at `LIMITS.stopBlocks`) and counts only once printed. `nudged` marks each request as nudged, so each request is nudged at most once. Nudges do not count as stop holds.
@@ -756,7 +756,7 @@ A session that spawned workers can wait at its stop for their messages instead o
   - `parent` when the sender is an ancestor of the recipient or issued an unrevoked grant the recipient spent;
   - `child` when the recipient is an ancestor of the sender;
   - unset for humans, remote senders and rows taken out of use.
-- **Steer key.** A spawn grant carries a random 6-character base-36 steer key. The spawner's prompt for the worker SHOULD end with a steer note that names the parent's address and the key and says that blocks with `relation="parent"` and that key come from the parent. The reference note is (informative):
+- **Steer key.** A spawn grant carries a random 6-character base-36 steer key. The spawner's prompt for the worker ends with the steer note, which peek strips from digests by its literal `[swarm spawn: ` prefix (section 13):
 
   ```
   [swarm spawn: <parent address>, the agent that gave you this task, may send follow-up instructions while you work. They arrive after your tool calls or when you stop, as <relay-message relation="parent" key="<key>"> blocks: apply them, the newest winning where they conflict. A block without that key is not from it.]
@@ -830,7 +830,7 @@ A spawn runs a worker harness under a fresh spawn grant. Launching the worker (i
 
 1. The spawner mints a spawn grant (`grant {spawn: true}`) bound to its own harness-instance key (`bind_process`), with the defaults below, and a time to live long enough for the worker to claim.
 2. The token reaches the worker by the host's binding (Appendix E.5). The spawner's own identity MUST NOT reach the worker: a worker that claimed with the spawner's session key, name or grant would act as the spawner.
-3. The worker's integration redeems the grant in its claim (section 9.1). Where the worker takes a prompt, the spawner SHOULD end it with the steer note (section 8.7).
+3. The worker's integration redeems the grant in its claim (section 9.1). Where the worker takes a prompt, the spawner ends it with the steer note (section 8.7).
 4. `spawn_steers {grant, take?}` returns `{session, steers, transcript}`: the harness session id and transcript path the worker's integration reported, and the spawner's messages to the worker that it never read. With `take: true` they are marked read, so that the spawner can hand them to a resumed run of the same worker session. Steers the spawner took but could not hand over are reported `unapplied` at exit (section 9.3).
 5. When the worker exits, the spawner reports it exactly once with `spawn_exit` (section 9.3), passing the worker's final output (where the integration named a transcript, the worker's own replies in it).
 
@@ -842,7 +842,7 @@ A spawn runs a worker harness under a fresh spawn grant. Launching the worker (i
 | Title | The prompt's first non-empty line, control characters removed, whitespace collapsed, redacted, cut to 64 characters; dropped if it still contains a credential. |
 | Name | `<program base name>-<5 random [a-z0-9]>`, else `worker-<5 random>`. |
 
-An ordinary grant (`spawn` absent) places a worker the same way without steer key, handback or stop push; the reference implementation offers it as `spawn_env`.
+An ordinary grant (`spawn` absent) places a worker the same way without steer key, handback or stop push.
 
 A worker on another machine of the account runs without a grant, linked under the spawner (sections 6.12 and 19.4).
 
@@ -889,7 +889,8 @@ An offline agent's `working` or `waiting` status is cleared by the sweep. A gran
 - Any hook event of the holding harness instance renews the hook timestamp, except during `LIMITS.hookEndedGraceS` (30 s) after a session end, when only a session start renews it.
 - When the last connection closes, the session binding is cleared unless a hook reported within `LIMITS.hookIdleS`.
 - **Wakers.** The connection whose `wake` set a value other than `none` is the endpoint's waker until it closes or sets `none`, whatever kind of connection it is (a lineage-bound or hook connection included). A hook connection's waker stays live for `LIMITS.restartGraceS` after it closes, while its harness starts the next one. A message wakes such an endpoint, so it is never offline while a waker lives, and goes offline when the last one is gone; the broker reports that like any other presence change. A claim's takeover (section 6.4) judges the row's presence without its wakers.
-- An idle agent with a wake (section 11.1) is woken by a message; one without reads it at its next turn. - A `hibernated` agent is not offline but wakeable: a message runs its provider's wake hook (section 19.1) and stays queued until the resumed session drains it. Claims, takeovers and incarnations judge the row by its own presence, so the returning session can reclaim it.
+- An idle agent with a wake (section 11.1) is woken by a message; one without reads it at its next turn.
+- A `hibernated` agent is not offline but wakeable: a message runs its provider's wake hook (section 19.1) and stays queued until the resumed session drains it. Claims, takeovers and incarnations judge the row by its own presence, so the returning session can reclaim it.
 - An endpoint with no connection whose holding harness instance has ended (Appendix E.3) ends its hook session as a session end would. The broker checks at every list and claim and at each periodic presence check, so presence does not wait out `LIMITS.hookIdleS`.
 
 ---
@@ -1322,10 +1323,10 @@ Categories: `secret`, `pii`, `injection`, `code`, `private`, `spam`, `offtopic`.
 
 A deterministic pre-filter runs first, without any model:
 
-- A credential (section 7.8) MUST refuse, category `secret`.
-- Personal data SHOULD be redacted, category `pii`.
-- Content that tries to forge relay framing (section 7.9) or carries other injection cues SHOULD be flagged suspect, category `injection`.
-- Code and diffs SHOULD be flagged, category `code`.
+- A credential (section 7.8): refuse, category `secret`.
+- Personal data (private-key and credential file paths, email addresses, IBANs with a valid checksum, card numbers passing the Luhn check, phone numbers): redactions, category `pii`.
+- Suspect, category `injection`: forged relay block markers (including fullwidth variants) or data delimiters, control or invisible characters, or injection cues (for example "ignore previous", "you are now", "new system prompt", "approved by user", piping a download to a shell).
+- Category `code`: a code fence or diff, or more than 20 lines of which more than half look like code.
 
 ### 15.4 Model judge
 
@@ -1337,7 +1338,7 @@ A deterministic pre-filter runs first, without any model:
 ### 15.5 Failure behaviour
 
 - **Local judge** (a broker, or a hub judging its own account). On timeout, error or malformed answer the reason is `judge_unavailable` and the configured fail mode applies: `closed` holds; `open` (default) passes, or redacts with the pre-filter's redactions. Mode `shadow` (default) delivers first and audits the verdict (`judge_shadow`); `enforce` applies it; `off` skips the judge.
-- **Hosted judge.** An unreadable configuration refuses `unavailable`. A single model failure holds with reason `judge_unavailable`. Repeated outage-class failures (the provider unreachable, timing out or failing) MAY open a circuit breaker per provider and key for a bounded time; while it is open the pre-filter decides (suspect holds, personal data redacts, everything else passes) and the reason ends with ` (judge_unavailable)`. Without a model credential the pre-filter decides at once. A provider's rejection of the message itself (as opposed to an outage), or an empty or malformed answer, always holds and never counts toward the breaker. In `shadow` mode the message passes and is judged afterwards. Over budget, `enforce` refuses `rate_limited` with `retry_after` and `shadow` passes unjudged. A hold that cannot be stored refuses `unavailable`. A retried message finds its earlier hold: still held returns the same hold, released is a duplicate, refused is `judge_refused`.
+- **Hosted judge.** An unreadable configuration refuses `unavailable`. A single model failure holds with reason `judge_unavailable`. Outage-class failures (unreachable, timeout, or any other error status, such as 401, 403, 429 or 5xx) on 3 distinct messages within 60 s open a breaker, per provider and key, for 30 s; while it is open the pre-filter decides (suspect holds, personal data redacts, everything else passes) and the reason ends with ` (judge_unavailable)`. After that, one message probes the model: success closes the breaker, an outage-class failure keeps it open for another 30 s. Without a model credential the pre-filter decides at once. Provider rejections (status 400, 413 or 422, or an empty or malformed answer) always hold and never count toward the breaker. In `shadow` mode the message passes and is judged afterwards. Over budget, `enforce` refuses `rate_limited` with `retry_after` and `shadow` passes unjudged. A hold that cannot be stored refuses `unavailable`. A retried message finds its earlier hold: still held returns the same hold, released is a duplicate, refused is `judge_refused`.
 
 ### 15.6 Configuration and budgets
 
@@ -1499,7 +1500,7 @@ An integration with push capability additionally:
 
 Providers that start or resume sessions outside the relay (a suspended VM, a container, another machine) plug in at two points: a waker brings a hibernated session back, and a runner starts a spawn on another machine.
 
-- **Normative and optional parts.** Section 19.1 is protocol: the `hibernated` presence, the `hook:<provider>` wake value, the semantics of the `hibernate` method and the mirrored presence. An implementation that supports hibernation MUST follow it. Sections 19.2 and 19.3 state what a broker's and a hub's wakes guarantee; the machine waker's webhook payload and signature (section 19.3) are an optional hub interface that a hub calling a webhook MUST follow. How a broker runs a provider's waker and how a runner starts a worker are implementation-defined (the reference is described in `IMPLEMENTATION.md`): another implementation MAY wake and start sessions any other way.
+- **Normative and optional parts.** Section 19.1 is protocol: the `hibernated` presence, the `hook:<provider>` wake value, the semantics of the `hibernate` method and the mirrored presence. An implementation that supports hibernation MUST follow it. Sections 19.2 and 19.3 state what a broker's and a hub's wake runs guarantee: when they run, what they learn and what their outcomes mean; the machine waker's webhook payload and signature (section 19.3) are an optional hub interface that a hub calling a webhook MUST follow. How a waker is configured and invoked, and how a runner starts a worker, are implementation-defined (the reference is described in `IMPLEMENTATION.md`): another implementation MAY wake and start sessions any other way.
 - **Hand-offs.** A waker or runner command is the whole hand-off. SCP passes it the request (for a runner, with the join information) and takes back the result. Resuming or booting a machine, provisioning the harness's credentials and starting the harness, for example in a terminal multiplexer, are the provider's.
 - **Credentials.** SCP never sees, stores or transports credentials. Messages, wake metadata, runner requests and replies, and the hub carry none, and nothing in SCP runs a credentials command. A provider's waker or runner provisions credentials itself, from the account that owns the endpoint: never a sender's, and never that of a sender of another account. The `from` of wake metadata is for routing and display, not for choosing credentials.
 
@@ -1551,7 +1552,7 @@ A runner starts a spawn on another machine of the same account. It is the whole 
 
 "ep" is any bound endpoint connection; "hook" a transient hook connection; "obs" an observer; "tty" the human at a terminal.
 
-`title_infer`, `subagent_title`, `cloud_status` and `bridge_relink` serve the integration's own conveniences: a broker MAY leave them out (a client then sees `method_not_found`), and the results of `cloud_status` and `bridge_relink` are informative. So are the `file` members of the `policy` and `policy_check` results (section 10.9).
+The results of `cloud_status` and `bridge_relink`, and the `file` members of the `policy` and `policy_check` results (section 10.9), are informative.
 
 | Method | Params | Result | Errors | Caller |
 | --- | --- | --- | --- | --- |
@@ -1757,21 +1758,27 @@ This appendix is normative for brokers and integrations on Unix hosts (Linux, ma
 
 ### E.2 Single instance
 
-- A broker MUST take an exclusive non-blocking lock (`flock`) on `broker.lock` in the relay directory before serving and MUST exit without serving when the lock is held. The lock holder writes `<pid>:<unix seconds>` into the file.
+- A broker takes the single-instance lock by creating `broker.lock` in the relay directory exclusively (create-new, mode 0600) and writing `<pid>:<unix seconds>` into it. It does not wait: when the file exists and its holder is live, the broker MUST exit without serving.
+- A holder is live when a process with that pid runs (a process of another user counts as running) and its time is not earlier than this boot, allowing 60 s of clock slack. A lock whose holder is not live is stale: the broker moves it aside (renaming it, and putting it back if another broker replaced it with a live one meanwhile) and retries.
 - A broker whose socket path no longer names its listener, or whose lock file no longer holds its line, MUST stop, and MUST NOT remove the socket path it no longer owns.
 
 ### E.3 Harness-instance keys and session keys
 
-- A harness-instance key is `pid:<pid>:<start>`. `<pid>` is the decimal process id of the harness instance's process. `<start>` is that process's start time as `ps -o lstart= -p <pid>` prints it in the C locale (`LC_ALL=C`), trimmed, with every run of whitespace replaced by one `-`; it MUST match `^[A-Za-z0-9:-]{1,64}$`, else the integration has no key for that process. Example: `pid:4100:Sat-Oct-17-09:00:00-2026`.
-- The harness instance's process is the harness program's own process: the parent of an integration process the harness starts directly, or the grandparent when the harness starts it through a shell. A launcher that holds one endpoint across several harness processes stands in as the instance (section 6.5) and names its pid to the integrations it starts; every integration of that session MUST then use the launcher's key.
-- A harness instance has ended when no process has its pid, or the process with that pid has a different start time. A broker checks this on its own host only.
-- `bind_process` (section 9.1) MUST be a key of this form; anything else is `invalid_params`.
+- A harness-instance key is `pid:<pid>:<start>`. `<pid>` is the decimal process id of the harness instance's process. `<start>` is that process's start time as `ps -o lstart= -p <pid>` prints it in the C locale (`LC_ALL=C`), trimmed, with every run of whitespace replaced by one `-`; it MUST match `^[A-Za-z0-9:-]{1,64}$`. Example: `pid:4100:Sat-Oct-17-09:00:00-2026`. When the start time cannot be read, the key is the bare `pid:<pid>`: it still serves as a session key and as a holding key, but it never places a claim, binds a grant or attests (section 6.5).
+- The harness instance's process is the harness program's own process: the parent of an integration process the harness starts directly, or the grandparent when the harness starts it through a shell. A hook uses the pid the harness names in its environment where it names one (`CLAUDE_PID` for Claude Code, `OPENCODE_PID` for OpenCode).
+- A launcher that holds one endpoint across several harness processes stands in as the instance (section 6.5): it sets `SCP_HARNESS_PID` to its own pid, and an integration uses that pid only when it is the parent of the harness process found above. Every integration of that session then uses the launcher's key.
+- A broker treats a harness instance as ended when no process with its pid runs (a process of another user counts as running); it checks only keys of its own host. It does not compare start times, so a recycled pid keeps the instance live until that process exits.
+- Grammar on the wire: a claim's `process` matches `^pid:\d+(:[A-Za-z0-9:-]{1,64})?$`; `bind_process` (section 9.1) matches `^pid:\d+:[A-Za-z0-9:-]{1,64}$`, anything else is `invalid_params`.
 - The session key (section 6.4 `session`) is `env:<value>` when the environment variable `SCP_SESSION` is set and non-empty, else the harness-instance key. An `env:` key is never shaped like a harness-instance key.
 
 ### E.4 Attestations
 
 - `lineage` lists the keys of the invoking process's ancestors, starting at its parent, nearest first, at most `LIMITS.lineageMax`.
-- `self` lists the keys from the invoking process's parent up to and including the harness instance's process, nearest first. The walk passes only processes that run no code but the agent's own: shells and pass-through wrappers, and interpreters running a script of the agent's own working tree. It MUST end without a `self` at anything else: an installed tool or package runner, another harness, a process it cannot read, or a pid 1 that is not an init process. Which programs count as pass-through is the integration's choice within that rule; the reference lists are informative (`IMPLEMENTATION.md`).
+- `self` lists the keys from the invoking process's parent up to and including the harness instance's process, nearest first. The walk passes only processes that run no code but the agent's own: shells and pass-through wrappers, and interpreters running a script of the agent's own working tree. It MUST end without a `self` at anything else: an installed tool or package runner, another harness, a process it cannot read, or a pid 1 that is not an init process. So that every integration stops at the same process, the walk climbs past pass-through processes and helper interpreters and stops at the first other process, which is taken as the harness:
+  - Pass-through processes: `sh`, `bash`, `zsh`, `dash`, `fish`, `ash`, `ksh`, `env`, `timeout`, `nohup`, `nice`, `time`, `stdbuf`, `xargs`, `script`, `caffeinate`, `flock`, `sandbox-exec`, `bwrap`, `codex-linux-sandbox` (also as its truncated name `codex-linux-san`).
+  - Helper interpreters pass only when they run the agent's own script: `node`, `nodejs`, `bun`, `deno`, `ruby`, `perl`, `python*`, `uv run`, `npm run`, `pnpm run`, `yarn run`, and `npx`, `bunx`, `pnpx`, `uvx` only with `tsx`, `ts-node`, `vite-node` or `esno`. The script MUST be relative without `..`, or under the working directory, the git top level or a temporary directory. It MUST NOT be a `scheme:` path, start with `~`, or lie where installed tools live (a `node_modules`, `site-packages`, `dist-packages`, `.npm`, `.bun`, `.cache`, `.local`, `.cargo`, `.volta`, `.nvm`, `.pyenv`, `.rbenv`, `Cellar` or `Applications` path segment, or under `/opt`, `/usr`, `/Library` or `/nix`). A file an interpreter flag loads first (`-r`, `--require`, `--import`, `--loader`, `--preload` and the like) is checked like the script. Inline-code flags (`-c`, `-e`, `--eval`, `-p`, `--print`, `-`) pass.
+  - The walk ends at `-m`, `bun x`, a `bun run` or `deno run` of a bare package name, any other package-runner command (such as `npm exec`), or any argument that names a known harness.
+  - A sandbox can hide the harness's process-table entry, or end the walk at a pid 1 that is not an init process. Without a recoverable shim binding (E.7), the agent uses its tool surface instead.
 
 ### E.5 Grant conveyance
 
@@ -1787,18 +1794,18 @@ This appendix is normative for brokers and integrations on Unix hosts (Linux, ma
 
 ### E.7 Shim bindings for sandboxed shells
 
-A sandbox can hide the harness's process from shells the agent runs, so that no `self` can be computed. A tool-surface process (a shim) that knows its harness-instance key MAY then publish it:
+A sandbox can hide the harness's process from shells the agent runs, so that no `self` can be computed. Shim bindings exist for the harnesses that do this, currently `codex` and `t3code` (a T3 Code session run by Codex); a binding for any other harness is ignored. A tool-surface process (a shim) of such a harness that knows its harness-instance key MAY publish it:
 
 - The shim writes `<relay dir>/bindings/pid-<harness pid>.json` holding `{process, handle, harness}`, where `process` is the full harness-instance key, with mode 0600, and removes it on exit when it can.
 - When the harness environment carries `SCP_SHIM_BINDING` (1 to 128 lowercase hex digits, set by a launcher to a fresh random value), the shim also writes `bindings/key-<SCP_SHIM_BINDING>.json` with the same content.
-- A tool invocation that cannot reach the harness by E.4 first reads `key-<SCP_SHIM_BINDING>.json` when that variable is set, else climbs from its parent through the visible process table to the first parent pid that is missing from it and reads `pid-<that pid>.json`, accepting it only when the binding's pid equals the missing pid. A binding whose `process` is not a full key, whose pid is not above 1, or whose `handle` is not a valid handle is ignored.
+- A tool invocation in a Codex shell (`SCP_HARNESS=codex`, or the harness's own markers `CODEX_THREAD_ID`, `CODEX_SANDBOX` or `CODEX_SANDBOX_NETWORK_DISABLED` unless `SCP_HARNESS_DETECT=0`) that cannot reach the harness by E.4 first reads `key-<SCP_SHIM_BINDING>.json` when that variable is set, else climbs from its parent through the visible process table to the first parent pid that is missing from it and reads `pid-<that pid>.json`, accepting it only when the binding's pid equals the missing pid. A binding whose `process` is not a full key, whose pid is not above 1, or whose `handle` is not a valid handle is ignored.
 - With a valid binding, both `lineage` and `self` are the visible keys followed by the binding's `process`, and the harness is the binding's `harness`. Without one the agent uses its tool surface.
 
 ---
 
 ## Appendix F. Reference tool surface (informative)
 
-The reference integration exposes the pull surface (section 8.1) as these MCP tools, served under the MCP server name `scp`. An integration MAY name its tools differently; section 7.9 writes the reply and inbox tools as `<reply>` and `<inbox>`. Server details, spawn options and server push are described in `IMPLEMENTATION.md`.
+The reference integration exposes the pull surface (section 8.1) as these MCP tools, served under the MCP server name `scp`. An integration MAY name its tools differently, but the framing text of section 7.9 names `relay_reply` and `relay_inbox`, so it SHOULD offer tools of those names. Server details, spawn options and server push are described in `IMPLEMENTATION.md`.
 
 | Tool | Parameters | Wire |
 | --- | --- | --- |

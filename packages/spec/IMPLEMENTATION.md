@@ -21,8 +21,8 @@ Variables marked "binding" are fixed by SPEC Appendix E; the others are this imp
 | `SCP_NAME` | The handle to claim or act as; with a grant, the grant's name (binding for workers). |
 | `SCP_UNDER` | Sent as the claim's `under`; set for a worker on another machine (binding). |
 | `SCP_SHIM_BINDING` | The launch key of a shim binding (binding). |
-| `SCP_HARNESS_PID` | The launcher that stands in as the harness instance. |
-| `SCP_HARNESS`, `SCP_HARNESS_DETECT` | Name the harness explicitly; `SCP_HARNESS_DETECT=0` turns off marker-based inference. |
+| `SCP_HARNESS_PID` | The launcher that stands in as the harness instance (binding). |
+| `SCP_HARNESS`, `SCP_HARNESS_DETECT` | Name the harness explicitly; `SCP_HARNESS_DETECT=0` turns off marker-based inference (binding, for shim bindings). |
 | `SCP_PARENT` | The spawner's address, removed from a worker's environment. |
 | `SCP_LABELS` | Labels passed to a worker's claims. |
 | `SCP_PUSH_WAIT` | Caps the stop push wait. |
@@ -53,11 +53,7 @@ Variables marked "binding" are fixed by SPEC Appendix E; the others are this imp
 An agent's shell commands run as children of its harness. A CLI that runs in such a shell authenticates as the agent's endpoint without any token:
 
 1. The CLI reads the process table once and computes `lineage` (process keys from its parent upward) and `self` (the harness lineage).
-2. The harness lineage walk climbs past pass-through processes and helper interpreters and stops at the first other process, which is taken as the harness.
-   - Pass-through processes: `sh`, `bash`, `zsh`, `dash`, `fish`, `ash`, `ksh`, `env`, `timeout`, `nohup`, `nice`, `time`, `stdbuf`, `xargs`, `script`, `caffeinate`, `flock`, `sandbox-exec`, `bwrap`, `codex-linux-sandbox` (also as its truncated name `codex-linux-san`).
-   - Helper interpreters pass only when they run the agent's own script: `node`, `nodejs`, `bun`, `deno`, `ruby`, `perl`, `python*`, `uv run`, `npm run`, `pnpm run`, `yarn run`, and `npx`, `bunx`, `pnpx`, `uvx` only with `tsx`, `ts-node`, `vite-node` or `esno`. The script MUST be relative without `..`, or under the working directory, the git top level or a temporary directory. It MUST NOT be a `scheme:` path, start with `~`, or lie where installed tools live (a `node_modules`, `site-packages`, `dist-packages`, `.npm`, `.bun`, `.cache`, `.local`, `.cargo`, `.volta`, `.nvm`, `.pyenv`, `.rbenv`, `Cellar` or `Applications` path segment, or under `/opt`, `/usr`, `/Library` or `/nix`). A file an interpreter flag loads first (`-r`, `--require`, `--import`, `--loader`, `--preload` and the like) is checked like the script. Inline-code flags (`-c`, `-e`, `--eval`, `-p`, `--print`, `-`) pass.
-   - The walk ends at `-m`, `bun x`, a `bun run` or `deno run` of a bare package name, any other package-runner command (such as `npm exec`), or any argument that names a known harness.
-   - A sandbox can hide the harness's process-table entry, or end the walk at a pid 1 that is not an init process. Without a recoverable binding below, the agent must use its MCP tools instead.
+2. The harness lineage walk follows SPEC Appendix E.4.
 3. When the harness lineage is empty in a codex shell, the CLI tries a local shim binding:
    - Codex markers are `CODEX_THREAD_ID`, then `CODEX_SANDBOX` (such as `seatbelt`) or `CODEX_SANDBOX_NETWORK_DISABLED`. `SCP_HARNESS=codex` also selects the fallback. `SCP_HARNESS_DETECT=0` disables marker-based inference, but not an explicit `SCP_HARNESS`.
    - The codex MCP shim writes `<relay dir>/bindings/pid-<harness pid>.json` containing `{process, handle, harness}`, with mode `0600`, and removes it on exit when possible. The process MUST be a full `pid:<pid>:<start time>` key.
@@ -72,7 +68,6 @@ The CLI resolves its identity in this order: an explicit name (`--as` or `SCP_NA
 
 ### Subagents
 
-- The broker abbreviates the subagent type `general-purpose` to `gp` in subagent handles; `Explore` gives `explore`.
 - Claude Code reports a subagent's description through the root's `PostToolUse` of its `Agent` or `Task` tool, with `tool_input.description` and an object `tool_response` carrying `agentId`. The hook offers it as `subagent_title`.
 
 ### Joining and linking from the CLI
@@ -107,7 +102,7 @@ A harness whose tool protocol supports server-initiated messages MAY receive mes
 The spawn operation (reference: `swarm spawn [flags] -- <harness command>`) runs a worker harness under a fresh spawn grant:
 
 1. Mint a spawn grant with `ttl_s` 3600, `bind_process` set to the spawner's own process key, and the defaults of SPEC section 9.2.
-2. Build the worker's environment from the spawner's minus the spawner's identity variables (`SCP_NAME`, `SCP_SESSION`, `SCP_GRANT`, `SCP_PARENT`, `SCP_UNDER`, `SCP_HARNESS`), plus the grant's environment and labels.
+2. Build the worker's environment from the spawner's minus the spawner's identity variables (those of SPEC Appendix E.5, plus `SCP_SPAWN_RUNNER` and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`), plus the grant's environment and labels.
 3. Append the steer note (SPEC section 8.7) to the worker's prompt where the harness takes a prompt argument, and apply harness-specific arguments that let the worker use its relay tools.
 4. Run the harness, forwarding signals, and capture the tail of its output when standard output is not a terminal.
 5. When the worker exits 0 and its harness resumes a headless session (reference: `codex exec`), call `spawn_steers {grant, take: true}`. It returns the harness session id the worker's hooks reported and the spawner's messages to the worker it never read; with a session and such steers they are marked read, and the spawn resumes the session with them as the prompt, at most twice. A resumed run that exits non-zero leaves those steers `unapplied` (SPEC section 9.3).
@@ -178,22 +173,11 @@ Changes take effect when the broker restarts, except peers, which are re-read ev
 
 - The reference hub takes the egress and ingress sides as a pluggable cross-account gate that passes by default; the hosted-side behaviour of SPEC sections 15.5 to 15.7 is not part of the reference implementation. The hosted relay does not federate and judges only on the `local` side.
 
-### Pre-filter heuristics
-
-- A credential (SPEC section 7.8): refuse, category `secret`.
-- Personal data (private-key and credential file paths, email addresses, IBANs with a valid checksum, card numbers passing the Luhn check, phone numbers): redactions, category `pii`.
-- Suspect, category `injection`: forged relay block markers (including fullwidth variants) or data delimiters, control or invisible characters, or injection cues (for example "ignore previous", "you are now", "new system prompt", "approved by user", piping a download to a shell).
-- Category `code`: a code fence or diff, or more than 20 lines of which more than half look like code.
-
 ### Model call
 
 - The body is passed between per-call nonce delimiters `<<<RELAY_DATA_<nonce>>>`.
 - Verdicts are cached in memory (at most 1000): `pass` and `redact` for 24 h, `refuse` for 1 h.
 - Model providers: `openai`, `openrouter` and `anthropic`.
-
-### Hosted breaker
-
-- **Hosted judge.** An unreadable configuration refuses `unavailable`. A single model failure holds with reason `judge_unavailable`. Outage-class failures (unreachable, timeout, or any other error status, such as 401, 403, 429 or 5xx) on 3 distinct messages within 60 s open a breaker, per provider and key, for 30 s; while it is open the pre-filter decides (suspect holds, personal data redacts, everything else passes) and the reason ends with ` (judge_unavailable)`. After that, one message probes the model: success closes the breaker, an outage-class failure keeps it open for another 30 s. Without a model credential the pre-filter decides at once. Provider rejections (status 400, 413 or 422, or an empty or malformed answer) always hold and never count toward the breaker. In `shadow` mode the message passes and is judged afterwards. Over budget, `enforce` refuses `rate_limited` with `retry_after` and `shadow` passes unjudged. A hold that cannot be stored refuses `unavailable`. A retried message finds its earlier hold: still held returns the same hold, released is a duplicate, refused is `judge_refused`.
 
 ### Hosted relay judge
 
@@ -284,7 +268,7 @@ A runner starts a spawn on another machine of the same account (`swarm spawn --v
 | `mcp [--as <h>] [--harness <h>] [--channels]`, `mcp install --harness <h> [--as <h>]` | the MCP shim (see "MCP server"); `install` prints the mount command |
 | `hooks install --harness <h> [--scope project or user or local] [--write or --print] [--block-stop-on-unread] [--push-wait <s>]`, `hook <harness> [event]` | see "Harness bindings" |
 | `setup [--write] [--undo] [--no-hooks] [--block-stop-on-unread] [--join auto or manual] [--bin <path>] [--harness <h>]` | see "MCP server" and "Harness bindings" |
-| `claude [--name N or --as N] [--] [claude args...]`, `codex [--name N or --as N] [--headless] [--resume <thread>] [--] [codex args...]`, `pi [--name N or --as N] [--] [pi args...]`, `opencode [--name N or --as N] [--] [opencode args...]`, `agy [--name N or --as N] [--] [agy args...]`, `grok [--name N or --as N] [--] [grok args...]`, `muse [--name N or --as N] [--resume <session>] [--approval-mode <mode>] [--] [muse serve args...]`, `t3code [--name N or --as N] --thread <thread> [--base-dir <dir>]` | launchers (Appendices F, G) |
+| `claude [--name N or --as N] [--] [claude args...]`, `codex [--name N or --as N] [--headless] [--resume <thread>] [--] [codex args...]`, `pi [--name N or --as N] [--] [pi args...]`, `opencode [--name N or --as N] [--] [opencode args...]`, `agy [--name N or --as N] [--] [agy args...]`, `grok [--name N or --as N] [--] [grok args...]`, `muse [--name N or --as N] [--resume <session>] [--approval-mode <mode>] [--] [muse serve args...]`, `t3code [--name N or --as N] --thread <thread> [--base-dir <dir>]` | launchers (see "Harness bindings") |
 | `help [<verb>] [--all]`, `<verb> --help`, `version` or `--version` | none; `version` prints the installed package's version, read from its `package.json` at run time |
 
 A launcher consumes only its own flags and passes every other argument to the harness: `claude`, `pi`, `agy` and `grok` read a leading `--name` or `--as`; `codex` reads `--name`, `--as`, `--headless` and `--resume`, `opencode` reads `--name` and `--as`, and `muse` reads `--name`, `--as`, `--resume` and `--approval-mode`, anywhere before a `--`; `t3code` takes only `--name`, `--as`, `--thread` and `--base-dir`, and refuses any other argument. Each launcher always wakes its session ("Harness bindings"). A command whose stdout reader goes away (`swarm status | head -1`) exits 0 quietly.
