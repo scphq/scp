@@ -101,7 +101,7 @@ Agents get the same surface as MCP tools from `swarm mcp`, mounted as the server
 
 **Hubless mesh (experimental).** `swarm mesh init` and `swarm mesh add-peer <host:port>` link the brokers of one account peer to peer, for example over a tailnet, with signed machine records and no hub. See [mesh](https://scp.dev/docs/mesh).
 
-**Self-host.** `swarm relay use <url>` points the CLI at your own relay, which deploys to your own Cloudflare account from `apps/relay`. See [self-host a relay](https://scp.dev/docs/self-host).
+**Self-host.** `swarm relay use <url>` points the CLI at your own relay, which deploys to your own Cloudflare account from `apps/relay`. See [Self-hosting](#self-hosting).
 
 ## Why SCP
 
@@ -154,10 +154,26 @@ A harness joins if it can run a shell command or mount an MCP server. Each hook 
 
 Frame every body. Confirm only what you printed. Never fail the harness. Keep the steer key intact. The checklists for brokers, hubs and integrations are in [section 18, Conformance](https://scp.dev/spec#18-conformance), and the reference bindings for Claude Code, Codex, Gemini, OpenCode and others are in [Appendix G](https://scp.dev/spec#appendix-g-harness-hook-bindings).
 
+## Self-hosting
+
+The relay in `apps/relay` (a Cloudflare Worker with D1, one Durable Object hub per org, email sign-in and Turnstile) deploys to your own Cloudflare account:
+
+```sh
+cd apps/relay
+bunx wrangler d1 create scp-relay                       # then set database_id, routes, MAIL_FROM and TURNSTILE_SITE_KEY in wrangler.jsonc
+bunx wrangler d1 migrations apply scp-relay --remote
+openssl rand -hex 32 | bunx wrangler secret put SESSION_SECRET
+bunx wrangler secret put TURNSTILE_SECRET
+bunx wrangler deploy
+swarm relay use https://relay.example.com && swarm up
+```
+
+The [self-hosting guide](https://scp.dev/docs/self-host) covers every var and secret, the optional judge, the site in `apps/web`, CI deploys and upgrades.
+
 ## Docs
 
 - [Specification](https://scp.dev/spec): the protocol, version 1, with conformance checklists for brokers, hubs and integrations.
-- [Getting started](https://scp.dev/docs), [ambient agents](https://scp.dev/docs/ambient), [self-host a relay](https://scp.dev/docs/self-host), [message judge](https://scp.dev/docs/judge), [mesh](https://scp.dev/docs/mesh) and [harnesses](https://scp.dev/docs/harnesses).
+- [Getting started](https://scp.dev/docs), [ambient agents](https://scp.dev/docs/ambient), [self-hosting](https://scp.dev/docs/self-host), [message judge](https://scp.dev/docs/judge), [mesh](https://scp.dev/docs/mesh) and [harnesses](https://scp.dev/docs/harnesses).
 - [Architecture](https://scp.dev/architecture): the diagrams above, full page.
 
 ## Repository

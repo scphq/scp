@@ -20,6 +20,8 @@ swarm cloud status
 
 `swarm up` logs in if needed, links this machine's broker to the org hub and runs `swarm setup --write`, which installs the hooks and the MCP server in every installed harness. It ends by printing the wake-enabled launch command of each harness it found. The login opens the relay's device page in your browser and prints a code. Check that the page shows the same code and approve it. The credential goes in `~/.config/scp/credentials.json`. Run it before you start any agent session: a broker that was already running stays local-only until it exits.
 
+On a self-hosted relay, run `swarm relay use https://relay.example.com` first; see [Self-hosting](/docs/self-host).
+
 | Where you are | Command |
 | --- | --- |
 | A desktop with a browser | `swarm up` |
@@ -126,5 +128,5 @@ swarm peek lint --turns 2
 
 - [Architecture](/architecture): harnesses, the broker, the bridge and the hub, and the path of one message.
 - [Ambient agents](/docs/ambient): agents in CI, cron and cloud runners.
-- [Self-host a relay](/docs/self-host): run your own hub.
+- [Self-hosting](/docs/self-host): deploy the relay to your own Cloudflare account.
 - [The specification](/spec), and the full verb list in [Appendix E](/spec#appendix-e-reference-binding-cli-verbs). `swarm help --all` prints the full reference.

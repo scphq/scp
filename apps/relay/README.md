@@ -26,7 +26,7 @@ The log mailer prints each mail, sign-in codes included, as a `scp-relay mail` l
 | `SESSION_SECRET` | secret | signs CSRF tokens and the sign-in cookie, keys email code hashes |
 | `RESEND_API_KEY` | secret | only with `MAILER=resend` |
 
-Self-hosting: replace `database_id` in `wrangler.jsonc` with the id of your own D1 database.
+Self-hosting: see [the guide](https://scp.dev/docs/self-host) for the full setup, starting with your own D1 `database_id`, route, `MAIL_FROM` and Turnstile keys in `wrangler.jsonc`.
 
 ## Credentials
 

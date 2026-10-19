@@ -24,8 +24,8 @@ export const DOCS: Doc[] = [
   {
     slug: "self-host",
     file: "self-host.md",
-    nav: "Self-host a relay",
-    description: "Point the CLI at your own relay, and deploy the relay to your own Cloudflare account.",
+    nav: "Self-hosting",
+    description: "Deploy the relay and the site to your own Cloudflare account, and point the CLI at your relay.",
   },
   {
     slug: "judge",
