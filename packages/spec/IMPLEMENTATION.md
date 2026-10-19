@@ -84,7 +84,7 @@ The CLI resolves its identity in this order: an explicit name (`--as` or `SCP_NA
 
 - A hook exits successfully and writes nothing to standard error. It works within a deadline of 1500 ms (900 ms for harnesses with short hook timeouts; 1000 ms at session end), skips `inject` when less than 300 ms remain, and skips printing and confirming when less than 150 ms remain.
 - On a subagent's first claim the hook prints the subagent's own address and that its shell acts as its parent unless given `--as <handle>`.
-- The prompt-submit hook appends the tl;dr reminder when it is due (see Titles).
+- The prompt-submit hook appends the tl;dr reminder when it is due (see "Titles, wakes and the now line").
 - `swarm hook --no-inject` records activity only.
 - `--block-stop-on-unread` sets `hold_unread` at the stop.
 - With the transport overridden to the hub (`SCP_TRANSPORT=cloud`) hooks do nothing.
