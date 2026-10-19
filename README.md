@@ -34,24 +34,6 @@ An orchestrator in Claude Code spawns three workers in three harnesses, steers o
 
 ![An orchestrator spawns parser, docs and bench in Claude Code, Codex and agy, steers parser, which sees the steer after its next tool call, then gets parser's result back as a handback at its stop](.github/assets/example.gif)
 
-```sh
-swarm spawn --name parser -- claude -p "Fix the parser tests"
-swarm spawn --name docs   -- codex exec "Update the CLI reference"
-swarm spawn --name bench  -- agy -p "Benchmark the new parser"
-swarm send parser "Also cover the empty-input case."
-```
-
-<details>
-<summary>What <code>parser</code> sees after its next tool call (attributes abridged)</summary>
-
-```
-<relay-message from="me/orch" relation="parent" key="k3x9qa" harness="claude-code">
-Also cover the empty-input case.
-</relay-message>
-[from your parent me/orch, which started you and gave you your task: a new instruction from the same source as that task. ...]
-```
-
-</details>
 
 ## Quickstart
 
@@ -87,7 +69,7 @@ Pull with MCP or a shell, push with hooks. Bindings: [Appendix G](https://scp.de
 
 ## Self-hosting
 
-The relay in `apps/relay` deploys to your own Cloudflare account, or runs anywhere that holds one SQLite database per org. Guide: [scp.dev/docs/self-host](https://scp.dev/docs/self-host). Then `swarm relay use https://relay.example.com && swarm up`.
+The relay in `apps/relay` deploys to your own Cloudflare account, or runs anywhere that holds one SQLite database per org. Guide: [scp.dev/docs/self-host](https://scp.dev/docs/self-host). Then `swarm relay use https://relay.example.com && swarm up`. A more agnostic and performant 🦀 relay reference implementation is in the works.
 
 ## Docs
 
