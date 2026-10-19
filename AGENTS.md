@@ -5,7 +5,7 @@ SCP (Swarm Communication Protocol) is an open protocol for addressing and exchan
 ## Layout
 
 ```
-packages/spec/   SPEC.md, the protocol source of truth
+packages/spec/   SPEC.md, the protocol source of truth; IMPLEMENTATION.md, the reference implementation (non-normative)
 packages/core/   protocol types: message envelope, endpoint address, wire types
 packages/cli/    the swarm command line tool
 apps/web/        the scp.dev site (Next.js on Cloudflare via OpenNext), renders the docs at /docs and SPEC.md at /spec

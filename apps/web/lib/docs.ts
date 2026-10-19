@@ -51,6 +51,12 @@ export const DOCS: Doc[] = [
     nav: "Providers",
     description: "Implement a waker and a runner: wake hibernated sessions and start sessions on other machines.",
   },
+  {
+    slug: "implementation",
+    file: "implementation.md",
+    nav: "Reference implementation",
+    description: "How the reference implementation does what the spec leaves open: CLI verbs, MCP server, harness bindings, files, variables and timings.",
+  },
 ];
 
 export const ARCHITECTURE_DESCRIPTION =

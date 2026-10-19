@@ -1,6 +1,6 @@
 # scp.dev
 
-The site for the Swarm Communication Protocol: a short landing page, the docs at `/docs` and the specification at `/spec`, rendered at build time from `docs/*.md` and `packages/spec/SPEC.md`.
+The site for the Swarm Communication Protocol: a short landing page, the docs at `/docs` and the specification at `/spec`, rendered at build time from `docs/*.md` and `packages/spec/SPEC.md`; `packages/spec/IMPLEMENTATION.md` renders as the docs page `/docs/implementation`.
 
 Next.js (App Router), deployed to Cloudflare Workers through OpenNext.
 

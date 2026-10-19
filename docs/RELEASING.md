@@ -1,6 +1,6 @@
 # Releasing
 
-Changesets drive npm releases. `@scp-dev/core`, `@scp-dev/hub`, `@scp-dev/broker`, `@scp-dev/mcp` and `@scp-dev/cli` are the publishable packages; `@scp-dev/spec` (SPEC.md only), `@scp-dev/web` and `@scp-dev/relay` are never published.
+Changesets drive npm releases. `@scp-dev/core`, `@scp-dev/hub`, `@scp-dev/broker`, `@scp-dev/mcp` and `@scp-dev/cli` are the publishable packages; `@scp-dev/spec` (SPEC.md and IMPLEMENTATION.md), `@scp-dev/web` and `@scp-dev/relay` are never published.
 A package is published once it drops `private: true`; until then `changeset publish` skips it.
 
 ## Day to day

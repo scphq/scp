@@ -12,6 +12,7 @@
   },
   "exports": {
     "./SPEC.md": "./SPEC.md",
+    "./IMPLEMENTATION.md": "./IMPLEMENTATION.md",
     "./package.json": "./package.json"
   }
 }

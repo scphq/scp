@@ -29,7 +29,7 @@ await runRelayMcp({
 - `TOOLS`: `relay_whoami`, `relay_list`, `relay_peers`, `relay_send`, `relay_reply`, `relay_inbox`, `relay_ask`, `relay_ask_wait`, `relay_spawn`, `relay_status`, `relay_set_status`, `relay_set_now`, `relay_set_title`, `relay_rules`, `relay_group`, `relay_peek`, `relay_set_peek`.
 - `INSTRUCTIONS` and `MCP_PROTOCOLS`: the server's instructions (the untrusted-content preamble) and the protocol versions it speaks.
 
-Implements [Appendix F, MCP tools](https://scp.dev/spec#appendix-f-reference-binding-mcp-tools). See the [root README](https://github.com/scphq/scp#readme).
+Implements the [MCP server](https://scp.dev/docs/implementation#mcp-server) of the reference implementation and the tool surface of [Appendix F](https://scp.dev/spec#appendix-f-reference-tool-surface-informative). See the [root README](https://github.com/scphq/scp#readme).
 
 ## License
 

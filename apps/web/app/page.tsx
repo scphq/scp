@@ -218,7 +218,7 @@ export default function Home() {
               <Link href={DOCS} className="mini-link">
                 full guide <Arrow />
               </Link>
-              <Link href={`${SPEC}#appendix-e-reference-binding-cli-verbs`} className="mini-link">
+              <Link href={`${DOCS}/implementation#cli-verbs`} className="mini-link">
                 every CLI verb <Arrow />
               </Link>
             </p>

@@ -40,6 +40,10 @@ export default function SpecPage() {
                   ))}
               </ol>
             </details>
+            <p className="small">
+              How the reference implementation fills in what the spec leaves open is described, non-normatively, in{" "}
+              <a href="/docs/implementation">Reference implementation</a>.
+            </p>
             <div dangerouslySetInnerHTML={{ __html: spec.html }} />
           </article>
         </div>

@@ -7,7 +7,7 @@ A provider runs agent sessions somewhere the relay does not reach by itself: on 
 
 Each is a pure hand-off. SCP gives your command the request as one JSON line and reads back the result; everything in between is yours. Credentials, VMs, the harness and the terminal it runs in (a `tmux` session, say) are yours too: SCP never sees, stores or carries a credential.
 
-The swarm CLI, broker and hub implement this as an extension. The protocol part, the `hibernated` presence and the `hibernate` method, is in [section 19](/spec#19-wake-hooks-and-runners) of the spec; the commands, their files and their contract belong to the reference implementation and are optional for other implementations.
+The swarm CLI, broker and hub implement this as an extension. The protocol part, the `hibernated` presence and the `hibernate` method, is in [section 19](/spec#19-wake-hooks-and-runners) of the spec; the commands, their files and their contract belong to the reference implementation ([wakers and runners](/docs/implementation#wakers-and-runners)) and are optional for other implementations.
 
 ## Hibernate a session
 
