@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(SITE),
   title: { default: SITE_TITLE, template: "%s, SCP" },
   description: SITE_DESCRIPTION,
-  alternates: { canonical: "/" },
+  alternates: { canonical: "/", types: { "text/markdown": "/index.md" } },
   ...shareMetadata(SITE_TITLE, SITE_DESCRIPTION, "/"),
   icons: { icon: "/icon.svg" },
 };
