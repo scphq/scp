@@ -30,6 +30,8 @@ export function detectHarness(env: Env): string | undefined {
 }
 
 type ShimBinding = { process: string; handle: string; harness: string }
+/** the harnesses whose shim publishes a binding: codex, and codex as T3 Code runs it */
+const BOUND_HARNESSES: ReadonlySet<string> = new Set(["codex", "t3code"])
 const BINDING_KEY = /^[0-9a-f]{1,128}$/
 const BINDING_PROCESS = /^pid:([1-9][0-9]*):[A-Za-z0-9:-]{1,64}$/
 
@@ -41,7 +43,7 @@ export function codexShell(env: Env): boolean {
 /** publish the codex shim's harness key for shells whose sandbox hides its process */
 export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
   const pid = BINDING_PROCESS.exec(claim.process)?.[1]
-  if (claim.harness !== "codex" || !pid) return () => {}
+  if (!BOUND_HARNESSES.has(claim.harness) || !pid) return () => {}
   const text = JSON.stringify({ process: claim.process, handle: claim.handle, harness: claim.harness })
   const names = [`pid-${pid}`, ...(BINDING_KEY.test(env.SCP_SHIM_BINDING ?? "") ? [`key-${env.SCP_SHIM_BINDING}`] : [])]
   const paths: string[] = []
@@ -111,7 +113,7 @@ export function readShimBinding(env: Env, pid: number, table: PsCommTable | unde
         match &&
         Number(match[1]) > 1 &&
         (expectedPid === undefined || Number(match[1]) === expectedPid) &&
-        binding.harness === "codex" &&
+        BOUND_HARNESSES.has(binding.harness) &&
         typeof binding.handle === "string" &&
         validHandle(binding.handle)
       )
@@ -527,6 +529,34 @@ export function launcherPid(env: Env, harness: () => number = harnessPid, parent
   return parentOf(harness())?.ppid === pid ? pid : undefined
 }
 
+/** the harness a session T3 Code runs claims, whatever provider (codex, Claude Code) runs it */
+export const T3CODE = "t3code"
+/** the originator T3 Code sets in the environment of the codex app-server it starts */
+export const T3_ORIGINATOR = "T3 Code"
+const T3_APP = /(^|\/)T3 Code\.app\//
+
+/** whether a command line is a T3 Code server: the t3 CLI (its native build too) or the desktop app */
+export function t3Process(args: string | undefined): boolean {
+  if (!args) return false
+  if (T3_APP.test(args)) return true
+  const name = command(args)
+  return name === "t3" || name === "t3code"
+}
+
+/** whether T3 Code runs the harness process `pid`: its codex app-server carries T3 Code's originator, and the server is the harness's parent */
+export function t3Hosted(env: Env, pid: number, table: () => PsCommTable | undefined): boolean {
+  if (env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE === T3_ORIGINATOR) return true
+  if (!inferring(env)) return false
+  const ps = table()
+  const parent = ps?.get(pid)?.ppid
+  return parent !== undefined && t3Process(ps?.get(parent)?.args)
+}
+
+/** the harness whose hook format a claim speaks: the provider of a T3 Code session, else the claimed harness */
+export function hookFormat(claimed: string, provider: string): string {
+  return claimed === T3CODE ? provider : claimed
+}
+
 export interface IdentityInput {
   as?: string
   harness?: string
@@ -542,6 +572,8 @@ export interface IdentityInput {
   lineageOf?: (pid: number) => string[]
   /** a Claude Code hook's payload session id, over $CLAUDE_CODE_SESSION_ID */
   harnessSession?: string
+  /** whether T3 Code runs the harness process (default {@link t3Hosted}) */
+  t3Hosted?: (pid: number) => boolean
 }
 
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -550,15 +582,22 @@ const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 export function relayIdentity(input: IdentityInput): Claim & { handle: string; harness: string; session: string; process: string; cwd: string } {
   const resolved = resolveHarness(input.harness, input.env, input.fallbackHarness)
   const pid = input.harnessPid(resolved)
-  const harness = (GENERIC_HARNESSES.has(resolved) && input.inferHarness?.(pid)) || resolved
+  const provider = (GENERIC_HARNESSES.has(resolved) && input.inferHarness?.(pid)) || resolved
+  let table: { value: PsCommTable | undefined } | undefined
+  const ps = () => {
+    table ??= { value: readPsTable() }
+    return table.value
+  }
+  const hosted = (provider === "codex" || provider === "claude-code") && (input.t3Hosted ? input.t3Hosted(pid) : t3Hosted(input.env, pid, ps))
+  const harness = hosted ? T3CODE : provider
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
   const harnessProcess = processKey(pid, input.startOf)
   const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(harnessProcess, input.env) : undefined
   const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? deriveHandle(harness, cwd)
   const grant = input.env.SCP_GRANT || launched?.grant
-  const keys = input.lineageOf ? input.lineageOf(pid) : lineage(pid)
+  const keys = input.lineageOf ? input.lineageOf(pid) : lineage(pid, ps())
   const harnessSession =
-    harness === "claude-code" ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id)) : undefined
+    provider === "claude-code" ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id)) : undefined
   return {
     handle,
     harness,

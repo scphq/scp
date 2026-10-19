@@ -222,7 +222,7 @@ export function walkNow(env = process.env, pid = process.ppid, table: PsCommTabl
     const binding = readShimBinding(env, pid, table)
     if (binding) {
       const bound = [...keys, binding.process]
-      return { keys: bound, self: bound, harness: "codex" }
+      return { keys: bound, self: bound, harness: binding.harness }
     }
   }
   const harness = self.length ? harnessAt(Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]), table) : undefined

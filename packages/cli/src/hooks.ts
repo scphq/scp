@@ -22,7 +22,7 @@ import {
 } from "@scp-dev/core"
 import { connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
 import { prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
-import { harnessAt, hookHarness, hookHarnessPid, normalizeHarness, processKey, psStart, relayIdentity, sessionKey } from "./identity"
+import { harnessAt, hookFormat, hookHarness, hookHarnessPid, normalizeHarness, processKey, psStart, relayIdentity, sessionKey } from "./identity"
 import { membership } from "./session"
 
 export { SUBAGENT }
@@ -645,20 +645,21 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     startOf: () => started,
   })
   if (!validHandle(claim.handle)) return
+  const format = hookFormat(claim.harness, harness)
   const named = eventName(asString(field(payload, "hook_event_name", "hookEventName")) ?? eventArg)
-  const ended = claim.harness !== "agy" || payload.terminationReason === "NO_TOOL_CALL"
+  const ended = format !== "agy" || payload.terminationReason === "NO_TOOL_CALL"
   const stop = event.kind === "stop" && named === "stop" && ended
-  const counts = stop || (claim.harness === "opencode" && event.kind === "prompt")
-  if (sub && !SUBAGENT_HARNESSES.has(claim.harness)) return
+  const counts = stop || (format === "opencode" && event.kind === "prompt")
+  if (sub && !SUBAGENT_HARNESSES.has(format)) return
   const client = await options.connect(event.kind === "session_start")
   if (sub) {
     try {
-      return await subagentHook(client, claim, sub, event, takes, options)
+      return await subagentHook(client, claim, format, sub, event, takes, options)
     } finally {
       client.close()
     }
   }
-  const inject = takes && !event.agent && (stop || injectsAt(claim.harness, event.kind)) && (options.remaining?.() ?? Number.POSITIVE_INFINITY) >= INJECT_MIN_MS
+  const inject = takes && !event.agent && (stop || injectsAt(format, event.kind)) && (options.remaining?.() ?? Number.POSITIVE_INFINITY) >= INJECT_MIN_MS
   try {
     const posted: Promise<unknown>[] = [client.hello({ transient: true, claim })]
     const every = tldrEvery(options.env)
@@ -667,7 +668,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (prompted) posted.push(prompted)
     if (event.kind !== "prompt") {
       const session = event.agent ? undefined : asString(field(payload, "session_id", "sessionId"))
-      const transcript = session && claim.harness === "claude-code" ? asString(field(payload, "transcript_path", "transcriptPath")) : undefined
+      const transcript = session && format === "claude-code" ? asString(field(payload, "transcript_path", "transcriptPath")) : undefined
       posted.push(
         client.request("event", {
           kind: event.kind,
@@ -682,9 +683,9 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (event.status) posted.push(client.request("status", { state: event.status }))
     const turn = peekTurn(event, named, payload)
     if (turn) posted.push(client.request("peek_turn", turn))
-    const title = inferredTitle(claim.harness, event, named, payload)
+    const title = inferredTitle(format, event, named, payload)
     if (title) posted.push(client.request("title_infer", title))
-    const launched = launchedSubagent(claim.harness, event, payload)
+    const launched = launchedSubagent(format, event, payload)
     if (launched) posted.push(client.request("subagent_title", launched))
     const injected = inject
       ? client.request<Injected>(
@@ -695,37 +696,37 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     const [result, hello] = await Promise.allSettled([injected, ...posted])
     if (event.kind === "session_start") {
       const untitled = hello?.status === "fulfilled" && (hello.value as HelloResult).endpoint?.title === null
-      return untitled && (claim.harness === "claude-code" || claim.harness === "codex") ? hookReply(claim.harness, event.kind, NUDGE) : undefined
+      return untitled && (format === "claude-code" || format === "codex") ? hookReply(format, event.kind, NUDGE) : undefined
     }
     const tldr = (await prompted?.catch(() => undefined))?.tldr === true ? TLDR : undefined
-    if (result.status !== "fulfilled" || !result.value) return tldr ? hookReply(claim.harness, event.kind, tldr) : undefined
-    const continues = !stop || claim.harness !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
+    if (result.status !== "fulfilled" || !result.value) return tldr ? hookReply(format, event.kind, tldr) : undefined
+    const continues = !stop || format !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
     if (stop && !result.value.block) {
-      if (waits === undefined || !PUSHES.has(claim.harness) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) return
-      return await push(client, claim.harness, waits * 1000, began, result.value.prompts, options, continues)
+      if (waits === undefined || !PUSHES.has(format) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) return
+      return await push(client, format, waits * 1000, began, result.value.prompts, options, continues)
     }
-    const directive = stop ? directiveText(claim.harness, result.value) : undefined
+    const directive = stop ? directiveText(format, result.value) : undefined
     const forced = stop && (result.value.forced ?? true)
     const pointer = forced ? unreadPointer(blockStop ? result.value.unread - (directive?.read.length ?? 0) : 0, result.value.awaiting) : undefined
     const nudged = stop ? (result.value.nudge ?? []) : []
     const intro = !stop && result.value.intro ? introText(result.value.intro, result.value.intro_key) : undefined
-    const shown = stop || counts ? undefined : injectionText({ ...result.value, more: await moreNow(client, result.value) }, claim.harness !== "agy")
+    const shown = stop || counts ? undefined : injectionText({ ...result.value, more: await moreNow(client, result.value) }, format !== "agy")
     const text = stop
       ? [directive?.text, [pointer, nudgeText(nudged, result.value.nudge_more)].filter(Boolean).join("\n")].filter(Boolean).join("\n\n")
       : [intro, counts ? unreadPointer(result.value.unread, result.value.awaiting) : shown, tldr].filter(Boolean).join("\n\n")
     if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return
-    const reply = hookReply(claim.harness, event.kind, text, result.value.unread, continues)
+    const reply = hookReply(format, event.kind, text, result.value.unread, continues)
     const offered = result.value.offered ?? []
     if ((stop || offered.length || intro) && (options.print?.(reply) ?? true)) {
       const read = directive
         ? directive.read
-        : claim.harness === "agy"
+        : format === "agy"
           ? []
           : result.value.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
       const full = directive ? directive.full : shown !== undefined && !result.value.brief && result.value.messages.length > 0
       await client
         .request("injected", {
-          seqs: directive && !PUSHES.has(claim.harness) ? [] : offered,
+          seqs: directive && !PUSHES.has(format) ? [] : offered,
           hold: result.value.hold,
           ...(read.length ? { read } : {}),
           ...(forced && (pointer || !directive) ? { stop: true } : {}),
@@ -733,7 +734,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
           ...(directive ? { restated: directive.restated } : {}),
           ...(full ? { preamble: true } : {}),
           ...(intro ? { intro: true } : {}),
-          ...(event.kind === "tool" && DEFERS.has(claim.harness) ? { deferred: true } : {}),
+          ...(event.kind === "tool" && DEFERS.has(format) ? { deferred: true } : {}),
         })
         .catch(() => {})
     }
@@ -782,7 +783,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     const shown = injectionText({ ...result, more: await moreNow(client, result) })
     const text = [intro, shown].filter(Boolean).join("\n\n")
     if (!text) return
-    const reply = hookReply(claim.harness, "prompt", text)
+    const reply = hookReply(hookFormat(claim.harness, harness), "prompt", text)
     if (options.stopping?.()) return
     if (options.print?.(reply) ?? true) {
       const read = result.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
@@ -821,6 +822,7 @@ export function subagentIntro(address: string): string {
 async function subagentHook(
   client: RelayClient,
   claim: ReturnType<typeof relayIdentity>,
+  format: string,
   sub: { id: string; type?: string },
   event: HookEvent,
   takes: boolean,
@@ -841,7 +843,7 @@ async function subagentHook(
   const intro = hello.created && hello.endpoint ? subagentIntro(hello.endpoint.address) : undefined
   const text = [intro, injected ? injectionText({ ...injected, more: await moreNow(client, injected) }) : undefined].filter(Boolean).join("\n\n")
   if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return undefined
-  const reply = hookReply(claim.harness, "tool", text)
+  const reply = hookReply(format, "tool", text)
   if (injected?.offered.length && (options.print?.(reply) ?? true)) {
     const read = injected.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
     await client

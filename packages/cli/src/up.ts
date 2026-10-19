@@ -19,6 +19,7 @@ const WAKE_LAUNCH: [harness: string, line: string][] = [
   ["opencode", "opencode                          its scp plugin wakes an idle session (on by default)"],
   ["agy", `${CLI_NAME} agy --name <name>        headless: each message resumes its conversation`],
   ["grok", `${CLI_NAME} grok --name <name>       headless: each message resumes its session`],
+  ["t3code", `${CLI_NAME} t3code --thread <id>    T3 Code: messages start or steer the thread's turns`],
 ]
 
 /** what `swarm up` prints last: the wake-enabled launch of each installed harness, and the fallback for a running session */
@@ -53,10 +54,11 @@ export async function up(positionals: string[], values: UpValues, cwd: string, b
   const broker = await brokerStatus()
   if (!broker.enabled) out(`the broker is still local-only; run \`${CLI_NAME} daemon restart\` to link it to ${url}`)
   else out(`broker linked to ${broker.url ?? url}${broker.connected ? "" : " (connecting)"}`)
-  const { detectHarnesses, whichOnPath } = await import("./setup")
+  const { detectHarnesses, detectT3, whichOnPath } = await import("./setup")
   const which = (name: string) => whichOnPath(name, process.env)
   const installed = new Set<string>(detectHarnesses(process.env, which).keys())
   if (which("pi")) installed.add("pi")
+  if (detectT3(process.env, which)) installed.add("t3code")
   out("")
   for (const line of nextSteps(installed)) out(line)
   return 0

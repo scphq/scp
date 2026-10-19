@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process"
-import { createHash, randomBytes } from "node:crypto"
+import { randomBytes } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
-import { connect, type Socket } from "node:net"
+import { connect } from "node:net"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -14,6 +14,7 @@ import { RelayUsage, startDaemon } from "./common"
 import { readPsTable, relayIdentity } from "./identity"
 import { CODEX_VALUED, codexMount, codexOverrides, toml } from "./spawn"
 import { SELF } from "./term"
+import { WebSocketLink } from "./websocket"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -62,122 +63,46 @@ export function codexLaunch(args: string[], env: Env, _self: string[]): { name?:
 
 /** a JSON-RPC WebSocket client on a private unix socket */
 export class CodexSocket implements Transport {
-  private socket: Socket
-  private buffer: Buffer = Buffer.alloc(0)
-  private opened = false
-  private resolveReady!: () => void
-  private rejectReady!: (error: Error) => void
-  readonly ready = new Promise<void>((resolve, reject) => {
-    this.resolveReady = resolve
-    this.rejectReady = reject
-  })
+  private link: WebSocketLink
+  readonly ready: Promise<void>
   private next = 1
   private pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
-  private key = randomBytes(16).toString("base64")
-  private fragments: Buffer[] = []
 
   constructor(
     path: string,
     private onMessage: (message: Json) => void = () => {},
   ) {
-    this.socket = connect(path)
-    this.socket.on("connect", () => {
-      this.socket.write(
-        `GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${this.key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
-      )
-    })
-    this.socket.on("data", (data) => {
-      try {
-        this.feed(typeof data === "string" ? Buffer.from(data) : data)
-      } catch (error) {
-        this.fail(error instanceof Error ? error : new Error(String(error)))
-      }
-    })
-    this.socket.on("error", (error) => this.fail(error))
-    this.socket.on("close", () => this.fail(new Error("codex socket closed")))
+    this.link = new WebSocketLink(
+      connect(path),
+      {},
+      "codex",
+      (text) => this.receive(text),
+      (error) => this.reject(error),
+    )
+    this.ready = this.link.ready
   }
 
-  private fail(error: Error): void {
-    this.rejectReady(error)
+  private reject(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
       pending.reject(error)
     }
     this.pending.clear()
-    this.socket.destroy()
   }
 
-  private feed(data: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, data])
-    if (!this.opened) {
-      const end = this.buffer.indexOf("\r\n\r\n")
-      if (end < 0) return
-      const header = this.buffer.subarray(0, end).toString()
-      const accept = createHash("sha1").update(`${this.key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64")
-      if (!/^HTTP\/1\.1 101\b/.test(header) || !header.toLowerCase().includes(`sec-websocket-accept: ${accept}`.toLowerCase()))
-        throw new Error("codex WebSocket upgrade failed")
-      this.buffer = this.buffer.subarray(end + 4)
-      this.opened = true
-      this.resolveReady()
-    }
-    while (this.buffer.length >= 2) {
-      const opcode = this.buffer[0]! & 15
-      const final = (this.buffer[0]! & 128) !== 0
-      const masked = (this.buffer[1]! & 128) !== 0
-      let length = this.buffer[1]! & 127
-      let offset = 2
-      if (length === 126) {
-        if (this.buffer.length < 4) return
-        length = this.buffer.readUInt16BE(2)
-        offset = 4
-      } else if (length === 127) {
-        if (this.buffer.length < 10) return
-        const size = this.buffer.readBigUInt64BE(2)
-        if (size > 64n * 1024n * 1024n) throw new Error("codex WebSocket frame too large")
-        length = Number(size)
-        offset = 10
-      }
-      const start = offset + (masked ? 4 : 0)
-      if (this.buffer.length < start + length) return
-      const payload = Buffer.from(this.buffer.subarray(start, start + length))
-      if (masked) for (let i = 0; i < length; i++) payload[i] = payload[i]! ^ this.buffer[offset + (i % 4)]!
-      this.buffer = this.buffer.subarray(start + length)
-      if (opcode === 8) {
-        this.fail(new Error("codex WebSocket closed"))
-        return
-      }
-      if (opcode === 9) this.frame(10, payload)
-      if (opcode !== 1 && opcode !== 0) continue
-      this.fragments.push(payload)
-      if (!final) continue
-      const message = JSON.parse(Buffer.concat(this.fragments).toString()) as Json
-      this.fragments = []
-      const pending = typeof message.id === "number" && !message.method ? this.pending.get(message.id) : undefined
-      if (pending) {
-        this.pending.delete(message.id as number)
-        clearTimeout(pending.timer)
-        if (message.error) pending.reject(new Error(JSON.stringify(message.error)))
-        else pending.resolve((message.result ?? {}) as Json)
-      } else this.onMessage(message)
-    }
-  }
-
-  private frame(opcode: number, payload: Buffer): void {
-    const length = payload.length
-    const header = Buffer.alloc(length < 126 ? 2 : length < 65536 ? 4 : 10)
-    header[0] = 128 | opcode
-    header[1] = 128 | (length < 126 ? length : length < 65536 ? 126 : 127)
-    if (header.length === 4) header.writeUInt16BE(length, 2)
-    if (header.length === 10) header.writeBigUInt64BE(BigInt(length), 2)
-    const mask = randomBytes(4)
-    const body = Buffer.from(payload)
-    for (let i = 0; i < length; i++) body[i] = body[i]! ^ mask[i % 4]!
-    this.socket.write(Buffer.concat([header, mask, body]))
+  private receive(text: string): void {
+    const message = JSON.parse(text) as Json
+    const pending = typeof message.id === "number" && !message.method ? this.pending.get(message.id) : undefined
+    if (pending) {
+      this.pending.delete(message.id as number)
+      clearTimeout(pending.timer)
+      if (message.error) pending.reject(new Error(JSON.stringify(message.error)))
+      else pending.resolve((message.result ?? {}) as Json)
+    } else this.onMessage(message)
   }
 
   send(message: Json): void {
-    if (this.socket.destroyed) throw new Error("codex socket closed")
-    this.frame(1, Buffer.from(JSON.stringify(message)))
+    this.link.send(JSON.stringify(message))
   }
 
   async request(method: string, params: Json): Promise<Json> {
@@ -200,7 +125,7 @@ export class CodexSocket implements Transport {
   }
 
   close(): void {
-    this.fail(new Error("codex socket closed"))
+    this.link.fail(new Error("codex socket closed"))
   }
 }
 
