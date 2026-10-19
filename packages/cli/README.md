@@ -32,7 +32,7 @@ Headless (CI, cron, cloud runners): `swarm up --token scp_t_... [--machine NAME]
 - Relay and federation: `login`, `logout`, `up`, `relay use`, `relay show`, `cloud`, `machines`.
 - Integration: `daemon`, `mcp`, `hooks install`, `setup`, `hook`.
 
-Implements [Appendix E, CLI verbs](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs) and [Appendix F, MCP tools](https://scp.dev/spec#appendix-f-reference-binding-mcp-tools). See the [root README](https://github.com/scphq/scp#readme).
+Implements the [CLI verbs](https://scp.dev/docs/implementation#cli-verbs) and the [MCP server](https://scp.dev/docs/implementation#mcp-server) of the reference implementation, and the [Unix binding](https://scp.dev/spec#appendix-e-local-binding-unix). See the [root README](https://github.com/scphq/scp#readme).
 
 ## License
 

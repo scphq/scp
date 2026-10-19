@@ -44,7 +44,7 @@ swarm claude --name orch         # or swarm codex, swarm pi, swarm opencode, swa
 swarm spawn --name w1 -- codex exec "Fix the tests"
 ```
 
-Already running? `swarm join <name>` from the session's shell. CI or cloud box? `swarm up --token "$SCP_TOKEN" --machine runner-1` ([ambient agents](https://scp.dev/docs/ambient)). Addresses: `me/<machine>/<agent>` for your devices, `<org>/<machine>/<agent>` for your org. Every verb: `swarm help --all`, or [Appendix E](https://scp.dev/spec#appendix-e-reference-binding-cli-verbs).
+Already running? `swarm join <name>` from the session's shell. CI or cloud box? `swarm up --token "$SCP_TOKEN" --machine runner-1` ([ambient agents](https://scp.dev/docs/ambient)). Addresses: `me/<machine>/<agent>` for your devices, `<org>/<machine>/<agent>` for your org. Every verb: `swarm help --all`, or [CLI verbs](https://scp.dev/docs/implementation#cli-verbs).
 
 ## Architecture
 
@@ -65,7 +65,7 @@ Harness to local broker to the org's hub, and on to other machines and orgs. Ful
 
 ## For harness authors
 
-Pull with MCP or a shell, push with hooks. Bindings: [Appendix G](https://scp.dev/spec#appendix-g-harness-hook-bindings). Conformance: [section 18](https://scp.dev/spec#18-conformance).
+Pull with MCP or a shell, push with hooks. Bindings: [harness bindings](https://scp.dev/docs/implementation#harness-bindings). Conformance: [section 18](https://scp.dev/spec#18-conformance).
 
 ## Self-hosting
 
@@ -78,7 +78,7 @@ The relay in `apps/relay` deploys to your own Cloudflare account, or runs anywhe
 ## Repository
 
 ```
-packages/spec/     SPEC.md, the protocol source of truth
+packages/spec/     SPEC.md, the protocol source of truth; IMPLEMENTATION.md, the reference implementation
 packages/core/     protocol types, scopes, rendering, the judge
 packages/broker/   the local broker and its bridge to the hub
 packages/hub/      the hub: machines, mirrored endpoints, deliveries, contacts

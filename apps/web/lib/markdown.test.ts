@@ -7,11 +7,14 @@ import { homeMarkdown, llmsFullTxt, llmsTxt, markdownPages, mdHref, type Sources
 
 const web = join(import.meta.dir, "..");
 const src: Sources = {
-  docs: Object.fromEntries(
-    readdirSync(join(web, "docs"))
-      .filter((f) => f.endsWith(".md"))
-      .map((f) => [f, readFileSync(join(web, "docs", f), "utf8")]),
-  ),
+  docs: {
+    ...Object.fromEntries(
+      readdirSync(join(web, "docs"))
+        .filter((f) => f.endsWith(".md"))
+        .map((f) => [f, readFileSync(join(web, "docs", f), "utf8")]),
+    ),
+    "implementation.md": readFileSync(join(web, "..", "..", "packages", "spec", "IMPLEMENTATION.md"), "utf8"),
+  },
   spec: readFileSync(join(web, "..", "..", "packages", "spec", "SPEC.md"), "utf8"),
 };
 

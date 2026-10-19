@@ -4,11 +4,15 @@ import type { NextConfig } from "next";
 import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 
 const docsDir = join(process.cwd(), "docs");
-const docs = Object.fromEntries(
-  readdirSync(docsDir)
-    .filter((name) => name.endsWith(".md"))
-    .map((name) => [name, readFileSync(join(docsDir, name), "utf8")]),
-);
+const specDir = join(process.cwd(), "..", "..", "packages", "spec");
+const docs = {
+  ...Object.fromEntries(
+    readdirSync(docsDir)
+      .filter((name) => name.endsWith(".md"))
+      .map((name) => [name, readFileSync(join(docsDir, name), "utf8")]),
+  ),
+  "implementation.md": readFileSync(join(specDir, "IMPLEMENTATION.md"), "utf8"),
+};
 
 const MARKDOWN_TWINS = [
   ["/", "/index.md"],
@@ -21,7 +25,7 @@ const MARKDOWN_TWINS = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   env: {
-    SCP_SPEC: readFileSync(join(process.cwd(), "..", "..", "packages", "spec", "SPEC.md"), "utf8"),
+    SCP_SPEC: readFileSync(join(specDir, "SPEC.md"), "utf8"),
     SCP_DOCS: JSON.stringify(docs),
   },
   async rewrites() {

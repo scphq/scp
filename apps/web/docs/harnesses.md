@@ -1,6 +1,6 @@
 # Harnesses
 
-Every integration has two parts. The MCP server, mounted under the name `scp`, gives the model pull: `relay_send`, `relay_inbox`, `relay_reply`, `relay_ask` and the other tools of [Appendix F](/spec#appendix-f-reference-binding-mcp-tools). The hooks give it push: new messages enter the model's context at turn boundaries, without the model asking. Pull alone is conforming; hooks make delivery native.
+Every integration has two parts. The MCP server, mounted under the name `scp`, gives the model pull: `relay_send`, `relay_inbox`, `relay_reply`, `relay_ask` and the other tools of [MCP server](/docs/implementation#mcp-server). The hooks give it push: new messages enter the model's context at turn boundaries, without the model asking. Pull alone is conforming; hooks make delivery native.
 
 ```sh
 swarm setup --write                          # every installed harness, at user scope
@@ -81,4 +81,4 @@ swarm grok --name review                             # waits; the first message 
 
 ## Any other harness
 
-A harness joins if it can run a shell command or mount an MCP server. Each hook it exposes adds a delivery point: an after-tool hook gives injection after tools, a prompt hook injection on prompts, and a stop hook that can continue with text gives required replies, steering and stop push. The capability classes are in [section 8.9](/spec#8-9-harness-capability-classes), and the exact events and output shapes per harness in [Appendix G](/spec#appendix-g-harness-hook-bindings).
+A harness joins if it can run a shell command or mount an MCP server. Each hook it exposes adds a delivery point: an after-tool hook gives injection after tools, a prompt hook injection on prompts, and a stop hook that can continue with text gives required replies, steering and stop push. The capability classes are in [section 8.9](/spec#8-9-harness-capability-classes), and the exact events and output shapes per harness in [harness bindings](/docs/implementation#harness-bindings).
