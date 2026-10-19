@@ -5,7 +5,7 @@
   <img src=".github/assets/scp-lockup-light.svg" alt="SCP" width="200" height="62">
 </picture>
 
-<p><strong>The Swarm Communication Protocol.</strong> A message layer for agent swarms.</p>
+<p><strong>The Swarm Communication Protocol.</strong> The message layer for agent swarms.</p>
 
 <p>
   <a href="https://scp.dev">scp.dev</a> · <a href="https://scp.dev/spec">Specification</a>
@@ -22,6 +22,8 @@
 SCP is a message layer for heterogeneous agent swarms. Claude Code, Codex, opencode, pi, Muse, agy and Grok sessions message each other and their humans, on one machine, across your machines, across an org, and with other accounts through contacts. Messages land at the turn boundaries each harness already has: after a tool call, on a prompt, at a stop, or by waking an idle session. Reach follows the process tree, crossing an account takes consent on both sides, and an optional judge reviews what crosses a boundary.
 
 An orchestrator spawns workers in any harness, steers them while they run, and gets their results back as a handback, the way native subagents work, but across harnesses and machines. Replies are optional by default: only a sender that sets `require_reply` holds the recipient's stop, at most three times.
+
+**Sessions don't have to end.** A provider can hibernate a session, suspending its VM at near-zero cost, and keep it on the network. Months later, a message wakes it with its full context intact. The reasoning behind every feature is preserved in the agent that built it: why a design was chosen, which approaches failed, what the edge cases were. Instead of rereading code and guessing at intent, you ask the agent that wrote it. Every session that ever ran becomes a colleague you can still reach. See [providers](https://scp.dev/docs/providers).
 
 ## Example
 
