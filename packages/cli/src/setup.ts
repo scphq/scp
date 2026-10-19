@@ -102,6 +102,8 @@ export interface SetupDeps {
   now?: Date
   which?: (name: string) => string | undefined
   run?: Runner
+  /** where T3 Code is installed (default {@link detectT3}) */
+  t3?: () => string | undefined
 }
 
 function home(env: Env): string {
@@ -142,6 +144,12 @@ export function detectHarnesses(env: Env, which: (name: string) => string | unde
     if (path) found.set(harness, path)
   }
   return found
+}
+
+/** where T3 Code is: t3 on PATH or $SCP_T3_BIN, else the desktop app, else its data directory */
+export function detectT3(env: Env, which: (name: string) => string | undefined, exists: (path: string) => boolean = existsSync): string | undefined {
+  const bin = which("t3") ?? (env.SCP_T3_BIN && executable(env.SCP_T3_BIN) ? env.SCP_T3_BIN : undefined)
+  return bin ?? ["/Applications/T3 Code.app", join(home(env), "Applications", "T3 Code.app"), env.T3CODE_HOME || join(home(env), ".t3")].find(exists)
 }
 
 function configHome(env: Env): string {
@@ -1262,6 +1270,11 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
   }
   out(`found: ${selected.map((harness) => `${harness} (${found.get(harness)})`).join(", ") || "none"}`)
   if (missing.length) out(`not installed: ${missing.join(", ")}`)
+  const t3 = options.undo ? undefined : (deps.t3 ?? (() => detectT3(env, which)))()
+  if (t3)
+    out(
+      `T3 Code (${t3}): its codex and Claude Code sessions use those harnesses' mounts and hooks below, so it needs no setup of its own; ${CLI_NAME} t3code --thread <id> wakes a thread`,
+    )
 
   const plan: Plan = { steps: [], lines: [], problems: 0, hooks: new Map() }
   const ctx: Ctx = { env, cwd: deps.cwd, now, run, found, added, wanted, blockStop: options.blockStop === true }

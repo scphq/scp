@@ -46,7 +46,18 @@ const SERVER = "scp"
 export const SPAWN_RUNNER = "SCP_SPAWN_RUNNER"
 
 /** the spawner's own identity, which the harness it starts must not inherit */
-const SPAWNER_IDENTITY = ["SCP_NAME", "SCP_SESSION", "SCP_GRANT", "SCP_PARENT", "SCP_UNDER", "SCP_HARNESS", "SCP_SHIM_BINDING", "SCP_HARNESS_PID", SPAWN_RUNNER]
+const SPAWNER_IDENTITY = [
+  "SCP_NAME",
+  "SCP_SESSION",
+  "SCP_GRANT",
+  "SCP_PARENT",
+  "SCP_UNDER",
+  "SCP_HARNESS",
+  "SCP_SHIM_BINDING",
+  "SCP_HARNESS_PID",
+  SPAWN_RUNNER,
+  "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+]
 
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
 const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_UNDER", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING"]

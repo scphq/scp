@@ -38,6 +38,7 @@
   --h-agy: #1a73e8;
   --h-grok: #3a3a3a;
   --h-muse: #0866ff;
+  --h-t3code: #4f46e5;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -61,6 +62,7 @@
     --h-agy: #7aa9ff;
     --h-grok: #e6e6e6;
     --h-muse: #3384ff;
+    --h-t3code: #a5a1ff;
   }
 }
 
@@ -408,6 +410,9 @@ h3 {
 }
 .h-muse {
   color: var(--h-muse);
+}
+.h-t3code {
+  color: var(--h-t3code);
 }
 
 .btn {

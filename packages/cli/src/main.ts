@@ -227,6 +227,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  refuses interactive flags and starts only with the scp hooks installed
   ${CLI_NAME} grok [--name N] [--] [grok args...]
                                                  runs grok headless: each new message resumes its session as a turn
+  ${CLI_NAME} t3code [--name N] --thread THREAD [--base-dir DIR]
+                                                 wakes a T3 Code thread: each new message starts or steers its turn
   ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
@@ -619,6 +621,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   if (verb === "pi") return (await import("./pi")).piCommand(rest)
   if (verb === "codex") return (await import("./codex")).codexCommand(rest)
   if (verb === "muse") return (await import("./muse")).museCommand(rest)
+  if (verb === "t3code") return (await import("./t3code")).t3codeCommand(rest, process.env, cwd)
   if (verb === "opencode") return (await import("./opencode")).opencodeCommand(rest, process.env, undefined, cwd)
   if (verb === "agy" || verb === "grok") return (await import("./resume")).resumeCommand(verb, rest, process.env, cwd)
   if (verb === "spawn") {

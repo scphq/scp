@@ -8,7 +8,7 @@ import { HttpError } from "./util";
 import { type Ctx, checkOrigin, page } from "./web";
 
 /** icon keys with a `--h-<key>` colour token; others draw in the ink colour */
-const COLORED = ["claude", "codex", "opencode", "gemini", "agy", "grok", "muse", "pi"];
+const COLORED = ["claude", "codex", "opencode", "gemini", "agy", "grok", "muse", "pi", "t3code"];
 
 const HUMAN_ICON =
   '<g transform="scale(1.5)"><circle cx="8" cy="5.25" r="2.75" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.75 14c.5-3 2.6-4.75 5.25-4.75S12.75 11 13.25 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></g>';

@@ -123,7 +123,7 @@ export const PRESENCES: readonly Presence[] = ["online", "idle", "offline", "hib
 export type StatusState = "working" | "waiting" | "blocked" | "done"
 /**
  * how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter, codex app-server, the session inbox,
- * a headless resume or muse serve; `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
+ * a headless resume, muse serve or a T3 Code thread; `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
  */
 export type Wake =
   | "channels"
@@ -134,6 +134,7 @@ export type Wake =
   | "agy-resume"
   | "grok-resume"
   | "muse-serve"
+  | "t3code"
   | "none"
   | `hook:${string}`
 export const WAKES: readonly Wake[] = [
@@ -145,6 +146,7 @@ export const WAKES: readonly Wake[] = [
   "agy-resume",
   "grok-resume",
   "muse-serve",
+  "t3code",
   "none",
 ]
 /** why a provider declined to wake a hibernated agent, a short token it picks (e.g. `policy`, `budget`): not a failure, and not retried for the same message */
