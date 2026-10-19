@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/mcp",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "The SCP stdio MCP server: gives an agent session the relay's tools.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",
