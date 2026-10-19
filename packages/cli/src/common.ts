@@ -84,6 +84,13 @@ export const OPTIONS = {
   "take-over": { type: "boolean" },
   live: { type: "boolean" },
   parent: { type: "string" },
+  via: { type: "string" },
+  wake: { type: "string" },
+  eta: { type: "string" },
+  ref: { type: "string" },
+  gone: { type: "boolean" },
+  "secret-env": { type: "string" },
+  clear: { type: "boolean" },
 } as const
 
 export type Option = keyof typeof OPTIONS
@@ -108,6 +115,7 @@ export const SPAWN_OPTIONS: Option[] = [
   "no-push",
   "bg",
   "fg",
+  "via",
 ]
 
 export const OBSERVE = new Set([
@@ -292,6 +300,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
           harness: claimHarness(values, process.env, here),
           cwd,
           ...(process.env.SCP_PARENT ? { parent: process.env.SCP_PARENT } : {}),
+          ...(process.env.SCP_UNDER ? { under: process.env.SCP_UNDER } : {}),
           labels: labelsFor(process.env),
           ...lineageClaim,
           ...(grant ? { grant } : {}),

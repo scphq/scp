@@ -34,6 +34,7 @@ export {
   type HubRole,
   type HubSocket,
   type MachineRow,
+  type MachineWakeEvent,
 } from "./hub"
 export {
   type Deliver,

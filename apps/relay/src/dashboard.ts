@@ -75,7 +75,7 @@ function gist(e: EndpointView, lastStop: Map<string, ActivityRow>): { lead: Html
 }
 
 const NOW_MAX = 6;
-const RANK: Record<string, number> = { online: 0, idle: 1, offline: 2 };
+const RANK: Record<string, number> = { online: 0, idle: 1, hibernated: 1, offline: 2 };
 
 function nowList(o: Overview, now: number, handle: string): Html {
   const lastStop = new Map<string, ActivityRow>();

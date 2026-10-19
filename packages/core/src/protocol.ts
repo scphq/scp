@@ -75,6 +75,14 @@ export const LIMITS = {
   policyLoadsKept: 8,
   /** the prompts between two refreshes of a title a hook inferred */
   titleRefreshTurns: 5,
+  /** the least time between two wake hook runs for one hibernated endpoint */
+  wakeDebounceS: 60,
+  /** the longest backoff after failed wake hook runs */
+  wakeBackoffMaxS: 900,
+  /** the longest opaque wake reference a provider stores with a hibernation */
+  wakeRefChars: 512,
+  /** the longest wake time a provider may announce with a hibernation */
+  wakeEtaMaxS: 3600,
 } as const
 
 export type ErrorCode =
@@ -109,10 +117,25 @@ export class RelayError extends Error {
 export type EndpointKind = "agent" | "human" | "system"
 export type MessageKind = "message" | "request" | "reply" | "status"
 export type DataClass = "public" | "private"
-export type Presence = "online" | "idle" | "offline"
+/** `hibernated`: a provider suspended the session; a message runs its wake hook and the session drains its queue once it is back */
+export type Presence = "online" | "idle" | "offline" | "hibernated"
+export const PRESENCES: readonly Presence[] = ["online", "idle", "offline", "hibernated"]
 export type StatusState = "working" | "waiting" | "blocked" | "done"
-/** how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter, codex app-server, the session inbox, a headless resume or muse serve; `none` reads at its next turn */
-export type Wake = "channels" | "pi" | "opencode-plugin" | "codex-app-server" | "claude-inbox" | "agy-resume" | "grok-resume" | "muse-serve" | "none"
+/**
+ * how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter, codex app-server, the session inbox,
+ * a headless resume or muse serve; `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
+ */
+export type Wake =
+  | "channels"
+  | "pi"
+  | "opencode-plugin"
+  | "codex-app-server"
+  | "claude-inbox"
+  | "agy-resume"
+  | "grok-resume"
+  | "muse-serve"
+  | "none"
+  | `hook:${string}`
 export const WAKES: readonly Wake[] = [
   "channels",
   "pi",
@@ -124,6 +147,14 @@ export const WAKES: readonly Wake[] = [
   "muse-serve",
   "none",
 ]
+/** why a provider declined to wake a hibernated agent, a short token it picks (e.g. `policy`, `budget`): not a failure, and not retried for the same message */
+export type WakeDecline = string
+export const WAKE_DECLINE = /^[a-z][a-z0-9_-]{0,31}$/
+
+/** `value` when it is a decline reason, else null */
+export function wakeDeclineOf(value: unknown): WakeDecline | null {
+  return typeof value === "string" && WAKE_DECLINE.test(value) ? value : null
+}
 
 export type ActivityKind = "session_start" | "tool" | "stop" | "note" | "session_end"
 export const ACTIVITY_KINDS: readonly ActivityKind[] = ["session_start", "tool", "stop", "note", "session_end"]
@@ -199,6 +230,8 @@ export interface Claim {
   in?: string[]
   out?: string[]
   groups?: string[]
+  /** an agent address a root claim links under, as a join under does; a refused link keeps the claim, audited */
+  under?: string
 }
 
 export type ScopeDirection = "in" | "out"
@@ -290,6 +323,10 @@ export interface EndpointView {
   peekable?: PeekLevel
   /** an agent's: how an idle agent is woken by a message; null or `none`: it reads at its next turn */
   wake?: Wake | null
+  /** a hibernated agent's last wake hook failure: the reason */
+  wake_failed?: string
+  /** a hibernated agent's provider declined the last wake */
+  wake_declined?: WakeDecline
 }
 
 export type PeekLevel = "local"
@@ -467,7 +504,8 @@ export interface SendResult {
   /**
    * `queued`: the recipient is not connected now; `offline`: it has been gone past a short grace, so a client polling between waits is not
    * offline; `state`: an agent recipient's {@link Reach} on this machine (an older broker leaves it out); `wake`: how it is woken, only when
-   * it can be; `idle`: its presence is idle
+   * it can be, `declined` when its provider declined the last wake; `idle`: its presence is idle; `hibernated`: it is hibernated and
+   * queued, its provider's wake hook resumes it; `wake_eta_s`: how long its provider said a wake takes
    */
   deliveries: {
     endpoint: string
@@ -477,8 +515,10 @@ export interface SendResult {
     queued?: boolean
     last_seen: string | null
     state?: Reach
-    wake?: Wake
+    wake?: Wake | "declined"
     idle?: true
+    hibernated?: true
+    wake_eta_s?: number
   }[]
   /** one line per agent recipient no live session holds: `queued: no live session holds <address>` */
   warnings?: string[]

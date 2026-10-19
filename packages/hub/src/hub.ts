@@ -39,6 +39,8 @@ import {
   sameSecret,
   untilTomorrow,
   type Wake,
+  type WakeDecline,
+  wakeDeclineOf,
   type XContact,
   XCounters,
   type XDelivered,
@@ -93,6 +95,8 @@ export interface MachineRow {
   bridge: boolean
   created_at: string | null
   last_seen: string | null
+  /** a machine waker URL is set; the URL and its secret are never shown */
+  wake?: boolean
 }
 
 /** an endpoint as the dashboard graph draws it */
@@ -158,6 +162,19 @@ export interface HubSocket {
   close(code: number, reason: string): void
 }
 
+/** what a machine waker gets: who to wake and the message's metadata, never its body */
+export interface MachineWakeEvent {
+  scp: 1
+  event: "machine_wake"
+  account: string
+  machine: string
+  endpoints: string[]
+  message: { id: string; from: string; kind: string; thread: string; created_at: string }
+  /** the sender's account handle; another account's sender never chooses the credentials a wake uses */
+  from_account: string
+  same_account: boolean
+}
+
 export interface HubDeps {
   sql: Sql
   /** synchronous sha256 hex */
@@ -177,6 +194,13 @@ export interface HubDeps {
   limits?: Partial<HubLimits>
   /** the link to other accounts' relays; without it an address of another account is not found */
   crossAccount?: CrossAccountLink
+  /** an HTTP client for machine waker URLs; without it (and without `machineWake`) no machine waker is called */
+  fetch?: (
+    url: string,
+    init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
+  ) => Promise<{ status: number; text?: () => Promise<string> }>
+  /** the embedder's own machine waker, called in-process for any machine in place of a registered URL; metadata only, never a body or secret */
+  machineWake?: (event: MachineWakeEvent) => Promise<{ ok: boolean; status?: number; declined?: WakeDecline }>
 }
 
 /** what a configured judge needs besides its policy */
@@ -331,6 +355,8 @@ export class RelayHub {
   private readonly limits: Readonly<HubLimits>
   private judgeConfig: { policy: JudgePolicy; options: HubJudgeOptions } | null = null
   private gate: JudgeGate | null = null
+  /** per machine, when its waker may be called next and the calls that failed in a row */
+  private readonly machineWakes = new Map<string, { next: number; fails: number; declined?: { reason: WakeDecline; message: string; from: string } }>()
 
   constructor(private readonly deps: HubDeps) {
     this.now = deps.now ?? Date.now
@@ -345,6 +371,8 @@ export class RelayHub {
     const columns = this.deps.sql.all<{ name: string }>(`PRAGMA table_info(machines)`).map((c) => c.name)
     if (!columns.includes("user_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN user_id TEXT`)
     if (!columns.includes("actor_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN actor_id TEXT`)
+    if (!columns.includes("wake_url")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_url TEXT`)
+    if (!columns.includes("wake_secret")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_secret TEXT`)
     const core = new FederatedCore(this.deps.sql, {
       user: account.user,
       now: this.now,
@@ -1049,6 +1077,8 @@ export class RelayHub {
         conn.watching = true
         this.save(socket)
         return core.snapshot({ activity: 20 })
+      case "machine_wake":
+        return this.setMachineWake(machine, params.url, params.secret)
     }
     throw new RelayError("method_not_found", `no method ${method} on a bridge`)
   }
@@ -1491,21 +1521,121 @@ export class RelayHub {
     if (this.stored !== null) this.stored += bytes
   }
 
-  /** wakes direct waiters and pushes a delivery for a mirrored row to the subscribed bridge of its machine */
+  /**
+   * wakes direct waiters and pushes a delivery for a mirrored row to the subscribed bridge of its machine; with none subscribed, a hibernated
+   * row's machine waker is called
+   */
   private route(seq: number, endpoint: string): void {
     this.wake(endpoint)
     const delivery = this.relay.delivery(seq)
     if (!delivery?.endpoint || !delivery.mirrored) return
     const machine = delivery.endpoint.slice(0, delivery.endpoint.indexOf("/"))
+    let pushed = false
     for (const socket of this.deps.sockets()) {
       if (socket.conn.role === "bridge" && socket.conn.subscribed && socket.conn.machine === machine) {
         this.write(socket, { jsonrpc: "2.0", method: "deliver", params: { seq, endpoint: delivery.endpoint, message: delivery.message } })
+        pushed = true
       }
     }
+    if (!pushed && delivery.recipient) this.machineWake(machine, delivery.recipient, delivery.message)
+  }
+
+  /** sets or (with a null url) clears the bridge's own machine waker: an https URL (http only to this host) and the secret that signs its calls */
+  private setMachineWake(machine: string, url: unknown, secret: unknown): { set: boolean } {
+    if (url === null || url === undefined) {
+      this.deps.sql.all(`UPDATE machines SET wake_url = NULL, wake_secret = NULL WHERE name = ?`, machine)
+      this.machineWakes.delete(machine)
+      this.relay.record("machine_wake_set", null, machine, { machine, set: false })
+      return { set: false }
+    }
+    if (typeof url !== "string" || url.length > MACHINE_WAKE_URL_CHARS || !wakeUrl(url))
+      throw new RelayError("invalid_params", `url is an https URL of at most ${MACHINE_WAKE_URL_CHARS} characters (http only to localhost)`)
+    if (typeof secret !== "string" || secret.length < 16 || secret.length > 256)
+      throw new RelayError("invalid_params", "secret is 16 to 256 characters, and a url needs one")
+    this.deps.sql.all(`UPDATE machines SET wake_url = ?, wake_secret = ? WHERE name = ?`, url, secret, machine)
+    this.machineWakes.delete(machine)
+    this.relay.record("machine_wake_set", null, machine, { machine, set: true })
+    return { set: true }
+  }
+
+  /**
+   * calls `machine`'s waker for its hibernated `recipient`: the embedder's `machineWake`, else the registered URL, signed. At most once per
+   * debounce window (doubling after failures); a decline counts toward nothing and holds calls for that message and its sender. Metadata only
+   */
+  private machineWake(machine: string, recipient: string, message: Envelope): void {
+    const embedded = this.deps.machineWake
+    if (!embedded && !this.deps.fetch) return
+    const now = this.now()
+    const state = this.machineWakes.get(machine)
+    if (state && state.next > now) return
+    if (state?.declined && (state.declined.message === message.id || state.declined.from === message.from.address)) return
+    let view: EndpointView
+    try {
+      view = this.relay.whoami(recipient)
+    } catch {
+      return
+    }
+    if (view.presence !== "hibernated") return
+    const waker = embedded
+      ? null
+      : one<{ wake_url: string | null; wake_secret: string | null }>(this.deps.sql, `SELECT wake_url, wake_secret FROM machines WHERE name = ?`, machine)
+    if (!embedded && (!waker?.wake_url || !waker.wake_secret)) return
+    const fails = state?.fails ?? 0
+    this.machineWakes.set(machine, { next: now + LIMITS.wakeDebounceS * 1000, fails })
+    const fromAccount = message.from.account ?? this.account
+    const event: MachineWakeEvent = {
+      scp: 1,
+      event: "machine_wake",
+      account: this.account,
+      machine,
+      endpoints: [view.address],
+      message: { id: message.id, from: message.from.address, kind: message.kind, thread: message.thread, created_at: message.created_at },
+      from_account: fromAccount,
+      same_account: fromAccount === this.account,
+    }
+    const done = (ok: boolean, detail: { status?: number; error?: string; declined?: WakeDecline }) => {
+      if (detail.declined)
+        this.machineWakes.set(machine, { next: now, fails, declined: { reason: detail.declined, message: message.id, from: message.from.address } })
+      else {
+        const next = ok ? 0 : fails + 1
+        const backoff = ok ? LIMITS.wakeDebounceS : Math.min(LIMITS.wakeDebounceS * 2 ** next, LIMITS.wakeBackoffMaxS)
+        this.machineWakes.set(machine, { next: now + backoff * 1000, fails: next })
+      }
+      try {
+        this.relay.record("machine_wake", null, machine, { machine, ok, ...detail })
+      } catch {}
+      this.deps.log?.("relay_action", {
+        account: this.account,
+        machine,
+        method: "machine_wake",
+        code: ok ? "ok" : detail.declined ? "declined" : "failed",
+        ...detail,
+      })
+    }
+    void (async () => {
+      if (embedded) {
+        const result = await embedded(event)
+        const declined = result.ok ? undefined : (wakeDeclineOf(result.declined) ?? undefined)
+        return done(result.ok, { ...(result.status !== undefined ? { status: result.status } : {}), ...(declined ? { declined } : {}) })
+      }
+      const body = JSON.stringify(event)
+      const timestamp = String(now)
+      const signature = await hmacHex(waker!.wake_secret!, `${timestamp}.${body}`)
+      const response = await this.deps.fetch!(waker!.wake_url!, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-scp-timestamp": timestamp, "x-scp-signature": `sha256=${signature}` },
+        body,
+        signal: AbortSignal.timeout(MACHINE_WAKE_TIMEOUT_MS),
+      })
+      const declined = response.status === 403 ? await declineOf(response) : null
+      done(response.status >= 200 && response.status < 300, { status: response.status, ...(declined ? { declined } : {}) })
+    })().catch((error: unknown) => done(false, { error: error instanceof Error ? error.name : "error" }))
   }
 
   /** a machine's endpoint changes: `endpoints` to the other bridges, presence and status to watchers */
   private announce(machine: string, changes: MirrorChange[], full: boolean): void {
+    const waking = this.machineWakes.get(machine)
+    if (waking?.declined && changes.some((c) => c.presence && c.view.presence === "hibernated")) delete waking.declined
     if (full || changes.length) {
       const endpoints = full ? this.relay.remoteRowsOf(machine) : changes.map((c) => (c.was === undefined ? c.view : { ...c.view, was: c.was }))
       this.toBridges(machine, { machine, endpoints, full })
@@ -1729,7 +1859,9 @@ export class RelayHub {
   private machineList(): MachineRow[] {
     const sockets = this.deps.sockets().filter((s) => !this.gone.has(s.conn.id))
     const bound = this.deps.sql
-      .all<{ name: string; kind: string; created_at: number; last_seen: number | null }>(`SELECT name, kind, created_at, last_seen FROM machines ORDER BY name`)
+      .all<{ name: string; kind: string; created_at: number; last_seen: number | null; wake_url: string | null }>(
+        `SELECT name, kind, created_at, last_seen, wake_url FROM machines ORDER BY name`,
+      )
       .map((row) => ({
         name: row.name,
         kind: row.kind,
@@ -1737,6 +1869,7 @@ export class RelayHub {
         bridge: sockets.some((s) => s.conn.role === "bridge" && s.conn.machine === row.name),
         created_at: iso(row.created_at),
         last_seen: iso(row.last_seen),
+        wake: row.wake_url !== null,
       }))
     const revoked = this.deps.sql
       .all<{ name: string; at: number }>(`SELECT name, at FROM machine_tombstones WHERE name NOT IN (SELECT name FROM machines) ORDER BY name`)
@@ -1887,5 +2020,38 @@ export class RelayHub {
   /** a status message from the relay to one of this account's endpoints (a held message's sender), pushed to its bridge */
   xnotice(endpoint: string, text: string): void {
     this.route(this.relay.judgeNoticeTo(endpoint, text), endpoint)
+  }
+}
+
+const MACHINE_WAKE_URL_CHARS = 2048
+const MACHINE_WAKE_TIMEOUT_MS = 10_000
+
+/** an https URL, or http to this host, with no credentials in it */
+function wakeUrl(value: string): boolean {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return false
+  }
+  if (url.username || url.password) return false
+  if (url.protocol === "https:") return true
+  return url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")
+}
+
+/** HMAC-SHA256 of `text` under `secret`, hex, with WebCrypto (Bun and Workers both have it) */
+async function hmacHex(secret: string, text: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+  const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(text)))
+  return Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+/** a 403 answer's `{"declined": "<reason>"}`, or null */
+async function declineOf(response: { text?: () => Promise<string> }): Promise<WakeDecline | null> {
+  try {
+    return wakeDeclineOf((JSON.parse((await response.text?.()) ?? "") as { declined?: unknown }).declined)
+  } catch {
+    return null
   }
 }

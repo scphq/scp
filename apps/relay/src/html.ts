@@ -175,7 +175,7 @@ tr.sub.d4 td.agent{padding-left:4.75rem}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .wake-badge{display:inline-flex;vertical-align:middle;margin-left:.25rem;color:var(--acc)}
 .bolt{width:11px;height:11px}
-.dot.idle.wake{border-color:var(--acc);background:var(--acc-soft)}
+.dot.idle.wake,.dot.hibernated{border-color:var(--acc);background:var(--acc-soft)}
 details.offline{margin-top:.5rem}
 details.offline>summary{display:inline-block;padding:.125rem 0;cursor:pointer;list-style:none}
 details.offline>summary::-webkit-details-marker{display:none}
@@ -251,7 +251,7 @@ table.activity td:last-child{grid-column:1/-1;white-space:normal!important}}
 .cell{display:inline-block;width:10px;height:10px;border:1px solid var(--faint);background:transparent}
 .cell.online{border-color:var(--acc);background:var(--acc)}
 .cell.idle{border-color:var(--dim);background:var(--dim)}
-.cell.idle.wake{border-color:var(--acc);background:var(--acc-soft)}
+.cell.idle.wake,.cell.hibernated{border-color:var(--acc);background:var(--acc-soft)}
 .strip-key{display:flex;flex-wrap:wrap;align-items:center;gap:.375rem;margin:1rem 0 1.25rem}
 .strip-key .cell{width:8px;height:8px;margin-left:.375rem}
 .strip-key .cell:first-child{margin-left:0}

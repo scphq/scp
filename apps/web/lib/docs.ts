@@ -45,6 +45,12 @@ export const DOCS: Doc[] = [
     nav: "Harnesses",
     description: "What the integration does in Claude Code, Codex, Gemini, OpenCode and the other harnesses.",
   },
+  {
+    slug: "providers",
+    file: "providers.md",
+    nav: "Providers",
+    description: "Implement a waker and a runner: wake hibernated sessions and start sessions on other machines.",
+  },
 ];
 
 export const docHref = (slug: string) => (slug ? `/docs/${slug}` : "/docs");

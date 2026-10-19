@@ -133,7 +133,7 @@ export const handleOf = (address: string): string => shown(splitAddress(address)
 /** labels worth a chip: the machine label repeats the section header */
 export const chips = (l: Record<string, string>): [string, string][] => Object.entries(l).filter(([k]) => k !== "machine");
 
-const RANK: Record<string, number> = { online: 0, idle: 1, offline: 2 };
+const RANK: Record<string, number> = { online: 0, idle: 1, hibernated: 1, offline: 2 };
 
 const byPresence = (a: EndpointView, b: EndpointView): number =>
   (RANK[a.presence] ?? 3) - (RANK[b.presence] ?? 3) || splitAddress(a.address).handle.localeCompare(splitAddress(b.address).handle);

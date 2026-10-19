@@ -45,6 +45,8 @@ import {
   validHandle,
   validHarness,
   type Wake,
+  type WakeDecline,
+  wakeDeclineOf,
   WAKES,
   type WhyResult,
 } from "./protocol"
@@ -274,6 +276,35 @@ export interface EndpointRow {
   wakers: number
   /** when the last hook connection that set the wake closed */
   waker_left: number | null
+  /** the provider whose wake hook resumes the hibernated session; null when it is not hibernated */
+  hibernate: string | null
+  /** the provider's opaque reference to the suspended session, handed to its wake hook */
+  wake_ref: string | null
+  hibernated_at: number | null
+  /** when a wake hook last ran for it */
+  wake_tried: number | null
+  /** the wake hook runs that failed in a row */
+  wake_fails: number
+  /** `wake_failed: <reason>` after a failed run */
+  wake_note: string | null
+  /** the seconds the provider said a wake takes */
+  wake_eta: number | null
+  /** the reason the provider declined a wake, a short token such as `policy` or `budget` */
+  wake_declined: string | null
+  /** the message, and its sender, the decline was for */
+  declined_message: string | null
+  declined_from: string | null
+}
+
+/** a wake hook run that is due: the hibernated endpoint, its provider and ref, and the newest unread message's metadata (never a body) */
+export interface WakeJob {
+  endpoint: string
+  address: string
+  handle: string
+  provider: string
+  ref: string | null
+  message: { id: string; from: string | null; kind: MessageKind; thread: string; created_at: string }
+  unread: number
 }
 
 export interface MessageRow {
@@ -405,6 +436,8 @@ interface ClaimScope {
 const GRANT_TOKEN = /^krt_[0-9a-f]{64}$/
 /** a harness's session id as its hooks name it: a UUID or a similar token */
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+/** a wake provider's name, as hibernate takes it and a waker is configured under */
+export const WAKE_PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/
 const TRANSCRIPT_CHARS = 4096
 
 /** a hook's transcript path for harness session `session`: an absolute path without control characters whose file is `<session>.jsonl` */
@@ -563,6 +596,16 @@ export class RelayCore {
       ["wake", "TEXT"],
       ["wakers", "INTEGER NOT NULL DEFAULT 0"],
       ["waker_left", "INTEGER"],
+      ["hibernate", "TEXT"],
+      ["wake_ref", "TEXT"],
+      ["hibernated_at", "INTEGER"],
+      ["wake_tried", "INTEGER"],
+      ["wake_fails", "INTEGER NOT NULL DEFAULT 0"],
+      ["wake_note", "TEXT"],
+      ["wake_eta", "INTEGER"],
+      ["wake_declined", "TEXT"],
+      ["declined_message", "TEXT"],
+      ["declined_from", "TEXT"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -733,7 +776,8 @@ export class RelayCore {
     if (fields.process !== null && !ANY_PROCESS_KEY.test(fields.process)) throw new RelayError("invalid_params", "process is a key pid:<pid>[:<start time>]")
     if (fields.harness_session !== null && !HARNESS_SESSION.test(fields.harness_session))
       throw new RelayError("invalid_params", "harness_session is a harness's session id: letters, digits, . _ : -")
-    const leaked = [wanted, fields.model, fields.cwd, fields.parent, fields.labels, fields.session, fields.harness_session]
+    const under = cleanText(claim.under, "under", 128) || null
+    const leaked = [wanted, fields.model, fields.cwd, fields.parent, fields.labels, fields.session, fields.harness_session, under]
       .map((v) => (v ? findSecret(v) : null))
       .find(Boolean)
     if (leaked) throw new RelayError("secret_refused", `the claim looks like it carries a credential (${leaked})`)
@@ -775,8 +819,25 @@ export class RelayCore {
       }
       const bound = scope.grant === null && !scope.exact ? this.boundGrant(scope, fields.process) : undefined
       if (bound) Object.assign(scope, { grant: bound.token_hash, handle: bound.name ?? wanted })
-      return this.claimRow(scope.handle, harness, fields, options.transient === true, scope)
+      const claimed = this.claimRow(scope.handle, harness, fields, options.transient === true, scope)
+      return under === null ? claimed : this.claimUnder(claimed, under)
     })
+  }
+
+  /** links a claimed root under `under` as a join under does; a refusal keeps the claim and is audited `claim_under_refused` */
+  private claimUnder<T extends { endpoint: EndpointView }>(claimed: T, under: string): T {
+    const me = this.mustEndpoint(claimed.endpoint.id)
+    if (me.kind !== "agent" || !this.localRow(me) || me.parent_ep !== null || me.parent_addr !== null) return claimed
+    try {
+      const parent = this.resolve(under)
+      if (parent.kind === "agent" && !this.mayMessage(me, parent)) throw unreachable(under)
+      this.link(me, parent, { by: this.address(me), auth: "session" })
+    } catch (error) {
+      if (!(error instanceof RelayError)) throw error
+      this.audit("claim_under_refused", me.id, null, { target: this.address(me), under, code: error.code })
+      return claimed
+    }
+    return { ...claimed, endpoint: this.view(this.byId(me.id)!) }
   }
 
   /** a claim's own rules per direction, as its `scope`, `allow`, `in` and `out` expand */
@@ -1016,6 +1077,7 @@ export class RelayCore {
     if (created || fresh === "grant") this.place(this.byId(row.id)!, scope, now)
     else if (scope.grant !== null) this.redeem(this.byId(row.id)!, scope, now)
     if (scope.grant !== null) this.takePending(row.id)
+    if (!transient) this.wakeDone(row.id, "claim")
     return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
   }
 
@@ -1108,6 +1170,7 @@ export class RelayCore {
         row.id,
       )
     this.sql.all(`DELETE FROM peek_turns WHERE endpoint = ?`, row.id)
+    this.wakeDone(row.id, "reset")
     let dropped = 0
     if (kind === "grant") {
       const spawned = one<{ issuer: string; created_at: number }>(this.sql, `SELECT issuer, created_at FROM grants WHERE token_hash = ?`, scope.grant!)
@@ -1440,7 +1503,7 @@ export class RelayCore {
     const shown = viewer ? new Set(this.visibleRows(viewer).map((row) => row.id)) : undefined
     const peeker = viewer ?? (filters.peekable === true ? this.byHandle(HUMAN_HANDLE)! : undefined)
     return this.listed()
-      .filter((row) => filters.all || row.connections > 0 || row.kind === "human" || (row.last_seen ?? 0) >= cutoff || waking(row, now))
+      .filter((row) => filters.all || row.connections > 0 || row.kind === "human" || (row.last_seen ?? 0) >= cutoff || waking(row, now) || this.hibernated(row))
       .filter((row) => !filters.harness || row.harness === filters.harness)
       .filter((row) => !filters.kind || row.kind === filters.kind)
       .filter((row) => !viewer || row.id === viewer.id || this.mayMessage(viewer, row, viewer.kind === "human"))
@@ -1641,6 +1704,7 @@ export class RelayCore {
       const row = this.mustEndpoint(endpoint.id)
       if (handle !== undefined && handle !== null && handle !== "") this.renameRow(row, handle, false)
       this.sql.all(`UPDATE endpoints SET hook_seen = ?, hook_ended = NULL WHERE id = ?`, this.now(), row.id)
+      this.wakeDone(row.id, "join")
       this.audit("join", row.id, null, { handle: this.byId(row.id)!.handle })
       if (under !== undefined && under !== null && under !== "") {
         const me = this.byId(row.id)!
@@ -1939,6 +2003,7 @@ export class RelayCore {
       row.id,
     )
     this.sql.all(`UPDATE endpoints SET handle = ?, session = NULL, token_hash = NULL WHERE id = ?`, `${GONE_PREFIX}${held.id}`, held.id)
+    this.wakeDone(held.id, "retired")
     this.dropPeek(held.id)
     this.scopeMemo?.ancestors.clear()
     this.scopeMemo?.limited.clear()
@@ -1966,6 +2031,7 @@ export class RelayCore {
         throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; a spawned worker stays joined while it runs`)
       }
       this.sql.all(`UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ?, wake = NULL WHERE id = ?`, this.now(), target.id)
+      this.wakeDone(target.id, "leave")
       this.audit("leave", target.id, null, { handle: target.handle })
       return { endpoint: this.whoami(target.id), session: target.session }
     })
@@ -1974,6 +2040,198 @@ export class RelayCore {
   /** the harness session key an endpoint holds, if any */
   sessionOf(endpoint: string): string | null {
     return this.byId(endpoint)?.session ?? null
+  }
+
+  /**
+   * marks a local agent hibernated by `wake`, the provider whose wake hook resumes it, with its opaque `ref` and the seconds a wake takes
+   * (`eta_s`); `none` clears it. The agent's own session or the human (no terminal needed: a provider's daemon has none) naming the endpoint.
+   * `known` is whether a waker is configured for a provider
+   */
+  hibernate(
+    actor: ScopeActor,
+    params: { endpoint?: unknown; wake?: unknown; ref?: unknown; eta_s?: unknown },
+    options: { known?: (provider: string) => boolean } = {},
+  ): { endpoint: EndpointView } {
+    const me = this.actorRow(actor)
+    const set = this.hibernation(params, options)
+    if (actor.kind === "endpoint" && actor.auth === "lineage")
+      throw new RelayError("scope_refused", "only the session itself hibernates: run this from the session's own shell")
+    if (params.endpoint === undefined && me.kind !== "agent") throw new RelayError("invalid_params", "the human names the endpoint")
+    const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
+    if (actor.kind === "endpoint" && target.id !== me.id) throw new RelayError("scope_refused", "an agent hibernates only itself")
+    if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint hibernates")
+    return { endpoint: this.setHibernation(me, target, set) }
+  }
+
+  /** the human marks every live local agent but subagents hibernated by one provider, as before suspending the machine they run on */
+  hibernateAll(
+    actor: ScopeActor,
+    params: { wake?: unknown; ref?: unknown; eta_s?: unknown },
+    options: { known?: (provider: string) => boolean } = {},
+  ): { endpoints: EndpointView[] } {
+    const me = this.actorRow(actor)
+    if (actor.kind !== "human") throw new RelayError("scope_refused", "only the human hibernates every agent")
+    const set = this.hibernation(params, options)
+    const now = this.now()
+    const targets = this.sql
+      .all<EndpointRow>(
+        `SELECT * FROM endpoints WHERE kind = 'agent' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
+         AND (session IS NULL OR substr(session, 1, 4) != 'sub:') ORDER BY handle`,
+      )
+      .filter((row) => this.localRow(row) && (set.wake === "none" ? row.hibernate !== null : presenceOf(row, now) !== "offline"))
+    return { endpoints: targets.map((row) => this.setHibernation(me, row, set)) }
+  }
+
+  private hibernation(
+    params: { wake?: unknown; ref?: unknown; eta_s?: unknown },
+    options: { known?: (provider: string) => boolean },
+  ): { wake: string; ref: string | null; eta: number | null } {
+    const wake = params?.wake
+    if (typeof wake !== "string" || (wake !== "none" && !WAKE_PROVIDER.test(wake)))
+      throw new RelayError("invalid_params", "wake is a provider name (lowercase letters, digits and hyphens, at most 32) or none")
+    let ref: string | null = null
+    if (params.ref !== undefined && params.ref !== null) {
+      if (typeof params.ref !== "string" || params.ref.length > LIMITS.wakeRefChars || /[\u0000-\u001f\u007f]/.test(params.ref))
+        throw new RelayError("invalid_params", `ref is a string of at most ${LIMITS.wakeRefChars} characters with no control characters`)
+      if (findSecret(params.ref)) throw new RelayError("secret_refused", "the wake ref looks like it carries a credential")
+      ref = params.ref
+    }
+    let eta: number | null = null
+    if (params.eta_s !== undefined && params.eta_s !== null) {
+      if (typeof params.eta_s !== "number" || !Number.isInteger(params.eta_s) || params.eta_s < 1 || params.eta_s > LIMITS.wakeEtaMaxS)
+        throw new RelayError("invalid_params", `eta_s is a whole number of seconds from 1 to ${LIMITS.wakeEtaMaxS}`)
+      eta = params.eta_s
+    }
+    if (wake !== "none" && options.known && !options.known(wake)) throw new RelayError("invalid_params", `no waker ${wake} is configured`)
+    return { wake, ref, eta }
+  }
+
+  private setHibernation(me: EndpointRow, target: EndpointRow, set: { wake: string; ref: string | null; eta: number | null }): EndpointView {
+    const address = this.address(target)
+    if (set.wake === "none") {
+      if (target.hibernate !== null) {
+        this.clearHibernation(target.id)
+        this.audit("unhibernate", target.id, null, { by: this.address(me), target: address })
+      }
+      return this.view(this.byId(target.id)!)
+    }
+    this.clearHibernation(target.id)
+    this.sql.all(
+      `UPDATE endpoints SET hibernate = ?, wake_ref = ?, wake_eta = ?, hibernated_at = ? WHERE id = ?`,
+      set.wake,
+      set.ref,
+      set.eta,
+      this.now(),
+      target.id,
+    )
+    this.audit("hibernate", target.id, null, { by: this.address(me), target: address, provider: set.wake })
+    return this.view(this.byId(target.id)!)
+  }
+
+  /**
+   * the wake hook run a delivery to a hibernated local agent is due, recorded as tried: none while it is not hibernated, has no unread
+   * message, ran within LIMITS.wakeDebounceS (after failures, a doubling backoff up to LIMITS.wakeBackoffMaxS), or the provider declined a
+   * wake for the newest unread message or for another from its sender. The newest unread message's metadata only, never its body
+   */
+  wakeDue(endpoint: string, now = this.now()): WakeJob | null {
+    const row = this.byId(endpoint)
+    if (!row?.hibernate || row.kind !== "agent" || !this.localRow(row)) return null
+    if (row.wake_tried !== null) {
+      const waitS = row.wake_fails > 0 ? Math.min(LIMITS.wakeDebounceS * 2 ** row.wake_fails, LIMITS.wakeBackoffMaxS) : LIMITS.wakeDebounceS
+      if (now - row.wake_tried < waitS * 1000) return null
+    }
+    const newest = one<{ id: string; from_ep: string; kind: MessageKind; thread: string; created_at: number }>(
+      this.sql,
+      `SELECT m.id, m.from_ep, m.kind, m.thread, m.created_at FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ? ORDER BY d.seq DESC LIMIT 1`,
+      endpoint,
+      now,
+    )
+    if (!newest) return null
+    if (row.wake_declined !== null && (newest.id === row.declined_message || newest.from_ep === row.declined_from)) return null
+    const unread = one<{ n: number }>(
+      this.sql,
+      `SELECT COUNT(*) AS n FROM deliveries WHERE endpoint = ? AND acked_at IS NULL AND expires_at > ?`,
+      endpoint,
+      now,
+    )!.n
+    this.sql.all(`UPDATE endpoints SET wake_tried = ? WHERE id = ?`, now, endpoint)
+    const sender = this.byId(newest.from_ep)
+    return {
+      endpoint,
+      address: this.address(row),
+      handle: row.handle,
+      provider: row.hibernate,
+      ref: row.wake_ref,
+      message: { id: newest.id, from: sender ? this.address(sender) : null, kind: newest.kind, thread: newest.thread, created_at: iso(newest.created_at)! },
+      unread,
+    }
+  }
+
+  /**
+   * how a wake hook run ended, audited without the ref: a failure counts toward the backoff and shows `wake_failed` while the message stays
+   * queued; a decline (`declined`, for the message `message`) shows `wake_declined`, counts toward nothing and holds further runs for that
+   * message and its sender until a newer message of another sender or a new hibernate; a success resets both (the hibernation clears once the
+   * session claims its endpoint again). Whether the shown note changed
+   */
+  wakeResult(
+    endpoint: string,
+    result: { ok: boolean; code?: number | null; error?: string | null; ms: number; declined?: WakeDecline; message?: string },
+  ): boolean {
+    const row = this.byId(endpoint)
+    if (!row) return false
+    const error = result.error ? redactSecrets(stripControl(result.error).replace(/\s+/g, " ").trim()).slice(0, 200) : null
+    const declined = result.ok ? null : wakeDeclineOf(result.declined)
+    this.audit("wake", endpoint, null, {
+      target: this.address(row),
+      provider: row.hibernate,
+      ok: result.ok,
+      ...(result.code !== undefined && result.code !== null ? { code: result.code } : {}),
+      ms: Math.max(0, Math.round(result.ms)),
+      ...(declined ? { declined } : error ? { error } : {}),
+    })
+    if (!row.hibernate) return false
+    if (declined) {
+      const message = result.message ? one<{ from_ep: string }>(this.sql, `SELECT from_ep FROM messages WHERE id = ?`, result.message) : undefined
+      this.sql.all(
+        `UPDATE endpoints SET wake_declined = ?, declined_message = ?, declined_from = ?, wake_note = NULL, wake_tried = NULL WHERE id = ?`,
+        declined,
+        result.message ?? null,
+        message?.from_ep ?? null,
+        endpoint,
+      )
+      return declined !== row.wake_declined || row.wake_note !== null
+    }
+    const note = result.ok
+      ? null
+      : `wake_failed: ${(error ?? (result.code !== undefined && result.code !== null ? `exit ${result.code}` : "failed")).slice(0, 120)}`
+    this.sql.all(
+      `UPDATE endpoints SET wake_fails = ${result.ok ? "0" : "wake_fails + 1"}, wake_note = ?, wake_declined = NULL, declined_message = NULL, declined_from = NULL WHERE id = ?`,
+      note,
+      endpoint,
+    )
+    return note !== row.wake_note || row.wake_declined !== null
+  }
+
+  /** whether the row shows hibernated: a subclass also counts what another machine mirrored */
+  protected hibernated(row: EndpointRow): boolean {
+    return row.hibernate !== null
+  }
+
+  /** the hibernated session is back, or gone: its hibernation clears */
+  private wakeDone(endpoint: string, how: string): void {
+    const row = this.byId(endpoint)
+    if (!row?.hibernate) return
+    this.clearHibernation(endpoint)
+    this.audit("wake_done", endpoint, null, { target: this.address(row), how })
+  }
+
+  private clearHibernation(endpoint: string): void {
+    this.sql.all(
+      `UPDATE endpoints SET hibernate = NULL, wake_ref = NULL, wake_eta = NULL, hibernated_at = NULL, wake_tried = NULL, wake_fails = 0, wake_note = NULL,
+       wake_declined = NULL, declined_message = NULL, declined_from = NULL WHERE id = ?`,
+      endpoint,
+    )
   }
 
   // messages
@@ -2045,8 +2303,9 @@ export class RelayCore {
         (now - Math.max(r.last_seen ?? 0, r.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS || (r.session === null && r.token_hash === null && r.hook_ended !== null)) &&
         !this.unjoinedSpawn(sender, r.handle, now),
     )
-    if (params.live === true && dark.length)
-      throw new RelayError("not_live", `no live session holds ${dark.map((r) => this.address(r)).join(", ")}: nothing was queued`)
+    const asleep = params.live === true ? recipients.filter((r) => r.kind === "agent" && r.hibernate !== null) : []
+    if (params.live === true && (dark.length || asleep.length))
+      throw new RelayError("not_live", `no live session holds ${[...dark, ...asleep].map((r) => this.address(r)).join(", ")}: nothing was queued`)
     const warnings = dark.map((r) => `queued: no live session holds ${this.address(r)}`)
     const pending = [...unjoined.values()].map((grant) => ({ key: pendingKey(grant.token_hash), address: `${this.user}/${grant.name}` }))
     const reached = recipients.length + pending.length
@@ -2271,8 +2530,9 @@ export class RelayCore {
         this.sql.all(`INSERT INTO pair_events (from_ep, to_ep, at) VALUES (?, ?, ?)`, from, recipient.id, now)
         if (treeSends && recipient.kind !== "human") this.sql.all(`INSERT INTO tree_events (tree, at) VALUES (?, ?)`, tree, now)
         const view = this.view(recipient)
-        const queued = view.presence === "offline"
-        const offline = queued && now - Math.max(recipient.last_seen ?? 0, recipient.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS
+        const hibernated = view.presence === "hibernated"
+        const queued = view.presence === "offline" || hibernated
+        const offline = view.presence === "offline" && now - Math.max(recipient.last_seen ?? 0, recipient.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS
         const state = this.reach(sender, recipient, offline, now)
         deliveries.push({
           endpoint: recipient.id,
@@ -2282,8 +2542,10 @@ export class RelayCore {
           ...(queued ? { queued } : {}),
           last_seen: view.last_seen,
           ...(state ? { state } : {}),
-          ...(view.wake ? { wake: view.wake } : {}),
+          ...(hibernated && recipient.wake_declined ? { wake: "declined" as const } : view.wake ? { wake: view.wake } : {}),
           ...(view.presence === "idle" ? { idle: true as const } : {}),
+          ...(hibernated ? { hibernated: true as const } : {}),
+          ...(hibernated && recipient.wake_eta ? { wake_eta_s: recipient.wake_eta } : {}),
         })
       }
       for (const { key, address } of pending) {
@@ -3357,6 +3619,7 @@ export class RelayCore {
           endpoint,
         )
     } else if (params.kind === "session_start") {
+      this.wakeDone(endpoint, "session_start")
       const fresh = own && summary !== "compact" && summary !== "resume"
       this.sql.all(
         `UPDATE endpoints SET hook_seen = COALESCE(?, hook_seen), hook_ended = NULL, stop_blocks = CASE WHEN ? THEN 0 ELSE stop_blocks END, pushes = CASE WHEN ? THEN 0 ELSE pushes END,
@@ -5378,7 +5641,9 @@ export class RelayCore {
       presence,
       status: row.status_state ? { state: row.status_state, note: row.status_note ?? "" } : null,
       last_seen: iso(row.last_seen),
-      ...(row.kind === "agent" ? { ...this.placeView(row, shown), wake: wakeOf(row) } : {}),
+      ...(row.kind === "agent" ? { ...this.placeView(row, shown), wake: row.hibernate ? (`hook:${row.hibernate}` as const) : wakeOf(row) } : {}),
+      ...(row.hibernate && row.wake_note ? { wake_failed: row.wake_note.replace(/^wake_failed: /, "") } : {}),
+      ...(row.hibernate && row.wake_declined ? { wake_declined: row.wake_declined } : {}),
     }
   }
 
@@ -5677,8 +5942,12 @@ function waking(row: EndpointRow, now: number): boolean {
   return wakeOf(row) !== null && (row.wakers > 0 || (row.waker_left ?? 0) >= now - LIMITS.restartGraceS * 1000)
 }
 
-/** the presence an endpoint shows: one its waker can wake is at least idle, though its session's own presence decayed */
+/**
+ * the presence an endpoint shows: a provider's hibernated session is `hibernated` whatever its connections say; one its waker can wake is at
+ * least idle, though its session's own presence decayed
+ */
 function shownPresence(row: EndpointRow, now: number): Presence {
+  if (row.hibernate) return "hibernated"
   const presence = presenceOf(row, now)
   return presence === "offline" && waking(row, now) ? "idle" : presence
 }

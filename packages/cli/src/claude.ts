@@ -57,7 +57,17 @@ export function claudeLaunchArgs(args: string[], added: string[]): string[] {
 }
 
 /** a launcher's own identity, which claude's daemon must not keep for the sessions it starts later */
-const LAUNCHER_IDENTITY = ["SCP_NAME", "SCP_GRANT", "SCP_SESSION", "SCP_PARENT", "SCP_HARNESS", "SCP_SHIM_BINDING", "SCP_SPAWN_RUNNER", CHANNELS_ENV]
+const LAUNCHER_IDENTITY = [
+  "SCP_NAME",
+  "SCP_GRANT",
+  "SCP_SESSION",
+  "SCP_PARENT",
+  "SCP_UNDER",
+  "SCP_HARNESS",
+  "SCP_SHIM_BINDING",
+  "SCP_SPAWN_RUNNER",
+  CHANNELS_ENV,
+]
 /** where the shim finds the broker and its labels, passed on since a background session's environment is the daemon's */
 const SHIM_VARS = ["SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME"]
 

@@ -36,7 +36,14 @@ class FakeSocket implements HubSocket {
 
 const grant = (tokenId: string, expiresAt = START + 3_600_000): HubGrant => ({ tokenId, userId: "usr_1", actorId: null, expiresAt, scoped: false, role: null })
 
-function setup(options: { limits?: Partial<HubLimits>; dashboard?: (event: DashboardEvent) => void } = {}) {
+function setup(
+  options: {
+    limits?: Partial<HubLimits>
+    dashboard?: (event: DashboardEvent) => void
+    fetch?: ConstructorParameters<typeof RelayHub>[0]["fetch"]
+    machineWake?: ConstructorParameters<typeof RelayHub>[0]["machineWake"]
+  } = {},
+) {
   const clock = { now: START }
   const db = new Database(":memory:")
   const writes = { n: 0 }
@@ -58,6 +65,8 @@ function setup(options: { limits?: Partial<HubLimits>; dashboard?: (event: Dashb
     log: (event, fields) => logs.push({ event, fields }),
     ...(options.limits ? { limits: options.limits } : {}),
     ...(options.dashboard ? { dashboard: options.dashboard } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.machineWake ? { machineWake: options.machineWake } : {}),
   })
   hub.init({ user: "ada" })
   let nextId = 1
@@ -1310,5 +1319,137 @@ describe("dashboard events", () => {
     for (const e of events) expect(Object.keys(e).sort()).toEqual(keys[e.type])
     const wire = JSON.stringify(events)
     for (const leak of ["secret plan", "secret note", "label-value", "body", "status"]) expect(wire).not.toContain(leak)
+  })
+})
+
+describe("machine waker", () => {
+  const SECRET = "wake-secret-0123456789abcdef"
+  type Call = { url: string; headers: Record<string, string>; body: string }
+
+  async function calls(list: Call[], n: number): Promise<void> {
+    for (let i = 0; i < 100 && list.length < n; i++) await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+
+  test("a bridge sets its machine's waker; the secret and url are never shown, only whether one is set", async () => {
+    const { bridge, connect, ok, fails } = setup()
+    const desk = await bridge("desk", [])
+    const cli = connect("tok_b")
+    await ok(cli, "hello", { protocol: PROTOCOL, machine: "ci", claim: { handle: "impl" } })
+    expect(await fails(desk, "machine_wake", { url: "https://wake.example/hook" })).toBe("invalid_params")
+    expect(await fails(desk, "machine_wake", { url: "http://wake.example/hook", secret: SECRET })).toBe("invalid_params")
+    expect(await fails(desk, "machine_wake", { url: "https://wake.example/hook", secret: "short" })).toBe("invalid_params")
+    expect(await ok(desk, "machine_wake", { url: "http://127.0.0.1:8080/wake", secret: SECRET })).toEqual({ set: true })
+    expect(await ok(desk, "machine_wake", { url: "https://wake.example/hook?k=q", secret: SECRET })).toEqual({ set: true })
+    const listed = await ok(cli, "machines")
+    expect(listed.machines.find((m: any) => m.name === "desk").wake).toBe(true)
+    expect(JSON.stringify(listed)).not.toContain(SECRET)
+    expect(JSON.stringify(listed)).not.toContain("wake.example")
+    expect(await ok(desk, "machine_wake", { url: null })).toEqual({ set: false })
+    expect((await ok(cli, "machines")).machines.find((m: any) => m.name === "desk").wake).toBe(false)
+  })
+
+  test("a delivery to a hibernated endpoint of a machine with no bridge calls its waker, signed, metadata only, debounced", async () => {
+    const sent: Call[] = []
+    let status = 200
+    const { bridge, ok, clock, disconnect, logs } = setup({
+      fetch: async (url, init) => {
+        sent.push({ url, headers: init.headers, body: init.body })
+        return { status }
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    const desk = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm-sleep" }])
+    await ok(desk, "machine_wake", { url: "https://wake.example/hook?k=q", secret: SECRET })
+    const before = await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "while the bridge is up" } })
+    expect(before.deliveries[0]).toMatchObject({ queued: true, hibernated: true })
+    await calls(sent, 1)
+    expect(sent).toEqual([])
+    disconnect(desk)
+    const listed = (await ok(laptop, "list", {})).endpoints
+    expect(listed.find((e: any) => e.address === "ada/desk/review")).toMatchObject({ presence: "hibernated", wake: "hook:vm-sleep" })
+    const first = await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "UNIQUE-HUB-BODY-1", kind: "request" } })
+    await calls(sent, 1)
+    expect(sent.length).toBe(1)
+    const call = sent[0]!
+    expect(call.url).toBe("https://wake.example/hook?k=q")
+    expect(call.headers["content-type"]).toBe("application/json")
+    const expected = new Bun.CryptoHasher("sha256", SECRET).update(`${call.headers["x-scp-timestamp"]}.${call.body}`).digest("hex")
+    expect(call.headers["x-scp-signature"]).toBe(`sha256=${expected}`)
+    expect(call.headers["x-scp-timestamp"]).toBe(String(clock.now))
+    expect(JSON.parse(call.body)).toEqual({
+      scp: 1,
+      event: "machine_wake",
+      account: "ada",
+      machine: "desk",
+      endpoints: ["ada/desk/review"],
+      message: { id: first.id, from: expect.any(String), kind: "request", thread: first.thread, created_at: expect.any(String) },
+      from_account: "ada",
+      same_account: true,
+    })
+    expect(call.body).not.toContain("UNIQUE-HUB-BODY")
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "again" } })
+    await calls(sent, 2)
+    expect(sent.length).toBe(1)
+    status = 500
+    clock.now += LIMITS.wakeDebounceS * 1000
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "later" } })
+    await calls(sent, 2)
+    expect(sent.length).toBe(2)
+    clock.now += LIMITS.wakeDebounceS * 1000
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "inside the backoff" } })
+    await calls(sent, 3)
+    expect(sent.length).toBe(2)
+    const lines = JSON.stringify(logs)
+    expect(lines).toContain("machine_wake")
+    expect(lines).not.toContain(SECRET)
+    expect(lines).not.toContain("k=q")
+  })
+
+  test("an embedder's machineWake is called for any machine without a URL; a decline holds calls for that message and sender only", async () => {
+    const events: any[] = []
+    let answer: { ok: boolean; declined?: string } = { ok: false, declined: "budget" }
+    const { bridge, ok, disconnect } = setup({
+      machineWake: async (event) => {
+        events.push(event)
+        return answer
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }, { address: "me/lead" }])
+    const desk = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+    disconnect(desk)
+    const first = await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "UNIQUE-EMBED-1" } })
+    await calls(events as Call[], 1)
+    expect(events).toEqual([
+      expect.objectContaining({ event: "machine_wake", machine: "desk", same_account: true, message: expect.objectContaining({ id: first.id }) }),
+    ])
+    expect(JSON.stringify(events)).not.toContain("UNIQUE-EMBED")
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "same sender" } })
+    await calls(events as Call[], 2)
+    expect(events.length).toBe(1)
+    answer = { ok: true }
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "another sender" } })
+    await calls(events as Call[], 2)
+    expect(events.length).toBe(2)
+  })
+
+  test("a webhook's 403 with a declined reason is a decline, not a failure", async () => {
+    const sent: Call[] = []
+    const { bridge, ok, disconnect, clock, logs } = setup({
+      fetch: async (url, init) => {
+        sent.push({ url, headers: init.headers, body: init.body })
+        return { status: 403, text: async () => JSON.stringify({ declined: "policy" }) }
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    const desk = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+    await ok(desk, "machine_wake", { url: "https://wake.example/hook", secret: SECRET })
+    disconnect(desk)
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await calls(sent, 1)
+    expect(logs.some((l) => l.fields.method === "machine_wake" && l.fields.declined === "policy" && l.fields.code === "declined")).toBe(true)
+    clock.now += LIMITS.wakeBackoffMaxS * 1000
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "two" } })
+    await calls(sent, 2)
+    expect(sent.length).toBe(1)
   })
 })

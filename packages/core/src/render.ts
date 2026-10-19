@@ -135,8 +135,9 @@ export function reachLines(deliveries: Delivery[], late = false): string[] {
     .map((d) => (d.state ? `${d.address}: ${reachText({ ...d, state: d.state })}` : deliveryText(d)))
 }
 
-/** an endpoint's presence as a line shows it: an idle agent no message wakes reads at its next turn */
+/** an endpoint's presence as a line shows it: an idle agent no message wakes reads at its next turn; a hibernated one is wakeable */
 export function presenceText(e: Pick<EndpointView, "kind" | "presence" | "wake">): string {
+  if (e.presence === "hibernated") return "hibernated (wakeable)"
   return e.kind === "agent" && e.presence === "idle" && (!e.wake || e.wake === "none") ? "idle (next turn)" : e.presence
 }
 

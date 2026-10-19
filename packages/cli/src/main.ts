@@ -205,6 +205,14 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  messages with the relay MCP tools (relay_send, relay_inbox, relay_reply). A
                                                  ${CLI_NAME} command from codex's workspace-write sandbox also needs
                                                  -c sandbox_workspace_write.network_access=true (the relay socket counts as network)
+  ${CLI_NAME} spawn --via R [--name N] [--title T] [--labels K=V,...] [--json] [--] <harness cmd...>
+                                                 hands the spawn to runner R of ~/.config/scp/runners.json ($SCP_RUNNERS_FILE):
+                                                 it gets the spawn as one JSON line on stdin and starts the worker on another
+                                                 machine logged in to your account, whose ${CLI_NAME} spawn --under me/<this
+                                                 machine>/<you> runs it linked under you, without a grant; it hands back as a
+                                                 relay message. Needs this broker linked to a hub; returns once the runner exits 0,
+                                                 naming the worker's address and attach command when the runner prints them
+                                                 (--json: as JSON)
   ${CLI_NAME} pi [--name N] [--] [pi args...]    runs pi with the bundled SCP extension: the relay tools, and each new
                                                  message as a turn (steering a running one, waking an idle session)
   ${CLI_NAME} codex [--name N] [--headless] [--] [codex args...]
@@ -289,6 +297,15 @@ agent sessions:
                                                  (a cycle) is refused; both are audited, as adopt and unlink
   ${CLI_NAME} leave [--endpoint EP]              take this session off the relay: offline, no messages pushed, mail kept until
                                                  ${CLI_NAME} join; a spawned worker stays joined while it runs
+  ${CLI_NAME} hibernate --wake <provider> [--ref R] [<endpoint>]   mark this session (or, for the human, <endpoint>) hibernated:
+                                                 suspended but wakeable. A message to it runs the provider's wake hook from
+                                                 ~/.config/scp/wakers.json with R and the message's metadata (never its body),
+                                                 at most once a minute; the session drains its queue once it is back
+  ${CLI_NAME} hibernate --wake none [<endpoint>] the session resumed or is gone: hibernation clears (--gone is the same); it also
+                                                 clears when the session claims its endpoint again
+  ${CLI_NAME} hibernate --all --wake <provider> [--ref R] [--eta S]   the human marks every live agent of this machine hibernated
+                                                 (--eta: how long a wake takes, shown to senders); it waits until the hub has it
+                                                 ("the hub has it"), so the machine can be suspended right after
   With setup --join manual a session stays off the relay until it runs ${CLI_NAME} join; the default, auto, joins every
   hooked session when it starts.
 
@@ -300,6 +317,9 @@ relay:
   ${CLI_NAME} logout                             remove the stored credential for the active relay
   ${CLI_NAME} cloud enable [--machine NAME] | disable | status   link the local broker to the hub, or inspect its link
   ${CLI_NAME} machines [rm NAME]                 list the hub's machines, or release one
+  ${CLI_NAME} machine wake-url <url> [--secret-env VAR] | --clear   the URL the hub POSTs to, signed with the secret in $VAR
+                                                 (default $SCP_MACHINE_WAKE_SECRET), when a message reaches a hibernated agent of
+                                                 this machine while its broker is not linked; for the human
   --cloud (or $SCP_TRANSPORT=cloud) sends messaging commands directly to the hub using the active relay's login.
   --machine NAME ($SCP_MACHINE, else the short hostname) names this machine on the hub; it requires --cloud.
 
@@ -386,6 +406,8 @@ const VERBS: Record<string, Option[]> = {
   link: IDENTITY,
   unlink: IDENTITY,
   leave: [...IDENTITY, "endpoint"],
+  hibernate: [...IDENTITY, "wake", "ref", "gone", "all", "eta"],
+  machine: [...IDENTITY, "secret-env", "clear"],
   name: [...IDENTITY, "endpoint", "take-over"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
   reply: IDENTITY,
@@ -1146,6 +1168,47 @@ async function runVerb(
       else out(`${result.endpoint.address} is a root again (was under ${result.parent})`)
       return 0
     }
+    case "hibernate": {
+      if (positionals.length > 1) throw new RelayUsage(`${CLI_NAME} hibernate takes at most one endpoint`)
+      if (values.gone === true && values.wake !== undefined) throw new RelayUsage("--gone and --wake: pick one")
+      const wake = values.gone === true ? "none" : (values.wake as string | undefined)
+      if (wake === undefined) throw new RelayUsage(`${CLI_NAME} hibernate takes --wake <provider>, or --wake none (--gone) to clear it`)
+      if (wake === "none" && (values.ref !== undefined || values.eta !== undefined))
+        throw new RelayUsage("--ref and --eta go with a provider, not with --wake none")
+      if (values.all === true && positionals.length) throw new RelayUsage(`${CLI_NAME} hibernate --all names no endpoint`)
+      const eta = values.eta === undefined ? undefined : Math.round(parseSeconds(values.eta as string, "--eta"))
+      const result = await client.request<{ endpoint?: EndpointView; endpoints?: EndpointView[]; mirrored?: boolean }>("hibernate", {
+        ...(values.all === true ? { all: true } : positionals.length ? { endpoint: positionals[0] } : {}),
+        wake,
+        ...(values.ref !== undefined ? { ref: values.ref } : {}),
+        ...(eta !== undefined ? { eta_s: eta } : {}),
+      })
+      if (asJson) json(result)
+      else {
+        for (const e of result.endpoints ?? (result.endpoint ? [result.endpoint] : []))
+          out(`${e.address} ${presenceText(e)}${e.presence === "hibernated" ? `, woken by ${wakeText(e)}` : ""}`)
+        if (result.mirrored) note("the hub has it: the machine may be suspended now")
+      }
+      return 0
+    }
+    case "machine": {
+      if (positionals[0] !== "wake-url") throw new RelayUsage(`${CLI_NAME} machine takes wake-url <url> [--secret-env VAR] | wake-url --clear`)
+      if (values.clear === true) {
+        if (positionals.length > 1 || values["secret-env"] !== undefined) throw new RelayUsage(`${CLI_NAME} machine wake-url --clear takes no url`)
+        const result = await client.request<{ set: boolean }>("machine_wake", { url: null })
+        if (asJson) json(result)
+        else out("machine waker cleared")
+        return 0
+      }
+      if (positionals.length !== 2) throw new RelayUsage(`${CLI_NAME} machine wake-url takes one url, or --clear`)
+      const name = (values["secret-env"] as string | undefined) ?? "SCP_MACHINE_WAKE_SECRET"
+      const secret = process.env[name]
+      if (!secret) throw new RelayUsage(`set $${name} to the waker's secret (16 to 256 characters); it is never read from the command line`)
+      const result = await client.request<{ set: boolean }>("machine_wake", { url: positionals[1], secret })
+      if (asJson) json(result)
+      else out("machine waker set; the hub signs each call with the secret")
+      return 0
+    }
     case "leave": {
       if (positionals.length) throw new RelayUsage(`${CLI_NAME} leave takes no arguments (--endpoint EP for the human at a terminal)`)
       const endpoint = values.endpoint as string | undefined
@@ -1419,7 +1482,8 @@ function printSummary(snapshot: Snapshot, me: EndpointView | null, all: boolean)
   const agents = snapshot.endpoints.filter((e) => e.kind !== "human")
   const count = (presence: string) => agents.filter((e) => e.presence === presence).length
   out()
-  out(`agents: ${count("online")} online, ${count("idle")} idle, ${count("offline")} offline`)
+  const hibernated = count("hibernated")
+  out(`agents: ${count("online")} online, ${count("idle")} idle, ${hibernated ? `${hibernated} hibernated, ` : ""}${count("offline")} offline`)
   const counted = all ? agents : agents.filter((e) => e.presence !== "offline")
   const harnesses = new Map<string, EndpointView[]>()
   for (const e of counted) harnesses.set(e.harness ?? "?", [...(harnesses.get(e.harness ?? "?") ?? []), e])

@@ -93,6 +93,7 @@ export class OrgHub extends DurableObject<Env> {
         }),
       save: (socket) => webSockets.get(socket)?.serializeAttachment(socket.conn),
       log: (event, fields) => console.log(JSON.stringify({ event, ...fields })),
+      fetch: (url, init) => fetch(url, init),
       limits: NO_LIMITS,
       dashboard: (event) => {
         const text = JSON.stringify(event);
