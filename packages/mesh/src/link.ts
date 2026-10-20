@@ -2,7 +2,8 @@ import type { Bridge, BridgeStatus, LinkContext } from "@scp-dev/broker"
 import { type EndpointView, findSecret, LIMITS, matches, newId, PROTOCOL, RelayError, SERVER_FIELDS, type SendParams, type SendResult } from "@scp-dev/core"
 import { WebSocket, WebSocketServer } from "ws"
 import { type AccountKey, type MeshConfig, parseHostPort } from "./config"
-import { accountId, canonicalJson, type KeyPair, newNonce, SIGN_DOMAIN, signPayload, verifyPayload } from "./keys"
+import { accountId, canonicalJson, type KeyPair, newNonce, SIGN_DOMAIN, signPayload, validPublicKey, verifyPayload } from "./keys"
+import { type Channel, type Exchange, newExchange, openChannel, SEAL_TAG_BYTES } from "./seal"
 import { issueCert, type MachineCert, type MachineRecord, MESH_FRAME_BYTES, MESH_PATH, signRecord, verifyCert, verifyRecord } from "./wire"
 
 export interface MeshOptions extends LinkContext {
@@ -71,6 +72,10 @@ type Link = {
   cert: MachineCert | null
   nonce: string
   peerNonce: string | null
+  /** dropped once the channel keys are derived */
+  exchange: Exchange | null
+  peerKx: string | null
+  channel: Channel | null
   authenticated: boolean
   order: number
   since: string
@@ -86,6 +91,9 @@ function object(value: unknown, what: string): Params {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RelayError("invalid_params", `${what} must be an object`)
   return value as Params
 }
+
+/** inbound links still authenticating; past this, new connections are closed at once */
+const PENDING_INBOUND = 64
 
 function hostPort(host: string, port: number): string {
   return `${host.includes(":") ? `[${host}]` : host}:${port}`
@@ -132,6 +140,9 @@ export function startMesh(options: MeshOptions): MeshLink {
     })
   }
 
+  /** handles local endpoints had before a rename, carried in the next record so peers rename their mirror in place */
+  const renames = new Map<string, string>()
+
   function outward(view: EndpointView): object {
     return {
       ...core.mirrorScope(view.id),
@@ -144,6 +155,8 @@ export function startMesh(options: MeshOptions): MeshLink {
       status: view.status ? { state: view.status.state, note: view.status.note } : null,
       presence: view.presence,
       last_seen: view.last_seen,
+      ...(view.kind === "agent" ? { wake: view.wake ?? null } : {}),
+      ...(renames.has(view.id) ? { was: renames.get(view.id) } : {}),
     }
   }
 
@@ -164,6 +177,12 @@ export function startMesh(options: MeshOptions): MeshLink {
     return latest
   }
 
+  /** a live link to a machine of this name under another machine key: two machines share a name */
+  function rival(name: string, key: string): boolean {
+    const live = linked(name)
+    return !!live && live.cert!.key !== key
+  }
+
   function apply(record: MachineRecord) {
     try {
       core.mirror(record.machine, record.endpoints, { full: true, auth: "account+bridge" })
@@ -177,7 +196,7 @@ export function startMesh(options: MeshOptions): MeshLink {
     const text = JSON.stringify({ jsonrpc: "2.0", ...frame })
     if (Buffer.byteLength(text) > MESH_FRAME_BYTES) throw new RelayError("too_large", "the mesh frame is too large")
     if (link.socket.readyState !== WebSocket.OPEN) throw new RelayError("unavailable", "the mesh link is closed")
-    link.socket.send(text)
+    link.socket.send(link.channel ? link.channel.seal(text) : text)
   }
 
   function notify(link: Link, method: string, params: object) {
@@ -204,6 +223,7 @@ export function startMesh(options: MeshOptions): MeshLink {
         throw new RelayError("too_large", "the mesh record is too large")
       own = record
       ownJson = json
+      renames.clear()
       broadcast([own])
     } catch (error) {
       report(error)
@@ -258,7 +278,10 @@ export function startMesh(options: MeshOptions): MeshLink {
       link.peer.attempt = 0
     }
     const record = records.get(name)
-    if (first && record) apply(record)
+    if (record && record.cert.key !== link.cert!.key) {
+      records.delete(name)
+      apply({ ...record, endpoints: [] })
+    } else if (first && record) apply(record)
     notify(link, "records", { records: [own, ...[...records.values()].filter((row) => row.machine !== name)] })
   }
 
@@ -320,18 +343,52 @@ export function startMesh(options: MeshOptions): MeshLink {
       const params = object(frame.params, "params")
       if (frame.method === "mesh_hello" && !link.cert) {
         if (params.protocol !== PROTOCOL || params.acct !== acct) return refuse(link, "wrong protocol or account")
-        if (!verifyCert(params.cert, trust) || params.cert.account !== account || params.cert.machine === machine) return refuse(link, "invalid certificate")
+        if (!verifyCert(params.cert, trust) || params.cert.account !== account) return refuse(link, "invalid certificate")
+        if (params.cert.machine === machine) return refuse(link, `the peer is also named ${machine}: give one of them another --machine`)
+        if (rival(params.cert.machine, params.cert.key)) return refuse(link, `machine ${params.cert.machine} is already linked with another machine key`)
         if (typeof params.nonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(params.nonce)) return refuse(link, "invalid nonce")
+        if (!validPublicKey(params.kx)) return refuse(link, "invalid key exchange")
         link.cert = params.cert
         link.peerNonce = params.nonce
+        link.peerKx = params.kx
         notify(link, "mesh_auth", {
-          sig: signPayload(machineKey, SIGN_DOMAIN.auth, { acct, from: machine, to: link.cert.machine, peer_nonce: link.peerNonce, nonce: link.nonce }),
+          sig: signPayload(machineKey, SIGN_DOMAIN.auth, {
+            acct,
+            from: machine,
+            to: link.cert.machine,
+            peer_nonce: link.peerNonce,
+            nonce: link.nonce,
+            peer_kx: link.peerKx,
+            kx: link.exchange!.public,
+            dialed: link.peer !== null,
+          }),
         })
         return
       }
       if (frame.method === "mesh_auth" && link.cert) {
-        const payload = { acct, from: link.cert.machine, to: machine, peer_nonce: link.nonce, nonce: link.peerNonce }
+        const peer = link.cert.machine
+        if (rival(peer, link.cert.key)) return refuse(link, `machine ${peer} is already linked with another machine key`)
+        const payload = {
+          acct,
+          from: peer,
+          to: machine,
+          peer_nonce: link.nonce,
+          nonce: link.peerNonce,
+          peer_kx: link.exchange!.public,
+          kx: link.peerKx,
+          dialed: link.peer === null,
+        }
         if (!verifyPayload(link.cert.key, SIGN_DOMAIN.auth, payload, params.sig)) return refuse(link, "invalid authentication")
+        const dialer = link.peer ? machine : peer
+        const own = { dialer, from_nonce: link.nonce, from_kx: link.exchange!.public }
+        const theirs = { dialer, from_nonce: link.peerNonce!, from_kx: link.peerKx! }
+        link.channel = openChannel(
+          link.exchange!,
+          link.peerKx!,
+          { acct, from: machine, to: peer, ...own, to_nonce: theirs.from_nonce, to_kx: theirs.from_kx },
+          { acct, from: peer, to: machine, ...theirs, to_nonce: own.from_nonce, to_kx: own.from_kx },
+        )
+        link.exchange = null
         authenticated(link)
         return
       }
@@ -342,7 +399,7 @@ export function startMesh(options: MeshOptions): MeshLink {
       if (!Array.isArray(params.records)) return refuse(link, "invalid records")
       const accepted: MachineRecord[] = []
       for (const record of params.records) {
-        if (!verifyRecord(record, trust) || record.cert.account !== account || record.machine === machine) continue
+        if (!verifyRecord(record, trust) || record.cert.account !== account || record.machine === machine || rival(record.machine, record.cert.key)) continue
         const previous = records.get(record.machine)
         if (previous && (record.epoch < previous.epoch || (record.epoch === previous.epoch && record.seq <= previous.seq))) continue
         records.set(record.machine, record)
@@ -384,6 +441,9 @@ export function startMesh(options: MeshOptions): MeshLink {
       cert: null,
       nonce: newNonce(),
       peerNonce: null,
+      exchange: newExchange(),
+      peerKx: null,
+      channel: null,
       authenticated: false,
       order: 0,
       since: new Date().toISOString(),
@@ -396,13 +456,19 @@ export function startMesh(options: MeshOptions): MeshLink {
       }),
     }
     links.add(link)
-    const hello = () => notify(link, "mesh_hello", { protocol: PROTOCOL, acct, cert, nonce: link.nonce })
+    const hello = () => notify(link, "mesh_hello", { protocol: PROTOCOL, acct, cert, nonce: link.nonce, kx: link.exchange!.public })
     socket.on("open", hello)
     socket.on("message", (data, binary) => {
       if (stopped || socket.readyState !== WebSocket.OPEN) return
       link.received = Date.now()
-      if (binary) return refuse(link, "text frames required")
-      const text = data.toString()
+      if (binary !== !!link.channel) return refuse(link, link.channel ? "sealed frames required" : "text frames required")
+      let text: string
+      try {
+        const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)
+        text = link.channel ? link.channel.open(bytes) : bytes.toString("utf8")
+      } catch {
+        return refuse(link, "invalid sealed frame")
+      }
       if (Buffer.byteLength(text) > MESH_FRAME_BYTES) return refuse(link, "frame too large")
       try {
         onFrame(link, text)
@@ -438,7 +504,7 @@ export function startMesh(options: MeshOptions): MeshLink {
     if (stopped || peers.get(peer.addr) !== peer) return
     try {
       const { host, port } = parseHostPort(peer.addr)
-      peer.link = attach(new WebSocket(`ws://${hostPort(host, port)}${MESH_PATH}`, { maxPayload: MESH_FRAME_BYTES }), peer)
+      peer.link = attach(new WebSocket(`ws://${hostPort(host, port)}${MESH_PATH}`, { maxPayload: MESH_FRAME_BYTES + SEAL_TAG_BYTES }), peer)
     } catch (error) {
       report(error, peer)
       retry(peer)
@@ -475,7 +541,7 @@ export function startMesh(options: MeshOptions): MeshLink {
     if (!options.config.listen) return resolve(null)
     try {
       const { host, port } = parseHostPort(options.config.listen, { listen: true })
-      server = new WebSocketServer({ host, port, path: MESH_PATH, maxPayload: MESH_FRAME_BYTES })
+      server = new WebSocketServer({ host, port, path: MESH_PATH, maxPayload: MESH_FRAME_BYTES + SEAL_TAG_BYTES })
       server.on("listening", () => {
         const address = server!.address()
         if (!address || typeof address === "string") return reject(new Error("no mesh listener address"))
@@ -487,6 +553,12 @@ export function startMesh(options: MeshOptions): MeshLink {
         reject(error)
       })
       server.on("connection", (socket) => {
+        let pending = 0
+        for (const link of links) if (!link.peer && !link.authenticated) pending++
+        if (pending >= PENDING_INBOUND) {
+          socket.on("error", () => {})
+          return socket.close(1013, "too many links authenticating")
+        }
         const link = attach(socket, null)
         if (stopped) close(link, 1000, "mesh stopped")
       })
@@ -566,6 +638,8 @@ export function startMesh(options: MeshOptions): MeshLink {
     if (handle === null) throw new RelayError("policy_refused", `${sender} is not mirrored to the mesh, so it can't message other machines`)
     const link = linked(name)
     if (!link) throw new RelayError("unavailable", `machine ${name} is not linked to this one over the mesh`, 5)
+    clearTimeout(rebuildTimer)
+    rebuild()
     const clientId = params.client_id ?? newId("fwd")
     const sent: SendParams = { ...params, client_id: clientId, to: routes as string[] }
     delete (sent as { wait_s?: unknown }).wait_s
@@ -634,7 +708,10 @@ export function startMesh(options: MeshOptions): MeshLink {
     forward,
     changed: schedule,
     resync: schedule,
-    renamed: schedule,
+    renamed: (endpoint, was) => {
+      if (!renames.has(endpoint)) renames.set(endpoint, was)
+      schedule()
+    },
     activity: () => {},
     relink,
     status,

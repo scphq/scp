@@ -167,7 +167,7 @@ The CLI shows only live endpoints (online, idle or hibernated) and the human by 
 
 | Verb | Effect |
 | --- | --- |
-| `init [--account <handle>] [--account-key <file>] [--machine <name>] [--listen <host:port>] [--force]` | Needs `--account` or `--account-key` (which must agree); `--machine` defaults to the short hostname. Creates or imports `account.key` (an existing key for the same account is kept), ensures `machine.key` and writes `mesh.json` (`enabled: true`). An existing `mesh.json` needs `--force`, which keeps its peers. |
+| `init [--account <handle>] [--account-key <file>] [--machine <name>] [--listen <host:port>] [--force]` | Needs `--account` or `--account-key` (which must agree; `-` reads the key from stdin); `--machine` defaults to the short hostname. Creates or imports `account.key` (an existing key for the same account is kept), ensures `machine.key` and writes `mesh.json` (`enabled: true`). An existing `mesh.json` needs `--force`, which keeps its peers. |
 | `add-peer <host:port>` | Adds a peer to `mesh.json`. |
 | `rm-peer <host:port>` | Removes a peer from `mesh.json`. |
 | `listen <host:port\|off>` | Sets or clears `listen` in `mesh.json`. |
@@ -175,7 +175,7 @@ The CLI shows only live endpoints (online, idle or hibernated) and the human by 
 | `status [--json]` | Shows `mesh.json` and live state from `cloud_status`, which gains `mesh {account, acct, listen, peers, links, machines}`. |
 | `help` | Prints usage; every verb also takes `--help`. |
 
-Changes take effect when the broker restarts, except peers, which are re-read every 5 s.
+Changes take effect when the broker restarts (`init`, `listen`, `on` and `off` say so), except peers, which are re-read every 5 s.
 
 ## Judge
 

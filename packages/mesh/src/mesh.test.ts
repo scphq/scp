@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Broker, type BrokerOptions, RelayClient, startBroker } from "@scp-dev/broker"
 import { type EndpointView, type Envelope, FakeJudgeClient, LIMITS, RelayError, type SendResult, SERVER_FIELDS } from "@scp-dev/core"
 import { WebSocket } from "ws"
 import type { AccountKey, MeshConfig } from "./config"
-import { accountId, canonicalJson, generateKeyPair, newNonce, SIGN_DOMAIN, signPayload, verifyPayload } from "./keys"
+import { accountId, canonicalJson, generateKeyPair, type KeyPair, newNonce, SIGN_DOMAIN, signPayload, verifyPayload } from "./keys"
 import { type MeshLink, type MeshOptions, type MeshStatus, startMesh } from "./link"
+import { type Channel, newExchange, openChannel, SEAL_TAG_BYTES } from "./seal"
 import { issueCert, type MachineCert, MESH_FRAME_BYTES, MESH_PATH, signRecord, verifyCert, verifyRecord } from "./wire"
 
 setDefaultTimeout(15_000)
@@ -100,12 +102,20 @@ type Frame = {
   error?: { code: number; message: string; data: { code: string; retry_after?: number } }
 }
 
-async function rawPeer(target: Machine, account: AccountKey, name = "c", options: { badAuth?: boolean; silent?: boolean } = {}) {
-  const key = generateKeyPair()
+async function rawPeer(
+  target: Machine,
+  account: AccountKey,
+  name = "c",
+  options: { badAuth?: boolean; silent?: boolean; otherKx?: boolean; key?: KeyPair } = {},
+) {
+  const key = options.key ?? generateKeyPair()
   const cert = issueCert(account, name, key)
   const acct = accountId(account.public)
   const nonce = newNonce()
-  const socket = new WebSocket(`ws://${target.addr}${MESH_PATH}`, { maxPayload: MESH_FRAME_BYTES })
+  const exchange = newExchange()
+  let channel: Channel | null = null
+  let remoteKx = ""
+  const socket = new WebSocket(`ws://${target.addr}${MESH_PATH}`, { maxPayload: MESH_FRAME_BYTES + SEAL_TAG_BYTES })
   const frames: Frame[] = []
   const pending = new Map<number, (frame: Frame) => void>()
   let authenticated = false
@@ -115,7 +125,11 @@ async function rawPeer(target: Machine, account: AccountKey, name = "c", options
   let nextId = 1
   let seq = 0
   const epoch = Date.now()
-  const notify = (method: string, params: object) => socket.send(JSON.stringify({ jsonrpc: "2.0", method, params }))
+  const raw = (frame: object) => {
+    const text = JSON.stringify({ jsonrpc: "2.0", ...frame })
+    socket.send(channel ? channel.seal(text) : text)
+  }
+  const notify = (method: string, params: object) => raw({ method, params })
   const closed = new Promise<void>((resolve) =>
     socket.once("close", (code) => {
       closeCode = code
@@ -127,17 +141,29 @@ async function rawPeer(target: Machine, account: AccountKey, name = "c", options
     await closed
   })
   socket.on("error", () => {})
-  socket.on("message", (data) => {
-    const frame = JSON.parse(data.toString()) as Frame
+  socket.on("message", (data, binary) => {
+    const frame = JSON.parse(binary && channel ? channel.open(data as Buffer) : data.toString()) as Frame
     frames.push(frame)
     if (frame.method === "mesh_hello") {
       remoteNonce = frame.params!.nonce as string
       remoteCert = frame.params!.cert as MachineCert
-      const payload = { acct, from: name, to: remoteCert.machine, peer_nonce: remoteNonce, nonce }
+      remoteKx = frame.params!.kx as string
+      const payload = { acct, from: name, to: remoteCert.machine, peer_nonce: remoteNonce, nonce, peer_kx: remoteKx, kx: exchange.public, dialed: true }
       notify("mesh_auth", { sig: signPayload(options.badAuth ? generateKeyPair() : key, SIGN_DOMAIN.auth, payload) })
     } else if (frame.method === "mesh_auth") {
-      const payload = { acct, from: remoteCert!.machine, to: name, peer_nonce: nonce, nonce: remoteNonce }
+      const remote = remoteCert!.machine
+      const payload = { acct, from: remote, to: name, peer_nonce: nonce, nonce: remoteNonce, peer_kx: exchange.public, kx: remoteKx, dialed: false }
       authenticated = verifyPayload(remoteCert!.key, SIGN_DOMAIN.auth, payload, frame.params!.sig)
+      if (authenticated && !options.badAuth) {
+        const mine = { dialer: name, from_nonce: nonce, from_kx: exchange.public }
+        const theirs = { dialer: name, from_nonce: remoteNonce, from_kx: remoteKx }
+        channel = openChannel(
+          exchange,
+          remoteKx,
+          { acct, from: name, to: remote, ...mine, to_nonce: remoteNonce, to_kx: remoteKx },
+          { acct, from: remote, to: name, ...theirs, to_nonce: nonce, to_kx: exchange.public },
+        )
+      }
     } else if (frame.method === "ping" && !options.silent) {
       notify("ping", {})
     }
@@ -148,7 +174,7 @@ async function rawPeer(target: Machine, account: AccountKey, name = "c", options
   })
   await new Promise<void>((resolve, reject) => {
     socket.once("open", () => {
-      notify("mesh_hello", { protocol: "scp/1", acct, cert, nonce })
+      notify("mesh_hello", { protocol: "scp/1", acct, cert, nonce, kx: options.otherKx ? newExchange().public : exchange.public })
       resolve()
     })
     socket.once("error", reject)
@@ -159,6 +185,7 @@ async function rawPeer(target: Machine, account: AccountKey, name = "c", options
     cert,
     key,
     notify,
+    sealed: (frame: object) => channel!.seal(JSON.stringify({ jsonrpc: "2.0", ...frame })),
     authenticated: () => authenticated,
     closeCode: () => closeCode,
     ready: () => waitFor(() => frames.some((frame) => frame.method === "records"), "raw peer authentication"),
@@ -178,7 +205,7 @@ async function rawPeer(target: Machine, account: AccountKey, name = "c", options
           clearTimeout(timer)
           resolve(frame)
         })
-        socket.send(JSON.stringify({ jsonrpc: "2.0", id, method: "forward", params }))
+        raw({ id, method: "forward", params })
       })
     },
   }
@@ -249,6 +276,25 @@ describe("mesh brokers", () => {
     expect(await code(impl.request("send", { to: ["b/review", "c/review"], body: "split" }))).toBe("invalid_params")
   })
 
+  test("a rename on one machine renames the mirror in place, and the wake binding is carried", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const a = await machine(account, "a", { peers: [b.addr!], listen: null })
+    const impl = await agent(a.broker, "impl")
+    const review = await agent(b.broker, "review")
+    const before = await waitFor(() => listed(impl, "me/b/review"), "remote review")
+    expect(before.wake).toBeNull()
+    const sent = await impl.request<SendResult>("send", { to: "b/review", body: "look" })
+    const question = (await review.request<Inbox>("inbox", { wait_s: 2 })).messages[0]!
+    await review.request("rename", { handle: "critic" })
+    const after = await waitFor(() => listed(impl, "me/b/critic"), "renamed mirror")
+    expect(after.id).toBe(before.id)
+    expect(await listed(impl, "me/b/review")).toBeUndefined()
+    await review.request("send", { to: "a/impl", body: "looked", kind: "reply", reply_to: question.id })
+    const reply = (await impl.request<Inbox>("inbox", { wait_s: 2 })).messages.find((row) => row.body.text === "looked")!
+    expect(reply).toMatchObject({ reply_to: sent.id, from: { address: "me/b/critic" } })
+  })
+
   test("the receiving broker's judge gates messages from other machines", async () => {
     const account = accountKey()
     const root = mkdtempSync(join(tmpdir(), "mesh-judge-"))
@@ -296,6 +342,113 @@ describe("mesh brokers", () => {
     expect((await forward({ body: "allowed", attachments: [{ path: "/missing" }], wait_s: 100 })).error).toBeUndefined()
     expect((await review.request<Inbox>("inbox")).messages.map((row) => row.body.text)).toEqual(["allowed"])
     expect((await forward({}, { hop_floor: LIMITS.hopMax + 1 })).error?.data.code).toBe("loop_guard")
+  })
+
+  test("frames after authentication are sealed, and a replayed, altered or cleartext frame closes the link", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const tapped: Buffer[] = []
+    const tap = createServer((inbound) => {
+      const outbound = connect(Number(b.addr!.split(":")[1]), "127.0.0.1")
+      for (const [from, to] of [
+        [inbound, outbound],
+        [outbound, inbound],
+      ] as const) {
+        from.on("data", (chunk: Buffer) => {
+          tapped.push(chunk)
+          to.write(chunk)
+        })
+        from.on("error", () => to.destroy())
+        from.on("close", () => to.destroy())
+      }
+    })
+    await new Promise<void>((resolve) => tap.listen(0, "127.0.0.1", resolve))
+    cleanups.push(() => new Promise<void>((resolve) => tap.close(() => resolve())))
+    const a = await machine(account, "a", { peers: [`127.0.0.1:${(tap.address() as { port: number }).port}`], listen: null })
+    const impl = await agent(a.broker, "impl")
+    const review = await agent(b.broker, "review")
+    await waitFor(() => listed(impl, "me/b/review"), "remote review")
+    await impl.request("send", { to: "b/review", body: "marker-6f1d-plaintext" })
+    await waitFor(async () => (await review.request<Inbox>("inbox", { wait_s: 1 })).messages.length, "the sealed message")
+    const wire = Buffer.concat(tapped).toString("latin1")
+    expect(wire).toContain("mesh_hello")
+    expect(wire).not.toContain("marker-6f1d-plaintext")
+    expect(wire).not.toContain("me/review")
+
+    const replayed = await rawPeer(b, account, "c")
+    await replayed.ready()
+    const ping = replayed.sealed({ method: "ping", params: {} })
+    replayed.socket.send(ping)
+    replayed.socket.send(ping)
+    await waitFor(() => replayed.closeCode(), "replay close")
+    expect(replayed.closeCode()).toBe(1008)
+    const altered = await rawPeer(b, account, "d")
+    await altered.ready()
+    const frame = altered.sealed({ method: "ping", params: {} })
+    frame[0]! ^= 1
+    altered.socket.send(frame)
+    await waitFor(() => altered.closeCode(), "altered close")
+    expect(altered.closeCode()).toBe(1008)
+    const clear = await rawPeer(b, account, "e")
+    await clear.ready()
+    clear.socket.send(JSON.stringify({ jsonrpc: "2.0", method: "ping", params: {} }))
+    await waitFor(() => clear.closeCode(), "cleartext close")
+    expect(clear.closeCode()).toBe(1008)
+    const swapped = await rawPeer(b, account, "f", { otherKx: true })
+    await waitFor(() => swapped.closeCode(), "swapped key exchange close")
+    expect(swapped.closeCode()).toBe(1008)
+  })
+
+  test("a third party dialing two machines cannot splice their handshakes into one link", async () => {
+    const account = accountKey()
+    const a = await machine(account, "a")
+    const b = await machine(account, "b")
+    const dial = async (target: Machine) => {
+      const socket = new WebSocket(`ws://${target.addr}${MESH_PATH}`)
+      const frames: Frame[] = []
+      const closed = new Promise<number>((resolve) => socket.once("close", resolve))
+      cleanups.push(async () => {
+        socket.terminate()
+        await closed
+      })
+      socket.on("error", () => {})
+      socket.on("message", (data, binary) => {
+        if (!binary) frames.push(JSON.parse(data.toString()) as Frame)
+      })
+      await new Promise((resolve) => socket.once("open", resolve))
+      const hello = await waitFor(() => frames.find((frame) => frame.method === "mesh_hello"), "hello")
+      const auth = () => waitFor(() => frames.find((frame) => frame.method === "mesh_auth"), "auth")
+      const send = (method: string, params: unknown) => socket.send(JSON.stringify({ jsonrpc: "2.0", method, params }))
+      return { hello: hello.params!, auth, send, closed }
+    }
+    const toA = await dial(a)
+    const toB = await dial(b)
+    toB.send("mesh_hello", toA.hello)
+    toA.send("mesh_hello", toB.hello)
+    const [fromA, fromB] = await Promise.all([toA.auth(), toB.auth()])
+    toA.send("mesh_auth", fromB.params)
+    toB.send("mesh_auth", fromA.params)
+    expect(await toA.closed).toBe(1008)
+    expect(await toB.closed).toBe(1008)
+    expect(a.mesh.status().mesh.links).toEqual([])
+    expect(b.mesh.status().mesh.links).toEqual([])
+  })
+
+  test("at most 64 inbound links authenticate at once", async () => {
+    const b = await machine(accountKey(), "b")
+    const open = async () => {
+      const socket = new WebSocket(`ws://${b.addr}${MESH_PATH}`)
+      const closed = new Promise<number>((resolve) => socket.once("close", resolve))
+      cleanups.push(async () => {
+        socket.terminate()
+        await closed
+      })
+      socket.on("error", () => {})
+      await new Promise((resolve) => socket.once("open", resolve))
+      return { closed }
+    }
+    await Promise.all(Array.from({ length: 64 }, open))
+    expect(await (await open()).closed).toBe(1013)
   })
 
   test("another account and an invalid authentication signature close with policy errors", async () => {
@@ -377,7 +530,7 @@ describe("mesh brokers", () => {
     const review = await agent(b.broker, "review")
     const first = await rawPeer(b, account)
     await carried(b, first)
-    const second = await rawPeer(b, account)
+    const second = await rawPeer(b, account, "c", { key: first.key })
     await second.ready()
     await waitFor(() => b.mesh.status().mesh.links.length === 2, "both links")
     const sending = code(review.request("send", { to: "c/source", body: "latest" }))
@@ -407,6 +560,51 @@ describe("mesh brokers", () => {
     const result = await peer.request({ from: "source", params: { to: "b/me", body: "removed sender" } })
     expect(result.error?.data.code).toBe("not_found")
     expect(b.mesh.status().mesh.machines.find((row) => row.machine === "c")).toMatchObject({ seq: second.seq, endpoints: 0 })
+  })
+
+  test("a second machine under a linked machine's name is refused, and so are its records", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const first = await rawPeer(b, account, "c")
+    await carried(b, first)
+    const twin = await rawPeer(b, account, "c")
+    await waitFor(() => twin.closeCode(), "twin close")
+    expect(twin.closeCode()).toBe(1008)
+    const relay = await rawPeer(b, account, "d")
+    await relay.ready()
+    const key = generateKeyPair()
+    const forged = signRecord(key, {
+      v: 1,
+      acct: accountId(account.public),
+      machine: "c",
+      epoch: Date.now() + 1000,
+      seq: 1,
+      endpoints: [],
+      cert: issueCert(account, "c", key),
+    })
+    relay.notify("records", { records: [forged] })
+    relay.record()
+    await waitFor(() => b.mesh.status().mesh.machines.some((row) => row.machine === "d"), "the relay's own record")
+    expect(b.mesh.status().mesh.machines.find((row) => row.machine === "c")).toMatchObject({ seq: 1, endpoints: 1 })
+    const self = await rawPeer(b, account, "b")
+    await waitFor(() => self.closeCode(), "same name close")
+    expect(self.closeCode()).toBe(1008)
+    first.socket.close()
+    await waitFor(() => !b.mesh.status().mesh.links.some((row) => row.machine === "c"), "c unlinked")
+    const later = signRecord(key, {
+      v: 1,
+      acct: accountId(account.public),
+      machine: "c",
+      epoch: Date.now() + 1_000_000,
+      seq: 1,
+      endpoints: [],
+      cert: issueCert(account, "c", key),
+    })
+    relay.notify("records", { records: [later] })
+    await waitFor(() => b.mesh.status().mesh.machines.find((row) => row.machine === "c")?.endpoints === 0, "the stored rival record")
+    const back = await rawPeer(b, account, "c", { key: first.key })
+    await carried(b, back)
+    expect(b.mesh.status().mesh.machines.find((row) => row.machine === "c")).toMatchObject({ endpoints: 1, linked: true })
   })
 
   test("a silent authenticated peer is closed after three heartbeats", async () => {
