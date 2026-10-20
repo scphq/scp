@@ -2199,8 +2199,9 @@ describe("spawn bindings", () => {
 
   test("spawn_steers returns the worker's harness session and the issuer's unread steers, marking them read only with take and a session", () => {
     const { core, actor, main, grant, shim } = spawned({ spawn: true })
-    expect(core.spawnSteers(actor, { grant: grant.token })).toEqual({ session: null, steers: [], transcript: null })
+    expect(core.spawnSteers(actor, { grant: grant.token })).toEqual({ session: null, steers: [], transcript: null, joined: false })
     const { endpoint } = shim(6)
+    expect(core.spawnSteers(actor, { grant: grant.token }).joined).toBe(true)
     core.send(core.humanId(), { to: "wm1", body: "fyi" }, { tty: true })
     const steer = core.send(main.id, { to: "wm1", body: "and lint" })
     const untaken = core.spawnSteers(actor, { grant: grant.token, take: true })
@@ -2226,7 +2227,7 @@ describe("spawn bindings", () => {
     const hook = { transient: true, process: key(6) }
     const path = "/home/u/.claude/projects/-w/019a-s.jsonl"
     core.event(endpoint.id, { kind: "session_start", session_id: "019a-s", transcript_path: path }, hook)
-    expect(core.spawnSteers(actor, { grant: grant.token })).toEqual({ session: "019a-s", steers: [], transcript: path })
+    expect(core.spawnSteers(actor, { grant: grant.token })).toEqual({ session: "019a-s", steers: [], transcript: path, joined: true })
     for (const bad of ["/home/u/other.jsonl", "rel/019a-s.jsonl", "/x/019a-s.jsonl.bak", "/x/\n/019a-s.jsonl", `/${"x".repeat(5000)}/019a-s.jsonl`, 5]) {
       core.event(endpoint.id, { kind: "session_start", session_id: "019a-s", transcript_path: path }, hook)
       core.event(endpoint.id, { kind: "tool", session_id: "019a-s", transcript_path: bad }, hook)
@@ -2236,7 +2237,7 @@ describe("spawn bindings", () => {
     core.event(endpoint.id, { kind: "tool", tool: "Bash", agent: "sub-1", session_id: "019a-x", transcript_path: "/x/019a-x.jsonl" }, hook)
     expect(core.spawnSteers(actor, { grant: grant.token }).transcript).toBe(path)
     core.event(endpoint.id, { kind: "tool", session_id: "019a-t" }, hook)
-    expect(core.spawnSteers(actor, { grant: grant.token })).toEqual({ session: "019a-t", steers: [], transcript: null })
+    expect(core.spawnSteers(actor, { grant: grant.token })).toEqual({ session: "019a-t", steers: [], transcript: null, joined: true })
   })
 
   test("spawn_steers taking steers for a resume ends the exited worker's hook presence, so the resumed session's shim re-claims its endpoint", () => {

@@ -25,6 +25,7 @@ import {
   type Reach,
   RelayError,
   SCOPE_PRESETS,
+  SPAWN_PROVIDER,
   type ScopeActor,
   type ScopeCap,
   type ScopeChange,
@@ -294,6 +295,8 @@ export interface EndpointRow {
   /** the message, and its sender, the decline was for */
   declined_message: string | null
   declined_from: string | null
+  /** a held spawn's durable ref: when its holding connection goes without a hibernate or spawn_end, the broker hibernates it by `spawn` with this ref */
+  hold_ref: string | null
 }
 
 /** a wake hook run that is due: the hibernated endpoint, its provider and ref, and the newest unread message's metadata (never a body) */
@@ -374,6 +377,10 @@ interface GrantRow {
   handback: string | null
   /** when a push last showed a message from the grant's spender */
   pushed_at: number | null
+  /** the last spawn run a handback went out for: run 1 is the first; null before any */
+  run: number | null
+  /** when the worker's spawner or an ancestor ended it (spawn_end): its spawn no longer holds it */
+  ended_at: number | null
   created_at: number
   expires_at: number
   revoked_at: number | null
@@ -427,6 +434,8 @@ interface ClaimScope {
   groups: string[]
   cwd: string | null
   exact?: boolean
+  /** the agent the claim asks to sit under (rule 7); naming the parent a row hibernated by `spawn` sits under restarts that row in place */
+  under?: string
   /** the claimant's nearest harness process, the end of its shell's walk (`self`), when that walk begins its lineage */
   nearest?: string
   /** a hook's claim for a subagent of the endpoint `root` */
@@ -606,6 +615,7 @@ export class RelayCore {
       ["wake_declined", "TEXT"],
       ["declined_message", "TEXT"],
       ["declined_from", "TEXT"],
+      ["hold_ref", "TEXT"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -619,6 +629,8 @@ export class RelayCore {
     if (!grantColumns.includes("handback")) this.sql.all(`ALTER TABLE grants ADD COLUMN handback TEXT`)
     if (!grantColumns.includes("pushed_at")) this.sql.all(`ALTER TABLE grants ADD COLUMN pushed_at INTEGER`)
     if (!grantColumns.includes("steer")) this.sql.all(`ALTER TABLE grants ADD COLUMN steer TEXT`)
+    if (!grantColumns.includes("run")) this.sql.all(`ALTER TABLE grants ADD COLUMN run INTEGER`)
+    if (!grantColumns.includes("ended_at")) this.sql.all(`ALTER TABLE grants ADD COLUMN ended_at INTEGER`)
     this.sql.all(`CREATE INDEX IF NOT EXISTS grants_bound ON grants (bound_process)`)
     this.sql.all(`CREATE INDEX IF NOT EXISTS grants_issuer ON grants (issuer)`)
     this.sql.all(`CREATE INDEX IF NOT EXISTS grants_used ON grants (used_by)`)
@@ -791,6 +803,7 @@ export class RelayCore {
       groups: groupNames(claim.groups, "groups"),
       cwd: fields.cwd,
       exact: claim.exact === true && !subagent,
+      ...(under !== null && !subagent ? { under } : {}),
     }
     const self = lineageKeys(options.self)
     const nearest = self.at(-1)
@@ -1001,7 +1014,9 @@ export class RelayCore {
         const ended = held.hook_ended !== null || (held.last_seen ?? held.created_at) < now - LIMITS.restartGraceS * 1000
         if (
           (!transient || own || ended) &&
-          (this.restarts(held, this.placement(scope, now).parent, fields.process) || this.redeems(held, scope, { harness, ...fields }))
+          (this.restarts(held, this.placement(scope, now).parent, fields.process) ||
+            this.redeems(held, scope, { harness, ...fields }) ||
+            (!transient && this.placedUnder(held, scope)))
         )
           row = held
       } else if (
@@ -1160,10 +1175,11 @@ export class RelayCore {
       .caps.filter((cap) => kind === "process" || cap.by === "human")
       .map((cap) => ({ ...cap, sels: cap.sels.filter((entry) => entry.via === undefined || entry.via === cap.by) }))
     const stored = caps.length ? JSON.stringify({ caps, allow: {} }) : null
-    if (kind === "process") this.sql.all(`UPDATE endpoints SET caps = ?, reset_at = ?, peek = NULL, wake = NULL WHERE id = ?`, stored, now, row.id)
+    if (kind === "process")
+      this.sql.all(`UPDATE endpoints SET caps = ?, reset_at = ?, peek = NULL, wake = NULL, hold_ref = NULL WHERE id = ?`, stored, now, row.id)
     else
       this.sql.all(
-        `UPDATE endpoints SET rules = NULL, caps = ?, status_state = NULL, status_note = NULL, title = NULL, reset_at = ?, spawned_at = ?, peek = NULL, harness_session = NULL, wake = NULL WHERE id = ?`,
+        `UPDATE endpoints SET rules = NULL, caps = ?, status_state = NULL, status_note = NULL, title = NULL, reset_at = ?, spawned_at = ?, peek = NULL, harness_session = NULL, wake = NULL, hold_ref = NULL WHERE id = ?`,
         stored,
         now,
         now,
@@ -1278,6 +1294,19 @@ export class RelayCore {
   private restarts(row: EndpointRow, parent: EndpointRow | null, process: string | null): boolean {
     if (parent?.id === row.id) return process !== null && row.process !== null && sameHarness(row.process, process)
     return (parent?.id ?? null) === row.parent_ep || (parent === null && row.linked !== null)
+  }
+
+  /**
+   * whether a claim's `under` names the local agent that `row`, hibernated by the built-in {@link SPAWN_PROVIDER} waker, sits under: the
+   * waker's runner taking the worker back where it is, as a restart in place
+   */
+  private placedUnder(row: EndpointRow, scope: ClaimScope): boolean {
+    if (scope.under === undefined || row.parent_ep === null || row.hibernate !== SPAWN_PROVIDER) return false
+    try {
+      return this.resolve(scope.under).id === row.parent_ep
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -1609,15 +1638,19 @@ export class RelayCore {
    * how the session holding an agent endpoint wakes it when idle, one of {@link WAKES}; `none` clears it. Only the process holding the
    * endpoint sets it through a hook; whether it changed
    */
-  setWake(endpoint: string, value: unknown, options: { transient?: boolean; process?: string } = {}): boolean {
+  setWake(endpoint: string, value: unknown, options: { transient?: boolean; process?: string; ref?: unknown } = {}): boolean {
     if (typeof value !== "string" || !WAKES.includes(value as Wake)) throw new RelayError("invalid_params", `via must be one of ${WAKES.join(", ")}`)
+    const ref = options.ref === undefined || options.ref === null ? null : this.wakeRef(options.ref)
+    if (ref !== null && (value !== "spawn-resume" || options.transient))
+      throw new RelayError("invalid_params", "ref goes only with spawn-resume, from the connection that holds the spawn")
     const row = this.mustEndpoint(endpoint)
     if (row.kind !== "agent") throw new RelayError("invalid_params", "only an agent endpoint wakes")
     if (!this.holds(row, options)) return false
     const wake = value === "none" ? null : value
-    if (row.wake === wake) return false
-    this.sql.all(`UPDATE endpoints SET wake = ? WHERE id = ?`, wake, endpoint)
-    return true
+    const hold = options.transient ? row.hold_ref : ref
+    if (row.wake === wake && row.hold_ref === hold) return false
+    this.sql.all(`UPDATE endpoints SET wake = ?, hold_ref = ? WHERE id = ?`, wake, hold, endpoint)
+    return row.wake !== wake
   }
 
   /**
@@ -2030,7 +2063,11 @@ export class RelayCore {
         const parent = this.byId(target.parent_ep)
         throw new RelayError("scope_refused", `spawned by ${parent ? this.address(parent) : "another agent"}; a spawned worker stays joined while it runs`)
       }
-      this.sql.all(`UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ?, wake = NULL WHERE id = ?`, this.now(), target.id)
+      this.sql.all(
+        `UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ?, wake = NULL, hold_ref = NULL WHERE id = ?`,
+        this.now(),
+        target.id,
+      )
       this.wakeDone(target.id, "leave")
       this.audit("leave", target.id, null, { handle: target.handle })
       return { endpoint: this.whoami(target.id), session: target.session }
@@ -2089,13 +2126,7 @@ export class RelayCore {
     const wake = params?.wake
     if (typeof wake !== "string" || (wake !== "none" && !WAKE_PROVIDER.test(wake)))
       throw new RelayError("invalid_params", "wake is a provider name (lowercase letters, digits and hyphens, at most 32) or none")
-    let ref: string | null = null
-    if (params.ref !== undefined && params.ref !== null) {
-      if (typeof params.ref !== "string" || params.ref.length > LIMITS.wakeRefChars || /[\u0000-\u001f\u007f]/.test(params.ref))
-        throw new RelayError("invalid_params", `ref is a string of at most ${LIMITS.wakeRefChars} characters with no control characters`)
-      if (findSecret(params.ref)) throw new RelayError("secret_refused", "the wake ref looks like it carries a credential")
-      ref = params.ref
-    }
+    const ref = params.ref === undefined || params.ref === null ? null : this.wakeRef(params.ref)
     let eta: number | null = null
     if (params.eta_s !== undefined && params.eta_s !== null) {
       if (typeof params.eta_s !== "number" || !Number.isInteger(params.eta_s) || params.eta_s < 1 || params.eta_s > LIMITS.wakeEtaMaxS)
@@ -2104,6 +2135,14 @@ export class RelayCore {
     }
     if (wake !== "none" && options.known && !options.known(wake)) throw new RelayError("invalid_params", `no waker ${wake} is configured`)
     return { wake, ref, eta }
+  }
+
+  /** a provider's opaque reference to a session: at most LIMITS.wakeRefChars characters, no control characters, no credential */
+  private wakeRef(value: unknown): string {
+    if (typeof value !== "string" || value.length > LIMITS.wakeRefChars || /[\u0000-\u001f\u007f]/.test(value))
+      throw new RelayError("invalid_params", `ref is a string of at most ${LIMITS.wakeRefChars} characters with no control characters`)
+    if (findSecret(value)) throw new RelayError("secret_refused", "the wake ref looks like it carries a credential")
+    return value
   }
 
   private setHibernation(me: EndpointRow, target: EndpointRow, set: { wake: string; ref: string | null; eta: number | null }): EndpointView {
@@ -2117,7 +2156,7 @@ export class RelayCore {
     }
     this.clearHibernation(target.id)
     this.sql.all(
-      `UPDATE endpoints SET hibernate = ?, wake_ref = ?, wake_eta = ?, hibernated_at = ? WHERE id = ?`,
+      `UPDATE endpoints SET hibernate = ?, wake_ref = ?, wake_eta = ?, hibernated_at = ?, hold_ref = NULL WHERE id = ?`,
       set.wake,
       set.ref,
       set.eta,
@@ -2126,6 +2165,34 @@ export class RelayCore {
     )
     this.audit("hibernate", target.id, null, { by: this.address(me), target: address, provider: set.wake })
     return this.view(this.byId(target.id)!)
+  }
+
+  /**
+   * the held spawn `endpoint` whose holding connection closed without a hibernate or spawn_end, or, with none named (the broker starting after
+   * a crash or reboot), every endpoint a durable spawn held: hibernated by the built-in provider {@link SPAWN_PROVIDER} with the spawn's durable
+   * ref, audited `hibernate {by: "broker"}`. The endpoints it hibernated
+   */
+  hibernateHeld(endpoint?: string): EndpointView[] {
+    return this.tx(() => {
+      const rows = this.sql.all<EndpointRow>(
+        `SELECT * FROM endpoints WHERE kind = 'agent' AND hold_ref IS NOT NULL AND hibernate IS NULL AND wakers <= 1 AND (? IS NULL OR id = ?) ORDER BY handle`,
+        endpoint ?? null,
+        endpoint ?? null,
+      )
+      return rows
+        .filter((row) => this.localRow(row))
+        .map((row) => {
+          this.clearHibernation(row.id)
+          this.sql.all(
+            `UPDATE endpoints SET hibernate = ?, wake_ref = hold_ref, hold_ref = NULL, hibernated_at = ? WHERE id = ?`,
+            SPAWN_PROVIDER,
+            this.now(),
+            row.id,
+          )
+          this.audit("hibernate", row.id, null, { by: "broker", target: this.address(row), provider: SPAWN_PROVIDER })
+          return this.view(this.byId(row.id)!)
+        })
+    })
   }
 
   /**
@@ -4297,11 +4364,24 @@ export class RelayCore {
    */
   spawnExit(
     actor: ScopeActor,
-    params: { grant: string; code: number; output?: string; stderr?: string; unapplied?: string[]; exits?: number[]; started?: boolean },
+    params: {
+      grant: string
+      code: number
+      output?: string
+      stderr?: string
+      unapplied?: string[]
+      exits?: number[]
+      started?: boolean
+      run?: number
+      reply_to?: string
+    },
   ): { joined: boolean; name: string | null; endpoint: EndpointView | null; handback: string | null; spawner: string } {
     const p = params ?? ({} as typeof params)
     if (typeof p.grant !== "string" || !GRANT_TOKEN.test(p.grant)) throw new RelayError("invalid_params", "grant is a krt_ token")
     if (!Number.isInteger(p.code) || p.code < 0 || p.code > 255) throw new RelayError("invalid_params", "code is an exit code, 0 to 255")
+    const run = p.run === undefined || p.run === null ? 1 : p.run
+    if (!Number.isInteger(run) || run < 1) throw new RelayError("invalid_params", "run is a whole number from 1")
+    if (p.reply_to !== undefined && p.reply_to !== null && typeof p.reply_to !== "string") throw new RelayError("invalid_params", "reply_to is a message id")
     if (p.output !== undefined && p.output !== null && typeof p.output !== "string") throw new RelayError("invalid_params", "output is a string")
     if (p.stderr !== undefined && p.stderr !== null && typeof p.stderr !== "string") throw new RelayError("invalid_params", "stderr is a string")
     if (p.started !== undefined && p.started !== null && typeof p.started !== "boolean") throw new RelayError("invalid_params", "started is a boolean")
@@ -4318,6 +4398,7 @@ export class RelayCore {
       const { grant, spender } = this.spawnGrant(me, p.grant)
       const now = this.now()
       const spawner = this.byId(grant.issuer) ?? me
+      if (!spender && run > 1) return { joined: false, name: grant.name, endpoint: null, handback: null, spawner: spawner.id }
       if (!spender) {
         this.sql.all(`UPDATE grants SET revoked_at = COALESCE(revoked_at, ?) WHERE token_hash = ?`, now, grant.token_hash)
         const lost = this.sql.all(`DELETE FROM deliveries WHERE endpoint = ? RETURNING seq`, pendingKey(grant.token_hash)).length
@@ -4334,8 +4415,12 @@ export class RelayCore {
         spender.id,
       )
       const exits = (exitTimes as number[]).map((at) => Math.min(Math.max(at, grant.created_at), now)).sort((a, b) => a - b)
-      const handback = this.handback(spawner, grant, spender, p.code, output, unapplied as string[], 0, exits, stderr)
-      this.audit("spawn_exit", spender.id, handback, { by: this.address(me), code: p.code, handback })
+      const handback =
+        run === 1
+          ? this.handback(spawner, grant, spender, p.code, output, unapplied as string[], 0, exits, stderr)
+          : this.runHandback(spawner, grant, spender, run, p.code, output, stderr, typeof p.reply_to === "string" ? p.reply_to : undefined)
+      if (run === 1 && handback) this.sql.all(`UPDATE grants SET run = 1 WHERE token_hash = ? AND run IS NULL`, grant.token_hash)
+      this.audit("spawn_exit", spender.id, handback, { by: this.address(me), code: p.code, handback, ...(run > 1 ? { run } : {}) })
       return { joined: true, name: grant.name, endpoint: this.whoami(spender.id), handback, spawner: spawner.id }
     })
   }
@@ -4372,13 +4457,16 @@ export class RelayCore {
    * marked read, for spawn to hand them to the resumed session itself, and the exited worker's hook presence ends, so the resumed session's
    * MCP shim re-claims its endpoint with the grant it spent. The grant's issuer or an ancestor of that endpoint only
    */
-  spawnSteers(actor: ScopeActor, params: { grant: string; take?: boolean }): { session: string | null; steers: Envelope[]; transcript: string | null } {
+  spawnSteers(
+    actor: ScopeActor,
+    params: { grant: string; take?: boolean },
+  ): { session: string | null; steers: Envelope[]; transcript: string | null; joined: boolean } {
     const p = params ?? ({} as typeof params)
     if (typeof p.grant !== "string" || !GRANT_TOKEN.test(p.grant)) throw new RelayError("invalid_params", "grant is a krt_ token")
     const me = this.actorRow(actor)
     return this.tx(() => {
       const { grant, spender } = this.spawnGrant(me, p.grant)
-      if (!spender) return { session: null, steers: [], transcript: null }
+      if (!spender) return { session: null, steers: [], transcript: null, joined: false }
       const now = this.now()
       const rows = this.steersOf(grant, spender, now)
       const steers = rows.map((row) => this.envelope(row, row.seq))
@@ -4391,7 +4479,33 @@ export class RelayCore {
         )
         this.audit("ack", spender.id, null, { count: rows.length, by: this.address(me) })
       }
-      return { session: spender.harness_session, steers, transcript: spender.harness_session ? spender.harness_transcript : null }
+      return { session: spender.harness_session, steers, transcript: spender.harness_session ? spender.harness_transcript : null, joined: true }
+    })
+  }
+
+  /**
+   * the worker `endpoint`'s spawn no longer holds it: its latest spawn grant records the end, its `spawn-resume` wake and durable ref clear,
+   * and a hibernation by {@link SPAWN_PROVIDER} clears, so no message resumes it again; a message after the end queues as for any offline
+   * agent. The broker closes the connections waking it. The issuer of its spawn grant, an ancestor of the worker, or the human at a terminal;
+   * audited `spawn_end {by, target, held}`, `held` whether a spawn held it or a durable one had it hibernated
+   */
+  spawnEnd(actor: ScopeActor, params: { endpoint: unknown }): { endpoint: EndpointView; held: boolean } {
+    const me = this.actorRow(actor)
+    return this.tx(() => {
+      const target = this.resolve(params?.endpoint)
+      if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint is ended")
+      const grant = one<GrantRow>(this.sql, `SELECT * FROM grants WHERE used_by = ? AND spawn = 1 ORDER BY created_at DESC, rowid DESC LIMIT 1`, target.id)
+      const tty = actor.kind === "human" && actor.tty
+      if (!tty && grant?.issuer !== me.id && !this.ancestorsOf(target).includes(me.id)) {
+        if (me.kind === "agent" && !this.discovers(me, target)) throw unreachable(params.endpoint)
+        throw new RelayError("unauthorized", "only the worker's spawner, an ancestor or the human at a terminal ends it")
+      }
+      const held = target.wake === "spawn-resume" || target.hold_ref !== null || target.hibernate === SPAWN_PROVIDER
+      if (grant) this.sql.all(`UPDATE grants SET ended_at = COALESCE(ended_at, ?) WHERE token_hash = ?`, this.now(), grant.token_hash)
+      this.sql.all(`UPDATE endpoints SET wake = CASE WHEN wake = 'spawn-resume' THEN NULL ELSE wake END, hold_ref = NULL WHERE id = ?`, target.id)
+      if (target.hibernate === SPAWN_PROVIDER) this.clearHibernation(target.id)
+      this.audit("spawn_end", target.id, null, { by: this.address(me), target: this.address(target), held })
+      return { endpoint: this.view(this.byId(target.id)!), held }
     })
   }
 
@@ -4418,7 +4532,7 @@ export class RelayCore {
     const tail = stderr && (!spender || code !== 0) ? `${STDERR_LABEL}\n${stderr}` : ""
     const output = tail ? handbackOutput(whole, false, LIMITS.handbackBytes - utf8Bytes(tail) - 2) : whole
     const now = this.now()
-    const stable = `thr_${grant.created_at.toString(36).padStart(9, "0")}${this.hash(`handback:${grant.token_hash}`).slice(0, 16)}`
+    const stable = this.handbackThread(grant)
     const last = spender
       ? one<{ thread: string }>(
           this.sql,
@@ -4471,12 +4585,67 @@ export class RelayCore {
         ...(unapplied.length ? this.unappliedLines(spender, grant, unapplied, now, exits) : []),
       ]
       if (steers.length) body.push(steers.join("\n"))
+      if (spender.wake === "spawn-resume") body.push(heldLine(this.address(spender)))
     }
     const causal = spender && spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
     const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, LIMITS.hopMax) : 0
     const { id } = this.post(spender ?? this.byHandle(SYSTEM_HANDLE)!, me, body.filter(Boolean).join("\n\n"), { kind: "message", thread, hop })
     this.sql.all(`UPDATE grants SET handback = ? WHERE token_hash = ?`, id, grant.token_hash)
     return id
+  }
+
+  /** the stable thread id a grant's handback falls back to */
+  private handbackThread(grant: GrantRow): string {
+    return `thr_${grant.created_at.toString(36).padStart(9, "0")}${this.hash(`handback:${grant.token_hash}`).slice(0, 16)}`
+  }
+
+  /**
+   * a held spawn's handback for its later run `run` (2 and up) to the issuer `me`: one per run, none for a run at or below the last one handed
+   * back. From the worker, kind `message`, a reply to `replyTo` when that is the issuer's message to the worker, else to the first handback,
+   * in that message's thread (the grant's stable thread without either, none when the thread is full). The body is the first run's without
+   * the steer lines
+   */
+  private runHandback(
+    me: EndpointRow,
+    grant: GrantRow,
+    spender: EndpointRow,
+    run: number,
+    code: number,
+    output: string,
+    stderr: string,
+    replyTo?: string,
+  ): string | null {
+    if (!one(this.sql, `UPDATE grants SET run = ? WHERE token_hash = ? AND COALESCE(run, 1) < ? RETURNING token_hash`, run, grant.token_hash, run)) return null
+    const full = (thread: string) => one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM messages WHERE thread = ?`, thread)!.n >= LIMITS.threadMax
+    const woke =
+      replyTo === undefined
+        ? undefined
+        : one<{ id: string; thread: string }>(
+            this.sql,
+            `SELECT m.id, m.thread FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE m.id = ? AND m.from_ep = ? AND d.endpoint = ?`,
+            replyTo,
+            me.id,
+            spender.id,
+          )
+    const first =
+      grant.handback === null ? undefined : one<{ id: string; thread: string }>(this.sql, `SELECT id, thread FROM messages WHERE id = ?`, grant.handback)
+    const anchor = [woke, first].find((m): m is { id: string; thread: string } => m !== undefined && !full(m.thread))
+    const stable = this.handbackThread(grant)
+    const thread = anchor?.thread ?? (full(stable) ? undefined : stable)
+    if (!thread) return null
+    const address = this.address(spender)
+    const tail = stderr && code !== 0 ? `${STDERR_LABEL}\n${stderr}` : ""
+    const kept = tail ? handbackOutput(output, false, LIMITS.handbackBytes - utf8Bytes(tail) - 2) : output
+    const body = [
+      kept ? `worker ${address} finished (exit ${code})` : `worker ${address} exited without replying (exit ${code})`,
+      kept,
+      tail,
+      spender.wake === "spawn-resume" ? heldLine(address) : "",
+    ]
+    const now = this.now()
+    const causal = spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
+    const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, LIMITS.hopMax) : 0
+    return this.post(spender, me, body.filter(Boolean).join("\n\n"), { kind: "message", thread, hop, ...(anchor ? { replyTo: anchor.id } : {}) }).id
   }
 
   /**
@@ -5533,15 +5702,21 @@ export class RelayCore {
   }
 
   /** one plain text message from `from` straight into `to`'s inbox, past every send check: the relay's notices and a spawn's handback */
-  private post(from: EndpointRow, to: EndpointRow, text: string, options: { kind: MessageKind; thread: string; hop?: number }): { id: string; seq: number } {
+  private post(
+    from: EndpointRow,
+    to: EndpointRow,
+    text: string,
+    options: { kind: MessageKind; thread: string; hop?: number; replyTo?: string },
+  ): { id: string; seq: number } {
     const now = this.now()
     const id = newId("msg", now)
     const expires = now + LIMITS.ttlDefaultS * 1000
     this.sql.all(
       `INSERT INTO messages (id, thread, reply_to, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, 'text/plain', 'public', '[]', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'text/plain', 'public', '[]', ?, ?, ?)`,
       id,
       options.thread,
+      options.replyTo ?? null,
       options.kind,
       from.id,
       this.address(to),
@@ -5911,6 +6086,11 @@ function subagentKind(type: string | undefined): string {
 }
 
 /** `<root handle>-<short type>-<first 4 alphanumerics of id>`, the root's part clipped so the whole leaves room for a `-<n>` suffix */
+/** the line a held spawn's handback ends with */
+function heldLine(address: string): string {
+  return `${address} stays resumable: message it to resume its session`
+}
+
 export function subagentHandle(root: string, subagent: { id: string; type?: string }): string {
   const tail = `-${subagentKind(subagent.type)}-${subagent.id
     .toLowerCase()

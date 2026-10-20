@@ -65,6 +65,8 @@ export function startWakers(options: {
   core: FederatedCore
   path: string
   wakers?: Record<string, unknown> | undefined
+  /** wakers configured whatever the file says, unless it or `wakers` names the same provider */
+  builtin?: Record<string, unknown> | undefined
   dir: string
   machine: string
   now: () => number
@@ -83,9 +85,21 @@ export function startWakers(options: {
       fixed = {}
     }
   }
+  let builtin: WakerConfigs = {}
+  if (options.builtin !== undefined) {
+    try {
+      builtin = parseWakers(options.builtin)
+    } catch (error) {
+      options.log(`relay broker: the built-in wakers are invalid (${message(error)})`)
+    }
+  }
   let loaded: { mtime: number; size: number; wakers: WakerConfigs } | null = null
 
   function configs(): WakerConfigs {
+    return { ...builtin, ...configured() }
+  }
+
+  function configured(): WakerConfigs {
     if (fixed) return fixed
     const stat = statSync(options.path, { throwIfNoEntry: false })
     if (!stat) {
