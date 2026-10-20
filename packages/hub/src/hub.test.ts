@@ -1640,6 +1640,7 @@ describe("machine waker", () => {
     disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
     await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
     hub.clearWakeHold("desk")
+    expect(answers.length).toBe(2)
     await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "two" } })
     expect(answers.length).toBe(2)
     answers[0]!({ ok: true })
@@ -1647,7 +1648,7 @@ describe("machine waker", () => {
     expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBeUndefined()
     answers[1]!({ ok: false, declined: "budget" })
     await new Promise((resolve) => setTimeout(resolve, 10))
-    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "three" } })
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "three" } })
     expect(answers.length).toBe(2)
   })
 
@@ -1671,6 +1672,105 @@ describe("machine waker", () => {
     await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "declined sender again" } })
     await calls(events, 3)
     expect(events.length).toBe(2)
+  })
+
+  describe("mail queued while a hold was on", () => {
+    function held(wake: Partial<HubWakeOptions> = {}, declines = 1) {
+      const events: Call[] = []
+      const answers: { ok: boolean; declined?: string }[] = Array.from({ length: declines }, () => ({ ok: false, declined: "budget" }))
+      const env = setup({
+        machineWake: async (event) => {
+          events.push(event as unknown as Call)
+          return answers.shift() ?? { ok: true }
+        },
+        wake: { declineHoldS: 600, ...wake },
+      })
+      return { ...env, events }
+    }
+
+    async function declined(env: ReturnType<typeof held>) {
+      const laptop = await env.bridge("laptop", [{ address: "me/impl" }, { address: "me/lead" }])
+      env.disconnect(await env.bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+      const first = await env.ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+      await calls(env.events, 1)
+      expect(env.events.length).toBe(1)
+      return { laptop, first }
+    }
+
+    test("the hold's expiry wakes the machine for the oldest queued message at the alarm", async () => {
+      const env = held()
+      const { first } = await declined(env)
+      expect(env.hub.nextAlarm()).toBeLessThanOrEqual(env.clock.now + 600_000)
+      env.clock.now += 599_000
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 2)
+      expect(env.events.length).toBe(1)
+      env.clock.now += 1000
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 2)
+      expect(env.events.map((e: any) => e.message.id)).toEqual([first.id, first.id])
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 3)
+      expect(env.events.length).toBe(2)
+    })
+
+    test("a hold shorter than the debounce retries queued mail at most once a debounce window", async () => {
+      const env = held({ declineHoldS: 0 }, 3)
+      await declined(env)
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 2)
+      expect(env.events.length).toBe(1)
+      expect(env.hub.nextAlarm()).toBeLessThanOrEqual(env.clock.now + LIMITS.wakeDebounceS * 1000)
+      env.clock.now += LIMITS.wakeDebounceS * 1000
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 2)
+      expect(env.events.length).toBe(2)
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 3)
+      expect(env.events.length).toBe(2)
+      env.clock.now += LIMITS.wakeDebounceS * 1000
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 3)
+      expect(env.events.length).toBe(3)
+    })
+
+    test("clearWakeHold wakes the machine for queued mail at once", async () => {
+      const env = held()
+      const { first } = await declined(env)
+      expect(env.hub.clearWakeHold("desk")).toBe(1)
+      await calls(env.events, 2)
+      expect(env.events.map((e: any) => e.message.id)).toEqual([first.id, first.id])
+    })
+
+    test("with nothing queued, an ended hold calls nothing", async () => {
+      const env = held()
+      await declined(env)
+      const desk = await env.bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+      const seqs = desk.frames.filter((f: any) => f.method === "deliver").map((f: any) => f.params.seq)
+      expect(seqs.length).toBe(1)
+      await env.ok(desk, "ack", { seqs })
+      env.disconnect(desk)
+      expect(env.hub.clearWakeHold("desk")).toBe(1)
+      await calls(env.events, 2)
+      expect(env.events.length).toBe(1)
+    })
+
+    test("queued mail and a new message at the same moment wake the machine once", async () => {
+      const env = held()
+      const { laptop } = await declined(env)
+      env.hub.clearWakeHold("desk")
+      await env.ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "racing" } })
+      await calls(env.events, 3)
+      expect(env.events.length).toBe(2)
+
+      const later = held()
+      const again = await declined(later)
+      later.clock.now += 600_000
+      await later.ok(again.laptop, "forward", { from: "lead", params: { to: "desk/review", body: "at the expiry" } })
+      await later.hub.alarm(async () => true)
+      await calls(later.events, 3)
+      expect(later.events.length).toBe(2)
+    })
   })
 
   test("wake durations must be finite; a per-hour cap or the decline hold may be Infinity", () => {

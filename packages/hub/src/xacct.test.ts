@@ -945,6 +945,35 @@ describe("machine waker for messages from other accounts", () => {
     expect(listed).toMatchObject({ presence: "hibernated", waking: true })
   })
 
+  test("a contact's queued message wakes the machine once its hold clears, after a restart too; with cross-account wakes off it never does", async () => {
+    const events: any[] = []
+    const answers = [{ ok: false, declined: "budget" }]
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return answers.shift() ?? { ok: true }
+    }
+    const on = await asleep({ machineWake, wake: { crossAccount: true } })
+    const sent = await on.alice.ok(on.laptop, "forward", forward("bob/desk/review", "one"))
+    await settle()
+    expect(events.length).toBe(1)
+    on.bob.wake()
+    expect(on.bob.hub.clearWakeHold("desk")).toBe(1)
+    await settle()
+    expect(events.map((e) => [e.message.id, e.same_account])).toEqual([
+      [sent.id, false],
+      [sent.id, false],
+    ])
+
+    events.length = 0
+    const off = await asleep({ machineWake })
+    await off.alice.ok(off.laptop, "forward", forward("bob/desk/review", "one"))
+    off.bob.db.query(`INSERT INTO machine_wakes (machine, next, fails) VALUES ('desk', 0, 0)`).run()
+    expect(off.bob.hub.clearWakeHold("desk")).toBe(1)
+    await settle()
+    expect(events).toEqual([])
+    expect(off.bob.xinbox()).toBe(1)
+  })
+
   test("a sender account and a target each cause at most their per-hour wakes; Infinity lifts a cap", async () => {
     const events: any[] = []
     const machineWake = async (event: any) => {

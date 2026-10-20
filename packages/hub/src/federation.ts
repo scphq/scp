@@ -1374,6 +1374,11 @@ export class FederatedCore extends RelayCore {
     return this.xinbox ? (one<XInboxRow>(this.sql, `SELECT * FROM xinbox WHERE endpoint = ? AND id = ?`, endpoint, id) ?? null) : null
   }
 
+  /** the account an unacked or kept xinbox row `seq` came from, or null for a delivery of this account */
+  xaccountOf(seq: number): string | null {
+    return this.xinbox ? (one<{ from_account: string }>(this.sql, `SELECT from_account FROM xinbox WHERE seq = ?`, seq)?.from_account ?? null) : null
+  }
+
   /** the earlier row of a message from `fromAccount` under `clientId`, or null */
   xduplicate(fromAccount: string, clientId: string): { id: string; acked: boolean } | null {
     const row = one<{ id: string; seq: number; endpoint: string }>(
