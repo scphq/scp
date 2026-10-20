@@ -6,10 +6,11 @@ interface OverviewModule {
   liveRegion(o: { machines: unknown[]; endpoints: EndpointView[]; activity: unknown[] }, handle: string, now: number): { value: string };
   fleetTrees(endpoints: EndpointView[]): { root: EndpointView; kids: EndpointView[] }[];
   fleetStrip(o: { machines: unknown[]; endpoints: EndpointView[]; activity: unknown[] }, handle: string): { value: string };
+  wakeHow(wake: string): string;
 }
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
 const path = "../src/overview";
-const { orderRows, liveRegion, fleetTrees, fleetStrip }: OverviewModule = await import(path);
+const { orderRows, liveRegion, fleetTrees, fleetStrip, wakeHow }: OverviewModule = await import(path);
 
 const ep = (handle: string, presence: Presence, parent?: string, labels: Record<string, string> = {}): EndpointView => ({
   id: `ep_${handle}`,
@@ -100,6 +101,15 @@ test("an idle agent a message can wake shows apart from one that reads at its ne
   expect(page).toContain('<svg class="hicon h-codex" width="12" height="12" viewBox="0 0 24 24" role="img" aria-label="codex">');
   expect(page).toContain('class="hicon h-claude"');
   expect(page).not.toContain('class="harness"');
+});
+
+test("a hibernated spawn's wake hook and a held spawn read as words, not wake tokens", () => {
+  const asleep = { ...ep("asleep", "hibernated"), wake: "hook:spawn" } as unknown as EndpointView;
+  const held = { ...ep("held", "idle"), wake: "spawn-resume" } as unknown as EndpointView;
+  const page = liveRegion({ machines: [], endpoints: [asleep, held], activity: [] }, "acme", Date.now()).value;
+  expect(page).toContain('title="hibernated, a message runs its spawn wake hook"');
+  expect(page).toContain('title="idle, a message resumes it through its spawn"');
+  expect(wakeHow("channels")).toBe("a message wakes it via channels");
 });
 
 test("the graph data block names each node's machine and label, escapes markup and drops a retired handle", async () => {

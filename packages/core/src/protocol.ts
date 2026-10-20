@@ -123,7 +123,7 @@ export const PRESENCES: readonly Presence[] = ["online", "idle", "offline", "hib
 export type StatusState = "working" | "waiting" | "blocked" | "done"
 /**
  * how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter, codex app-server, the session inbox,
- * a headless resume, muse serve or a T3 Code thread; `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
+ * a headless resume, muse serve, a T3 Code thread or a held spawn resuming its worker's session; `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
  */
 export type Wake =
   | "channels"
@@ -135,6 +135,7 @@ export type Wake =
   | "grok-resume"
   | "muse-serve"
   | "t3code"
+  | "spawn-resume"
   | "none"
   | `hook:${string}`
 export const WAKES: readonly Wake[] = [
@@ -147,8 +148,11 @@ export const WAKES: readonly Wake[] = [
   "grok-resume",
   "muse-serve",
   "t3code",
+  "spawn-resume",
   "none",
 ]
+/** the built-in wake provider of a durable spawn: its waker resumes the worker's harness session from the hibernation's ref */
+export const SPAWN_PROVIDER = "spawn"
 /** why a provider declined to wake a hibernated agent, a short token it picks (e.g. `policy`, `budget`): not a failure, and not retried for the same message */
 export type WakeDecline = string
 export const WAKE_DECLINE = /^[a-z][a-z0-9_-]{0,31}$/
@@ -234,6 +238,8 @@ export interface Claim {
   groups?: string[]
   /** an agent address a root claim links under, as a join under does; a refused link keeps the claim, audited */
   under?: string
+  /** a `kwt_` wake ticket a `spawn` waker run got: takes back the endpoint hibernated by `spawn` it was minted for, as its resumed session */
+  ticket?: string
 }
 
 export type ScopeDirection = "in" | "out"
@@ -421,6 +427,8 @@ export interface Envelope {
   relation?: "parent" | "ancestor" | "child"
   /** with `parent`, from the issuer of the `swarm spawn` grant the recipient spent: that grant's steer key, which the worker's prompt names */
   parent_key?: string
+  /** on a delivery to an idle in-process subagent that its root's waker is offered: the subagent's address and the id its root continues it by */
+  for?: { address: string; subagent: string }
 }
 
 /** a message in a thread the caller sent or got a message in, as `message` with `member` finds it: enough to reply to it, never its body */

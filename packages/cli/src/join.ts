@@ -1,6 +1,6 @@
 import { CLI_NAME } from "@scp-dev/core"
-import { connectBroker, readSessionMarker, relayDir } from "@scp-dev/broker"
-import { localHandle, RelayUsage, startDaemon, walkNow } from "./common"
+import { readSessionMarker, relayDir } from "@scp-dev/broker"
+import { connectShell, localHandle, RelayUsage, walkNow } from "./common"
 import { codexShell, harnessAt, relayIdentity, sessionKey } from "./identity"
 
 type Values = { harness?: unknown; json?: unknown; under?: unknown }
@@ -13,11 +13,13 @@ type Values = { harness?: unknown; json?: unknown; under?: unknown }
 export async function joinCommand(values: Values, positionals: string[], cwd: string, out: (line: string) => void): Promise<number> {
   if (positionals.length > 1) throw new RelayUsage(`${CLI_NAME} join takes one handle, or none to keep the session's name`)
   const handle = positionals[0] === undefined ? undefined : localHandle(positionals[0])
+  const under = typeof values.under === "string" ? values.under : undefined
+  const tool = `relay_join${handle || under ? ` {${[handle ? `name: "${handle}"` : "", under ? `under: "${under}"` : ""].filter(Boolean).join(", ")}}` : ""} (MCP)`
   const { keys, self } = walkNow()
   const key = self.at(-1)
   const match = key === undefined ? null : /^pid:(\d+):(.+)$/.exec(key)
   if (!match) {
-    if (codexShell(process.env)) throw new RelayUsage(`${CLI_NAME} join: the codex sandbox hides the harness; use relay_join (MCP) instead`)
+    if (codexShell(process.env)) throw new RelayUsage(`${CLI_NAME} join: the codex sandbox hides the harness; use ${tool} instead`)
     throw new RelayUsage(`${CLI_NAME} join runs in an agent session's shell: no harness process runs this shell`)
   }
   const dir = relayDir()
@@ -33,9 +35,8 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
     startOf: () => match[2],
     lineageOf: () => keys.slice(Math.max(0, keys.indexOf(key!))),
   })
-  const client = await connectBroker(dir, () => startDaemon(dir))
+  const client = await connectShell(dir, tool)
   try {
-    const under = typeof values.under === "string" ? values.under : undefined
     const hello = await client.hello({ transient: true, claim, join: { ...(handle ? { handle } : {}), ...(under ? { under } : {}) } })
     const view = hello.endpoint!
     if (values.json === true) out(JSON.stringify(view, null, 2))

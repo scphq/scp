@@ -127,6 +127,11 @@ export class RelayClient {
     this.listeners.push(fn)
   }
 
+  /** whether the connection is closed, by either side */
+  get closed(): boolean {
+    return this.closedError !== undefined
+  }
+
   request<T = unknown>(method: string, params: object = {}): Promise<T> {
     if (this.closedError) return Promise.reject(this.closedError)
     const id = this.nextId++
@@ -184,6 +189,10 @@ export class RelayClient {
     unapplied?: string[]
     exits?: number[]
     started?: boolean
+    /** a held spawn's later run, 2 and up: its own handback, a reply in the spawn's thread */
+    run?: number
+    /** the spawner's message that woke that run */
+    reply_to?: string
   }): Promise<{ joined: boolean; name: string | null; endpoint: EndpointView | null; handback?: string | null }> {
     return this.request("spawn_exit", params)
   }
@@ -192,7 +201,10 @@ export class RelayClient {
    * a spawned worker that exited: its harness session id, the transcript its hooks named with it and its spawner's unread messages to it;
    * with `take` and a session they are marked read, for a resume to carry them
    */
-  spawnSteers(params: { grant: string; take?: boolean }): Promise<{ session: string | null; steers: Envelope[]; transcript?: string | null }> {
+  spawnSteers(params: {
+    grant: string
+    take?: boolean
+  }): Promise<{ session: string | null; steers: Envelope[]; transcript?: string | null; joined?: boolean }> {
     return this.request("spawn_steers", params)
   }
 
@@ -276,7 +288,15 @@ export class RelayClient {
   }
 }
 
-export class BrokerUnavailable extends Error {}
+export class BrokerUnavailable extends Error {
+  /** `sandboxed`: a sandbox around this process refused the connection to a running broker */
+  constructor(
+    message: string,
+    readonly sandboxed = false,
+  ) {
+    super(message)
+  }
+}
 
 /** whether the broker for `dir` is running: its lock is held, or, when the lock cannot be probed, its pid is alive */
 function brokerLive(dir: string): boolean {
@@ -305,7 +325,7 @@ function brokerLive(dir: string): boolean {
  */
 export async function connectBroker(dir: string, start?: () => void, timeoutMs = 5000): Promise<RelayClient> {
   const path = socketPath(dir)
-  const refuse = (code: unknown) => new BrokerUnavailable(`the sandbox blocks the relay socket (${code}); allow ${path} or run outside the sandbox`)
+  const refuse = (code: unknown) => new BrokerUnavailable(`the sandbox blocks the relay socket (${code}); allow ${path} or run outside the sandbox`, true)
   const owned = (client: RelayClient) => {
     if (ownPrivateDir(dirname(path))) return client
     client.close()
@@ -320,8 +340,8 @@ export async function connectBroker(dir: string, start?: () => void, timeoutMs =
     return owned(await RelayClient.connect(path))
   } catch (error) {
     sandboxed(error)
-    if (!start) throw new BrokerUnavailable(`no relay broker at ${path} (${error instanceof Error ? error.message : String(error)})`)
     if (existsSync(path) && brokerLive(dir)) throw refuse((error as { code?: unknown } | null)?.code ?? "refused")
+    if (!start) throw new BrokerUnavailable(`no relay broker at ${path} (${error instanceof Error ? error.message : String(error)})`)
   }
   start()
   const deadline = Date.now() + timeoutMs

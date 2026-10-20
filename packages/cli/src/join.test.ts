@@ -1,9 +1,9 @@
 import { Readable } from "node:stream"
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdirSync, mkdtempSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, linkSync, mkdirSync, mkdtempSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { LIMITS } from "@scp-dev/core"
-import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
+import { type Broker, privateDir, RelayClient, socketPath, startBroker } from "@scp-dev/broker"
 import { runHook } from "./hooks"
 import { harnessLineage } from "./identity"
 import { joinMode, setJoinMode } from "./relay"
@@ -41,12 +41,67 @@ test("join and shell commands use the codex shim binding when the sandbox hides 
     clear()
     const missing = await run("join", "--under", "sandbox-parent")
     expect(missing.code).toBe(125)
-    expect(missing.stderr).toContain("the codex sandbox hides the harness; use relay_join (MCP) instead")
+    expect(missing.stderr).toContain('the codex sandbox hides the harness; use relay_join {under: "sandbox-parent"} (MCP) instead')
   } finally {
     clear()
     shim.close()
     parent.close()
     await broker.stop()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("join --under in a codex sandbox that blocks the relay socket names relay_join and the setting, and starts no broker", async () => {
+  const root = mkdtempSync(join(process.env.HOME!, "sandbox-socket-"))
+  const dir = privateDir(join(root, "relay"))
+  const env = cleanEnv({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_SHIM_BINDING: "e".repeat(32) })
+  const clear = writeShimBinding({ handle: "boxed", harness: "codex", process: processKey(process.pid) }, env)
+  const path = socketPath(dir)
+  privateDir(dirname(path))
+  const listener = Bun.listen({ unix: `${path}.live`, socket: { data() {} } })
+  linkSync(`${path}.live`, path)
+  listener.stop(true)
+  writeFileSync(join(dir, "broker.lock"), `${process.pid}:${Math.floor(Date.now() / 1000)}`, { mode: 0o600 })
+  try {
+    const child = Bun.spawn([process.execPath, "--no-env-file", entry, "join", "boxed", "--under", "lead"], {
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited])
+    expect(code).toBe(125)
+    expect(stderr).toContain("the sandbox blocks the relay socket")
+    expect(stderr).toContain('In a codex sandbox use relay_join {name: "boxed", under: "lead"} (MCP) instead: the scp MCP server runs outside the sandbox')
+    expect(stderr).toContain("sandbox_workspace_write.network_access = true")
+    expect(existsSync(join(dir, "broker.log"))).toBe(false)
+  } finally {
+    clear()
+    rmSync(root, { recursive: true, force: true })
+    if (dirname(path) !== dir) rmSync(dirname(path), { recursive: true, force: true })
+  }
+})
+
+test("join --under in a codex shell with no broker running names relay_join and starts none", async () => {
+  const root = mkdtempSync(join(process.env.HOME!, "sandbox-none-"))
+  const dir = privateDir(join(root, "relay"))
+  const env = cleanEnv({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_SHIM_BINDING: "f".repeat(32) })
+  const clear = writeShimBinding({ handle: "boxed", harness: "codex", process: processKey(process.pid) }, env)
+  try {
+    const child = Bun.spawn([process.execPath, "--no-env-file", entry, "join", "boxed", "--under", "lead"], {
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited])
+    expect(code).toBe(125)
+    expect(stderr).toContain("no relay broker at")
+    expect(stderr).toContain('In a codex sandbox use relay_join {name: "boxed", under: "lead"} (MCP) instead')
+    expect(existsSync(join(dir, "broker.log"))).toBe(false)
+    expect(existsSync(join(dir, "broker.lock"))).toBe(false)
+  } finally {
+    clear()
     rmSync(root, { recursive: true, force: true })
   }
 })
@@ -199,20 +254,24 @@ describe("swarm join --under, adopt and unlink", () => {
     other.close()
   })
 
-  test("adopt: an agent asks for consent, the child accepts; a cycle is refused", async () => {
+  test("adopt: an agent's shell links a root it may message at once; a child under another parent is asked; a cycle is refused", async () => {
     const solo = await RelayClient.connect(broker.socket)
     await solo.hello({ claim: { handle: "solo", harness: "codex" } })
     await human.request("rules_set", { endpoint: "orch", out: ["*"] })
     const byAgent = await swarm("adopt", "solo")
-    expect(byAgent.code).toBe(0)
-    expect(byAgent.stdout).toMatch(/^asked me\/solo to link under me\/app; it accepts with swarm link accept [a-z0-9]+\n$/)
-    expect(view("me/solo")?.parent ?? null).toBeNull()
-    const { messages } = await solo.request<{ messages: { id: string; link?: { parent: string } }[] }>("inbox")
+    expect([byAgent.code, byAgent.stdout]).toEqual([0, "me/solo now sits under me/app\n"])
+    expect(view("me/solo")).toMatchObject({ parent: "me/app", depth: 2 })
+    const ward = await RelayClient.connect(broker.socket)
+    await ward.hello({ claim: { handle: "ward", harness: "codex" } })
+    await human.request("adopt", { endpoint: "ward", parent: "orch" })
+    const asked = await swarm("adopt", "ward")
+    expect(asked.stdout).toMatch(/^asked me\/ward to link under me\/app; it accepts with swarm link accept [a-z0-9]+\n$/)
+    const { messages } = await ward.request<{ messages: { id: string; link?: { parent: string } }[] }>("inbox")
     expect(messages[0]?.link).toEqual({ parent: "me/app" })
-    expect(await solo.request("link_accept", { id: messages[0]!.id })).toMatchObject({ parent: "me/app", endpoint: { depth: 2 } })
     const cycle = await human.request("adopt", { endpoint: "orch", parent: "solo" }).catch((error: Error) => error.message)
     expect(cycle).toContain("cannot go under its own descendant")
     solo.close()
+    ward.close()
   })
 
   test("unlink: the session may not detach itself; the human puts it back at the root with its subtree", async () => {
@@ -225,7 +284,12 @@ describe("swarm join --under, adopt and unlink", () => {
   })
 
   test("link accept from the session's shell accepts a short request id", async () => {
+    const keeper = await RelayClient.connect(broker.socket)
+    await keeper.hello({ claim: { handle: "keeper", harness: "codex" } })
+    await human.request("adopt", { endpoint: "app", parent: "keeper" })
     const { requested: id } = await orch.request<{ requested: string }>("adopt", { endpoint: "app" })
+    await human.request("unlink", { endpoint: "app" })
+    keeper.close()
     const accepted = await swarm("link", "accept", id.slice(-6))
     expect(accepted).toEqual({ code: 0, stderr: "", stdout: "me/app now sits under me/orch\n" })
     expect(view("me/app")).toMatchObject({ parent: "me/orch", depth: 1 })

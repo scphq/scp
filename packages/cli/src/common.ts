@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { closeSync, openSync, statSync, truncateSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
-import { type BrokerInfo, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
+import { type BrokerInfo, BrokerUnavailable, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
 import {
   codexShell,
   detectHarness,
@@ -69,6 +69,7 @@ export const OPTIONS = {
   labels: { type: "string" },
   "handback-bytes": { type: "string" },
   "no-push": { type: "boolean" },
+  durable: { type: "boolean" },
   bg: { type: "boolean" },
   fg: { type: "boolean" },
   name: { type: "string" },
@@ -116,6 +117,8 @@ export const SPAWN_OPTIONS: Option[] = [
   "bg",
   "fg",
   "via",
+  "idle",
+  "durable",
 ]
 
 export const OBSERVE = new Set([
@@ -229,6 +232,23 @@ export function walkNow(env = process.env, pid = process.ppid, table: PsCommTabl
   return { keys, self, ...(harness ? { harness } : {}) }
 }
 
+/**
+ * the broker for `dir`, started when none runs, except from a codex shell, whose sandbox would hold the daemon too. There a broker it cannot
+ * reach is a usage error naming `tool`, the MCP tool that does the same from outside the sandbox (the scp MCP server runs outside it), or the
+ * codex setting that opens the socket
+ */
+export async function connectShell(dir: string, tool: string): Promise<RelayClient> {
+  const codex = codexShell(process.env)
+  try {
+    return await connectBroker(dir, codex ? undefined : () => startDaemon(dir))
+  } catch (error) {
+    if (!(error instanceof BrokerUnavailable) || !codex) throw error
+    throw new RelayUsage(
+      `${error.message}. In a codex sandbox use ${tool} instead: the scp MCP server runs outside the sandbox. Or let the sandbox reach the socket (codex: sandbox_workspace_write.network_access = true)`,
+    )
+  }
+}
+
 /** an `--as` claim's harness: --harness or $SCP_HARNESS, else the harness this shell's walk or environment shows, else cli */
 export function claimHarness(values: Identity, env: Record<string, string | undefined>, walk: Walk | undefined): string {
   return values.harness ?? env.SCP_HARNESS ?? (inferring(env) ? (walk?.harness ?? detectHarness(env)) : undefined) ?? "cli"
@@ -287,7 +307,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
   const harnessPid = self.length ? Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]) : undefined
   const lineageClaim = keys.length ? { lineage: keys } : {}
   const dir = relayDir()
-  const client = await connectBroker(dir, () => startDaemon(dir))
+  const client = await connectShell(dir, "the scp MCP tools (relay_*)")
   try {
     let bound: Bound | null
     let hello: HelloResult

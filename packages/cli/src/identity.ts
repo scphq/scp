@@ -64,9 +64,10 @@ export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
   }
 }
 
-type MuseLaunch = { name?: string; grant?: string }
+/** what a launcher hands a muse process's shim and hooks in place of SCP_NAME, SCP_GRANT, SCP_SESSION and SCP_HARNESS_PID (its process key) */
+export type MuseLaunch = { name?: string; grant?: string; session?: string; launcher?: string }
 
-/** the file where `swarm muse` leaves the name and grant for the shim and hooks of its muse serve process, which Muse starts without SCP_* variables */
+/** the file where a launcher (`swarm muse`, `swarm spawn`) leaves a muse process's {@link MuseLaunch}: Muse starts its shim and hooks without SCP_* variables */
 function museLaunchFile(key: string, env: Env): string | undefined {
   const pid = BINDING_PROCESS.exec(key)?.[1]
   return pid ? join(relayDir(env), "launch", `muse-${pid}.json`) : undefined
@@ -87,7 +88,9 @@ export function writeMuseLaunch(key: string, launch: MuseLaunch, env: Env): () =
   }
 }
 
-/** what `swarm muse` left for this muse serve process, when the file names exactly that process */
+const LAUNCH_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** what a launcher left for this muse process, when the file names exactly that process */
 export function readMuseLaunch(key: string, env: Env): MuseLaunch | undefined {
   const path = museLaunchFile(key, env)
   if (!path) return undefined
@@ -97,6 +100,8 @@ export function readMuseLaunch(key: string, env: Env): MuseLaunch | undefined {
     return {
       ...(typeof launch.name === "string" && validHandle(launch.name) ? { name: launch.name } : {}),
       ...(typeof launch.grant === "string" && launch.grant ? { grant: launch.grant } : {}),
+      ...(typeof launch.session === "string" && LAUNCH_SESSION.test(launch.session) ? { session: launch.session } : {}),
+      ...(typeof launch.launcher === "string" && BINDING_PROCESS.test(launch.launcher) ? { launcher: launch.launcher } : {}),
     }
   } catch {
     return undefined
@@ -578,7 +583,7 @@ export interface IdentityInput {
 
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
-/** the claim a shim or hook makes for this harness session */
+/** the claim a shim or hook makes for this harness session; a muse process a launcher left a session and launcher for claims as $SCP_SESSION and $SCP_HARNESS_PID would */
 export function relayIdentity(input: IdentityInput): Claim & { handle: string; harness: string; session: string; process: string; cwd: string } {
   const resolved = resolveHarness(input.harness, input.env, input.fallbackHarness)
   const pid = input.harnessPid(resolved)
@@ -591,18 +596,21 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const hosted = (provider === "codex" || provider === "claude-code") && (input.t3Hosted ? input.t3Hosted(pid) : t3Hosted(input.env, pid, ps))
   const harness = hosted ? T3CODE : provider
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
-  const harnessProcess = processKey(pid, input.startOf)
-  const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(harnessProcess, input.env) : undefined
+  const own = processKey(pid, input.startOf)
+  const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env) : undefined
   const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? deriveHandle(harness, cwd)
   const grant = input.env.SCP_GRANT || launched?.grant
-  const keys = input.lineageOf ? input.lineageOf(pid) : lineage(pid, ps())
+  const harnessProcess = launched?.launcher ?? own
+  const claimed = launched?.launcher ? Number(BINDING_PROCESS.exec(launched.launcher)![1]) : pid
+  const env = launched?.session ? { ...input.env, SCP_SESSION: launched.session } : input.env
+  const keys = input.lineageOf ? input.lineageOf(claimed) : lineage(claimed, ps())
   const harnessSession =
     provider === "claude-code" ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id)) : undefined
   return {
     handle,
     harness,
     cwd,
-    session: sessionKey(input.env, harnessProcess),
+    session: sessionKey(env, harnessProcess),
     process: harnessProcess,
     labels: labelsFor(input.env),
     ...(input.env.SCP_PARENT ? { parent: input.env.SCP_PARENT } : {}),
