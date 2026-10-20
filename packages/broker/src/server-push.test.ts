@@ -133,6 +133,26 @@ describe("broker, stop_wait", () => {
     expect((await hook.stopWait(0)).pushes_left).toBe(19)
   })
 
+  test("a session a message wakes waits on no worker: a wait ends as its waker connects, and the next returns at once with what the workers sent", async () => {
+    const { main, hook, worker } = await setup()
+    const started = Date.now()
+    const waiting = hook.stopWait(10)
+    await Bun.sleep(150)
+    await main.request("wake", { via: "channels" })
+    expect(await waiting).toMatchObject({ messages: [], workers: ["me/w1"], wakeable: true })
+    expect(Date.now() - started).toBeLessThan(2000)
+    await worker.request("send", { to: "main", body: "done-42" })
+    const quick = Date.now()
+    const result = await hook.stopWait(10)
+    expect(result).toMatchObject({ wakeable: true, workers: ["me/w1"] })
+    expect(result.messages.map((m) => m.body.text)).toEqual(["done-42"])
+    expect(Date.now() - quick).toBeLessThan(LIMITS.pushQuietS * 1000)
+    await main.request("wake", { via: "none" })
+    const held = Date.now()
+    expect(await hook.stopWait(0.3)).not.toHaveProperty("wakeable")
+    expect(Date.now() - held).toBeGreaterThanOrEqual(250)
+  })
+
   test("a no_push worker holds no stop: its message stays an ordinary unread one", async () => {
     const { broker, main, hook, token } = await setup()
     await main.spawnExit({ grant: token, code: 0 })
@@ -262,7 +282,7 @@ describe("broker, stop_wait gathers the results of workers finishing together", 
     expect(Buffer.byteLength(result.messages.map(wrapMessage).join(""))).toBeLessThanOrEqual(LIMITS.pushBytes)
   })
 
-  test("the last other worker's exit or a prompt ends the gathering at once", async () => {
+  test("the last other worker's exit, the session's waker connecting or a prompt ends the gathering at once", async () => {
     const exited = await setup()
     const w2 = await spawned(exited.broker, exited.main, "w2", 20)
     const waiting = exited.hook.stopWait(10)
@@ -273,6 +293,17 @@ describe("broker, stop_wait gathers the results of workers finishing together", 
     const exit = Date.now()
     expect((await waiting).messages.map((m) => m.body.text)).toEqual(["w1 done", "worker me/w2 finished (exit 0)\n\nw2 out"])
     expect(Date.now() - exit).toBeLessThan(LIMITS.pushQuietS * 1000)
+
+    const woken = await setup()
+    await spawned(woken.broker, woken.main, "w2", 20)
+    const gathering = woken.hook.stopWait(10)
+    await Bun.sleep(100)
+    await say(woken.worker, "w1 done")
+    await Bun.sleep(300)
+    await woken.main.request("wake", { via: "channels" })
+    const connected = Date.now()
+    expect(await gathering).toMatchObject({ wakeable: true, messages: [{ body: { text: "w1 done" } }] })
+    expect(Date.now() - connected).toBeLessThan(1000)
 
     const prompted = await setup()
     await spawned(prompted.broker, prompted.main, "w2", 20)

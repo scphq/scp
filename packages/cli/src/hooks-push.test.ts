@@ -1,7 +1,10 @@
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Readable } from "node:stream"
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { type Envelope, LIMITS, PREAMBLE, PREAMBLE_BRIEF, type StopWaitResult } from "@scp-dev/core"
-import type { RelayClient } from "@scp-dev/broker"
+import { RelayClient, startBroker } from "@scp-dev/broker"
 import {
   BLOCK_STOP,
   CLAUDE_CAPS,
@@ -18,6 +21,12 @@ import {
   runHook,
   steerPrompt,
 } from "./hooks"
+import { processKey } from "./identity"
+
+const cleanups: (() => Promise<void> | void)[] = []
+afterEach(async () => {
+  for (const fn of cleanups.splice(0).reverse()) await fn()
+})
 
 const MARKERS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_|OPENCODE|GROK_|MUSE_|CODEX_THREAD_ID|SCP_PUSH_WAIT)/
 
@@ -198,6 +207,31 @@ describe("a stop waits on spawned workers", () => {
     expect(sent("injected")).toEqual([])
   })
 
+  test("a session a message wakes never waits: it passes with workers running, shows at once what they already sent, and a wait ends once it turns wakeable", async () => {
+    const running = await stop(["claude", PUSH_WAIT, "600"], { workers: 2, wakeable: true }, [{ ...EMPTY, wakeable: true }])
+    expect(running.sent("stop_wait")).toEqual([{ wait_s: 0 }])
+    expect(running.deadlines).toEqual([])
+    expect(running.reply).toBeUndefined()
+    const got = { ...EMPTY, messages: [DONE], offered: [12], hold: "hld_1", wakeable: true as const }
+    const sent = await stop(["claude", PUSH_WAIT, "600"], { workers: 1, worker_unread: 1, wakeable: true, prompts: 2 }, [got])
+    expect(sent.sent("stop_wait")).toEqual([{ wait_s: 0, prompts: 2 }])
+    expect(sent.deadlines).toEqual([])
+    expect(JSON.parse(sent.reply!).hookSpecificOutput.additionalContext).toContain("done-42")
+    expect(sent.sent("injected")).toEqual([{ seqs: [12], hold: "hld_1", read: [12], push: true, preamble: true }])
+    const turned = await stop(["claude", PUSH_WAIT, "600"], { workers: 1 }, [EMPTY, { ...EMPTY, wakeable: true }, EMPTY])
+    expect(turned.sent("stop_wait")).toHaveLength(2)
+    expect(turned.reply).toBeUndefined()
+  })
+
+  test("a session whose waker left between the stop's count and its look waits as any other", async () => {
+    const got = { ...EMPTY, messages: [DONE], offered: [12], hold: "hld_1" }
+    const left = await stop(["claude", PUSH_WAIT, "600"], { workers: 1, wakeable: true }, [EMPTY, got])
+    expect(left.sent("stop_wait").map((p) => p.wait_s)).toEqual([0, LIMITS.waitMaxS])
+    expect(left.deadlines).toHaveLength(1)
+    expect(left.deadlines[0]).toBeGreaterThan(600_000)
+    expect(JSON.parse(left.reply!).hookSpecificOutput.additionalContext).toContain("done-42")
+  })
+
   test("the last push of a prompt's budget says so, and with none left the stop passes without waiting", async () => {
     const last = await stop(["claude", PUSH_WAIT, "600"], { workers: 1, pushes_left: 1 }, [
       { ...EMPTY, messages: [DONE], offered: [12], hold: "hld_1", pushes_left: 1 },
@@ -279,6 +313,75 @@ describe("a stop waits on spawned workers", () => {
       payload: { hook_event_name: "SubagentStop", agent_id: "a1", cwd: process.env.HOME },
     })
     expect(sub.sent("stop_wait")).toEqual([])
+  })
+})
+
+/** a broker where `orch`, held by this process, spawned a worker that has not joined yet from a live spawn process; `run` runs one of its Claude Code hooks */
+async function spawning() {
+  const root = mkdtempSync(join(tmpdir(), "hook-stop-"))
+  const broker = await startBroker({ dir: join(root, "state"), policyPath: join(root, "policy.json"), idleMs: 0 })
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+  cleanups.push(() => broker.stop())
+  const own = processKey(process.pid)
+  const main = await RelayClient.connect(broker.socket)
+  cleanups.push(() => main.close())
+  await main.hello({ claim: { handle: "orch", harness: "claude-code", session: "env:stop-hold", process: own, lineage: [own] } })
+  const spawn = Bun.spawn(["sleep", "60"], { stdio: ["ignore", "ignore", "ignore"] })
+  cleanups.push(() => spawn.kill())
+  await main.grant({ name: "w1", bind_process: processKey(spawn.pid), ttl_s: 3600, spawn: true })
+  const env = cleanEnv({
+    CLAUDECODE: "1",
+    SCP_SESSION: "stop-hold",
+    SCP_NAME: "orch",
+    SCP_DIR: join(root, "state"),
+    HOME: root,
+    XDG_CONFIG_HOME: join(root, "config"),
+  })
+  const run = (event: "Stop" | "UserPromptSubmit", args: string[] = [], deadlines: number[] = []) =>
+    runHook(["claude", ...args], {
+      env,
+      cwd: root,
+      stdin: Readable.from([JSON.stringify({ hook_event_name: event, session_id: "ses_hold", cwd: root, prompt: "go on" })]),
+      connect: async () => RelayClient.connect(broker.socket),
+      harnessPid: () => process.pid,
+      deadline: (ms) => deadlines.push(ms),
+      print: () => true,
+    })
+  return { main, run, spawn }
+}
+
+describe("a stop held on a starting worker, against a broker", () => {
+  test("a prompt typed while it waits releases it at once", async () => {
+    const { run } = await spawning()
+    const deadlines: number[] = []
+    const began = Date.now()
+    const stopping = run("Stop", [PUSH_WAIT, "600"], deadlines)
+    await Bun.sleep(300)
+    expect(await run("UserPromptSubmit")).toBeUndefined()
+    expect(await stopping).toBeUndefined()
+    expect(Date.now() - began).toBeLessThan(3000)
+    expect(deadlines[0]).toBeGreaterThan(600_000)
+  })
+
+  test("the hold ends once the spawn process of the worker that never joined is gone", async () => {
+    const { run, spawn } = await spawning()
+    const began = Date.now()
+    const stopping = run("Stop", [PUSH_WAIT, "600"])
+    await Bun.sleep(300)
+    spawn.kill()
+    await spawn.exited
+    expect(await stopping).toBeUndefined()
+    expect(Date.now() - began).toBeLessThan(4000)
+  })
+
+  test("a session a message wakes is never held", async () => {
+    const { main, run } = await spawning()
+    await main.request("wake", { via: "channels" })
+    const deadlines: number[] = []
+    const began = Date.now()
+    expect(await run("Stop", [PUSH_WAIT, "600"], deadlines)).toBeUndefined()
+    expect(Date.now() - began).toBeLessThan(1000)
+    expect(deadlines).toEqual([])
   })
 })
 

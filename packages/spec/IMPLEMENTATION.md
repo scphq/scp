@@ -100,6 +100,9 @@ A harness whose tool protocol supports server-initiated messages MAY receive mes
 ### Stop push
 
 - The push wait is configured per install: default 600 s, 0 disables, range 0 to 3600. The effective wait is the smaller of the install setting and `SCP_PUSH_WAIT`.
+- A wakeable session (SPEC section 8.6), such as one under `swarm claude`, `swarm claude --bg` or `swarm codex`, does not wait: its stop shows only the worker messages already unread and ends the turn, and the waker brings the later ones. A waker that connects ends a waiting or gathering stop.
+- The installed Claude Code and Codex stop hooks with a push wait carry `"statusMessage": "waiting for worker messages (swarm)"`, which the harness shows while the stop runs. A prompt-submit hook that runs during the wait ends it (`prompted`); whether a prompt typed then runs it at once or only after the stop is up to the harness.
+- The broker counts a spawn grant's bound process, and a hook-only worker's harness process, as running while its pid runs and `ps -o lstart=` (C locale; a match is cached 5 s, a mismatch read again) gives the start time its key holds, or none.
 
 ## Spawn launcher
 
@@ -329,7 +332,7 @@ The Wake column is the `wake` value the endpoint advertises (SPEC section 11.1);
 
 | Harness | Events | Context output | Stop output | Stop push | Subagents | Wake |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | SessionStart, UserPromptSubmit, PostToolUse (`*`, plus a `--subagent` handler), Stop (`--push-wait 600`, timeout wait plus 30 s), SubagentStop (plus an async `--subagent` handler), SessionEnd | `{"hookSpecificOutput":{"hookEventName":<event>,"additionalContext":<text>}}` | Version 2.1.163 or later: the same with `"hookEventName":"Stop"`; earlier: `{"decision":"block","reason":<text>}` | yes | yes | `channels` under `swarm claude`; `claude-inbox` in a background session (`swarm claude --bg`); else none |
+| Claude Code | SessionStart, UserPromptSubmit, PostToolUse (`*`, plus a `--subagent` handler), Stop (`--push-wait 600`, timeout wait plus 30 s, `statusMessage`), SubagentStop (plus an async `--subagent` handler), SessionEnd | `{"hookSpecificOutput":{"hookEventName":<event>,"additionalContext":<text>}}` | Version 2.1.163 or later: the same with `"hookEventName":"Stop"`; earlier: `{"decision":"block","reason":<text>}` | yes | yes | `channels` under `swarm claude`; `claude-inbox` in a background session (`swarm claude --bg`); else none |
 | Codex | SessionStart, UserPromptSubmit, PostToolUse, Stop (as Claude Code), SubagentStop (activity only), SessionEnd | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no | `codex-app-server` under `swarm codex`; else none |
 | Grok | Claude Code's hooks, labelled by environment | as Claude Code; injection after tools only | `{"decision":"block","reason":<text>}` | yes | no | `grok-resume` under `swarm grok`; else none |
 | Muse | Plugin manifest: SessionStart, UserPromptSubmit, PostToolUse, Stop, SessionEnd | as Claude Code | `{"decision":"block","reason":<text>}` | yes | no | `muse-serve` under `swarm muse`; else none |
