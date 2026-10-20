@@ -1,5 +1,12 @@
 # @scp-dev/core
 
+## 0.7.1
+
+### Patch Changes
+
+- a4ebb80: A spawn grant now places the endpoint its session's hooks registered first, so `env $(swarm spawn-env --name W) swarm claude --bg --name W` lands W under the spawner instead of leaving it a root. Only an unplaced, unnamed local root of the same session moves; a placed or named endpoint still only gains the grant's caps and groups.
+- b866b51: A stop no longer holds a session that a message wakes anyway (a wake with a live waker, as under `swarm claude`): it shows the worker messages already unread and lets the turn end, and the waker brings the later ones. A held stop now counts a worker only while it or its `swarm spawn` process still runs, comparing the process start time as well as the pid, so a spawn that died before its worker joined, or a worker whose harness and spawn are both gone, no longer keeps it waiting. `swarm setup` gives the Claude Code and Codex stop hooks the status line "waiting for worker messages (swarm)".
+
 ## 0.7.0
 
 ### Minor Changes
