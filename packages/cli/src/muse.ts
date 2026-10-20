@@ -6,6 +6,7 @@ import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { connectCodexChannel } from "./codex"
+import { attribute, attributed, ROOT_HELP } from "./attribute"
 import { RelayUsage, startDaemon } from "./common"
 import { processKey, relayIdentity, writeMuseLaunch } from "./identity"
 import { mcpFile, mountedEntry } from "./setup"
@@ -15,19 +16,21 @@ type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 type Transport = { request(method: string, params: Json): Promise<Json> }
 
-export const MUSE_HELP = `${CLI_NAME} muse [--name N | --as N] [--resume SESSION] [--approval-mode never|on-request|untrusted] [--] [muse serve args...]
+export const MUSE_HELP = `${CLI_NAME} muse [--name N | --as N] [--root] [--resume SESSION] [--approval-mode never|on-request|untrusted] [--] [muse serve args...]
   runs a headless Muse session (muse serve) that relay messages wake: a message starts a turn on the idle session or steers a running one.
   every other argument goes to muse serve (--provider, --model, -c, sandbox flags); it runs with --contributor-mode off unless you pass on.
   prints the agent's messages; approvals the mode leaves to a human are declined. --resume SESSION reopens a stored session.
-  needs the scp mount and plugin ${CLI_NAME} setup --write installs. $SCP_MUSE_BIN picks the muse binary (default muse on PATH).`
+  needs the scp mount and plugin ${CLI_NAME} setup --write installs. $SCP_MUSE_BIN picks the muse binary (default muse on PATH).
+${ROOT_HELP}`
 
 /** Muse's tool approval modes, as the TUI names them, to the modes muse serve takes on the wire */
 const APPROVAL: Record<string, string> = { never: "allowAll", "on-request": "onRequest", untrusted: "promptUnmatched" }
 const NO_USER_INPUT = "--disable-request-user-input"
 
 /** the muse serve arguments and environment, without the launching session's identity */
-export function museLaunch(args: string[], env: Env): { name?: string; resume?: string; approvalMode: string; serveArgs: string[]; env: Env } {
+export function museLaunch(args: string[], env: Env): { name?: string; root?: true; resume?: string; approvalMode: string; serveArgs: string[]; env: Env } {
   let name: string | undefined
+  let root = false
   let resume: string | undefined
   let approval = "on-request"
   const serveArgs: string[] = []
@@ -45,6 +48,7 @@ export function museLaunch(args: string[], env: Env): { name?: string; resume?: 
     const flag = eq > 0 ? arg.slice(0, eq) : arg
     const take = () => (eq > 0 ? arg.slice(eq + 1) : value(flag, args[++i]))
     if (flag === "--name" || flag === "--as") name = take()
+    else if (arg === "--root") root = true
     else if (flag === "--resume") resume = take()
     else if (flag === "--approval-mode") approval = take()
     else serveArgs.push(arg)
@@ -61,6 +65,7 @@ export function museLaunch(args: string[], env: Env): { name?: string; resume?: 
   const { SCP_SESSION: _session, SCP_PARENT: _parent, ...clean } = env
   return {
     ...(name !== undefined ? { name } : {}),
+    ...(root ? { root: true as const } : {}),
     ...(resume !== undefined ? { resume } : {}),
     approvalMode,
     serveArgs: [...(modes.length ? [] : [MUSE_MODE, "off"]), ...(serveArgs.includes(NO_USER_INPUT) ? [] : [NO_USER_INPUT]), ...serveArgs],
@@ -264,18 +269,21 @@ export async function museCommand(args: string[]): Promise<number> {
     process.stdout.write(`${MUSE_HELP}\n`)
     return 0
   }
-  const launch = museLaunch(args, process.env)
   const cwd = process.cwd()
   const log = (line: string) => void process.stderr.write(`${line}\n`)
+  const parsed = museLaunch(args, process.env)
   try {
-    if (!mountedEntry("muse", mcpFile("muse", launch.env)))
+    if (!mountedEntry("muse", mcpFile("muse", parsed.env)))
       throw new RelayUsage(`${CLI_NAME} muse: Muse has no scp MCP mount, so messages cannot wake this session; run ${CLI_NAME} setup --write`)
   } catch (error) {
     if (error instanceof RelayUsage) throw error
     throw new RelayUsage(
-      `${CLI_NAME} muse: ${mcpFile("muse", launch.env)} is unreadable, so the scp mount is unchecked; fix it or run ${CLI_NAME} setup --write`,
+      `${CLI_NAME} muse: ${mcpFile("muse", parsed.env)} is unreadable, so the scp mount is unchecked; fix it or run ${CLI_NAME} setup --write`,
     )
   }
+  const resume = parsed.resume !== undefined
+  const attribution = await attribute("muse", { ...parsed, resume, dir: museBroker(process.env) }, process.env, cwd, log)
+  const launch = attribution ? museLaunch(args, attributed(process.env, attribution)) : parsed
   const broker = museBroker(launch.env)
   if (relayDir(launch.env) !== broker) log(`${CLI_NAME} muse: Muse starts its shim and hooks without SCP_DIR or XDG_STATE_HOME, so this session uses ${broker}`)
   const env: Env = { ...launch.env, SCP_DIR: broker }
