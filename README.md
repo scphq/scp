@@ -5,7 +5,7 @@
   <img src=".github/assets/scp-lockup-light.svg" alt="SCP" width="200" height="62">
 </picture>
 
-<p><strong>Swarm Communication Protocol</strong>, the message layer for agent swarms.</p>
+<p><strong>Swarm Communication Protocol</strong>, the message layer for agents.</p>
 
 <p>
   <a href="https://scp.dev">scp.dev</a> · <a href="https://scp.dev/spec">Specification</a>
