@@ -566,6 +566,10 @@ export function startMesh(options: MeshOptions): MeshLink {
     if (handle === null) throw new RelayError("policy_refused", `${sender} is not mirrored to the mesh, so it can't message other machines`)
     const link = linked(name)
     if (!link) throw new RelayError("unavailable", `machine ${name} is not linked to this one over the mesh`, 5)
+    if (rebuildTimer) {
+      clearTimeout(rebuildTimer)
+      rebuild()
+    }
     const clientId = params.client_id ?? newId("fwd")
     const sent: SendParams = { ...params, client_id: clientId, to: routes as string[] }
     delete (sent as { wait_s?: unknown }).wait_s
