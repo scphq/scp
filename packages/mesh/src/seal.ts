@@ -15,6 +15,8 @@ export interface Exchange {
 /** what both ends know about one direction of a link, bound into its key */
 export interface Direction {
   acct: string
+  /** the machine that opened the connection */
+  dialer: string
   from: string
   to: string
   from_nonce: string

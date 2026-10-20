@@ -272,8 +272,10 @@ export function startMesh(options: MeshOptions): MeshLink {
       link.peer.attempt = 0
     }
     const record = records.get(name)
-    if (record && record.cert.key !== link.cert!.key) records.delete(name)
-    else if (first && record) apply(record)
+    if (record && record.cert.key !== link.cert!.key) {
+      records.delete(name)
+      apply({ ...record, endpoints: [] })
+    } else if (first && record) apply(record)
     notify(link, "records", { records: [own, ...[...records.values()].filter((row) => row.machine !== name)] })
   }
 
@@ -351,6 +353,7 @@ export function startMesh(options: MeshOptions): MeshLink {
             nonce: link.nonce,
             peer_kx: link.peerKx,
             kx: link.exchange!.public,
+            dialed: link.peer !== null,
           }),
         })
         return
@@ -358,10 +361,20 @@ export function startMesh(options: MeshOptions): MeshLink {
       if (frame.method === "mesh_auth" && link.cert) {
         const peer = link.cert.machine
         if (rival(peer, link.cert.key)) return refuse(link, `machine ${peer} is already linked with another machine key`)
-        const payload = { acct, from: peer, to: machine, peer_nonce: link.nonce, nonce: link.peerNonce, peer_kx: link.exchange!.public, kx: link.peerKx }
+        const payload = {
+          acct,
+          from: peer,
+          to: machine,
+          peer_nonce: link.nonce,
+          nonce: link.peerNonce,
+          peer_kx: link.exchange!.public,
+          kx: link.peerKx,
+          dialed: link.peer === null,
+        }
         if (!verifyPayload(link.cert.key, SIGN_DOMAIN.auth, payload, params.sig)) return refuse(link, "invalid authentication")
-        const own = { from_nonce: link.nonce, from_kx: link.exchange!.public }
-        const theirs = { from_nonce: link.peerNonce!, from_kx: link.peerKx! }
+        const dialer = link.peer ? machine : peer
+        const own = { dialer, from_nonce: link.nonce, from_kx: link.exchange!.public }
+        const theirs = { dialer, from_nonce: link.peerNonce!, from_kx: link.peerKx! }
         link.channel = openChannel(
           link.exchange!,
           link.peerKx!,

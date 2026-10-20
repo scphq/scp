@@ -148,15 +148,15 @@ async function rawPeer(
       remoteNonce = frame.params!.nonce as string
       remoteCert = frame.params!.cert as MachineCert
       remoteKx = frame.params!.kx as string
-      const payload = { acct, from: name, to: remoteCert.machine, peer_nonce: remoteNonce, nonce, peer_kx: remoteKx, kx: exchange.public }
+      const payload = { acct, from: name, to: remoteCert.machine, peer_nonce: remoteNonce, nonce, peer_kx: remoteKx, kx: exchange.public, dialed: true }
       notify("mesh_auth", { sig: signPayload(options.badAuth ? generateKeyPair() : key, SIGN_DOMAIN.auth, payload) })
     } else if (frame.method === "mesh_auth") {
       const remote = remoteCert!.machine
-      const payload = { acct, from: remote, to: name, peer_nonce: nonce, nonce: remoteNonce, peer_kx: exchange.public, kx: remoteKx }
+      const payload = { acct, from: remote, to: name, peer_nonce: nonce, nonce: remoteNonce, peer_kx: exchange.public, kx: remoteKx, dialed: false }
       authenticated = verifyPayload(remoteCert!.key, SIGN_DOMAIN.auth, payload, frame.params!.sig)
       if (authenticated && !options.badAuth) {
-        const mine = { from_nonce: nonce, from_kx: exchange.public }
-        const theirs = { from_nonce: remoteNonce, from_kx: remoteKx }
+        const mine = { dialer: name, from_nonce: nonce, from_kx: exchange.public }
+        const theirs = { dialer: name, from_nonce: remoteNonce, from_kx: remoteKx }
         channel = openChannel(
           exchange,
           remoteKx,
@@ -380,6 +380,41 @@ describe("mesh brokers", () => {
     expect(swapped.closeCode()).toBe(1008)
   })
 
+  test("a third party dialing two machines cannot splice their handshakes into one link", async () => {
+    const account = accountKey()
+    const a = await machine(account, "a")
+    const b = await machine(account, "b")
+    const dial = async (target: Machine) => {
+      const socket = new WebSocket(`ws://${target.addr}${MESH_PATH}`)
+      const frames: Frame[] = []
+      const closed = new Promise<number>((resolve) => socket.once("close", resolve))
+      cleanups.push(async () => {
+        socket.terminate()
+        await closed
+      })
+      socket.on("error", () => {})
+      socket.on("message", (data, binary) => {
+        if (!binary) frames.push(JSON.parse(data.toString()) as Frame)
+      })
+      await new Promise((resolve) => socket.once("open", resolve))
+      const hello = await waitFor(() => frames.find((frame) => frame.method === "mesh_hello"), "hello")
+      const auth = () => waitFor(() => frames.find((frame) => frame.method === "mesh_auth"), "auth")
+      const send = (method: string, params: unknown) => socket.send(JSON.stringify({ jsonrpc: "2.0", method, params }))
+      return { hello: hello.params!, auth, send, closed }
+    }
+    const toA = await dial(a)
+    const toB = await dial(b)
+    toB.send("mesh_hello", toA.hello)
+    toA.send("mesh_hello", toB.hello)
+    const [fromA, fromB] = await Promise.all([toA.auth(), toB.auth()])
+    toA.send("mesh_auth", fromB.params)
+    toB.send("mesh_auth", fromA.params)
+    expect(await toA.closed).toBe(1008)
+    expect(await toB.closed).toBe(1008)
+    expect(a.mesh.status().mesh.links).toEqual([])
+    expect(b.mesh.status().mesh.links).toEqual([])
+  })
+
   test("at most 64 inbound links authenticate at once", async () => {
     const b = await machine(accountKey(), "b")
     const open = async () => {
@@ -393,7 +428,7 @@ describe("mesh brokers", () => {
       await new Promise((resolve) => socket.once("open", resolve))
       return { closed }
     }
-    for (let i = 0; i < 64; i++) await open()
+    await Promise.all(Array.from({ length: 64 }, open))
     expect(await (await open()).closed).toBe(1013)
   })
 

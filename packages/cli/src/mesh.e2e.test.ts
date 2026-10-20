@@ -42,20 +42,17 @@ function present(row: Listed["endpoints"][number] | undefined): boolean {
   return !!row && row.presence !== "offline"
 }
 
-/** distinct free loopback ports, all held open at once while they are picked */
-async function freePorts(count: number): Promise<number[]> {
-  const servers = Array.from({ length: count }, () => createServer())
-  const ports = await Promise.all(
-    servers.map(
-      (server) =>
-        new Promise<number>((resolve, reject) => {
-          server.once("error", reject)
-          server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port))
-        }),
-    ),
-  )
-  await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))))
-  return ports
+/** a free loopback port below the ephemeral ranges, so no outgoing connection takes it before the broker binds it */
+async function freePort(): Promise<number> {
+  for (;;) {
+    const port = 20_000 + Math.floor(Math.random() * 12_000)
+    const free = await new Promise<boolean>((resolve) => {
+      const server = createServer()
+      server.once("error", () => resolve(false))
+      server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)))
+    })
+    if (free) return port
+  }
 }
 
 /** one machine: its own HOME and relay dir, driven only through the swarm CLI and its broker socket */
@@ -114,6 +111,7 @@ class Machine {
   }
 
   async init(args: string[], stdin?: string) {
+    this.port ||= await freePort()
     return this.ok(["mesh", "init", "--machine", this.name, "--listen", this.addr, ...args], stdin === undefined ? {} : { stdin })
   }
 
@@ -192,7 +190,7 @@ describe("mesh across real brokers", () => {
   })
 
   test("setup: init, copy the account key, add peers; a broker started before its peer links once the peer is up", async () => {
-    ;[a.port, b.port, c.port] = (await freePorts(3)) as [number, number, number]
+    b.port = await freePort()
     const out = await a.init(["--account", "team"])
     expect(out).toContain("machine: laptop")
     await b.init(["--account-key", "-"], readFileSync(join(a.dir, "mesh", "account.key"), "utf8"))
