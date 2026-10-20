@@ -1003,6 +1003,7 @@ export class RelayCore {
         : undefined)
     if (resumed) row = resumed
     let joined = row !== undefined && !resumed
+    const hooked = joined
     let own = false
     let live = false
     let created = false
@@ -1099,7 +1100,7 @@ export class RelayCore {
     }
     if (fresh) this.reset(row, scope, fresh, moved, now)
     if (created || fresh === "grant") this.place(this.byId(row.id)!, scope, now)
-    else if (scope.grant !== null) this.redeem(this.byId(row.id)!, scope, now)
+    else if (scope.grant !== null) this.redeem(this.byId(row.id)!, scope, now, hooked)
     if (scope.grant !== null) this.takePending(row.id)
     if (!transient) this.wakeDone(row.id, "claim")
     return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
@@ -1396,14 +1397,19 @@ export class RelayCore {
 
   /**
    * a claim that took over or joined an existing endpoint spends a grant that would have placed it, adds its caps to the endpoint's and joins
-   * its groups; it moves nothing. The endpoint that spent the grant re-claims with it; any other refused grant fails the claim
+   * its groups; it moves nothing, unless it joined by session a root its session's hooks registered ({@link unplaced}), which the grant places
+   * as a new endpoint. The endpoint that spent the grant re-claims with it; any other refused grant fails the claim
    */
-  private redeem(row: EndpointRow, scope: ClaimScope, now: number): void {
+  private redeem(row: EndpointRow, scope: ClaimScope, now: number, hooked: boolean): void {
     if (this.spentGrant(scope)?.used_by === row.id) return
     const { grant, refused, ignored } = this.placement(scope, now, row)
     if (refused) throw this.grantRefused(scope, refused)
     if (ignored) this.audit("scope_grant_ignored", row.id, null, { target: this.address(row), reason: ignored })
     if (!grant) return
+    if (hooked && this.unplaced(row)) {
+      this.place(row, scope, now)
+      return
+    }
     this.spend(grant, row.id, scope.cwd)
     const caps = this.capsOf(row)
     const base = (cap: ScopeCap) =>
@@ -1419,6 +1425,21 @@ export class RelayCore {
     this.saveCaps(row.id, caps)
     if (grant.title) this.sql.all(`UPDATE endpoints SET title = COALESCE(title, ?) WHERE id = ?`, grant.title, row.id)
     this.joinGrant(grant, row.id, now)
+  }
+
+  /** a local root no one named, linked or placed: no parent, no children, no grant spent, not a subagent's */
+  private unplaced(row: EndpointRow): boolean {
+    return (
+      row.kind === "agent" &&
+      this.localRow(row) &&
+      row.parent_ep === null &&
+      row.parent_addr === null &&
+      row.linked === null &&
+      row.named === null &&
+      !row.session?.startsWith("sub:") &&
+      !one(this.sql, `SELECT 1 AS x FROM endpoints WHERE parent_ep = ? LIMIT 1`, row.id) &&
+      !one(this.sql, `SELECT 1 AS x FROM grants WHERE used_by = ? LIMIT 1`, row.id)
+    )
   }
 
   private grantCaps(grant: GrantRow): ScopeCap[] {

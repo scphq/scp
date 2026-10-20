@@ -1626,6 +1626,50 @@ describe("single-use grants", () => {
     expect(claim("w", 11, [], { grant: open, cwd: "/work/w" }).id).toBe(w)
   })
 
+  test("a grant joining the root its session's hooks registered first places it as a fresh claim would, once", () => {
+    const { core, claim, as, db } = setup()
+    claim("main", 1)
+    claim("orch", 2, [1])
+    const session = { harness: "claude", session: "sess-bg", process: key(7), lineage: [key(7), key(99)] }
+    const hook = core.claim({ handle: "claude-app", ...session }, { transient: true }).endpoint
+    expect(hook.parent).toBeNull()
+    const grant = core.grant(as("orch"), { name: "w", scope: "parent" }).token
+    const shim = core.claim({ handle: "w", ...session, grant }).endpoint
+    expect(shim).toMatchObject({ id: hook.id, address: "me/w", parent: "me/orch" })
+    expect(db.query("SELECT depth, tree FROM endpoints WHERE id = ?").get(hook.id)).toEqual({
+      depth: 2,
+      tree: core.list().find((e) => e.address === "me/main")!.id,
+    })
+    const placed = core.log({}).filter((row) => row.event === "scope_place" && row.detail.target === "me/w")
+    expect(placed.map((row) => row.detail)).toEqual([{ by: "me/orch", target: "me/w", parent: "me/orch", grant: true }])
+    core.disconnect(hook.id)
+    expect(core.claim({ handle: "w", ...session, grant }).endpoint).toMatchObject({ id: hook.id, parent: "me/orch" })
+    expect(core.claim({ handle: "claude-app", ...session }, { transient: true }).endpoint).toMatchObject({ id: hook.id, address: "me/w", parent: "me/orch" })
+    expect(core.log({}).filter((row) => row.event === "scope_place" && row.detail.target === "me/w")).toHaveLength(1)
+  })
+
+  test("a grant joining a session's endpoint that is placed, named or has children moves nothing", () => {
+    const { core, claim, as } = setup()
+    claim("main", 1)
+    claim("orch", 2, [1])
+    const join = (n: number, lineage: number[], prepare?: (id: string) => void) => {
+      const session = { harness: "claude", session: `sess-${n}`, process: key(n), lineage: [key(n), ...lineage.map(key)] }
+      const hook = core.claim({ handle: `hooks-${n}`, ...session }, { transient: true }).endpoint
+      prepare?.(hook.id)
+      const grant = core.grant(as("orch"), {}).token
+      const joined = core.claim({ handle: `hooks-${n}`, ...session, grant }).endpoint
+      expect(joined.id).toBe(hook.id)
+      return joined
+    }
+    expect(join(10, [1]).parent).toBe("me/main")
+    expect(join(11, [99], (id) => core.rename({ kind: "endpoint", id, auth: "session" }, { handle: "mine" }))).toMatchObject({
+      address: "me/mine",
+      parent: null,
+    })
+    expect(join(12, [99], () => claim("kid", 13, [12])).parent).toBeNull()
+    expect(core.list().find((e) => e.address === "me/kid")?.parent).toBe("me/hooks-12")
+  })
+
   test("a named grant is neither applied nor spent, and the claim fails, when it would land on a suffixed handle", () => {
     const { core, claim, as, db } = setup()
     claim("main", 1)
