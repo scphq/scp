@@ -853,6 +853,8 @@ A spawn runs a worker harness under a fresh spawn grant. Launching the worker (i
 
 An ordinary grant (`spawn` absent) places a worker the same way without steer key, handback or stop push.
 
+A launcher that starts a harness on behalf of an agent MAY mint an ordinary grant for it as that agent, from the connection the agent's own shell would bind (its self or lineage attestation, section 6.7), so the new endpoint is placed under that agent without the agent asking. Such a grant carries the caller's existing authority and never widens it: the same caps, child default and group rules apply as to a grant the agent minted itself. A launcher that cannot mint one starts the harness without a grant.
+
 A worker on another machine of the account runs without a grant, linked under the spawner (sections 6.12 and 19.4).
 
 ### 9.3 Handback

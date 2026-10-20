@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream"
 import { connectBroker, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
+import { attribute, attributed, ROOT_HELP } from "./attribute"
 import { RelayUsage, startDaemon } from "./common"
 import { relayIdentity } from "./identity"
 import { whichOnPath } from "./setup"
@@ -17,13 +18,14 @@ type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 type Transport = { request(tag: string, payload: Json): Promise<Json> }
 
-export const T3CODE_HELP = `${CLI_NAME} t3code [--name N | --as N] --thread THREAD [--base-dir DIR]
+export const T3CODE_HELP = `${CLI_NAME} t3code [--name N | --as N] [--root] --thread THREAD [--base-dir DIR]
   holds an agent endpoint for one T3 Code thread, wake on: each batch of relay messages goes to the thread as a user
   message, starting a turn when it is idle and steering the running one otherwise; retried every 2 s until T3 Code takes it.
   finds the running server in DIR/userdata/server-runtime.json (DIR: --base-dir, else $T3CODE_HOME, else ~/.t3) or at
   $SCP_T3_URL, with the token $SCP_T3_TOKEN or one t3 auth session issue grants ($SCP_T3_BIN picks t3, default t3 on PATH).
   refuses to start without a server, a token or the thread, and exits non-zero when the connection drops.
-  the thread's own agent joins through its provider's mount (codex or claude) as a separate t3code endpoint.`
+  the thread's own agent joins through its provider's mount (codex or claude) as a separate t3code endpoint.
+${ROOT_HELP}`
 
 /** the active-run statuses of a T3 Code run */
 const ACTIVE = new Set(["preparing", "starting", "running", "waiting"])
@@ -31,6 +33,7 @@ const CONNECT_TIMEOUT_MS = 10_000
 
 export interface T3Launch {
   name?: string
+  root?: true
   thread: string
   baseDir?: string
   env: Env
@@ -41,12 +44,17 @@ export function t3Launch(args: string[], env: Env): T3Launch {
   let name: string | undefined
   let thread: string | undefined
   let baseDir: string | undefined
+  let root = false
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
+    if (arg === "--root") {
+      root = true
+      continue
+    }
     const eq = arg.startsWith("--") ? arg.indexOf("=") : -1
     const flag = eq > 0 ? arg.slice(0, eq) : arg
     if (flag !== "--name" && flag !== "--as" && flag !== "--thread" && flag !== "--base-dir")
-      throw new RelayUsage(`${CLI_NAME} t3code takes --name, --thread and --base-dir, not ${JSON.stringify(arg)}`)
+      throw new RelayUsage(`${CLI_NAME} t3code takes --name, --root, --thread and --base-dir, not ${JSON.stringify(arg)}`)
     const value = eq > 0 ? arg.slice(eq + 1) : args[++i]
     if (!value) throw new RelayUsage(`${CLI_NAME} t3code ${flag} takes a value`)
     if (flag === "--thread") thread = value
@@ -59,6 +67,7 @@ export function t3Launch(args: string[], env: Env): T3Launch {
   const { SCP_SESSION: _session, SCP_PARENT: _parent, SCP_HARNESS_PID: _pid, ...clean } = env
   return {
     ...(name !== undefined ? { name } : {}),
+    ...(root ? { root: true as const } : {}),
     thread,
     ...(baseDir !== undefined ? { baseDir } : {}),
     env: { ...clean, SCP_HARNESS: "t3code", SCP_SESSION: randomBytes(16).toString("hex"), ...(name !== undefined ? { SCP_NAME: name } : {}) },
@@ -360,10 +369,12 @@ export async function t3codeCommand(
     process.stdout.write(`${T3CODE_HELP}\n`)
     return 0
   }
-  const launch = t3Launch(args, env)
-  const home = t3Home(env, launch.baseDir)
+  const parsed = t3Launch(args, env)
+  const home = t3Home(env, parsed.baseDir)
   const server = t3Server(env, home)
   const token = t3Token(env, home)
+  const attribution = await attribute("t3code", parsed, env, cwd, err)
+  const launch = attribution ? t3Launch(args, attributed(env, attribution)) : parsed
   let finish!: (code: number) => void
   const done = new Promise<number>((resolve) => {
     finish = resolve
