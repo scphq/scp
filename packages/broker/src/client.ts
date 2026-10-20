@@ -127,6 +127,11 @@ export class RelayClient {
     this.listeners.push(fn)
   }
 
+  /** whether the connection is closed, by either side */
+  get closed(): boolean {
+    return this.closedError !== undefined
+  }
+
   request<T = unknown>(method: string, params: object = {}): Promise<T> {
     if (this.closedError) return Promise.reject(this.closedError)
     const id = this.nextId++
@@ -335,8 +340,8 @@ export async function connectBroker(dir: string, start?: () => void, timeoutMs =
     return owned(await RelayClient.connect(path))
   } catch (error) {
     sandboxed(error)
-    if (!start) throw new BrokerUnavailable(`no relay broker at ${path} (${error instanceof Error ? error.message : String(error)})`)
     if (existsSync(path) && brokerLive(dir)) throw refuse((error as { code?: unknown } | null)?.code ?? "refused")
+    if (!start) throw new BrokerUnavailable(`no relay broker at ${path} (${error instanceof Error ? error.message : String(error)})`)
   }
   start()
   const deadline = Date.now() + timeoutMs

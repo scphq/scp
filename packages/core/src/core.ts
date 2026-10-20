@@ -2129,6 +2129,8 @@ export class RelayCore {
     const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
     if (actor.kind === "endpoint" && target.id !== me.id) throw new RelayError("scope_refused", "an agent hibernates only itself")
     if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint hibernates")
+    if (actor.kind === "endpoint" && set.wake === SPAWN_PROVIDER && (target.hold_ref === null || set.ref !== target.hold_ref))
+      throw new RelayError("invalid_params", `an agent hibernates by ${SPAWN_PROVIDER} only with the ref its durable hold gave`)
     return { endpoint: this.setHibernation(me, target, set) }
   }
 

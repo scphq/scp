@@ -118,6 +118,8 @@ interface Connection {
   lineage?: string | undefined
   /** the lineage endpoint is the one of the harness whose shell runs the command, bound with no grant: it acts with the endpoint's session reach */
   own?: boolean
+  /** the connection claimed with a grant or a wake ticket, as a spawn holding its worker does: it may give a durable ref */
+  holder?: boolean
   /** a hook's connection: it posts activity and status, and never counts as connected */
   transient?: boolean
   /** a hook connection's harness process key, from its claim */
@@ -912,7 +914,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         s.data.tty = params.tty === true
         endpoint = core.claimHuman(s.data.tty)
       } else {
-        const claimed = core.claim((params.claim ?? {}) as Claim, { self: params.self })
+        const claim = (params.claim ?? {}) as Claim
+        const claimed = core.claim(claim, { self: params.self })
+        s.data.holder = typeof claim.grant === "string" || typeof claim.ticket === "string"
         endpoint = claimed.endpoint
         token = claimed.token
       }
@@ -1016,6 +1020,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "wake": {
         if (s.data.lineage && !s.data.own) throw new RelayError("unauthorized", "only the endpoint's own session says how it wakes")
+        if (params.ref !== undefined && params.ref !== null && !s.data.holder)
+          throw new RelayError("unauthorized", "only a spawn holding its worker, by the grant it spent or a wake ticket, gives a durable ref")
         if (params.ref !== undefined && params.ref !== null && !wakers?.known(SPAWN_PROVIDER))
           throw new RelayError("invalid_params", `no waker ${SPAWN_PROVIDER} is configured: this broker cannot hold a spawn durably`)
         const changed = core.setWake(me, params.via, { ...hookOf(s), ref: params.ref })

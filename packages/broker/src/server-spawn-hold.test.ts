@@ -36,6 +36,14 @@ async function connect(broker: Broker, hello: Parameters<RelayClient["hello"]>[0
   return { client, endpoint: result.endpoint! }
 }
 
+/** the worker `w` claimed with a spawn grant `lead` issued, as a spawn holding it does */
+async function holder(broker: Broker) {
+  const lead = await connect(broker, { claim: { handle: "lead", harness: "claude-code", session: "s0", process: key(10) } })
+  const grant = await lead.client.grant({ name: "w", spawn: true, ttl_s: 60 })
+  const held = await connect(broker, { claim: { handle: "w", harness: "codex", session: "s1", process: key(11), grant: grant.token } })
+  return { lead, held }
+}
+
 async function until(check: () => boolean, ms = 10_000): Promise<void> {
   const deadline = Date.now() + ms
   while (!check()) {
@@ -57,15 +65,26 @@ async function code(promise: Promise<unknown>): Promise<string | undefined> {
 describe("broker, held spawns", () => {
   test("a durable hold needs the spawn waker; without one the endpoint can still be held plainly", async () => {
     const { broker } = await setup(false)
-    const { client } = await connect(broker, { claim: { handle: "w", harness: "codex", session: "s1", process: key(11) } })
+    const { client } = (await holder(broker)).held
     expect(await code(client.request("wake", { via: "spawn-resume", ref: REF }))).toBe("invalid_params")
     expect(await client.request("wake", { via: "spawn-resume" })).toEqual({ changed: true })
   })
 
+  test("only a connection that claimed with a grant or wake ticket gives a durable ref, and an agent hibernates by spawn only with it", async () => {
+    const { broker } = await setup(true)
+    const plain = await connect(broker, { claim: { handle: "p", harness: "codex", session: "s9", process: key(19) } })
+    expect(await code(plain.client.request("wake", { via: "spawn-resume", ref: REF }))).toBe("unauthorized")
+    expect(await code(plain.client.request("hibernate", { wake: "spawn", ref: REF }))).toBe("invalid_params")
+    const { held } = await holder(broker)
+    await held.client.request("wake", { via: "spawn-resume", ref: REF })
+    const other = JSON.stringify({ ...JSON.parse(REF), argv: ["/tmp/x/codex"] })
+    expect(await code(held.client.request("hibernate", { wake: "spawn", ref: other }))).toBe("invalid_params")
+    expect(await held.client.request("hibernate", { wake: "spawn", ref: REF })).toMatchObject({ endpoint: { presence: "hibernated" } })
+  })
+
   test("a durable hold's connection closing hibernates it by the built-in waker, which then runs for its unread message", async () => {
     const { broker, record } = await setup(true)
-    const lead = await connect(broker, { claim: { handle: "lead", harness: "claude-code", session: "s0", process: key(10) } })
-    const held = await connect(broker, { claim: { handle: "w", harness: "codex", session: "s1", process: key(11) } })
+    const { lead, held } = await holder(broker)
     expect(await held.client.request("wake", { via: "spawn-resume", ref: REF })).toEqual({ changed: true })
     await lead.client.request("send", { to: "w", body: "queued while held" })
     held.client.close()
@@ -91,7 +110,7 @@ describe("broker, held spawns", () => {
 
   test("a broker that starts again hibernates the endpoints a durable spawn still held", async () => {
     const first = await setup(true)
-    const held = await connect(first.broker, { claim: { handle: "w", harness: "codex", session: "s1", process: key(11) } })
+    const { held } = await holder(first.broker)
     await held.client.request("wake", { via: "spawn-resume", ref: REF })
     await first.broker.stop()
     const again = await setup(true, first.root)

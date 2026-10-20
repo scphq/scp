@@ -298,6 +298,25 @@ test("a durable worker hibernates when let go; a message wakes it through the bu
   await until(async () => (await f.view("hd"))?.presence === "hibernated", 15_000, "the woken worker to hibernate again")
 })
 
+test("a woken durable worker ended during its run still hands that run back, then stays let go", async () => {
+  const f = await fixture()
+  f.gate()
+  const runner = f.spawn("--durable", "--idle", "2", "--name", "hz", "--", "codex", "exec", "go")
+  await f.up(1)
+  f.go(1)
+  await f.next("hz")
+  await waitFor(() => !alive(runner), 15_000, "the runner to hibernate and exit")
+  await f.lead.request("send", { to: "hz", body: "wake" })
+  await f.up(2)
+  expect((await f.lead.request<{ held: boolean }>("spawn_end", { endpoint: "hz" })).held).toBe(true)
+  f.go(2)
+  expect((await f.next("hz")).body.text).toStartWith("worker me/hz finished (exit 0)\n\nrun 2 done")
+  await until(async () => (await f.view("hz"))?.presence === "offline", 15_000, "the ended worker to go offline")
+  await f.lead.request("send", { to: "hz", body: "too late" })
+  await Bun.sleep(500)
+  expect(f.runs()).toHaveLength(2)
+})
+
 test("a durable worker whose spawn dies, or whose broker restarts, is hibernated by the broker", async () => {
   const f = await fixture()
   const runner = f.spawn("--durable", "--idle", "60", "--name", "hk", "--", "codex", "exec", "go")

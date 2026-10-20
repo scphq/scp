@@ -148,6 +148,8 @@ export interface Held {
   endpoint: EndpointView
   /** the durable ref the broker took, when it did */
   durable?: string
+  /** the session's resume token, before any harness run claims the session and replaces it */
+  token?: string
 }
 
 /**
@@ -162,7 +164,8 @@ export async function holdEndpoint(
   let client: RelayClient | undefined
   try {
     client = await connectBroker(relayDir())
-    const endpoint = (await client.hello({ claim })).endpoint!
+    const { endpoint: claimed, token } = await client.hello({ claim })
+    const endpoint = claimed!
     let kept = durable?.(endpoint)
     try {
       await client.request("wake", { via: "spawn-resume", ...(kept ? { ref: kept } : {}) })
@@ -172,7 +175,7 @@ export async function holdEndpoint(
       kept = undefined
       await client.request("wake", { via: "spawn-resume" })
     }
-    return { client, endpoint, ...(kept ? { durable: kept } : {}) }
+    return { client, endpoint, ...(kept ? { durable: kept } : {}), ...(token ? { token } : {}) }
   } catch (error) {
     client?.close()
     log(`${CLI_NAME} spawn: ${claim.handle} cannot be held for a resume: ${error instanceof Error ? error.message : String(error)}`)
@@ -378,6 +381,7 @@ async function wakeRunner(env: Env): Promise<number> {
   const runEnv: Record<string, string> = {}
   for (const [key, value] of Object.entries({ ...clean, SCP_NAME: handle, SCP_SESSION: session, SCP_HARNESS_PID: String(process.pid) }))
     if (value !== undefined) runEnv[key] = value
+  const spare = await resumed(held.token)
   const signals = watchSignals()
   try {
     await holdLoop(held, {
@@ -394,15 +398,18 @@ async function wakeRunner(env: Env): Promise<number> {
         })
         const code = Math.min(run.code, 255)
         const woke = wokeBy(messages)
-        try {
+        const handBack = async (client: RelayClient) => {
           if (parent)
-            await held.client.request("send", {
+            await client.request("send", {
               to: parent,
               kind: "message",
               body: linkedHandbackBody(held.endpoint.address, code, harnessOutput(run), stderrOutput(run)),
               ...(woke ? { reply_to: woke } : {}),
             })
-          await held.client.request("status", { state: "done", note: `exited ${code}` })
+          await client.request("status", { state: "done", note: `exited ${code}` })
+        }
+        try {
+          await handBack(held.client.closed && spare ? spare : held.client)
         } catch (error) {
           note(`${CLI_NAME} spawn-wake: could not hand ${handle}'s result back: ${error instanceof Error ? error.message : String(error)}`)
         }
@@ -410,8 +417,26 @@ async function wakeRunner(env: Env): Promise<number> {
     })
   } finally {
     signals.stop()
+    spare?.close()
   }
   return 0
+}
+
+/**
+ * a second connection to the held endpoint, resumed with its token before a harness run replaces it: `spawn_end` closes only the holding
+ * connection, so a run in flight still hands back over this one
+ */
+async function resumed(token: string | undefined): Promise<RelayClient | undefined> {
+  if (!token) return undefined
+  let client: RelayClient | undefined
+  try {
+    client = await connectBroker(relayDir())
+    await client.hello({ resume: token })
+    return client
+  } catch {
+    client?.close()
+    return undefined
+  }
 }
 
 /** the claim with which a spawn holds its worker's endpoint once the harness exited: its grant, the spawner's lineage, spawn's own process */

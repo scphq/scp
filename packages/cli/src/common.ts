@@ -233,14 +233,16 @@ export function walkNow(env = process.env, pid = process.ppid, table: PsCommTabl
 }
 
 /**
- * the broker for `dir`, started when none runs. A codex sandbox that blocks the socket is a usage error naming `tool`, the MCP tool that does
- * the same from outside it (the scp MCP server runs outside the sandbox), or the codex setting that opens it
+ * the broker for `dir`, started when none runs, except from a codex shell, whose sandbox would hold the daemon too. There a broker it cannot
+ * reach is a usage error naming `tool`, the MCP tool that does the same from outside the sandbox (the scp MCP server runs outside it), or the
+ * codex setting that opens the socket
  */
 export async function connectShell(dir: string, tool: string): Promise<RelayClient> {
+  const codex = codexShell(process.env)
   try {
-    return await connectBroker(dir, () => startDaemon(dir))
+    return await connectBroker(dir, codex ? undefined : () => startDaemon(dir))
   } catch (error) {
-    if (!(error instanceof BrokerUnavailable) || !error.sandboxed || !codexShell(process.env)) throw error
+    if (!(error instanceof BrokerUnavailable) || !codex) throw error
     throw new RelayUsage(
       `${error.message}. In a codex sandbox use ${tool} instead: the scp MCP server runs outside the sandbox. Or let the sandbox reach the socket (codex: sandbox_workspace_write.network_access = true)`,
     )

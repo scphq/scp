@@ -82,6 +82,30 @@ test("join --under in a codex sandbox that blocks the relay socket names relay_j
   }
 })
 
+test("join --under in a codex shell with no broker running names relay_join and starts none", async () => {
+  const root = mkdtempSync(join(process.env.HOME!, "sandbox-none-"))
+  const dir = privateDir(join(root, "relay"))
+  const env = cleanEnv({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_SHIM_BINDING: "f".repeat(32) })
+  const clear = writeShimBinding({ handle: "boxed", harness: "codex", process: processKey(process.pid) }, env)
+  try {
+    const child = Bun.spawn([process.execPath, "--no-env-file", entry, "join", "boxed", "--under", "lead"], {
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stderr, code] = await Promise.all([new Response(child.stderr).text(), child.exited])
+    expect(code).toBe(125)
+    expect(stderr).toContain("no relay broker at")
+    expect(stderr).toContain('In a codex sandbox use relay_join {name: "boxed", under: "lead"} (MCP) instead')
+    expect(existsSync(join(dir, "broker.log"))).toBe(false)
+    expect(existsSync(join(dir, "broker.lock"))).toBe(false)
+  } finally {
+    clear()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 const entry = join(import.meta.dir, "cli.ts")
 const MARKERS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_|OPENCODE|GROK_|MUSE_|CODEX_THREAD_ID|SCP_)/
 
