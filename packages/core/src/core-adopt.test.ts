@@ -147,35 +147,96 @@ describe("adopt", () => {
     expect(core.adopt(self(lead.id), { endpoint: "peer" }, { tty: true }).endpoint.parent).toBe("me/lead")
   })
 
-  test("an agent requests consent, the recipient accepts a short id and takes on worker scope", () => {
+  test("an agent adopts a local root under itself directly: the child takes on worker scope, audited adopt with the actor's auth", () => {
     const { core, lead, peer, send } = setup()
     core.setPolicy({ rules: [], defaults: { child_default: "parent" } })
     const result = core.adopt(self(lead.id), { endpoint: "peer" })
-    expect(result).toMatchObject({ parent: "me/lead", endpoint: { id: peer.id, parent: null } })
-    expect(result.requested).toBeString()
-    expect(core.whoami(peer.id).parent).toBeNull()
+    expect(result).toMatchObject({ parent: "me/lead", endpoint: { id: peer.id, parent: "me/lead", depth: 1 } })
+    expect(result.requested).toBeUndefined()
+    expect(core.inbox(peer.id)).toEqual([])
+    expect(core.log({}).find((row) => row.event === "adopt")?.detail).toEqual({ by: "me/lead", auth: "session", target: "me/peer", parent: "me/lead" })
+    expect(core.log({}).find((row) => row.event === "adopt_request")).toBeUndefined()
+    expect(send(peer.id, "lead")).toBe("ok")
+    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
+    expect(send(peer.id, other.address)).toBe("not_found")
+    expect(core.adopt(self(lead.id), { endpoint: "peer" })).toMatchObject({ parent: "me/lead", endpoint: { parent: "me/lead" } })
+    expect(core.log({}).filter((row) => row.event === "adopt")).toHaveLength(1)
+  })
+
+  test("a shell inside the agent's harness (lineage auth) counts as the agent; the root of another tree moves over with its subtree", () => {
+    const { core, lead } = setup()
+    const app = core.claim({ handle: "app", harness: "codex" }).endpoint
+    core.adopt(HUMAN, { endpoint: "peer", parent: "app" })
+    expect(core.adopt({ kind: "endpoint", id: lead.id, auth: "lineage" }, { endpoint: "app" }).endpoint).toMatchObject({ id: app.id, parent: "me/lead" })
+    expect(core.list({ all: true }).find((v) => v.address === "me/peer")).toMatchObject({ parent: "me/app", depth: 2 })
+    expect(core.log({}).find((row) => row.event === "adopt" && row.detail?.target === "me/app")?.detail).toMatchObject({ auth: "lineage" })
+    const tty = core.claim({ handle: "tty", harness: "cli" }).endpoint
+    expect(core.adopt({ kind: "endpoint", id: lead.id, auth: "lineage" }, { endpoint: "tty" }, { tty: true }).endpoint).toMatchObject({
+      id: tty.id,
+      parent: "me/lead",
+    })
+  })
+
+  test("refuses itself, its own ancestor, a subagent's endpoint, another parent, an unreachable child and a policy refusal", () => {
+    const { core, hook, lead, peer } = setup()
+    const refused = (endpoint: string, actor = self(lead.id)) => {
+      const error = failure(() => core.adopt(actor, { endpoint }))
+      return `${error.code}: ${error.message}`
+    }
+    expect(refused("lead")).toBe("scope_refused: an agent cannot adopt itself")
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer", parent: "peer" })).code).toBe("scope_refused")
+    expect(failure(() => core.adopt(self(lead.id), { endpoint: "me/" })).code).toBe("invalid_params")
+    core.adopt(self(lead.id), { endpoint: "peer" })
+    expect(refused("lead", self(peer.id))).toBe("scope_refused: me/lead sits above you: an agent cannot adopt its own ancestor")
+    const sub = core.claim({ ...claim10(), subagent: { id: "aceb553c19f223c70", type: "Explore" } }, { transient: true }).endpoint
+    core.unlink(HUMAN, { endpoint: sub.address })
+    expect(refused(sub.address.slice(3), self(peer.id))).toBe("scope_refused: me/lead-explore-aceb is a subagent's endpoint: it stays under its root")
+    const loose = hook("loose", 30)
+    core.rulesSet(HUMAN, { endpoint: "loose", in: [] })
+    expect(refused("loose")).toStartWith("not_found")
+    core.rulesSet(HUMAN, { endpoint: "loose", in: ["*"] })
+    core.setPolicy({ rules: [{ match: "ep:lead", send_to: [] }] })
+    expect(refused("loose")).toStartWith("policy_refused")
+    core.setPolicy({ rules: [] })
+    expect(core.whoami(loose.id).parent ?? null).toBeNull()
+    expect(core.log({}).filter((row) => row.event === "adopt" && row.detail?.target === "me/loose")).toEqual([])
+
+    function claim10() {
+      return { handle: "lead", harness: "claude-code", process: key(10), session: key(10), lineage: [key(10), key(1)] }
+    }
+  })
+
+  test("a child under another parent is asked instead, through the send path; the recipient accepts a short id once it is a root", () => {
+    const { core, lead, peer } = setup()
+    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
+    core.adopt(HUMAN, { endpoint: "peer", parent: other.address })
+    const result = core.adopt(self(lead.id), { endpoint: "peer" })
+    expect(result).toMatchObject({ parent: "me/lead", endpoint: { id: peer.id, parent: "me/other" } })
     expect(core.inbox(peer.id)[0]).toMatchObject({ id: result.requested, kind: "request", from: { endpoint: lead.id }, link: { parent: "me/lead" } })
+    expect(core.inbox(peer.id)[0]!.body.text).toContain("You sit under me/other now")
     expect(core.inbox(peer.id)[0]!.body.text).toContain("swarm link accept <id>")
     expect(core.log({}).find((row) => row.event === "adopt_request")).toMatchObject({
       ref: result.requested,
       detail: { auth: "session", target: "me/peer", parent: "me/lead" },
     })
+    expect(failure(() => core.linkAccept(self(peer.id), { id: result.requested })).message).toContain("already sits under me/other")
+    expect(failure(() => core.adopt({ kind: "endpoint", id: lead.id, auth: "lineage" }, { endpoint: "peer" })).code).toBe("scope_refused")
+    core.unlink(HUMAN, { endpoint: "peer" })
     expect(core.linkAccept({ kind: "endpoint", id: peer.id, auth: "self" }, { id: result.requested!.slice(-6) })).toMatchObject({
       endpoint: { parent: "me/lead", depth: 1 },
       parent: "me/lead",
     })
-    expect(core.log({}).find((row) => row.event === "adopt")).toMatchObject({
+    expect(core.log({}).find((row) => row.event === "adopt" && row.detail?.request)).toMatchObject({
       ref: result.requested,
       detail: { request: result.requested, by: "me/peer", auth: "self" },
     })
-    expect(send(peer.id, "lead")).toBe("ok")
-    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
-    expect(send(peer.id, other.address)).toBe("not_found")
   })
 
   test("only the recipient's own session accepts an authentic link request", () => {
     const { core, lead, peer } = setup()
+    core.adopt(HUMAN, { endpoint: "peer", parent: core.claim({ handle: "other", harness: "cli" }).endpoint.address })
     const { requested: id } = core.adopt({ kind: "endpoint", id: lead.id, auth: "self" }, { endpoint: "peer", parent: "lead" })
+    core.unlink(HUMAN, { endpoint: "peer" })
     expect(failure(() => core.linkAccept(self(lead.id), { id })).code).toBe("not_found")
     expect(failure(() => core.linkAccept({ kind: "endpoint", id: peer.id, auth: "lineage" }, { id })).code).toBe("scope_refused")
     expect(failure(() => core.linkAccept(HUMAN, { id })).code).toBe("scope_refused")
@@ -185,32 +246,18 @@ describe("adopt", () => {
     expect(core.whoami(peer.id).parent).toBeNull()
   })
 
-  test("requests enforce sender authority, scopes, policy and a local root target", () => {
-    const { core, lead, peer } = setup()
-    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer", parent: "peer" })).code).toBe("scope_refused")
-    expect(failure(() => core.adopt({ kind: "endpoint", id: lead.id, auth: "lineage" }, { endpoint: "peer" }, { tty: true })).code).toBe("scope_refused")
-    expect(failure(() => core.adopt(self(lead.id), { endpoint: "me/" })).code).toBe("invalid_params")
-    core.rulesSet(HUMAN, { endpoint: "peer", in: [] })
-    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("not_found")
-    core.rulesSet(HUMAN, { endpoint: "peer", in: ["*"] })
-    core.setPolicy({ rules: [{ match: "ep:lead", send_to: [] }] })
-    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("policy_refused")
-    expect(core.inbox(peer.id)).toEqual([])
-    core.setPolicy({ rules: [] })
-    core.adopt(HUMAN, { endpoint: "peer", parent: "lead" })
-    expect(failure(() => core.adopt(self(lead.id), { endpoint: "peer" })).code).toBe("scope_refused")
-  })
-
   test("acceptance rechecks cycles, depth, existing placement, expiry and the sender", () => {
     const { core, lead, peer, clock, db } = setup()
+    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
+    core.adopt(HUMAN, { endpoint: "peer", parent: other.address })
     const { requested: id } = core.adopt(self(lead.id), { endpoint: "peer" })
+    core.unlink(HUMAN, { endpoint: "peer" })
     core.adopt(HUMAN, { endpoint: "lead", parent: "peer" })
     expect(failure(() => core.linkAccept(self(peer.id), { id })).message).toContain("its own descendant")
     core.unlink(HUMAN, { endpoint: "lead" })
     db.query("UPDATE endpoints SET depth = ? WHERE id = ?").run(LIMITS.depthMax, lead.id)
     expect(failure(() => core.linkAccept(self(peer.id), { id })).message).toContain("deeper")
     db.query("UPDATE endpoints SET depth = 0 WHERE id = ?").run(lead.id)
-    const other = core.claim({ handle: "other", harness: "cli" }).endpoint
     core.adopt(HUMAN, { endpoint: "peer", parent: other.address })
     expect(failure(() => core.linkAccept(self(peer.id), { id })).message).toContain("already sits under")
     core.unlink(HUMAN, { endpoint: "peer" })

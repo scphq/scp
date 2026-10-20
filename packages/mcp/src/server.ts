@@ -248,7 +248,8 @@ export const TOOLS = [
   },
   {
     name: "relay_link_accept",
-    description: "Accept a link request; you then sit under the requesting agent as its worker.",
+    description:
+      "Accept a link request: an agent asked to adopt you while you sat under another parent. Accept once you are a root again; you then sit under the requesting agent as its worker.",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false },
   },
   {
@@ -1000,7 +1001,16 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
             write({
               jsonrpc: "2.0",
               method: "notifications/claude/channel",
-              params: { content, meta: { from: message.from.address, id: message.id, seq: String(message.seq), thread: message.thread } },
+              params: {
+                content,
+                meta: {
+                  from: message.from.address,
+                  id: message.id,
+                  seq: String(message.seq),
+                  thread: message.thread,
+                  ...(message.for ? { for: message.for.address, subagent: message.for.subagent } : {}),
+                },
+              },
             })
         }
         const pushed = messages.flatMap((message) => (message.seq !== undefined && channelPushed.has(message.seq) ? [message.seq] : []))

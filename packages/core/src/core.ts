@@ -1456,7 +1456,7 @@ export class RelayCore {
       endpoint,
     )
     const row = this.mustEndpoint(endpoint)
-    if (!options.settle || shownPresence(row, now) !== "offline" || (row.status_state !== "working" && row.status_state !== "waiting")) return false
+    if (!options.settle || this.presence(row, now) !== "offline" || (row.status_state !== "working" && row.status_state !== "waiting")) return false
     this.sql.all(`UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?`, endpoint)
     return true
   }
@@ -1503,7 +1503,16 @@ export class RelayCore {
     const shown = viewer ? new Set(this.visibleRows(viewer).map((row) => row.id)) : undefined
     const peeker = viewer ?? (filters.peekable === true ? this.byHandle(HUMAN_HANDLE)! : undefined)
     return this.listed()
-      .filter((row) => filters.all || row.connections > 0 || row.kind === "human" || (row.last_seen ?? 0) >= cutoff || waking(row, now) || this.hibernated(row))
+      .filter(
+        (row) =>
+          filters.all ||
+          row.connections > 0 ||
+          row.kind === "human" ||
+          (row.last_seen ?? 0) >= cutoff ||
+          waking(row, now) ||
+          this.rootWake(row, now) !== null ||
+          this.hibernated(row),
+      )
       .filter((row) => !filters.harness || row.harness === filters.harness)
       .filter((row) => !filters.kind || row.kind === filters.kind)
       .filter((row) => !viewer || row.id === viewer.id || this.mayMessage(viewer, row, viewer.kind === "human"))
@@ -1716,7 +1725,11 @@ export class RelayCore {
     })
   }
 
-  /** the human links a local root directly; an agent asks it to consent through the normal send path */
+  /**
+   * the human links a local root directly. An agent (session, self or lineage auth) adopts a local root under itself directly when it may
+   * message it: not itself, an ancestor or a subagent's endpoint. A child that sits under another parent is asked to consent through the normal
+   * send path instead
+   */
   adopt(actor: ScopeActor, params: { endpoint: unknown; parent?: unknown }, options?: { tty?: boolean }): AdoptResult
   adopt(actor: ScopeActor, params: { endpoint: unknown; parent?: unknown }, options: { tty?: boolean; send: AdoptSend }): AdoptResult | Promise<AdoptResult>
   adopt(
@@ -1724,36 +1737,44 @@ export class RelayCore {
     params: { endpoint: unknown; parent?: unknown },
     options: { tty?: boolean; send?: AdoptSend } = {},
   ): AdoptResult | Promise<AdoptResult> {
-    const prepared: { result: AdoptResult; sender?: { from: string; auth: "session" | "self" } } = this.scopeTx(() => {
+    const prepared: { result: AdoptResult; sender?: { from: string; auth: "session" | "self"; under: string } } = this.scopeTx(() => {
       const me = this.actorRow(actor)
       if (actor.kind === "human") this.needTerminal(actor, me, params.endpoint)
-      else if (actor.auth === "lineage")
-        throw this.scopeRefused(actor, me, { target: String(params.endpoint), reason: "adopt" }, "only the session itself may request a link")
       const target = this.resolve(params.endpoint)
       if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint can be linked")
       const parentAddress = params.parent ?? (actor.kind === "human" ? undefined : this.address(me))
       if (parentAddress === undefined || parentAddress === null || parentAddress === "")
         throw new RelayError("invalid_params", "the human names the parent to link under")
       const parent = this.resolve(parentAddress)
-      if (actor.kind !== "human" && parent.id !== me.id)
-        throw this.scopeRefused(actor, me, { target: this.address(target), reason: "adopt" }, "an agent may request a link only under itself")
+      const refused = (message: string) => this.scopeRefused(actor, me, { target: this.address(target), reason: "adopt" }, message)
+      if (actor.kind !== "human" && parent.id !== me.id) throw refused("an agent adopts only under itself")
       const result: AdoptResult = { endpoint: this.whoami(target.id), parent: this.address(parent) }
       if (actor.kind === "human" || options.tty === true) {
         this.link(target, parent, this.actorDetail(actor, me))
         return { result: { ...result, endpoint: this.whoami(target.id) } }
       }
-      if (target.parent_ep !== null || target.parent_addr !== null) throw this.alreadyLinked(target)
-      const auth = actor.auth === "self" ? "self" : "session"
-      return { result, sender: { from: me.id, auth } }
+      if (target.id === me.id) throw refused("an agent cannot adopt itself")
+      if (this.ancestorsOf(me).includes(target.id)) throw refused(`${this.address(target)} sits above you: an agent cannot adopt its own ancestor`)
+      if (target.session?.startsWith("sub:")) throw refused(`${this.address(target)} is a subagent's endpoint: it stays under its root`)
+      if (target.parent_ep === me.id) return { result }
+      if (target.parent_ep !== null || target.parent_addr !== null) {
+        if (actor.auth === "lineage") throw refused("only the session itself may ask a child that sits under another parent to link")
+        return { result, sender: { from: me.id, auth: actor.auth === "self" ? "self" : "session", under: this.parentAddress(target) } }
+      }
+      this.checkScope(me, target, String(params.endpoint))
+      const policy = policyRefusal(this.policy, this.subject(me), this.subject(target), this.policyBound)
+      if (policy) throw new RelayError("policy_refused", `${policy} (${this.address(target)})`)
+      this.link(target, me, this.actorDetail(actor, me))
+      return { result: { ...result, endpoint: this.whoami(target.id) } }
     })
     if (!prepared.sender) return prepared.result
     const { result } = prepared
-    const { from, auth } = prepared.sender
+    const { from, auth, under } = prepared.sender
     const send: SendParams = {
       to: result.endpoint.address,
       kind: "request",
       ttl_s: 86_400,
-      body: `${result.parent} asks you to link under it as its worker. To accept, run ${CLI_NAME} link accept <id> with this message's id, or ${CLI_NAME} join --under ${result.parent} (relay_link_accept {id} or relay_join {under: "${result.parent}"}).`,
+      body: `${result.parent} asks you to link under it as its worker. You sit under ${under} now: you can accept only once you are a root again. To accept, run ${CLI_NAME} link accept <id> with this message's id, or ${CLI_NAME} join --under ${result.parent} (relay_link_accept {id} or relay_join {under: "${result.parent}"}).`,
     }
     const requested = (sent: SendResult): AdoptResult => ({ ...result, ...(sent.held ? { held: sent.held } : { requested: sent.id }) })
     return options.send ? options.send(from, send, { link: auth }).then(requested) : requested(this.send(from, send, { link: auth }))
@@ -1872,9 +1893,13 @@ export class RelayCore {
 
   /** a link of `row`, which already sits under a parent, to another one */
   private alreadyLinked(row: EndpointRow): RelayError {
+    return new RelayError("scope_refused", `${this.address(row)} already sits under ${this.parentAddress(row)}; unlink it first`)
+  }
+
+  /** the address of the parent `row` sits under, local or on another machine */
+  private parentAddress(row: EndpointRow): string {
     const local = row.parent_ep ? this.byId(row.parent_ep) : undefined
-    const now = local ? this.address(local) : row.parent_addr !== null ? (this.linkedParent(row) ?? row.parent_addr) : "another agent"
-    return new RelayError("scope_refused", `${this.address(row)} already sits under ${now}; unlink it first`)
+    return local ? this.address(local) : row.parent_addr !== null ? (this.linkedParent(row) ?? row.parent_addr) : "another agent"
   }
 
   /**
@@ -2299,7 +2324,7 @@ export class RelayCore {
     const dark = recipients.filter(
       (r) =>
         r.kind === "agent" &&
-        shownPresence(r, now) === "offline" &&
+        this.presence(r, now) === "offline" &&
         (now - Math.max(r.last_seen ?? 0, r.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS || (r.session === null && r.token_hash === null && r.hook_ended !== null)) &&
         !this.unjoinedSpawn(sender, r.handle, now),
     )
@@ -2319,8 +2344,7 @@ export class RelayCore {
         recipients[0]!.kind !== "agent" ||
         !this.localRow(recipients[0]!))
     )
-      throw new RelayError("invalid_params", "a link request is from an agent to one local root agent")
-    if (origin.link && (recipients[0]!.parent_ep !== null || recipients[0]!.parent_addr !== null)) throw this.alreadyLinked(recipients[0]!)
+      throw new RelayError("invalid_params", "a link request is from an agent to one local agent")
     const requestedThread = this.threadRef(from, cleanText(params.thread, "thread", 64))
     const payloadHash = this.hash(
       JSON.stringify([
@@ -2534,6 +2558,7 @@ export class RelayCore {
         const queued = view.presence === "offline" || hibernated
         const offline = view.presence === "offline" && now - Math.max(recipient.last_seen ?? 0, recipient.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS
         const state = this.reach(sender, recipient, offline, now)
+        const woken = state === "running" && recipient.status_state === "done"
         deliveries.push({
           endpoint: recipient.id,
           address: view.address,
@@ -2543,7 +2568,7 @@ export class RelayCore {
           last_seen: view.last_seen,
           ...(state ? { state } : {}),
           ...(hibernated && recipient.wake_declined ? { wake: "declined" as const } : view.wake ? { wake: view.wake } : {}),
-          ...(view.presence === "idle" ? { idle: true as const } : {}),
+          ...(view.presence === "idle" || woken ? { idle: true as const } : {}),
           ...(hibernated ? { hibernated: true as const } : {}),
           ...(hibernated && recipient.wake_eta ? { wake_eta_s: recipient.wake_eta } : {}),
         })
@@ -2583,8 +2608,8 @@ export class RelayCore {
   private reach(sender: EndpointRow, recipient: EndpointRow, offline: boolean, now: number): Reach | undefined {
     if (recipient.kind !== "agent" || !this.localRow(recipient)) return undefined
     const done = recipient.status_state === "done"
-    if ((done || shownPresence(recipient, now) === "offline") && this.unjoinedSpawn(sender, recipient.handle, now)) return "starting"
-    if (done) return "ended"
+    if ((done || this.presence(recipient, now) === "offline") && this.unjoinedSpawn(sender, recipient.handle, now)) return "starting"
+    if (done) return this.rootWake(recipient, now) ? "running" : "ended"
     return offline ? "offline" : "running"
   }
 
@@ -2670,16 +2695,21 @@ export class RelayCore {
 
   /**
    * A channel push's page: the oldest unacked deliveries no hook showed or holds, held from the hooks for ${LIMITS.injectHoldS} s under `hold`
-   * until {@link injected} confirms them; reading counts as receiving for the causal hop
+   * until {@link injected} confirms them; reading counts as receiving for the causal hop. With `subagents` (the root's waker asks), also those
+   * to its idle in-process subagents, tagged `for` the subagent and without a relation: confirming marks them injected, never read, so they stay
+   * in the subagent's inbox while no hook of it shows them again
    */
-  offer(endpoint: string, options: { limit?: number } = {}): { messages: Envelope[]; hold: string | null } {
+  offer(endpoint: string, options: { limit?: number; subagents?: boolean } = {}): { messages: Envelope[]; hold: string | null } {
     const now = this.now()
     const limit = Math.min(Math.max(1, Math.floor(options.limit ?? LIMITS.inboxPage)), LIMITS.inboxPage)
-    const rows = this.sql.all<MessageRow & { seq: number }>(
-      `SELECT m.*, d.seq AS seq FROM deliveries d JOIN messages m ON m.id = d.message_id
-       WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ? AND d.injected_at IS NULL AND (d.offered_until IS NULL OR d.offered_until <= ?)
+    const subagents = options.subagents ? this.idleSubagents(endpoint, now) : new Map<string, NonNullable<Envelope["for"]>>()
+    const ids = [endpoint, ...subagents.keys()]
+    const rows = this.sql.all<MessageRow & { seq: number; delivered_to: string }>(
+      `SELECT m.*, d.seq AS seq, d.endpoint AS delivered_to FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.endpoint IN (${ids.map(() => "?").join(", ")}) AND d.acked_at IS NULL AND d.expires_at > ? AND d.injected_at IS NULL
+       AND (d.offered_until IS NULL OR d.offered_until <= ?)
        ORDER BY d.seq LIMIT ?`,
-      endpoint,
+      ...ids,
       now,
       now,
       limit,
@@ -2689,7 +2719,33 @@ export class RelayCore {
       now,
     )
     this.received(endpoint, rows, now)
-    return { messages: rows.map((row) => this.envelope(row, row.seq)), hold }
+    for (const id of subagents.keys())
+      this.received(
+        id,
+        rows.filter((row) => row.delivered_to === id),
+        now,
+      )
+    const messages = rows.map((row) => {
+      const envelope = this.envelope(row, row.seq)
+      const tag = subagents.get(row.delivered_to)
+      if (!tag) return envelope
+      const { relation: _relation, parent_key: _key, ...rest } = envelope
+      return { ...rest, for: tag }
+    })
+    return { messages, hold }
+  }
+
+  /** the root's idle (`done`) in-process subagents its waker is offered messages for ({@link rootWake}), with their tags */
+  private idleSubagents(root: string, now: number): Map<string, NonNullable<Envelope["for"]>> {
+    const tags = new Map<string, NonNullable<Envelope["for"]>>()
+    for (const row of this.sql.all<EndpointRow>(
+      `SELECT * FROM endpoints WHERE parent_ep = ? AND kind = 'agent' AND status_state = 'done' AND substr(session, 1, 4) = 'sub:'`,
+      root,
+    )) {
+      const wake = this.rootWake(row, now)
+      if (wake) tags.set(row.id, { address: this.address(row), subagent: wake.id })
+    }
+    return tags
   }
 
   /**
@@ -3036,7 +3092,7 @@ export class RelayCore {
         continue
       }
       const row = this.byId(grant.used_by)
-      if (!row || row.status_state === "done" || (shownPresence(row, now) === "offline" && (grant.handback !== null || !pid || !this.alive(pid)))) continue
+      if (!row || row.status_state === "done" || (this.presence(row, now) === "offline" && (grant.handback !== null || !pid || !this.alive(pid)))) continue
       workers.set(row.id, row)
       if (grant.pushed_at !== null && grant.pushed_at > now - LIMITS.pushGapS * 1000) paced.add(row.id)
     }
@@ -3438,10 +3494,10 @@ export class RelayCore {
       .filter((row) =>
         present
           ? present.includes(row.id)
-          : shownPresence(row, now) !== "offline" || Math.max(row.last_seen ?? 0, row.hook_seen ?? 0, row.hook_ended ?? 0) >= asked.created_at,
+          : this.presence(row, now) !== "offline" || Math.max(row.last_seen ?? 0, row.hook_seen ?? 0, row.hook_ended ?? 0) >= asked.created_at,
       )
     const gone = (row: EndpointRow): boolean =>
-      shownPresence(row, now) === "offline" &&
+      this.presence(row, now) === "offline" &&
       ((row.hook_ended ?? 0) >= asked.created_at || row.status_state === "done" || now - Math.max(row.last_seen ?? 0, row.hook_seen ?? 0) >= ASK_ENDED_GRACE_MS)
     if (!rows.length || !rows.every(gone)) return null
     return rows.map((row) => ({ address: this.address(row), state: row.status_state as StatusState | null }))
@@ -3564,7 +3620,7 @@ export class RelayCore {
     for (const row of this.sql.all<EndpointRow>(
       `SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND status_state IN ('working', 'waiting')`,
     )) {
-      if (this.localRow(row) && shownPresence(row, now) === "offline")
+      if (this.localRow(row) && this.presence(row, now) === "offline")
         this.sql.all(`UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?`, row.id)
     }
   }
@@ -5628,7 +5684,8 @@ export class RelayCore {
 
   /** with `shown`, the ids a viewer sees: a parent outside it is null */
   protected view(row: EndpointRow, shown?: Set<string>): EndpointView {
-    const presence = shownPresence(row, this.now())
+    const now = this.now()
+    const presence = this.presence(row, now)
     return {
       id: row.id,
       address: this.address(row),
@@ -5641,7 +5698,9 @@ export class RelayCore {
       presence,
       status: row.status_state ? { state: row.status_state, note: row.status_note ?? "" } : null,
       last_seen: iso(row.last_seen),
-      ...(row.kind === "agent" ? { ...this.placeView(row, shown), wake: row.hibernate ? (`hook:${row.hibernate}` as const) : wakeOf(row) } : {}),
+      ...(row.kind === "agent"
+        ? { ...this.placeView(row, shown), wake: row.hibernate ? (`hook:${row.hibernate}` as const) : (wakeOf(row) ?? this.rootWake(row, now)?.wake ?? null) }
+        : {}),
       ...(row.hibernate && row.wake_note ? { wake_failed: row.wake_note.replace(/^wake_failed: /, "") } : {}),
       ...(row.hibernate && row.wake_declined ? { wake_declined: row.wake_declined } : {}),
     }
@@ -5651,6 +5710,38 @@ export class RelayCore {
     const parent = row.parent_ep && (!shown || shown.has(row.parent_ep)) ? this.byId(row.parent_ep) : undefined
     const across = !parent && row.parent_ep === null && row.parent_addr ? this.linkedParent(row, shown) : null
     return { parent: parent ? this.address(parent) : across, depth: row.depth ?? 0, scope: presetOf(this.scopeNode(row), this.defaults().symmetric) }
+  }
+
+  /** the presence an endpoint shows ({@link shownPresence}): an in-process subagent whose root's waker it reaches ({@link rootWake}) is at least idle */
+  private presence(row: EndpointRow, now: number): Presence {
+    const presence = shownPresence(row, now)
+    return presence === "offline" && this.rootWake(row, now) ? "idle" : presence
+  }
+
+  /**
+   * the wake of the root a message to `row`, one of its in-process subagents, reaches, with the subagent's id: while the subagent belongs to
+   * the root's current session (`sub:<id>:<root session>`) and has no live wake of its own, and the root has a wake with a live waker and is
+   * not hibernated
+   */
+  private rootWake(row: EndpointRow, now: number): { root: EndpointRow; id: string; wake: Wake } | null {
+    if (row.kind !== "agent" || row.parent_ep === null || !row.session?.startsWith("sub:") || waking(row, now) || !this.localRow(row)) return null
+    const id = row.session.slice(4, row.session.indexOf(":", 4))
+    const root = this.byId(row.parent_ep)
+    if (!root || root.hibernate !== null || !waking(root, now) || row.session !== `sub:${id}:${root.session ?? root.id}`.slice(0, 128)) return null
+    return { root, id, wake: wakeOf(root)! }
+  }
+
+  /** the root whose waker a delivery to `endpoint` reaches: `endpoint` is an idle (`done`) in-process subagent of it ({@link rootWake}) */
+  wakesRoot(endpoint: string): string | null {
+    const row = this.byId(endpoint)
+    return row?.status_state === "done" ? (this.rootWake(row, this.now())?.root.id ?? null) : null
+  }
+
+  /** the in-process subagents' endpoints under `root` */
+  subagentsOf(root: string): string[] {
+    return this.sql
+      .all<{ id: string }>(`SELECT id FROM endpoints WHERE parent_ep = ? AND kind = 'agent' AND substr(session, 1, 4) = 'sub:'`, root)
+      .map((row) => row.id)
   }
 
   /** `recipient` names the delivery's endpoint when there is no `seq`: a send to several addresses shows each recipient only itself */

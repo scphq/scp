@@ -104,25 +104,31 @@ describe("broker", () => {
     expect(await code(a.client.request("send", { to: "b", body: "x", hop: 0 }))).toBe("invalid_params")
   })
 
-  test("adopt requests consent and only the recipient's own connection accepts", async () => {
+  test("an agent adopts a root at once; a child under another parent is asked, and only its own connection accepts", async () => {
     const { broker } = await setup()
+    const HUMAN = { kind: "human", tty: true } as const
     const parent = await agent(broker, "parent")
     const child = await agent(broker, "child")
     const stranger = await agent(broker, "stranger")
+    await agent(broker, "loose")
+    expect(await parent.client.request("adopt", { endpoint: "loose" })).toMatchObject({ endpoint: { parent: "me/parent", depth: 1 } })
+    broker.core.adopt(HUMAN, { endpoint: "child", parent: "stranger" })
     const requested = await parent.client.request<{ requested: string }>("adopt", { endpoint: "child" })
-    expect(broker.core.whoami(child.hello.endpoint!.id).parent).toBeNull()
+    expect(broker.core.whoami(child.hello.endpoint!.id).parent).toBe("me/stranger")
     const { messages } = await child.client.request<{ messages: { id: string; link?: { parent: string } }[] }>("inbox")
     expect(messages[0]).toMatchObject({ id: requested.requested, link: { parent: "me/parent" } })
     expect(await code(stranger.client.request("link_accept", { id: requested.requested }))).toBe("not_found")
     expect(await code(parent.client.request("adopt", { endpoint: "child", parent: "stranger" }))).toBe("scope_refused")
     for (const method of ["send", "ask"])
       expect(await code(parent.client.request(method, { to: "child", body: "x", link: { parent: "me/parent" } }))).toBe("invalid_params")
+    broker.core.unlink(HUMAN, { endpoint: "child" })
     expect(await child.client.request("link_accept", { id: requested.requested.slice(-6) })).toMatchObject({ endpoint: { parent: "me/parent", depth: 1 } })
   })
 
-  test("human and hook connections cannot accept; lineage cannot adopt or accept; self can accept", async () => {
+  test("human and hook connections cannot accept; lineage cannot accept or adopt an ancestor; self can accept", async () => {
     const { broker } = await setup()
     const parent = await agent(broker, "parent")
+    await agent(broker, "other")
     const key = "pid:200:Thu-Oct-15-10:00:00-2026"
     const claim = { handle: "child", harness: "codex", process: key, session: key, lineage: [key] }
     const child = await RelayClient.connect(broker.socket)
@@ -136,11 +142,13 @@ describe("broker", () => {
     await lineage.hello({ human: true, tty: false, lineage: [key] })
     await self.hello({ observe: true, self: [key], lineage: [key] })
     await human.hello({ human: true, tty: true })
+    await human.request("adopt", { endpoint: "child", parent: "other" })
     const { requested: id } = await parent.client.request<{ requested: string }>("adopt", { endpoint: "child" })
     expect(await code(hook.request("link_accept", { id }))).toBe("unauthorized")
     expect(await code(human.request("link_accept", { id }))).toBe("scope_refused")
     expect(await code(lineage.request("link_accept", { id }))).toBe("scope_refused")
-    expect(await code(lineage.request("adopt", { endpoint: "parent" }))).toBe("scope_refused")
+    expect(await code(lineage.request("adopt", { endpoint: "other" }))).toBe("scope_refused")
+    await human.request("unlink", { endpoint: "child" })
     expect(await self.request("link_accept", { id })).toMatchObject({ endpoint: { id: hello.endpoint!.id, parent: "me/parent" } })
   })
 

@@ -421,6 +421,8 @@ export interface Envelope {
   relation?: "parent" | "ancestor" | "child"
   /** with `parent`, from the issuer of the `swarm spawn` grant the recipient spent: that grant's steer key, which the worker's prompt names */
   parent_key?: string
+  /** on a delivery to an idle in-process subagent that its root's waker is offered: the subagent's address and the id its root continues it by */
+  for?: { address: string; subagent: string }
 }
 
 /** a message in a thread the caller sent or got a message in, as `message` with `member` finds it: enough to reply to it, never its body */
