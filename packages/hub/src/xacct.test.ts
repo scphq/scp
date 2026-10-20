@@ -1070,6 +1070,10 @@ describe("machine waker for messages from other accounts", () => {
     await settle()
     expect(events).toEqual([])
     expect(retryAt(env)).toBe(start + 3_600_000)
+    expect(env.bob.hub.clearWakeHold("desk")).toBe(1)
+    await settle()
+    expect(events).toEqual([])
+    expect(retryAt(env)).toBe(start + 3_600_000)
 
     env.clock.now = start + 3_600_000
     const fresh = await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "at the reset"))

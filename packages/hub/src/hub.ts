@@ -1652,7 +1652,7 @@ export class RelayHub {
    */
   clearWakeHold(machine?: string): number {
     const machines = this.forgetWakeHold(machine)
-    void this.wakeQueued(machines)
+    void this.wakeQueued(machines, new Set(machines))
     return machines.length
   }
 
@@ -1695,6 +1695,7 @@ export class RelayHub {
         const again = retrying.has(machine) ? this.now() + this.declineRetryMs() : Number.POSITIVE_INFINITY
         this.wakeQueuedOn(machine, call, again, loaded ? Number.POSITIVE_INFINITY : again)
       } catch (error) {
+        if (retrying.has(machine)) this.retryWake(machine, this.now() + this.declineRetryMs())
         this.deps.log?.("relay_action", {
           account: this.account,
           machine,
@@ -1722,7 +1723,10 @@ export class RelayHub {
     }
     const now = this.now()
     const state = this.wakeState(machine, now)
-    if (state && state.next > now) return
+    if (state && state.next > now) {
+      this.retryWake(machine, aborted)
+      return
+    }
     if (this.deps.sockets().some((s) => s.conn.role === "bridge" && s.conn.subscribed && s.conn.machine === machine && !this.gone.has(s.conn.id))) return
     if (!this.deps.machineWake && !one(this.deps.sql, `SELECT 1 FROM machines WHERE name = ? AND wake_url IS NOT NULL AND wake_secret IS NOT NULL`, machine))
       return
@@ -1831,7 +1835,7 @@ export class RelayHub {
       one(this.deps.sql, `SELECT 1 FROM wake_limits WHERE key = ? AND since = ?`, `seq:${seq}`, window.since) !== undefined
     const charged = counted ? counts.filter((c) => c !== window) : counts
     const full = charged.filter((c) => c.n >= c.cap)
-    if (full.length) return Math.max(...full.map((c) => (c.n > 0 ? c.since + WAKE_HOUR_MS : Number.POSITIVE_INFINITY)))
+    if (full.length) return Math.max(...full.map((c) => (c.cap > 0 && c.n > 0 ? c.since + WAKE_HOUR_MS : Number.POSITIVE_INFINITY)))
     for (const c of charged) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, ?, ?)`, c.key, c.n + 1, c.since)
     if (seq !== undefined && !counted) this.wakeCounted(fromAccountId, seq, now)
     return null
