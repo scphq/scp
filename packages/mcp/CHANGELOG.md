@@ -1,5 +1,11 @@
 # @scp-dev/mcp
 
+## 0.3.4
+
+### Patch Changes
+
+- @scp-dev/broker@0.6.4
+
 ## 0.3.3
 
 ### Patch Changes
