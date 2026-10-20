@@ -347,8 +347,8 @@ export interface CoreOptions {
   capEverySender?: boolean
   /** whether a process is running; without it every process holding an endpoint counts as running */
   alive?: (pid: number) => boolean
-  /** when a process started, as a full harness-instance key spells it (Appendix E.3); undefined when it cannot be read */
-  startOf?: (pid: number) => string | undefined
+  /** when a process started, as a full harness-instance key spells it (Appendix E.3), checked against `expected`; undefined when it cannot be read */
+  startOf?: (pid: number, expected: string) => string | undefined
   /** this host's machine name: what `machine:` selectors match for its endpoints */
   machine?: string
   /** the short hostname, matched by `machine:` selectors when `machine` is not set */
@@ -521,7 +521,7 @@ export class RelayCore {
   protected readonly tx: <T>(fn: () => T) => T
   private readonly capEverySender: boolean
   private readonly alive: (pid: number) => boolean
-  private readonly startOf: ((pid: number) => string | undefined) | undefined
+  private readonly startOf: ((pid: number, expected: string) => string | undefined) | undefined
   private readonly hostMachine: string | null
   private readonly namedMachine: string | null
   private readonly hostname: string | null
@@ -3226,7 +3226,7 @@ export class RelayCore {
     const pid = Number(match?.[1])
     if (!pid) return true
     if (!this.alive(pid)) return false
-    const started = match![2] === undefined ? undefined : this.startOf?.(pid)
+    const started = match![2] === undefined ? undefined : this.startOf?.(pid, match![2])
     return started === undefined || started === match![2]
   }
 
@@ -6272,9 +6272,13 @@ function presenceOf(row: EndpointRow, now: number): Presence {
   return row.hook_seen >= now - LIMITS.hookIdleS * 1000 ? "idle" : "offline"
 }
 
-/** a wake whose waker holds a live connection, on a row not hibernated: a message wakes it, so its stop need not wait on its workers */
+/**
+ * a wake whose waker holds a live connection, on a row not hibernated: a message wakes it, so its stop need not wait on its workers. A spawn's
+ * hold does not count, since a held worker's run that ends hands back to its parent
+ */
 function wakes(row: EndpointRow): boolean {
-  return wakeOf(row) !== null && row.wakers > 0 && !row.hibernate
+  const wake = wakeOf(row)
+  return wake !== null && wake !== "spawn-resume" && row.wakers > 0 && !row.hibernate
 }
 
 /** a wake with a live waker, or a hook waker that left within LIMITS.restartGraceS */

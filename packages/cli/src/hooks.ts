@@ -704,10 +704,8 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (result.status !== "fulfilled" || !result.value) return tldr ? hookReply(format, event.kind, tldr) : undefined
     const continues = !stop || format !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
     if (stop && !result.value.block) {
-      const wakes = result.value.wakeable === true
-      if (waits === undefined || !PUSHES.has(format) || !(wakes ? result.value.worker_unread : result.value.workers || result.value.worker_unread)) return
-      if (result.value.pushes_left === 0) return
-      return await push(client, format, wakes ? 0 : waits * 1000, began, result.value.prompts, options, continues)
+      if (waits === undefined || !PUSHES.has(format) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) return
+      return await push(client, format, waits * 1000, began, result.value.prompts, options, continues, result.value.wakeable === true)
     }
     const directive = stop ? directiveText(format, result.value) : undefined
     const forced = stop && (result.value.forced ?? true)
@@ -862,7 +860,10 @@ async function subagentHook(
   return reply
 }
 
-/** Waits for worker messages, allowing the broker's grace period to gather results before the deadline; a session a message wakes waits no longer. */
+/**
+ * Waits for worker messages, allowing the broker's grace period to gather results before the deadline. A session a message wakes (`wakes`)
+ * only looks once, unless that look finds it no longer wakeable with workers still running: then it waits as any other.
+ */
 async function push(
   client: RelayClient,
   harness: string,
@@ -871,15 +872,26 @@ async function push(
   prompts: number | undefined,
   options: HookOptions,
   continues = true,
+  wakes = false,
 ): Promise<string | undefined> {
-  const end = Date.now() + waitMs
-  if (waitMs > 0) options.deadline?.(end - began + LIMITS.pushGraceS * 1000 + PUSH_PRINT_MS)
+  const wait = (ms: number) => {
+    const end = Date.now() + ms
+    if (ms > 0) options.deadline?.(end - began + LIMITS.pushGraceS * 1000 + PUSH_PRINT_MS)
+    return end
+  }
+  let end = wait(wakes ? 0 : waitMs)
   let result: StopWaitResult
   for (;;) {
     result = await client.request<StopWaitResult>("stop_wait", {
       wait_s: Math.max(0, Math.min(LIMITS.waitMaxS, (end - Date.now()) / 1000)),
       ...(prompts !== undefined ? { prompts } : {}),
     })
+    const idle = !result.messages.length && !result.more && !result.prompted && result.pushes_left > 0 && result.workers.length + result.starting > 0
+    if (wakes && !result.wakeable && idle && waitMs > 0) {
+      wakes = false
+      end = wait(waitMs)
+      continue
+    }
     if (
       result.messages.length ||
       result.more ||

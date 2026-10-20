@@ -100,9 +100,9 @@ A harness whose tool protocol supports server-initiated messages MAY receive mes
 ### Stop push
 
 - The push wait is configured per install: default 600 s, 0 disables, range 0 to 3600. The effective wait is the smaller of the install setting and `SCP_PUSH_WAIT`.
-- A wakeable session (SPEC section 8.6), such as one under `swarm claude`, `swarm claude --bg` or `swarm codex`, never waits: its stop shows only the worker messages already unread and ends the turn, and the waker brings the later ones.
-- The installed Claude Code and Codex stop hooks with a push wait carry `"statusMessage": "waiting for worker messages (swarm)"`, which the harness shows while the stop runs. A prompt typed during the wait ends it (`prompted`).
-- The broker counts a spawn grant's bound process, and a hook-only worker's harness process, as running while its pid runs and `ps -o lstart=` (C locale, cached 5 s) gives the start time its key holds, or none.
+- A wakeable session (SPEC section 8.6), such as one under `swarm claude`, `swarm claude --bg` or `swarm codex`, does not wait: its stop shows only the worker messages already unread and ends the turn, and the waker brings the later ones. A waker that connects ends a waiting or gathering stop.
+- The installed Claude Code and Codex stop hooks with a push wait carry `"statusMessage": "waiting for worker messages (swarm)"`, which the harness shows while the stop runs. A prompt-submit hook that runs during the wait ends it (`prompted`); whether a prompt typed then runs it at once or only after the stop is up to the harness.
+- The broker counts a spawn grant's bound process, and a hook-only worker's harness process, as running while its pid runs and `ps -o lstart=` (C locale; a match is cached 5 s, a mismatch read again) gives the start time its key holds, or none.
 
 ## Spawn launcher
 

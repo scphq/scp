@@ -208,8 +208,8 @@ describe("a stop waits on spawned workers", () => {
   })
 
   test("a session a message wakes never waits: it passes with workers running, shows at once what they already sent, and a wait ends once it turns wakeable", async () => {
-    const running = await stop(["claude", PUSH_WAIT, "600"], { workers: 2, wakeable: true }, [EMPTY])
-    expect(running.sent("stop_wait")).toEqual([])
+    const running = await stop(["claude", PUSH_WAIT, "600"], { workers: 2, wakeable: true }, [{ ...EMPTY, wakeable: true }])
+    expect(running.sent("stop_wait")).toEqual([{ wait_s: 0 }])
     expect(running.deadlines).toEqual([])
     expect(running.reply).toBeUndefined()
     const got = { ...EMPTY, messages: [DONE], offered: [12], hold: "hld_1", wakeable: true as const }
@@ -221,6 +221,15 @@ describe("a stop waits on spawned workers", () => {
     const turned = await stop(["claude", PUSH_WAIT, "600"], { workers: 1 }, [EMPTY, { ...EMPTY, wakeable: true }, EMPTY])
     expect(turned.sent("stop_wait")).toHaveLength(2)
     expect(turned.reply).toBeUndefined()
+  })
+
+  test("a session whose waker left between the stop's count and its look waits as any other", async () => {
+    const got = { ...EMPTY, messages: [DONE], offered: [12], hold: "hld_1" }
+    const left = await stop(["claude", PUSH_WAIT, "600"], { workers: 1, wakeable: true }, [EMPTY, got])
+    expect(left.sent("stop_wait").map((p) => p.wait_s)).toEqual([0, LIMITS.waitMaxS])
+    expect(left.deadlines).toHaveLength(1)
+    expect(left.deadlines[0]).toBeGreaterThan(600_000)
+    expect(JSON.parse(left.reply!).hookSpecificOutput.additionalContext).toContain("done-42")
   })
 
   test("the last push of a prompt's budget says so, and with none left the stop passes without waiting", async () => {

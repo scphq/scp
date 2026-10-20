@@ -282,7 +282,7 @@ describe("broker, stop_wait gathers the results of workers finishing together", 
     expect(Buffer.byteLength(result.messages.map(wrapMessage).join(""))).toBeLessThanOrEqual(LIMITS.pushBytes)
   })
 
-  test("the last other worker's exit or a prompt ends the gathering at once", async () => {
+  test("the last other worker's exit, the session's waker connecting or a prompt ends the gathering at once", async () => {
     const exited = await setup()
     const w2 = await spawned(exited.broker, exited.main, "w2", 20)
     const waiting = exited.hook.stopWait(10)
@@ -293,6 +293,17 @@ describe("broker, stop_wait gathers the results of workers finishing together", 
     const exit = Date.now()
     expect((await waiting).messages.map((m) => m.body.text)).toEqual(["w1 done", "worker me/w2 finished (exit 0)\n\nw2 out"])
     expect(Date.now() - exit).toBeLessThan(LIMITS.pushQuietS * 1000)
+
+    const woken = await setup()
+    await spawned(woken.broker, woken.main, "w2", 20)
+    const gathering = woken.hook.stopWait(10)
+    await Bun.sleep(100)
+    await say(woken.worker, "w1 done")
+    await Bun.sleep(300)
+    await woken.main.request("wake", { via: "channels" })
+    const connected = Date.now()
+    expect(await gathering).toMatchObject({ wakeable: true, messages: [{ body: { text: "w1 done" } }] })
+    expect(Date.now() - connected).toBeLessThan(1000)
 
     const prompted = await setup()
     await spawned(prompted.broker, prompted.main, "w2", 20)
