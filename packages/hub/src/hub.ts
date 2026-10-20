@@ -288,7 +288,7 @@ const HUB_MIGRATION = [
   `CREATE TABLE IF NOT EXISTS machine_tombstones (name TEXT PRIMARY KEY, actor_id TEXT, user_id TEXT, at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS local_events (from_ep TEXT NOT NULL, to_ep TEXT NOT NULL, at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS local_events_at ON local_events (at)`,
-  `CREATE TABLE IF NOT EXISTS machine_wakes (machine TEXT PRIMARY KEY, next INTEGER NOT NULL, fails INTEGER NOT NULL, declined TEXT, declined_message TEXT, declined_from TEXT, declined_until INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS machine_wakes (machine TEXT PRIMARY KEY, next INTEGER NOT NULL, fails INTEGER NOT NULL, call TEXT, declined TEXT, declined_message TEXT, declined_from TEXT, declined_until INTEGER)`,
   `CREATE TABLE IF NOT EXISTS wake_limits (key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)`,
 ]
 
@@ -1659,10 +1659,11 @@ export class RelayHub {
   private setWakeState(machine: string, state: WakeState): void {
     const d = state.declined
     this.deps.sql.all(
-      `INSERT OR REPLACE INTO machine_wakes (machine, next, fails, declined, declined_message, declined_from, declined_until) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO machine_wakes (machine, next, fails, call, declined, declined_message, declined_from, declined_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       machine,
       state.next,
       state.fails,
+      state.call ?? null,
       d?.reason ?? null,
       d?.message ?? null,
       d?.from ?? null,
@@ -1718,7 +1719,9 @@ export class RelayHub {
     }
     const fails = state?.fails ?? 0
     const scheduled = now + options.debounceS * 1000
-    this.setWakeState(machine, { next: scheduled, fails, declined: state?.declined ?? null })
+    const call = randomHex(8)
+    const held = state?.declined ?? null
+    this.setWakeState(machine, { next: scheduled, fails, call, declined: held })
     const fromAccount = message.from.account ?? this.account
     const event: MachineWakeEvent = {
       scp: 1,
@@ -1733,20 +1736,19 @@ export class RelayHub {
     /** the call's outcome, unless a cleared hold, a new hibernation or a new registration replaced its state while it ran */
     const settle = (ok: boolean, declined: WakeDecline | undefined) => {
       const at = this.now()
-      const current = one<{ next: number }>(this.deps.sql, `SELECT next FROM machine_wakes WHERE machine = ?`, machine)
-      if (current?.next !== scheduled) return
+      if (one<{ call: string | null }>(this.deps.sql, `SELECT call FROM machine_wakes WHERE machine = ?`, machine)?.call !== call) return
       if (declined) {
         const until = Number.isFinite(options.declineHoldS) ? at + options.declineHoldS * 1000 : null
         this.setWakeState(machine, { next: now, fails, declined: { reason: declined, message: message.id, from: message.from.address, until } })
       } else if (ok) {
         const until = at + options.wakingTimeoutS * 1000
         const marked = this.relay.markWaking(recipient, until)
-        this.setWakeState(machine, { next: marked ? Math.max(scheduled, until) : scheduled, fails: 0, declined: null })
+        this.setWakeState(machine, { next: marked ? Math.max(scheduled, until) : scheduled, fails: 0, declined: held })
         if (marked) this.fleet({ type: "presence", machine, endpoint: view.address, presence: "hibernated", waking: true })
       } else {
         const next = fails + 1
         const backoff = Math.min(options.debounceS * 2 ** next, Math.max(options.backoffMaxS, options.debounceS))
-        this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: null })
+        this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: held })
       }
     }
     this.wakeCalls++
@@ -2181,8 +2183,8 @@ export class RelayHub {
 
 const MACHINE_WAKE_URL_CHARS = 2048
 
-/** a machine's waker calls: when the next may be made, the failures in a row, and a decline holding calls for its message and sender */
-type WakeState = { next: number; fails: number; declined: { reason: WakeDecline; message: string; from: string; until: number | null } | null }
+/** a machine's waker calls: when the next may be made, the failures in a row, the running call, and a decline holding calls for its message and sender */
+type WakeState = { next: number; fails: number; call?: string; declined: { reason: WakeDecline; message: string; from: string; until: number | null } | null }
 const MACHINE_WAKE_TIMEOUT_MS = 10_000
 
 /** an https URL, or http to this host, with no credentials in it */

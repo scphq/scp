@@ -1633,6 +1633,46 @@ describe("machine waker", () => {
     expect(sent.map((c) => c.url)).toEqual(["https://wake.example/hook", "https://wake.example/other"])
   })
 
+  test("a call answered after its hold was cleared and a new call started in the same millisecond changes nothing", async () => {
+    const answers: ((answer: { ok: boolean; declined?: string }) => void)[] = []
+    const { bridge, ok, disconnect, hub } = setup({ machineWake: () => new Promise((resolve) => answers.push(resolve)) })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }, { address: "me/lead" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    hub.clearWakeHold("desk")
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "two" } })
+    expect(answers.length).toBe(2)
+    answers[0]!({ ok: true })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBeUndefined()
+    answers[1]!({ ok: false, declined: "budget" })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "three" } })
+    expect(answers.length).toBe(2)
+  })
+
+  test("a call for another sender keeps the earlier sender's decline, whatever its outcome", async () => {
+    const answers: { ok: boolean; declined?: string }[] = [{ ok: false, declined: "budget" }, { ok: false }]
+    const events: Call[] = []
+    const { bridge, ok, disconnect, clock } = setup({
+      machineWake: async (event) => {
+        events.push(event as unknown as Call)
+        return answers.shift() ?? { ok: false }
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }, { address: "me/lead" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await calls(events, 1)
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "two" } })
+    await calls(events, 2)
+    expect(events.length).toBe(2)
+    clock.now += LIMITS.wakeBackoffMaxS * 1000
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "declined sender again" } })
+    await calls(events, 3)
+    expect(events.length).toBe(2)
+  })
+
   test("wake durations must be finite; a per-hour cap or the decline hold may be Infinity", () => {
     expect(() => setup({ wake: { debounceS: Number.POSITIVE_INFINITY } })).toThrow(RangeError)
     expect(() => setup({ wake: { wakingTimeoutS: -1 } })).toThrow(RangeError)
