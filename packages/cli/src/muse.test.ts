@@ -145,7 +145,7 @@ test("a headless session declines approvals and refuses other server requests", 
   expect(lines[0]).toContain("declined rm -rf /")
 })
 
-test("a muse shim and hook take the name and grant swarm muse left for their harness process", () => {
+test("a muse shim and hook take the name, grant, session and launcher a launcher left for their harness process", () => {
   const dir = mkdtempSync(join(tmpdir(), "scp-muse-launch-"))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const env = { SCP_DIR: dir }
@@ -173,6 +173,14 @@ test("a muse shim and hook take the name and grant swarm muse left for their har
   remove()
   expect(existsSync(file)).toBe(false)
   expect(claim("muse").handle).not.toBe("kid")
+  const launcher = "pid:4242:Mon-Oct-19-00:00:00-2026"
+  const resumed = writeMuseLaunch(key, { name: "kid", session: "abc123", launcher }, env)
+  expect(claim("muse")).toMatchObject({ handle: "kid", session: "env:abc123", process: launcher })
+  expect(claim("muse").grant).toBeUndefined()
+  resumed()
+  const odd = writeMuseLaunch(key, { name: "kid", session: "a b", launcher: "4242" }, env)
+  expect(readMuseLaunch(key, env)).toEqual({ name: "kid" })
+  odd()
 })
 
 test("a prompt a waker submitted with relay messages names no title", () => {

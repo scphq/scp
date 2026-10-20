@@ -52,6 +52,14 @@ describe("a held worker's resume", () => {
     })
     expect(firstRun(["muse", "exec", "--session-id", "mine", "go"], uuid)).toEqual({ command: ["muse", "exec", "--session-id", "mine", "go"], session: "mine" })
     expect(firstRun(["muse", "exec", "--no-session-log", "go"], uuid)).toEqual({ command: ["muse", "exec", "--no-session-log", "go"] })
+    expect(firstRun(["muse", "--session-id", "top", "exec", "go"], uuid)).toEqual({ command: ["muse", "--session-id", "top", "exec", "go"], session: "top" })
+    expect(firstRun(["muse", "exec", "-c", "--session-id", "go"], uuid)).toEqual({
+      command: ["muse", "exec", "--session-id", uuid(), "-c", "--session-id", "go"],
+      session: uuid(),
+    })
+    expect(firstRun(["muse", "exec", "-c", "--no-session-log", "go"], uuid).session).toBe(uuid())
+    expect(resumeBase(["muse", "--session-id", "top", "exec", "go"], "top")).toEqual(["muse", "exec", "--session-id", "top"])
+    expect(resumeBase(["muse", "exec", "-c", "--session-id", "go"], "s-1")).toEqual(["muse", "exec", "-c", "--session-id", "--session-id", "s-1"])
   })
 
   test("a grok's first run names a new session unless it has one; agy's session is its hook's, else its own --conversation", () => {

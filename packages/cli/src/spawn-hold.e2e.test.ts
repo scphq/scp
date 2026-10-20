@@ -98,6 +98,9 @@ appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, address }) + "\\n"
 console.log("turn done")
 `
 
+/** Muse starts its shim and hooks without the launcher's SCP_* variables; the fake keeps only the broker dir */
+const MUSE_UNSET = ["SCP_GRANT", "SCP_NAME", "SCP_LABELS", "SCP_SESSION", "SCP_HARNESS_PID"].map((key) => `-u ${key}`).join(" ")
+
 type Run = { run: number; argv: string[]; address: string | null; session: string | null; launcher: string | null }
 
 async function fixture() {
@@ -116,7 +119,7 @@ async function fixture() {
     writeFileSync(join(root, `fake-${harness}.ts`), fakeTurn(harness, turns))
     writeFileSync(
       join(bin, harness),
-      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} --no-env-file ${JSON.stringify(join(root, `fake-${harness}.ts`))} "$@"\n`,
+      `#!/bin/sh\nexec ${harness === "muse" ? `env ${MUSE_UNSET} ` : ""}${JSON.stringify(process.execPath)} --no-env-file ${JSON.stringify(join(root, `fake-${harness}.ts`))} "$@"\n`,
     )
     chmodSync(join(bin, harness), 0o755)
   }
@@ -384,7 +387,7 @@ test("headless agy and grok workers stay resumable: a message resumes the conver
   await waitFor(() => !alive(grok), 10_000, "grok's runner to exit")
 })
 
-test("a muse exec worker stays resumable: its first run names a session, a message resumes it with exec --session-id, durably too", async () => {
+test("a muse exec worker, whose shim gets no SCP_* variables, stays resumable as itself: a message resumes it with exec --session-id, durably too", async () => {
   const f = await fixture()
   const muse = f.spawn("--idle", "60", "--name", "mu", "--", "muse", "exec", "--model", "m", "hi")
   expect((await f.next("mu")).body.text).toStartWith("worker me/mu finished (exit 0)\n\nturn done")
@@ -401,6 +404,8 @@ test("a muse exec worker stays resumable: its first run names a session, a messa
   expect(again!.args.at(-1)).toContain("muse again")
   expect(again!.args.at(-1)).toContain("<relay-message")
   expect([opened!.address, again!.address]).toEqual(["me/mu", "me/mu"])
+  const addresses = async () => (await f.lead.request<{ endpoints: EndpointView[] }>("list", { all: true })).endpoints.map((e) => e.address)
+  expect(await addresses()).not.toContain(expect.stringMatching(/^me\/muse-/))
   await f.lead.request("spawn_end", { endpoint: "mu" })
   await waitFor(() => !alive(muse), 10_000, "muse's runner to exit")
 
@@ -415,5 +420,6 @@ test("a muse exec worker stays resumable: its first run names a session, a messa
   expect(woken!.args.slice(1, -1)).toEqual(["--contributor-mode", "off", "--session-id", "mine-1"])
   expect(woken!.args.at(-1)).toContain("wake muse")
   expect(woken!.address).toBe("me/md")
+  expect(await addresses()).not.toContain(expect.stringMatching(/^me\/muse-/))
   await until(async () => (await f.view("md"))?.presence === "hibernated", 15_000, "the woken muse worker to hibernate again")
 })

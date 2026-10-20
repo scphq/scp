@@ -64,7 +64,7 @@ import {
   wokeBy,
 } from "./hold"
 import { steerPrompt } from "./hooks"
-import { detectHarness, spawnerKey } from "./identity"
+import { detectHarness, type MuseLaunch, processKey, spawnerKey, writeMuseLaunch } from "./identity"
 import { readConversation } from "./resume"
 import { agyRules, agySettingsFile, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF, note } from "./term"
@@ -295,19 +295,28 @@ const MUSE_SESSION = "--session-id"
 /** muse exec's options a resume leaves out: the first prompt's file and images, the session id it sets itself, and a new worktree */
 const MUSE_FIRST_ONLY = new Set(["--prompt-file", "--image", MUSE_SESSION, "-w", "--worktree", "--worktree-base", "--worktree-existing"])
 
-/** a headless `muse [opts] exec [opts] [prompt]` that logs its session: where exec is, where its options end, the session it names */
-function museExec(args: string[]): { exec: number; end: number; session?: string } | undefined {
+/** one of muse's options, or its exec subcommand: where it is, how many words it takes, its flag and value */
+type MuseOption = { at: number; size: number; flag: string; value?: string }
+
+/** a headless `muse [opts] exec [opts] [prompt]` that logs its session: where exec is, where its options end, them read by arity, the session it names */
+function museExec(args: string[]): { exec: number; end: number; options: MuseOption[]; session?: string } | undefined {
   const exec = museOptionsEnd(args)
   if (args[exec] !== "exec") return undefined
   const end = museOptionsEnd(args, exec + 1)
   const operands = args[end] === "--" ? args.slice(end + 1) : args.slice(end)
-  if (operands.length > 1 || hasFlag(args.slice(0, end), ["--no-session-log", "--api-key-stdin"])) return undefined
-  let session: string | undefined
-  for (let i = exec + 1; i < end; i++) {
-    if (args[i] === MUSE_SESSION) session = args[i + 1]
-    else if (args[i]!.startsWith(`${MUSE_SESSION}=`)) session = args[i]!.slice(MUSE_SESSION.length + 1)
+  if (operands.length > 1) return undefined
+  const options: MuseOption[] = []
+  for (let i = 0; i < end; ) {
+    const word = args[i]!
+    const eq = word.startsWith("-") ? word.indexOf("=") : -1
+    const size = i === exec || eq > 0 ? 1 : MUSE_VALUED.has(word) || MUSE_OPTIONAL[word]?.has(args[i + 1] ?? "") ? 2 : 1
+    const flag = eq > 0 ? word.slice(0, eq) : word
+    options.push({ at: i, size, flag, ...(eq > 0 ? { value: word.slice(eq + 1) } : size === 2 ? { value: args[i + 1]! } : {}) })
+    i += size
   }
-  return { exec, end, ...(session !== undefined ? { session } : {}) }
+  if (options.some((option) => option.flag === "--no-session-log" || option.flag === "--api-key-stdin")) return undefined
+  const session = options.findLast((option) => option.flag === MUSE_SESSION)?.value
+  return { exec, end, options, ...(session !== undefined ? { session } : {}) }
 }
 
 /** a muse exec spawn may resume: with its own session id, else with `--session-id <uuid>` after exec, the session returned */
@@ -327,13 +336,7 @@ export function museResumeBase(command: string[], session: string): string[] | u
   const args = command.slice(at + 1)
   const run = museExec(args)
   if (!run) return undefined
-  const kept: string[] = []
-  for (let i = 0; i < run.end; ) {
-    const word = args[i]!
-    const size = i === run.exec || word.includes("=") ? 1 : MUSE_VALUED.has(word) || MUSE_OPTIONAL[word]?.has(args[i + 1] ?? "") ? 2 : 1
-    if (!MUSE_FIRST_ONLY.has(word.includes("=") ? word.slice(0, word.indexOf("=")) : word)) kept.push(...args.slice(i, i + size))
-    i += size
-  }
+  const kept = run.options.flatMap((option) => (MUSE_FIRST_ONLY.has(option.flag) ? [] : args.slice(option.at, option.at + option.size)))
   return [...command.slice(0, at + 1), ...kept, MUSE_SESSION, session]
 }
 
@@ -740,6 +743,24 @@ function tee(from: NodeJS.ReadableStream, to: NodeJS.WritableStream): { bytes: (
   return { bytes: () => new Uint8Array(tail), cut: () => cut }
 }
 
+/** for a muse process `pid`, whose shim and hooks Muse starts without SCP_* variables: a launch file with the run's identity, and its remover */
+function museLaunchFile(argv: string[], env: Record<string, string>, pid: number | undefined): () => void {
+  const program = argv[programAt(argv)]
+  if (!pid || program === undefined || basename(program) !== "muse" || (!env.SCP_NAME && !env.SCP_GRANT)) return () => {}
+  const launcher = Number(env.SCP_HARNESS_PID)
+  const launch: MuseLaunch = {
+    ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}),
+    ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}),
+    ...(env.SCP_SESSION ? { session: env.SCP_SESSION } : {}),
+    ...(Number.isInteger(launcher) && launcher > 1 ? { launcher: processKey(launcher) } : {}),
+  }
+  try {
+    return writeMuseLaunch(processKey(pid), launch, env)
+  } catch {
+    return () => {}
+  }
+}
+
 /** Tee captured output, retain its tail and forward signals. Detached harnesses lead a process group; terminal Ctrl-C already reaches it. */
 export function runHarness(
   argv: string[],
@@ -767,6 +788,7 @@ export function runHarness(
       env,
       detached: group,
     })
+    const unlaunch = museLaunchFile(argv, env, child.pid)
     if (piped && child.stdin) {
       child.stdin.on("error", () => {})
       child.stdin.write(piped.first)
@@ -799,6 +821,7 @@ export function runHarness(
     const done = async (code: number) => {
       if (settled) return
       settled = true
+      unlaunch()
       if (open > 0) {
         const timer = setTimeout(() => {
           for (const pipe of pipes) pipe.destroy()
