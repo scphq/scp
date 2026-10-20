@@ -63,18 +63,18 @@ export const wakeOf = (e: EndpointView): string | null => (e.wake && e.wake !== 
 
 const BOLT = html`<svg class="bolt" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1 3 9h4.5L6.5 15 13 7H8.5z" fill="currentColor"/></svg>`;
 
+/** how a message wakes an agent, in words: a hibernated one's wake hook, a spawn that holds its finished worker, else the mechanism */
+export function wakeHow(wake: string): string {
+  if (wake.startsWith("hook:")) return `a message runs its ${wake.slice(5)} wake hook`;
+  if (wake === "spawn-resume") return "a message resumes it through its spawn";
+  return `a message wakes it via ${wake}`;
+}
+
 function presence(e: EndpointView): { cell: Html; tip: string } {
   const wake = wakeOf(e);
-  const tip =
-    e.presence === "idle"
-      ? wake
-        ? `idle, a message wakes it via ${wake}`
-        : "idle, reads messages at its next turn"
-      : wake
-        ? `${e.presence}, wakes via ${wake}`
-        : e.presence;
+  const tip = wake ? `${e.presence}, ${wakeHow(wake)}` : e.presence === "idle" ? "idle, reads messages at its next turn" : e.presence;
   return {
-    cell: html`<span class="dot ${e.presence}${wake ? " wake" : ""}" aria-hidden="true"></span><span class="mini">${e.presence}</span>${wake ? html` <span class="wake-badge">${BOLT}<span class="sr">wakes via ${wake}</span></span>` : ""}`,
+    cell: html`<span class="dot ${e.presence}${wake ? " wake" : ""}" aria-hidden="true"></span><span class="mini">${e.presence}</span>${wake ? html` <span class="wake-badge">${BOLT}<span class="sr">${wakeHow(wake)}</span></span>` : ""}`,
     tip,
   };
 }
