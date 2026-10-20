@@ -76,8 +76,8 @@ results back, as with native subagents.
   ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, wake, status; --all adds offline ones
   ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
   ${CLI_NAME} join --under <parent>       link this session under an orchestrator, as a spawned worker sits: ${CLI_NAME} join --under lead
-  ${CLI_NAME} adopt <child>              ask a local root agent to link under you; it accepts with ${CLI_NAME} link accept <id>
-  ${CLI_NAME} link accept <id>           accept a link request and sit under its sender as a worker
+  ${CLI_NAME} adopt <child>              link a local root agent you may message under you as your worker, at once
+  ${CLI_NAME} link accept <id>           accept a link request (adopt of an agent under another parent) and sit under its sender
   ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
   ${CLI_NAME} peek <ep>                   a short, redacted view of a peekable agent's last turns: ${CLI_NAME} peek rev
   ${CLI_NAME} set-status <state> [note]   working, waiting, blocked or done: ${CLI_NAME} set-status done "PR open"
@@ -304,8 +304,10 @@ agent sessions:
   ${CLI_NAME} adopt <child> [--parent <p>]      link a local root agent and its subtree under <p>, for the human at a terminal;
                                                  <p> may be on another machine of the account (me/<machine>/<handle>).
                                                  With --parent and a terminal, inherited $SCP_NAME and $SCP_GRANT are ignored
-                                                 unless --as is explicit. An agent without a terminal asks the child to consent,
-                                                 under itself only; the child accepts with link accept or join --under
+                                                 unless --as is explicit. An agent (from its session or its shell) adopts under
+                                                 itself only: a local root it may message links at once, never itself, one of
+                                                 its ancestors or a subagent's endpoint; a child under another parent is asked
+                                                 to consent and accepts with link accept or join --under once it is a root
   ${CLI_NAME} link accept <id>                  accept a link request delivered to this session and sit under its sender as a worker;
                                                  <id> is the full or short message id. Only the session itself may accept
   ${CLI_NAME} unlink [<child>]                  put a linked agent back at the root, its subtree along and the child scope off;

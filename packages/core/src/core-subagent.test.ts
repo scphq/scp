@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { RelayCore, subagentHandle } from "./core"
-import { shortId } from "./render"
-import { RelayError, type ScopeActor } from "./protocol"
+import { shortId, wrapMessage } from "./render"
+import { LIMITS, RelayError, type ScopeActor } from "./protocol"
 import type { Sql, SqlValue } from "./sql"
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`
@@ -371,5 +371,78 @@ describe("a spawn's prompt", () => {
     expect(turns[0]!.text).not.toContain(secret)
     expect((db.query(`SELECT COUNT(*) AS n FROM peek_turns`).get() as { n: number }).n).toBe(1)
     expect((db.query(`SELECT COUNT(*) AS n FROM grants WHERE prompt IS NOT NULL`).get() as { n: number }).n).toBe(0)
+  })
+})
+
+describe("a subagent woken through its root", () => {
+  /** a root whose MCP connection set wake `channels` and is its waker, and its stopped Explore subagent */
+  function woken() {
+    const { core, clock, db, hook } = setup()
+    const root = hook(9).endpoint
+    core.claim({ handle: "claude-app", harness: "claude-code", process: key(9), session: key(9), lineage: [key(9), key(1)] })
+    core.setWake(root.id, "channels")
+    core.waker(root.id, true)
+    const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
+    core.status(sub.id, "done", undefined)
+    const peer = core.claim({ handle: "peer", harness: "codex" }).endpoint
+    return { core, clock, db, hook, root, sub, peer }
+  }
+
+  test("its view shows the root's wake and stays idle while the root's waker lives; a send says it is woken", () => {
+    const { core, clock, root, sub, peer } = woken()
+    expect(core.whoami(sub.id).wake).toBe("channels")
+    clock.now += (LIMITS.hookIdleS + 1) * 1000
+    expect(core.whoami(sub.id)).toMatchObject({ presence: "idle", wake: "channels" })
+    expect(core.list({}).map((v) => v.id)).toContain(sub.id)
+    const sent = core.send(peer.id, { to: sub.address, body: "more for you" })
+    expect(sent.deliveries[0]).toMatchObject({ state: "running", idle: true, wake: "channels" })
+    expect(core.wakesRoot(sub.id)).toBe(root.id)
+    core.waker(root.id, false)
+    expect(core.whoami(sub.id)).toMatchObject({ presence: "offline", wake: null })
+    expect(core.wakesRoot(sub.id)).toBeNull()
+    expect(core.send(peer.id, { to: sub.address, body: "later" }).deliveries[0]).toMatchObject({ state: "ended" })
+  })
+
+  test("the root's waker is offered the subagent's messages tagged for it, once: they stay unread for the subagent and no hook shows them again", () => {
+    const { core, root, sub, peer } = woken()
+    const sent = core.send(peer.id, { to: sub.address, body: "check the tests", kind: "request" })
+    expect(core.offer(root.id).messages).toEqual([])
+    const page = core.offer(root.id, { subagents: true })
+    expect(page.messages).toHaveLength(1)
+    const [message] = page.messages
+    expect(message).toMatchObject({ id: sent.id, for: { address: sub.address, subagent: AGENT } })
+    expect(message!.relation).toBeUndefined()
+    const text = wrapMessage(message!)
+    expect(text).toContain(`for="${sub.address}" subagent="${AGENT}">`)
+    expect(text).toEndWith(
+      `[for your subagent ${sub.address} (id ${AGENT}), which has stopped: continue that subagent with this message by its id (for example SendMessage to ${AGENT}) instead of acting on it yourself; the sender asked it a question]`,
+    )
+    expect(core.injected([message!.seq], page.hold, { endpoint: root.id })).toBe(1)
+    expect(core.offer(root.id, { subagents: true }).messages).toEqual([])
+    expect(core.inject(sub.id, { transient: true, process: key(9) }).messages).toEqual([])
+    expect(core.inbox(sub.id).map((m) => m.id)).toEqual([sent.id])
+    expect(core.inbox(root.id)).toEqual([])
+  })
+
+  test("a working subagent, one with a wake of its own or one of an earlier root session is not offered to the root", () => {
+    const { core, db, hook, root, sub, peer } = woken()
+    core.status(sub.id, "working", undefined)
+    core.send(peer.id, { to: sub.address, body: "while it runs" })
+    expect(core.wakesRoot(sub.id)).toBeNull()
+    expect(core.offer(root.id, { subagents: true }).messages).toEqual([])
+    core.status(sub.id, "done", undefined)
+    core.setWake(sub.id, "claude-inbox")
+    core.waker(sub.id, true)
+    expect(core.whoami(sub.id).wake).toBe("claude-inbox")
+    expect(core.offer(root.id, { subagents: true }).messages).toEqual([])
+    core.waker(sub.id, false)
+    core.setWake(sub.id, "none")
+    expect(core.offer(root.id, { subagents: true }).messages).toHaveLength(1)
+    const other = hook(9, { subagent: { id: "b0c1d2e3f4", type: "Plan" } }).endpoint
+    core.status(other.id, "done", undefined)
+    db.query(`UPDATE endpoints SET session = ? WHERE id = ?`).run("sub:b0c1d2e3f4:env:older", other.id)
+    core.send(peer.id, { to: other.address, body: "for an old one" })
+    expect(core.whoami(other.id).wake).toBeNull()
+    expect(core.wakesRoot(other.id)).toBeNull()
   })
 })

@@ -474,6 +474,16 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       core.waker(endpoint, true)
       presenceMoved(endpoint)
     }
+    for (const root of [was, endpoint]) if (root) subagentsMoved(root)
+  }
+
+  /** a root's in-process subagents show its wake and the presence it gives them: those that moved are reported */
+  function subagentsMoved(root: string) {
+    for (const id of core.subagentsOf(root)) {
+      const wake = core.whoami(id).wake
+      if (!presenceMoved(id) && wakes.get(id) !== wake) bridge?.changed(id)
+      wakes.set(id, wake)
+    }
   }
 
   /** reports an endpoint's presence when it is not the one last reported; whether it was not */
@@ -608,9 +618,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
 
   /** a delivery reached `endpoint`: its waiters return, and a hibernated one's wake hook runs when due */
   function wake(endpoint: string) {
-    const set = waiters.get(endpoint)
-    if (set) {
-      waiters.delete(endpoint)
+    for (const id of [endpoint, core.wakesRoot(endpoint)]) {
+      const set = id ? waiters.get(id) : undefined
+      if (!set) continue
+      waiters.delete(id!)
       for (const fn of set) fn()
     }
     wakers?.kick(endpoint)
@@ -975,7 +986,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "inbox": {
         const query = compact({ after: params.after as number | undefined, limit: params.limit as number | undefined })
-        const read = () => (params.offer === true ? core.offer(me, query) : { messages: core.inbox(me, query) })
+        const read = () => (params.offer === true ? core.offer(me, { ...query, subagents: s.data.waker === me }) : { messages: core.inbox(me, query) })
         const deadline = Date.now() + waitSeconds(params.wait_s)
         let page = read()
         while (!page.messages.length && !s.data.closed && Date.now() < deadline) {
@@ -1010,6 +1021,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const changed = core.setWake(me, params.via, { ...hookOf(s), ref: params.ref })
         setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
         if (!presenceMoved(me) && changed) bridge?.changed(me)
+        if (changed) subagentsMoved(me)
         return { changed }
       }
       case "rename": {
@@ -1024,6 +1036,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "adopt": {
         const actor = actorOf(s)
+        loadPolicy()
+        if (policyError && actor.kind === "endpoint" && s.data.terminal !== true) throw new RelayError("policy_refused", policyError)
         const adopted = await core.adopt(
           actor,
           { endpoint: params.endpoint, ...(params.parent !== undefined ? { parent: params.parent } : {}) },

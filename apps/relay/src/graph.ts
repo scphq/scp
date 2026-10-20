@@ -3,7 +3,7 @@ import { hubEvents, hubGraph } from "./hub/routes";
 import { Html, html, stamp } from "./html";
 import type { IdentifiedGraph } from "./identity";
 import { orgHeader, requireMember } from "./orgs";
-import { APP_JS, harnessIcon, ICON_PATHS, REFRESH_MS, shown } from "./overview";
+import { APP_JS, harnessIcon, ICON_PATHS, REFRESH_MS, shown, wakeHow } from "./overview";
 import { HttpError } from "./util";
 import { type Ctx, checkOrigin, page } from "./web";
 
@@ -46,6 +46,7 @@ export function graphData(g: IdentifiedGraph | null): Html {
       presence: n.presence,
       status: n.status,
       wake: n.wake && n.wake !== "none" ? n.wake : null,
+      how: n.wake && n.wake !== "none" ? wakeHow(n.wake) : null,
       parent: n.parent,
     };
   });
@@ -679,7 +680,7 @@ function paintNode(e) {
   const n = e.n, c = e.g.classList;
   for (const p of ["online", "idle", "offline"]) c.toggle(p, n.presence === p);
   c.toggle("human", n.kind === "human");
-  e.g.setAttribute("aria-label", n.name + ", " + n.presence + (n.wake ? ", wakes via " + n.wake : ""));
+  e.g.setAttribute("aria-label", n.name + ", " + n.presence + (n.how ? ", " + n.how : ""));
   if (e.icon !== n.icon) {
     e.icon = n.icon;
     e.glyph.innerHTML = ICONS[n.icon] || ICONS.generic;
@@ -864,7 +865,7 @@ function showTip(g) {
   head.append(icon, document.createTextNode(n.name));
   const sum = (side) => data.edges.filter((e) => e.kind === "message" && e[side] === n.address).reduce((s, e) => s + e.count, 0);
   const out = sum("from"), inn = sum("to");
-  const wake = n.wake ? "wakes via " + n.wake : n.kind === "agent" && n.presence === "idle" ? "reads at its next turn" : "";
+  const wake = n.how ? n.how : n.kind === "agent" && n.presence === "idle" ? "reads at its next turn" : "";
   const rows = [
     ["presence", n.presence + (wake ? ", " + wake : "")],
     ["status", n.status ? n.status.state + (n.status.note ? ": " + n.status.note : "") : ""],

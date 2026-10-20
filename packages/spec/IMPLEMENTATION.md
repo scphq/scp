@@ -59,7 +59,8 @@ An agent's shell commands run as children of its harness. A CLI that runs in suc
    - The codex MCP shim writes `<relay dir>/bindings/pid-<harness pid>.json` containing `{process, handle, harness}`, with mode `0600`, and removes it on exit when possible. The process MUST be a full `pid:<pid>:<start time>` key.
    - `swarm codex` sets a fresh random 32-character hex `SCP_SHIM_BINDING` in the harness environment and passes it to the shim through `env_vars`. The shim also writes `bindings/key-<SCP_SHIM_BINDING>.json`. The CLI tries this binding first, so a pid namespace can recover the host harness key. `swarm spawn` removes the spawner's binding key from the worker's environment.
    - Without a usable key binding, the CLI climbs from its parent through the visible process table to the first missing parent pid and tries that pid's binding. The binding's process pid MUST equal the missing pid.
-   - With a valid codex binding, both `lineage` and `self` contain the visible keys followed by the binding's process key, and the harness is codex. Without one, `swarm join` reports that the codex sandbox hides the harness and directs the agent to `relay_join` (MCP).
+   - With a valid codex binding, both `lineage` and `self` contain the visible keys followed by the binding's process key, and the harness is codex. Without one, `swarm join` reports that the codex sandbox hides the harness and directs the agent to `relay_join` (MCP) with the name and `under` it was given.
+   - A binding does not open the socket: a sandbox that refuses the connection to the relay socket ("Joining and linking from the CLI") makes the CLI name the MCP tools instead.
 4. The CLI sends `hello {observe, self, lineage}`. The broker binds the endpoint that `self` places with auth `self`.
 
 ### Identity resolution in the CLI
@@ -69,12 +70,15 @@ The CLI resolves its identity in this order: an explicit name (`--as` or `SCP_NA
 ### Subagents
 
 - Claude Code reports a subagent's description through the root's `PostToolUse` of its `Agent` or `Task` tool, with `tool_input.description` and an object `tool_response` carrying `agentId`. The hook offers it as `subagent_title`.
+- The subagent's `id` is Claude Code's `agentId`, which its SendMessage tool takes to continue a stopped subagent. A root under `swarm claude` (`channels`) or in a background session (`claude-inbox`) is the subagents' waker (SPEC section 6.9): its MCP server's channel push, the waker connection, also pushes a stopped subagent's messages, framed for the root to continue that subagent and carrying `for` and `subagent` in the channel metadata. The broker returns the root's waiting `inbox` call as soon as such a message arrives.
 
 ### Joining and linking from the CLI
 
 - The default join mode is `auto`. `swarm setup --join manual` selects `manual` and stores it as `join` in `~/.config/scp/config.json`.
 - `swarm adopt <child> --parent <p>` at a terminal without explicit `--as` acts as the human, ignoring inherited `$SCP_NAME` and `$SCP_GRANT`.
-- A link request is accepted with `swarm link accept <id>` or the MCP tool `relay_link_accept {id}`. The child may instead consent with `swarm join --under <parent>` or `relay_join {under: <parent>}`.
+- `swarm adopt <child>` from an agent's own session or from its shell (lineage or self auth, "Self-attestation of tool shells") links a local root it may message under that agent at once and prints `<child> now sits under <agent>`; a child under another parent is asked to consent instead, and the command prints the request's short id.
+- A link request is accepted with `swarm link accept <id>` or the MCP tool `relay_link_accept {id}`, once the child is a root. The child may instead consent with `swarm join --under <parent>` or `relay_join {under: <parent>}`.
+- `swarm join --under <parent>` in a codex shell needs what a plain `swarm join` needs and nothing more: the harness instance, recovered from the shim binding, and a connection to the relay socket. Codex's workspace-write sandbox without network access refuses Unix domain socket connections too, so every relay command from its shell fails there; the CLI then exits with a usage error that names the MCP tool doing the same from outside the sandbox (`relay_join {name?, under?}` for a join, the scp MCP tools for the other verbs that act as the agent) and the codex setting that lets the sandbox reach the socket (`sandbox_workspace_write.network_access = true`), and starts no broker. Without a binding it names `relay_join` with the same arguments.
 - A session renamed through its marker claims its own handle over `SCP_NAME` and the derived default.
 - The CLI sends `$SCP_UNDER` as the claim's `under`.
 
@@ -91,7 +95,7 @@ The CLI resolves its identity in this order: an explicit name (`--as` or `SCP_NA
 
 ### Channel push
 
-A harness whose tool protocol supports server-initiated messages MAY receive messages as they arrive. The reference MCP server, when started with channels enabled and connected to a client that declares the `claude/channel` experimental capability, or to one the reference launcher started with channels loaded, polls `inbox {wait_s: LIMITS.injectHoldS, offer: true}`, emits `notifications/claude/channel` with `{content: <preamble and block>, meta: {from, id, seq, thread}}`, and confirms with `injected {seqs, hold}`. Channel pushes do not acknowledge.
+A harness whose tool protocol supports server-initiated messages MAY receive messages as they arrive. The reference MCP server, when started with channels enabled and connected to a client that declares the `claude/channel` experimental capability, or to one the reference launcher started with channels loaded, polls `inbox {wait_s: LIMITS.injectHoldS, offer: true}`, emits `notifications/claude/channel` with `{content: <preamble and block>, meta: {from, id, seq, thread, for?, subagent?}}` (`for` and `subagent` on a message for an idle subagent, SPEC section 6.9), and confirms with `injected {seqs, hold}`. Channel pushes do not acknowledge.
 
 ### Stop push
 
@@ -292,7 +296,7 @@ The MCP server speaks JSON-RPC 2.0 over stdio (lines up to 4 MiB; protocol versi
 | `relay_list` | `all?`, `contacts?` | `list` |
 | `relay_peers` | `all?` | `peers` |
 | `relay_send` | `to` (1 to 16), `body`, `thread?`, `private?`, `live?` | `send` with a `client_id` |
-| `relay_link_accept` | `id` | `link_accept`, accept a link request and sit under its sender as a worker |
+| `relay_link_accept` | `id` | `link_accept`, accept a link request (an adopt of a child under another parent, SPEC section 6.12) and sit under its sender as a worker |
 | `relay_join` | `name?`, `under?` | `hello {transient, claim, join}` on a fresh connection, then the shim's own claim |
 | `relay_leave` | | `leave`; the shim then claims nothing until a join |
 | `relay_status` | `id` (id, short id or `last`) | `receipts` |

@@ -283,7 +283,15 @@ export class RelayClient {
   }
 }
 
-export class BrokerUnavailable extends Error {}
+export class BrokerUnavailable extends Error {
+  /** `sandboxed`: a sandbox around this process refused the connection to a running broker */
+  constructor(
+    message: string,
+    readonly sandboxed = false,
+  ) {
+    super(message)
+  }
+}
 
 /** whether the broker for `dir` is running: its lock is held, or, when the lock cannot be probed, its pid is alive */
 function brokerLive(dir: string): boolean {
@@ -312,7 +320,7 @@ function brokerLive(dir: string): boolean {
  */
 export async function connectBroker(dir: string, start?: () => void, timeoutMs = 5000): Promise<RelayClient> {
   const path = socketPath(dir)
-  const refuse = (code: unknown) => new BrokerUnavailable(`the sandbox blocks the relay socket (${code}); allow ${path} or run outside the sandbox`)
+  const refuse = (code: unknown) => new BrokerUnavailable(`the sandbox blocks the relay socket (${code}); allow ${path} or run outside the sandbox`, true)
   const owned = (client: RelayClient) => {
     if (ownPrivateDir(dirname(path))) return client
     client.close()
