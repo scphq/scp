@@ -155,6 +155,7 @@ export function dashboardEvent(event: Record<string, unknown>, at: string): Dash
     const endpoint = str(event.endpoint)
     const presence = (PRESENCES as readonly unknown[]).includes(event.presence) ? (event.presence as Presence) : null
     const waking = typeof event.waking === "boolean" ? { waking: event.waking } : {}
+    if (presence === "hibernated" && !("waking" in waking)) return null
     return endpoint && presence ? { type: "presence", at, machine: str(event.machine), endpoint, presence, ...waking } : null
   }
   return null
@@ -395,12 +396,15 @@ export class RelayHub {
   private judgeConfig: { policy: JudgePolicy; options: HubJudgeOptions } | null = null
   private gate: JudgeGate | null = null
   private readonly wakeOptions: Readonly<HubWakeOptions>
+  /** machine waker calls still running, whose waking deadline storage does not hold yet */
+  private wakeCalls = 0
 
   constructor(private readonly deps: HubDeps) {
     this.now = deps.now ?? Date.now
     this.limits = { ...HUB_LIMITS, ...deps.limits }
     for (const key of DURATIONS) if (!Number.isFinite(this.limits[key])) throw new RangeError(`hub limit ${key} must be finite`)
-    this.wakeOptions = { ...HUB_WAKE, ...deps.wake }
+    const debounceS = deps.wake?.debounceS ?? HUB_WAKE.debounceS
+    this.wakeOptions = { ...HUB_WAKE, debounceS, wakingTimeoutS: debounceS, ...deps.wake }
     for (const key of WAKE_DURATIONS) {
       const value = this.wakeOptions[key]
       if (!Number.isFinite(value) || value < 0) throw new RangeError(`hub wake option ${key} must be a finite number of seconds`)
@@ -655,8 +659,7 @@ export class RelayHub {
     } else {
       this.deps.sql.all(`DELETE FROM hub_state WHERE key = 'idle_since'`)
     }
-    for (const view of this.relay.wakingTimedOut(now))
-      this.fleet({ type: "presence", machine: view.machine, endpoint: view.address, presence: view.presence, waking: false })
+    for (const view of this.relay.endWaking(now)) this.wokeNot(view)
     return this.nextAlarm()
   }
 
@@ -665,7 +668,9 @@ export class RelayHub {
     const now = this.now()
     const trueUp = this.xcounters?.dueAt() ?? null
     const held = this.retentionAlarm(now)
-    const waking = this.core?.wakingDue() ?? null
+    const stored = this.core?.wakingDue() ?? null
+    const running = this.wakeCalls > 0 ? now + MACHINE_WAKE_TIMEOUT_MS + this.wakeOptions.wakingTimeoutS * 1000 : null
+    const waking = stored === null || running === null ? (stored ?? running) : Math.min(stored, running)
     const retention = [held, trueUp, waking === null ? null : Math.max(waking, now)].reduce<number | null>(
       (at, next) => (next === null ? at : at === null ? next : Math.min(at, next)),
       null,
@@ -1623,7 +1628,13 @@ export class RelayHub {
       machine === undefined
         ? this.deps.sql.all(`DELETE FROM machine_wakes RETURNING machine`)
         : this.deps.sql.all(`DELETE FROM machine_wakes WHERE machine = ? RETURNING machine`, machine)
+    for (const view of this.relay.endWaking(Number.POSITIVE_INFINITY, machine)) this.wokeNot(view)
     return rows.length
+  }
+
+  /** a row that no longer shows waking, to watchers and the dashboard */
+  private wokeNot(view: { machine: string; address: string; presence: Presence }): void {
+    this.fleet({ type: "presence", machine: view.machine, endpoint: view.address, presence: view.presence, waking: false })
   }
 
   private wakeState(machine: string, now: number): WakeState | null {
@@ -1706,7 +1717,8 @@ export class RelayHub {
       return
     }
     const fails = state?.fails ?? 0
-    this.setWakeState(machine, { next: now + options.debounceS * 1000, fails, declined: null })
+    const scheduled = now + options.debounceS * 1000
+    this.setWakeState(machine, { next: scheduled, fails, declined: state?.declined ?? null })
     const fromAccount = message.from.account ?? this.account
     const event: MachineWakeEvent = {
       scp: 1,
@@ -1718,21 +1730,30 @@ export class RelayHub {
       from_account: fromAccount,
       same_account: fromAccount === this.account,
     }
+    /** the call's outcome, unless a cleared hold, a new hibernation or a new registration replaced its state while it ran */
+    const settle = (ok: boolean, declined: WakeDecline | undefined) => {
+      const at = this.now()
+      const current = one<{ next: number }>(this.deps.sql, `SELECT next FROM machine_wakes WHERE machine = ?`, machine)
+      if (current?.next !== scheduled) return
+      if (declined) {
+        const until = Number.isFinite(options.declineHoldS) ? at + options.declineHoldS * 1000 : null
+        this.setWakeState(machine, { next: now, fails, declined: { reason: declined, message: message.id, from: message.from.address, until } })
+      } else if (ok) {
+        const until = at + options.wakingTimeoutS * 1000
+        const marked = this.relay.markWaking(recipient, until)
+        this.setWakeState(machine, { next: marked ? Math.max(scheduled, until) : scheduled, fails: 0, declined: null })
+        if (marked) this.fleet({ type: "presence", machine, endpoint: view.address, presence: "hibernated", waking: true })
+      } else {
+        const next = fails + 1
+        const backoff = Math.min(options.debounceS * 2 ** next, Math.max(options.backoffMaxS, options.debounceS))
+        this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: null })
+      }
+    }
+    this.wakeCalls++
     const done = (ok: boolean, detail: { status?: number; error?: string; declined?: WakeDecline }) => {
+      this.wakeCalls = Math.max(0, this.wakeCalls - 1)
       try {
-        const at = this.now()
-        if (detail.declined) {
-          const until = Number.isFinite(options.declineHoldS) ? at + options.declineHoldS * 1000 : null
-          this.setWakeState(machine, { next: now, fails, declined: { reason: detail.declined, message: message.id, from: message.from.address, until } })
-        } else if (ok) {
-          const until = at + options.wakingTimeoutS * 1000
-          this.setWakeState(machine, { next: until, fails: 0, declined: null })
-          if (this.relay.markWaking(recipient, until)) this.fleet({ type: "presence", machine, endpoint: view.address, presence: "hibernated", waking: true })
-        } else {
-          const next = fails + 1
-          const backoff = Math.min(options.debounceS * 2 ** next, Math.max(options.backoffMaxS, options.debounceS))
-          this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: null })
-        }
+        settle(ok, detail.declined)
       } catch {}
       try {
         this.relay.record("machine_wake", null, machine, { machine, ok, ...detail })
@@ -2035,6 +2056,7 @@ export class RelayHub {
     const dropped = this.tx(() => {
       const count = core.dropMachine(name, { queue: true })
       this.deps.sql.all(`DELETE FROM machines WHERE name = ?`, name)
+      this.deps.sql.all(`DELETE FROM machine_wakes WHERE machine = ?`, name)
       this.deps.sql.all(`DELETE FROM machine_tombstones WHERE name = ?`, name)
       core.record("machine_release", null, name, { machine: name, endpoints: count })
       return count
@@ -2075,6 +2097,7 @@ export class RelayHub {
       const dropped = this.tx(() => {
         const count = core.dropMachine(name)
         this.deps.sql.all(`DELETE FROM machines WHERE name = ?`, name)
+        this.deps.sql.all(`DELETE FROM machine_wakes WHERE machine = ?`, name)
         core.record("machine_expire", null, name, { machine: name, endpoints: count })
         return count
       })

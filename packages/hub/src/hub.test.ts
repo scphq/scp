@@ -1581,6 +1581,58 @@ describe("machine waker", () => {
     expect(await send("after clearWakeHold")).toBe(3)
   })
 
+  test("waking survives a restart; clearWakeHold ends it and the debounce, so the next message calls at once", async () => {
+    const events: Call[] = []
+    const dash: DashboardEvent[] = []
+    const machineWake = async (event: unknown) => {
+      events.push(event as Call)
+      return { ok: true }
+    }
+    const { bridge, ok, disconnect, restart } = setup({ machineWake, dashboard: (event) => dash.push(event), wake: { wakingTimeoutS: 600 } })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    const send = async (body: string) => {
+      await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body } })
+      await calls(events, events.length + 1)
+      return events.length
+    }
+    expect(await send("one")).toBe(1)
+    const fresh = restart()
+    expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBe(true)
+    expect(await send("while waking")).toBe(1)
+    expect(fresh.clearWakeHold()).toBe(1)
+    expect(dash).toContainEqual(expect.objectContaining({ type: "presence", endpoint: "ada/desk/review", waking: false }))
+    expect(await send("after clearWakeHold")).toBe(2)
+  })
+
+  test("a new registration while a call runs drops that call's outcome: no waking, no debounce", async () => {
+    const sent: Call[] = []
+    let answer: (status: number) => void = () => {}
+    const { bridge, ok, disconnect } = setup({
+      fetch: (url, init) => {
+        sent.push({ url, headers: init.headers, body: init.body })
+        return new Promise((resolve) => {
+          answer = (status) => resolve({ status })
+        })
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    const desk = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+    await ok(desk, "machine_wake", { url: "https://wake.example/hook", secret: SECRET })
+    disconnect(desk)
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await calls(sent, 1)
+    const again = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+    await ok(again, "machine_wake", { url: "https://wake.example/other", secret: SECRET })
+    disconnect(again)
+    answer(200)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBeUndefined()
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "two" } })
+    await calls(sent, 2)
+    expect(sent.map((c) => c.url)).toEqual(["https://wake.example/hook", "https://wake.example/other"])
+  })
+
   test("wake durations must be finite; a per-hour cap or the decline hold may be Infinity", () => {
     expect(() => setup({ wake: { debounceS: Number.POSITIVE_INFINITY } })).toThrow(RangeError)
     expect(() => setup({ wake: { wakingTimeoutS: -1 } })).toThrow(RangeError)

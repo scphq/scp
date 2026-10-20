@@ -914,15 +914,30 @@ export class FederatedCore extends RelayCore {
     )
   }
 
-  /** the rows whose waking timed out by `now`, back to plain hibernated */
-  wakingTimedOut(now: number): RemoteView[] {
-    const rows = this.sql.all<{ id: string }>(`UPDATE endpoints SET waking_until = NULL WHERE waking_until <= ? RETURNING id`, now)
-    return rows.map((row) => this.remoteView(this.byId(row.id)!))
+  /** ends the waking of rows that timed out by `now` (with `machine`, of that machine's rows at any time); the mirrored hibernated ones it ended */
+  endWaking(now: number, machine?: string): RemoteView[] {
+    const rows =
+      machine === undefined
+        ? this.sql.all<{ id: string }>(`UPDATE endpoints SET waking_until = NULL WHERE waking_until <= ? RETURNING id`, now)
+        : this.sql.all<{ id: string }>(
+            `UPDATE endpoints SET waking_until = NULL WHERE waking_until IS NOT NULL AND substr(remote, 1, ?) = ? RETURNING id`,
+            machine.length + 1,
+            `${machine}/`,
+          )
+    return rows.flatMap((row) => {
+      const found = this.byId(row.id) as FederatedRow | undefined
+      return found?.remote && found.token_hash === null && found.mirrored_presence === "hibernated" ? [this.remoteView(found)] : []
+    })
   }
 
-  /** when the next waking row times out, or null */
+  /** when the next mirrored hibernated row's waking times out, or null */
   wakingDue(): number | null {
-    return one<{ at: number | null }>(this.sql, `SELECT MIN(waking_until) AS at FROM endpoints WHERE waking_until IS NOT NULL`)?.at ?? null
+    return (
+      one<{ at: number | null }>(
+        this.sql,
+        `SELECT MIN(waking_until) AS at FROM endpoints WHERE waking_until IS NOT NULL AND remote IS NOT NULL AND token_hash IS NULL AND mirrored_presence = 'hibernated'`,
+      )?.at ?? null
+    )
   }
 
   markOffline(machine: string): MirrorChange[] {

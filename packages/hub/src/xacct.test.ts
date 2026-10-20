@@ -920,11 +920,11 @@ describe("machine waker for messages from other accounts", () => {
     bob.gate.ingressVerdict = { verdict: "refuse", code: "policy_refused", categories: ["x"] }
     expect(await alice.fails(laptop, "forward", forward("bob/desk/review", "refused"))).toBe("policy_refused")
     bob.gate.ingressVerdict = { verdict: "hold", hold_id: "hld_1" }
-    await alice.ok(laptop, "forward", forward("bob/desk/review", "held"))
+    await alice.ok(laptop, "forward", forward("bob/desk/review", "UNIQUE-XACCT-BODY"))
     await settle()
     expect(events).toEqual([])
-    bob.gate.ingressVerdict = { verdict: "pass" }
-    const sent = await alice.ok(laptop, "forward", forward("bob/desk/review", "UNIQUE-XACCT-BODY"))
+    const held = bob.gate.calls.at(-1)!.msg
+    await bob.hub.xrelease({ side: "ingress", hold_id: "hld_1", from_account: alice.id, message: held })
     await settle()
     expect(events).toEqual([
       {
@@ -933,7 +933,7 @@ describe("machine waker for messages from other accounts", () => {
         account: "bob",
         machine: "desk",
         endpoints: ["bob/desk/review"],
-        message: { id: sent.id, from: "alice/laptop/impl", kind: "message", thread: sent.thread, created_at: expect.any(String) },
+        message: { id: held.id, from: "alice/laptop/impl", kind: "message", thread: held.thread, created_at: expect.any(String) },
         from_account: "alice",
         same_account: false,
       },
@@ -962,6 +962,20 @@ describe("machine waker for messages from other accounts", () => {
     await sender.alice.ok(sender.laptop, "forward", forward("bob/desk/review", "next hour"))
     await settle()
     expect(events.length).toBe(3)
+
+    events.length = 0
+    const held = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: 2, wakingTimeoutS: 60 } })
+    const send = async (body: string, extra: Record<string, unknown> = {}) => {
+      await held.alice.ok(held.laptop, "forward", forward("bob/desk/review", body, extra))
+      await settle()
+    }
+    await send("one", { client_id: "dup" })
+    await send("one again", { client_id: "dup" })
+    await send("while waking")
+    expect(events.length).toBe(1)
+    held.clock.now += 61_000
+    await send("after the timeout")
+    expect(events.length).toBe(2)
 
     events.length = 0
     const target = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: Number.POSITIVE_INFINITY, targetPerHour: 1 } })

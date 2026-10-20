@@ -228,7 +228,7 @@ Before delivering to a hibernated local agent the broker runs its provider's wak
   | `targetPerHour` | `12` | calls messages from other accounts may cause for one endpoint, an hour |
   | `debounceS` | `60` | the least time between two calls for one machine |
   | `backoffMaxS` | `900` | the longest backoff after failed calls |
-  | `wakingTimeoutS` | `60` | how long a row shows `waking` after an accepted call before it falls back to hibernated |
+  | `wakingTimeoutS` | `debounceS` | how long a row shows `waking` after an accepted call before it falls back to hibernated |
   | `declineHoldS` | `Infinity` | how long a decline holds calls for its message and sender; `Infinity` until it clears as SPEC section 19.3 says |
 
   The per-hour caps and `declineHoldS` take `Infinity`; the durations are finite. `RelayHub.clearWakeHold(machine?)` forgets a machine's (or every machine's) decline, debounce and backoff, for example once the provider's budget allows wakes again. The holds and the per-hour counts live in the hub's SQL storage (tables `machine_wakes` and `wake_limits`), and a row's waking deadline in its endpoint row.
