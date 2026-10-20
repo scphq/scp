@@ -396,7 +396,7 @@ export class RelayHub {
   private judgeConfig: { policy: JudgePolicy; options: HubJudgeOptions } | null = null
   private gate: JudgeGate | null = null
   private readonly wakeOptions: Readonly<HubWakeOptions>
-  /** machine waker calls still running, whose waking deadline storage does not hold yet */
+  /** machine waker calls and queued-mail scans still running, whose waking deadline or retry storage does not hold yet */
   private wakeCalls = 0
 
   constructor(private readonly deps: HubDeps) {
@@ -424,6 +424,8 @@ export class RelayHub {
     if (!columns.includes("actor_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN actor_id TEXT`)
     if (!columns.includes("wake_url")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_url TEXT`)
     if (!columns.includes("wake_secret")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_secret TEXT`)
+    const wakeColumns = this.deps.sql.all<{ name: string }>(`PRAGMA table_info(machine_wakes)`).map((c) => c.name)
+    if (!wakeColumns.includes("retry_at")) this.deps.sql.all(`ALTER TABLE machine_wakes ADD COLUMN retry_at INTEGER`)
     const core = new FederatedCore(this.deps.sql, {
       user: account.user,
       now: this.now,
@@ -665,11 +667,16 @@ export class RelayHub {
       this.declineRetryMs(),
       now,
     )
-    await this.wakeQueued(unheld.map((row) => row.machine))
+    const retried = this.deps.sql.all<{ machine: string }>(
+      `UPDATE machine_wakes SET retry_at = NULL WHERE MAX(retry_at, next + ?) <= ? RETURNING machine`,
+      this.declineRetryMs(),
+      now,
+    )
+    await this.wakeQueued([...new Set([...unheld, ...retried].map((row) => row.machine))])
     return this.nextAlarm()
   }
 
-  /** when the next alarm should fire (earliest grant expiry, revalidation or its retry after an error, sweep, retention, a waking timeout or a decline hold's end), or null when the hub holds nothing */
+  /** when the next alarm should fire (earliest grant expiry, revalidation or its retry after an error, sweep, retention, a waking timeout, a decline hold's end or a capped queued wake's retry), or null when the hub holds nothing */
   nextAlarm(): number | null {
     const now = this.now()
     const trueUp = this.xcounters?.dueAt() ?? null
@@ -680,7 +687,9 @@ export class RelayHub {
     const unheld =
       one<{ at: number | null }>(
         this.deps.sql,
-        `SELECT MIN(MAX(declined_until, next + ?)) AS at FROM machine_wakes WHERE declined_until IS NOT NULL`,
+        `SELECT MIN(at) AS at FROM (SELECT MAX(declined_until, next + ?) AS at FROM machine_wakes WHERE declined_until IS NOT NULL
+         UNION ALL SELECT MAX(retry_at, next + ?) AS at FROM machine_wakes WHERE retry_at IS NOT NULL)`,
+        this.declineRetryMs(),
         this.declineRetryMs(),
       )?.at ?? null
     const retention = [held, trueUp, waking === null ? null : Math.max(waking, now), unheld === null ? null : Math.max(unheld, now)].reduce<number | null>(
@@ -1665,7 +1674,12 @@ export class RelayHub {
     if (!machines.length || (!this.deps.machineWake && !this.deps.fetch)) return
     const before = new Map(machines.map((machine) => [machine, this.wakeCall(machine)]))
     if (this.wakeOptions.crossAccount && this.deps.crossAccount) {
-      this.relay.xsenders(await this.xinbound().catch(() => null))
+      this.wakeCalls++
+      try {
+        this.relay.xsenders(await this.xinbound().catch(() => null))
+      } finally {
+        this.wakeCalls = Math.max(0, this.wakeCalls - 1)
+      }
     }
     for (const [machine, call] of before) {
       try {
@@ -1686,7 +1700,10 @@ export class RelayHub {
     return one<{ call: string | null }>(this.deps.sql, `SELECT call FROM machine_wakes WHERE machine = ?`, machine)?.call ?? null
   }
 
-  /** the queued-mail wake of `machine`; nothing once a call other than `before` started, as a message arriving meanwhile makes */
+  /**
+   * the queued-mail wake of `machine`; nothing once a call other than `before` started, as a message arriving meanwhile makes. When only
+   * per-hour caps refused another account's message, the alarm retries once the earliest such refusal's windows reset
+   */
   private wakeQueuedOn(machine: string, before: string | null): void {
     if (this.wakeCall(machine) !== before) return
     const now = this.now()
@@ -1696,17 +1713,32 @@ export class RelayHub {
     if (!this.deps.machineWake && !one(this.deps.sql, `SELECT 1 FROM machines WHERE name = ? AND wake_url IS NOT NULL AND wake_secret IS NOT NULL`, machine))
       return
     const tried = new Set<string>()
+    let retry = Number.POSITIVE_INFINITY
     for (let page = this.relay.pending(machine, 0); page.length; page = this.relay.pending(machine, page.at(-1)!.seq)) {
       for (const delivery of page) {
         const key = `${delivery.recipient} ${delivery.message.from.address}`
         if (tried.has(key)) continue
         tried.add(key)
         const fromAccountId = this.relay.xaccountOf(delivery.seq) ?? undefined
-        if (fromAccountId !== undefined && !this.wakeOptions.crossAccount) continue
-        this.machineWake(machine, delivery.recipient, delivery.message, fromAccountId)
+        if (fromAccountId !== undefined) {
+          if (!this.wakeOptions.crossAccount || !this.wakeTarget(machine, delivery.recipient, delivery.message, now)) continue
+          const reset = this.wakeAdmitted(fromAccountId, delivery.recipient, delivery.message.id, now, true)
+          if (reset !== null) {
+            retry = Math.min(retry, reset)
+            this.deps.log?.("relay_action", { account: this.account, machine, method: "machine_wake", code: "rate_limited" })
+            continue
+          }
+        }
+        this.machineWake(machine, delivery.recipient, delivery.message)
         if (this.wakeCall(machine) !== before) return
       }
     }
+    if (Number.isFinite(retry))
+      this.deps.sql.all(
+        `INSERT INTO machine_wakes (machine, next, fails, retry_at) VALUES (?, 0, 0, ?) ON CONFLICT (machine) DO UPDATE SET retry_at = excluded.retry_at`,
+        machine,
+        retry,
+      )
   }
 
   /** a row that no longer shows waking, to watchers and the dashboard */
@@ -1736,7 +1768,9 @@ export class RelayHub {
   private setWakeState(machine: string, state: WakeState): void {
     const d = state.declined
     this.deps.sql.all(
-      `INSERT OR REPLACE INTO machine_wakes (machine, next, fails, call, declined, declined_message, declined_from, declined_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO machine_wakes (machine, next, fails, call, declined, declined_message, declined_from, declined_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (machine) DO UPDATE SET next = excluded.next, fails = excluded.fails, call = excluded.call, declined = excluded.declined,
+       declined_message = excluded.declined_message, declined_from = excluded.declined_from, declined_until = excluded.declined_until`,
       machine,
       state.next,
       state.fails,
@@ -1748,10 +1782,15 @@ export class RelayHub {
     )
   }
 
-  /** counts one machine waker call a message of the account `fromAccountId` causes for `recipient`; false, counting nothing, past a cap */
-  private wakeAdmitted(fromAccountId: string, recipient: string, now: number): boolean {
+  /**
+   * counts one machine waker call a message of the account `fromAccountId` causes for `recipient`; null, or counting nothing past a cap,
+   * when the refusing windows reset (Infinity under a cap of 0). A sender's window counts a message once: with `queued`, a message it
+   * already counted is charged to the target cap only
+   */
+  private wakeAdmitted(fromAccountId: string, recipient: string, messageId: string, now: number, queued: boolean): number | null {
+    const sender = `account:${fromAccountId}`
     const caps: [string, number][] = [
-      [`account:${fromAccountId}`, this.wakeOptions.senderAccountPerHour],
+      [sender, this.wakeOptions.senderAccountPerHour],
       [`endpoint:${recipient}`, this.wakeOptions.targetPerHour],
     ]
     const counts = caps
@@ -1760,16 +1799,39 @@ export class RelayHub {
         const row = one<{ n: number; since: number }>(this.deps.sql, `SELECT n, since FROM wake_limits WHERE key = ?`, key)
         return row && now - row.since < WAKE_HOUR_MS ? { key, cap, n: row.n, since: row.since } : { key, cap, n: 0, since: now }
       })
-    if (counts.some((c) => c.n >= c.cap)) return false
-    for (const c of counts) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, ?, ?)`, c.key, c.n + 1, c.since)
-    return true
+    const window = counts.find((c) => c.key === sender)
+    const mark = `message:${fromAccountId} ${messageId}`
+    const counted =
+      queued &&
+      window !== undefined &&
+      window.n > 0 &&
+      one(this.deps.sql, `SELECT 1 FROM wake_limits WHERE key = ? AND since = ?`, mark, window.since) !== undefined
+    const charged = counted ? counts.filter((c) => c !== window) : counts
+    const full = charged.filter((c) => c.n >= c.cap)
+    if (full.length) return Math.max(...full.map((c) => (c.n > 0 ? c.since + WAKE_HOUR_MS : Number.POSITIVE_INFINITY)))
+    for (const c of charged) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, ?, ?)`, c.key, c.n + 1, c.since)
+    if (window && !counted) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, 1, ?)`, mark, window.since)
+    return null
+  }
+
+  /** `recipient`'s view while it is a hibernated row of `machine`, not waking, that no decline of this message or its sender holds */
+  private wakeTarget(machine: string, recipient: string, message: Envelope, now: number): EndpointView | null {
+    const declined = this.wakeState(machine, now)?.declined
+    if (declined && (declined.message === message.id || declined.from === message.from.address)) return null
+    try {
+      const view = this.relay.whoami(recipient)
+      return view.presence === "hibernated" && !view.waking ? view : null
+    } catch {
+      return null
+    }
   }
 
   /**
    * calls `machine`'s waker for its hibernated `recipient`: the embedder's `machineWake`, else the registered URL, signed. At most once per
    * debounce window (doubling after failures); an accepted call shows the row waking and holds further calls until it times out; a decline
    * counts toward nothing and holds calls for that message and its sender. With `fromAccountId`, a message from that other account, within
-   * its per-hour caps. The state lives in storage, so an evicted or restarted hub keeps it. Metadata only
+   * its per-hour caps; a queued message's caller admits it itself. The state lives in storage, so an evicted or restarted hub keeps it.
+   * Metadata only
    */
   private machineWake(machine: string, recipient: string, message: Envelope, fromAccountId?: string): void {
     const embedded = this.deps.machineWake
@@ -1778,19 +1840,13 @@ export class RelayHub {
     const now = this.now()
     const state = this.wakeState(machine, now)
     if (state && state.next > now) return
-    if (state?.declined && (state.declined.message === message.id || state.declined.from === message.from.address)) return
-    let view: EndpointView
-    try {
-      view = this.relay.whoami(recipient)
-    } catch {
-      return
-    }
-    if (view.presence !== "hibernated" || view.waking) return
+    const view = this.wakeTarget(machine, recipient, message, now)
+    if (!view) return
     const waker = embedded
       ? null
       : one<{ wake_url: string | null; wake_secret: string | null }>(this.deps.sql, `SELECT wake_url, wake_secret FROM machines WHERE name = ?`, machine)
     if (!embedded && (!waker?.wake_url || !waker.wake_secret)) return
-    if (fromAccountId !== undefined && !this.wakeAdmitted(fromAccountId, recipient, now)) {
+    if (fromAccountId !== undefined && this.wakeAdmitted(fromAccountId, recipient, message.id, now, false) !== null) {
       this.deps.log?.("relay_action", { account: this.account, machine, method: "machine_wake", code: "rate_limited" })
       return
     }
@@ -1822,6 +1878,7 @@ export class RelayHub {
         const until = at + options.wakingTimeoutS * 1000
         const marked = this.relay.markWaking(recipient, until)
         this.setWakeState(machine, { next: marked ? Math.max(scheduled, until) : scheduled, fails: 0, declined: kept })
+        this.deps.sql.all(`UPDATE machine_wakes SET retry_at = NULL WHERE machine = ?`, machine)
         if (marked) this.fleet({ type: "presence", machine, endpoint: view.address, presence: "hibernated", waking: true })
       } else {
         const next = fails + 1
