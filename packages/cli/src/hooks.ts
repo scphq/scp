@@ -247,7 +247,7 @@ export interface Injected {
   /** with either: the pushes left since the last prompt, and the prompts mark a wait passes on to end at the next prompt */
   pushes_left?: number
   prompts?: number
-  /** with either: a message wakes the session anyway, so the stop only shows what its workers already sent and never waits */
+  /** with either: a message wakes the session anyway, so the stop shows what its workers already sent and waits only if its waker left meanwhile */
   wakeable?: true
   /** the session was shown the full preamble: the brief marker stands for it (an older broker leaves it out) */
   brief?: true

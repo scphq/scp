@@ -494,6 +494,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** counts `s` as the waker of `endpoint`, or of none, and reports the presence that moves */
+  /** the endpoint's waiting calls return and look again, as when it turned wakeable */
+  function release(endpoint: string) {
+    const waiting = waiters.get(endpoint)
+    waiters.delete(endpoint)
+    for (const fn of waiting ?? []) fn()
+  }
+
   function setWaker(s: Conn<Connection>, endpoint: string | undefined) {
     const was = s.data.waker
     if (was === endpoint) return
@@ -506,9 +513,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     if (endpoint) {
       core.waker(endpoint, true)
       presenceMoved(endpoint)
-      const waiting = waiters.get(endpoint)
-      waiters.delete(endpoint)
-      for (const fn of waiting ?? []) fn()
+      release(endpoint)
     }
     for (const root of [was, endpoint]) if (root) subagentsMoved(root)
   }
@@ -1061,7 +1066,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const changed = core.setWake(me, params.via, { ...hookOf(s), ref: params.ref })
         setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
         if (!presenceMoved(me) && changed) bridge?.changed(me)
-        if (changed) subagentsMoved(me)
+        if (changed) {
+          subagentsMoved(me)
+          release(me)
+        }
         return { changed }
       }
       case "rename": {
