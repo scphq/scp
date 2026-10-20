@@ -130,4 +130,48 @@ describe("broker, subagent endpoints", () => {
       code: "unauthorized",
     })
   })
+
+  test("a message to a stopped subagent wakes the root's waker, tagged for the subagent; other connections of the root are not offered it", async () => {
+    const { broker, main, claim } = await setup()
+    expect(await main.request("wake", { via: "channels" })).toEqual({ changed: true })
+    const hook = await open(broker)
+    const sub = await hook.hello({ transient: true, claim: { ...claim, subagent: { id: "aceb553c19f223c70", type: "Explore" } } })
+    await hook.request("status", { state: "done" })
+    expect(broker.core.whoami(sub.endpoint!.id).wake).toBe("channels")
+    const peer = await open(broker)
+    await peer.hello({ claim: { handle: "peer", harness: "codex" } })
+    const waiting = main.request<{ messages: { body: { text: string }; for?: { address: string; subagent: string } }[] }>("inbox", {
+      wait_s: 5,
+      offer: true,
+    })
+    await Bun.sleep(50)
+    const started = Date.now()
+    await peer.request("send", { to: sub.endpoint!.address, body: "one more thing" })
+    const { messages } = await waiting
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(messages).toMatchObject([{ body: { text: "one more thing" }, for: { address: "me/claude-app-explore-aceb", subagent: "aceb553c19f223c70" } }])
+    const other = await open(broker)
+    await other.hello({ claim: { ...claim, handle: "claude-app", exact: true }, self: [key(1)] })
+    await peer.request("send", { to: sub.endpoint!.address, body: "and another" })
+    expect((await other.request<{ messages: unknown[] }>("inbox", { offer: true })).messages).toEqual([])
+    const again = await main.request<{ messages: { body: { text: string } }[] }>("inbox", { offer: true })
+    expect(again.messages.map((m) => m.body.text)).toEqual(["and another"])
+  })
+
+  test("mail that reached a working subagent wakes the root's waiting waker once the subagent stops", async () => {
+    const { broker, main, claim } = await setup()
+    await main.request("wake", { via: "channels" })
+    const hook = await open(broker)
+    const sub = await hook.hello({ transient: true, claim: { ...claim, subagent: { id: "bced553c19f223c71", type: "Explore" } } })
+    await hook.request("status", { state: "working" })
+    const peer = await open(broker)
+    await peer.hello({ claim: { handle: "peer", harness: "codex" } })
+    await peer.request("send", { to: sub.endpoint!.address, body: "late" })
+    const waiting = main.request<{ messages: { body: { text: string } }[] }>("inbox", { wait_s: 5, offer: true })
+    await Bun.sleep(50)
+    const started = Date.now()
+    await hook.request("status", { state: "done" })
+    expect((await waiting).messages.map((m) => m.body.text)).toEqual(["late"])
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
 })

@@ -25,6 +25,7 @@ import {
   type ScopeView,
   type SendResult,
   shortId,
+  SPAWN_PROVIDER,
   stripControl,
   type ThreadMessage,
   wakeText,
@@ -57,7 +58,10 @@ import { SPAWN_HELP } from "./help-spawn"
 import { shortHostname } from "./identity"
 import type { RelayTransport } from "./remote"
 import type { UpValues } from "./up"
-import { exitFlushed, FAILED, note, parseSeconds, printTable } from "./term"
+import { exitFlushed, FAILED, note, parseSeconds, printTable, SELF } from "./term"
+
+/** how long the built-in spawn waker may take to have its runner hold the worker's endpoint */
+const SPAWN_WAKE_TIMEOUT_S = 60
 
 /** Brief help; {@link RELAY_HELP} is the full reference. */
 export const RELAY_BRIEF = `${CLI_NAME}: messages between the agent sessions on this machine. Start worker agents, steer them and get their
@@ -72,8 +76,8 @@ results back, as with native subagents.
   ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, wake, status; --all adds offline ones
   ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
   ${CLI_NAME} join --under <parent>       link this session under an orchestrator, as a spawned worker sits: ${CLI_NAME} join --under lead
-  ${CLI_NAME} adopt <child>              ask a local root agent to link under you; it accepts with ${CLI_NAME} link accept <id>
-  ${CLI_NAME} link accept <id>           accept a link request and sit under its sender as a worker
+  ${CLI_NAME} adopt <child>              link a local root agent you may message under you as your worker, at once
+  ${CLI_NAME} link accept <id>           accept a link request (adopt of an agent under another parent) and sit under its sender
   ${CLI_NAME} status [id]                 the fleet in short; with the id of a message you sent: who read it when
   ${CLI_NAME} peek <ep>                   a short, redacted view of a peekable agent's last turns: ${CLI_NAME} peek rev
   ${CLI_NAME} set-status <state> [note]   working, waiting, blocked or done: ${CLI_NAME} set-status done "PR open"
@@ -153,7 +157,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  that places the spawned agent under you (or EP) with those rules;
                                                  --title is its title until it sets its own; --peek local makes it
                                                  peekable from its start
-  ${CLI_NAME} spawn [spawn-env's flags] [--labels K=V,...] [--handback-bytes N] [--no-push] [--bg|--fg] [--] <harness cmd...>
+  ${CLI_NAME} spawn [spawn-env's flags] [--labels K=V,...] [--handback-bytes N] [--no-push] [--bg|--fg] [--idle S] [--durable]
+        [--] <harness cmd...>
                                                  runs the harness with that grant (never printed); the command starts after -- or
                                                  at the first word that is not one of these flags.
                                                  In an agent's shell (a harness's markers or a relay identity in the environment,
@@ -198,6 +203,13 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  A codex exec worker runs no stop hook, so a message you send after its last step
                                                  would be lost: spawn resumes its session with it (codex exec resume, by the session
                                                  id its hooks report), at most twice, before the handback.
+                                                 A codex exec, agy -p, grok -p or muse exec worker stays resumable after it exits (wake
+                                                 spawn-resume): spawn holds its endpoint, and each message to it resumes the same
+                                                 session, every run handing back again as a reply. --idle S (default 1800 s when
+                                                 detached, none in the foreground; Infinity: until ended; 0: never held) lets it go
+                                                 after S quiet seconds; ${CLI_NAME} end <worker> lets it go now. --durable hibernates
+                                                 it instead of letting go, even when spawn dies: a message then resumes it through
+                                                 the broker's built-in spawn waker.
                                                  With --peek local, a claude -p or codex exec prompt is its first peek turn.
                                                  A claude -p or codex exec prompt gets a note naming you and the key your
                                                  messages to the worker carry, so it applies your steers.
@@ -205,6 +217,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  messages with the relay MCP tools (relay_send, relay_inbox, relay_reply). A
                                                  ${CLI_NAME} command from codex's workspace-write sandbox also needs
                                                  -c sandbox_workspace_write.network_access=true (the relay socket counts as network)
+  ${CLI_NAME} end <worker>                       let go of a worker your spawn holds for resumes, or one a durable spawn
+                                                 hibernated: messages to it then queue as for any offline agent; for its spawner,
+                                                 an ancestor or the human at a terminal
   ${CLI_NAME} spawn --via R [--name N] [--title T] [--labels K=V,...] [--json] [--] <harness cmd...>
                                                  hands the spawn to runner R of ~/.config/scp/runners.json ($SCP_RUNNERS_FILE):
                                                  it gets the spawn as one JSON line on stdin and starts the worker on another
@@ -289,8 +304,10 @@ agent sessions:
   ${CLI_NAME} adopt <child> [--parent <p>]      link a local root agent and its subtree under <p>, for the human at a terminal;
                                                  <p> may be on another machine of the account (me/<machine>/<handle>).
                                                  With --parent and a terminal, inherited $SCP_NAME and $SCP_GRANT are ignored
-                                                 unless --as is explicit. An agent without a terminal asks the child to consent,
-                                                 under itself only; the child accepts with link accept or join --under
+                                                 unless --as is explicit. An agent (from its session or its shell) adopts under
+                                                 itself only: a local root it may message links at once, never itself, one of
+                                                 its ancestors or a subagent's endpoint; a child under another parent is asked
+                                                 to consent and accepts with link accept or join --under once it is a root
   ${CLI_NAME} link accept <id>                  accept a link request delivered to this session and sit under its sender as a worker;
                                                  <id> is the full or short message id. Only the session itself may accept
   ${CLI_NAME} unlink [<child>]                  put a linked agent back at the root, its subtree along and the child scope off;
@@ -409,6 +426,7 @@ const VERBS: Record<string, Option[]> = {
   unlink: IDENTITY,
   leave: [...IDENTITY, "endpoint"],
   hibernate: [...IDENTITY, "wake", "ref", "gone", "all", "eta"],
+  end: IDENTITY,
   machine: [...IDENTITY, "secret-env", "clear"],
   name: [...IDENTITY, "endpoint", "take-over"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
@@ -634,6 +652,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     return spawnCommand(rest, cwd)
   }
   if (verb === "mesh") return (await import("./mesh")).meshCommand(rest)
+  if (verb === "spawn-wake") return (await import("./hold")).spawnWakeCommand(rest)
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
@@ -1194,6 +1213,18 @@ async function runVerb(
       }
       return 0
     }
+    case "end": {
+      if (positionals.length !== 1) throw new RelayUsage(`${CLI_NAME} end takes the worker to let go: ${CLI_NAME} end <worker>`)
+      const result = await client.request<{ endpoint: EndpointView; held: boolean }>("spawn_end", { endpoint: positionals[0] })
+      if (asJson) json(result)
+      else
+        out(
+          result.held
+            ? `${result.endpoint.address} ended: no message resumes it now; messages to it queue as for any offline agent`
+            : `${result.endpoint.address} was not held for a resume; marked ended`,
+        )
+      return 0
+    }
     case "machine": {
       if (positionals[0] !== "wake-url") throw new RelayUsage(`${CLI_NAME} machine takes wake-url <url> [--secret-env VAR] | wake-url --clear`)
       if (values.clear === true) {
@@ -1650,6 +1681,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
       bridgeConfig: () => daemonBridge(),
       ...(idleMs !== undefined ? { idleMs } : {}),
       ...(policyFile ? { policyPath: resolve(policyFile) } : {}),
+      builtinWakers: { [SPAWN_PROVIDER]: { command: [...SELF, "spawn-wake"], timeout_s: SPAWN_WAKE_TIMEOUT_S } },
     })
   } catch (error) {
     if (error instanceof BrokerRunning) {

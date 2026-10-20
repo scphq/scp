@@ -65,7 +65,7 @@ const STDERR_LABEL = `stderr (last ${LIMITS.stderrBytes / 1024} KB):`
 /** the flags `spawn --via` takes */
 const VIA_FLAGS: Option[] = ["as", "harness", "name", "title", "labels", "bg", "json", "via"]
 /** the flags of a grant, which a worker linked under an agent on another machine runs without */
-const GRANT_FLAGS: Option[] = ["scope", "rules", "in", "out", "allow", "group", "ttl", "peek", "no-push", "as", "human", "harness"]
+const GRANT_FLAGS: Option[] = ["scope", "rules", "in", "out", "allow", "group", "ttl", "peek", "no-push", "idle", "durable", "as", "human", "harness"]
 
 /** `$SCP_RUNNERS_FILE`, else runners.json beside the policy file */
 export function runnersPath(env: Env = process.env): string {

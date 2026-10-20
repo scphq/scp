@@ -21,6 +21,7 @@ import {
   type SendParams,
   type SendResult,
   SERVER_FIELDS,
+  SPAWN_PROVIDER,
   type Sql,
   type StopWaitResult,
   stripControl,
@@ -75,6 +76,8 @@ export interface BrokerOptions {
   wakersPath?: string | undefined
   /** the wake hooks by provider, in place of the file */
   wakers?: Record<string, unknown> | undefined
+  /** wake hooks this broker has built in, by provider (the reference CLI's `spawn`), configured even without a wakers file; a configured provider of the same name replaces one */
+  builtinWakers?: Record<string, unknown> | undefined
 }
 
 /** what a link gets from the broker: its core, the remote hooks a bridge gets, and a send as a local endpoint or a mirrored one through the judge */
@@ -115,6 +118,8 @@ interface Connection {
   lineage?: string | undefined
   /** the lineage endpoint is the one of the harness whose shell runs the command, bound with no grant: it acts with the endpoint's session reach */
   own?: boolean
+  /** the connection claimed with a grant or a wake ticket, as a spawn holding its worker does: it may give a durable ref */
+  holder?: boolean
   /** a hook's connection: it posts activity and status, and never counts as connected */
   transient?: boolean
   /** a hook connection's harness process key, from its claim */
@@ -151,6 +156,7 @@ const SCOPE_METHODS = new Set([
   "why",
   "spawn_exit",
   "spawn_steers",
+  "spawn_end",
   "peek",
   "peek_set",
   "peek_who",
@@ -252,6 +258,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     core.relabelMachine()
     core.resetConnections()
     core.sweep()
+    core.hibernateHeld()
     judge = new JudgeGate({ sql, core, now: options.now ?? Date.now, env: options.env ?? process.env, client: options.judgeClient, log, wake })
     judge.sweep()
     if (existsSync(socket)) unlinkSync(socket)
@@ -353,12 +360,14 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     core,
     path: options.wakersPath ?? join(dirname(policyFile), "wakers.json"),
     wakers: options.wakers,
+    builtin: options.builtinWakers,
     dir,
     machine: options.machine ?? options.bridge?.machine ?? shortHostname(),
     now: options.now ?? Date.now,
     log,
     changed: (endpoint) => presenceChanged(core.whoami(endpoint)),
   })
+  for (const view of localViews()) if (view.presence === "hibernated") wakers.kick(view.id)
 
   /** links the bridge again with the credential on disk; a configuration this broker cannot take without a restart stops it */
   async function relink(): Promise<object> {
@@ -466,6 +475,16 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     if (endpoint) {
       core.waker(endpoint, true)
       presenceMoved(endpoint)
+    }
+    for (const root of [was, endpoint]) if (root) subagentsMoved(root)
+  }
+
+  /** a root's in-process subagents show its wake and the presence it gives them: those that moved are reported */
+  function subagentsMoved(root: string) {
+    for (const id of core.subagentsOf(root)) {
+      const wake = core.whoami(id).wake
+      if (!presenceMoved(id) && wakes.get(id) !== wake) bridge?.changed(id)
+      wakes.set(id, wake)
     }
   }
 
@@ -601,9 +620,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
 
   /** a delivery reached `endpoint`: its waiters return, and a hibernated one's wake hook runs when due */
   function wake(endpoint: string) {
-    const set = waiters.get(endpoint)
-    if (set) {
-      waiters.delete(endpoint)
+    for (const id of [endpoint, core.wakesRoot(endpoint)]) {
+      const set = id ? waiters.get(id) : undefined
+      if (!set) continue
+      waiters.delete(id!)
       for (const fn of set) fn()
     }
     wakers?.kick(endpoint)
@@ -686,7 +706,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     s.data.closed = true
     clearTimeout(s.data.lineTimer)
     connections.delete(s)
+    const held = !closing && s.data.waker ? core.hibernateHeld(s.data.waker) : []
+    for (const view of held) presenceChanged(view)
     if (!closing) setWaker(s, undefined)
+    for (const view of held) wakers?.kick(view.id)
     if (s.data.endpoint && !closing && !s.data.transient && !s.data.lineage) {
       const before = core.whoami(s.data.endpoint).presence
       const settled = core.disconnect(s.data.endpoint, { settle: !s.data.brief })
@@ -891,7 +914,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         s.data.tty = params.tty === true
         endpoint = core.claimHuman(s.data.tty)
       } else {
-        const claimed = core.claim((params.claim ?? {}) as Claim, { self: params.self })
+        const claim = (params.claim ?? {}) as Claim
+        const claimed = core.claim(claim, { self: params.self })
+        s.data.holder = typeof claim.grant === "string" || typeof claim.ticket === "string"
         endpoint = claimed.endpoint
         token = claimed.token
       }
@@ -965,7 +990,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "inbox": {
         const query = compact({ after: params.after as number | undefined, limit: params.limit as number | undefined })
-        const read = () => (params.offer === true ? core.offer(me, query) : { messages: core.inbox(me, query) })
+        const read = () => (params.offer === true ? core.offer(me, { ...query, subagents: s.data.waker === me }) : { messages: core.inbox(me, query) })
         const deadline = Date.now() + waitSeconds(params.wait_s)
         let page = read()
         while (!page.messages.length && !s.data.closed && Date.now() < deadline) {
@@ -995,9 +1020,14 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "wake": {
         if (s.data.lineage && !s.data.own) throw new RelayError("unauthorized", "only the endpoint's own session says how it wakes")
-        const changed = core.setWake(me, params.via, hookOf(s))
+        if (params.ref !== undefined && params.ref !== null && !s.data.holder)
+          throw new RelayError("unauthorized", "only a spawn holding its worker, by the grant it spent or a wake ticket, gives a durable ref")
+        if (params.ref !== undefined && params.ref !== null && !wakers?.known(SPAWN_PROVIDER))
+          throw new RelayError("invalid_params", `no waker ${SPAWN_PROVIDER} is configured: this broker cannot hold a spawn durably`)
+        const changed = core.setWake(me, params.via, { ...hookOf(s), ref: params.ref })
         setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
         if (!presenceMoved(me) && changed) bridge?.changed(me)
+        if (changed) subagentsMoved(me)
         return { changed }
       }
       case "rename": {
@@ -1012,6 +1042,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "adopt": {
         const actor = actorOf(s)
+        loadPolicy()
+        if (policyError && actor.kind === "endpoint" && s.data.terminal !== true) throw new RelayError("policy_refused", policyError)
         const adopted = await core.adopt(
           actor,
           { endpoint: params.endpoint, ...(params.parent !== undefined ? { parent: params.parent } : {}) },
@@ -1048,7 +1080,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
             : core.hibernate(actorOf(s), { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), ...set }, known)
         const views = "endpoints" in result ? result.endpoints : [result.endpoint]
         for (const view of views) presenceChanged(view)
-        return { ...result, mirrored: await mirrorBarrier(views.map((view) => view.id)) }
+        const mirrored = await mirrorBarrier(views.map((view) => view.id))
+        for (const view of views) wakers?.kick(view.id)
+        return { ...result, mirrored }
       }
       case "machine_wake": {
         if (actorOf(s).kind !== "human") throw new RelayError("unauthorized", "only the human sets this machine's waker")
@@ -1066,6 +1100,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "status": {
         core.status(me, params.state, params.note)
         const view = core.whoami(me)
+        if (params.state === "done" && core.wakesRoot(me)) wake(me)
         notifyFleet({ type: "status", endpoint: view.address, status: view.status })
         bridge?.changed(me)
         return view
@@ -1277,6 +1312,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         return core.peekWho(actor, compact({ endpoint: optional(params, "endpoint") }))
       case "spawn_steers":
         return core.spawnSteers(actor, { grant: params.grant as string, take: params.take === true })
+      case "spawn_end": {
+        const ended = core.spawnEnd(actor, { endpoint: params.endpoint })
+        for (const c of connections) if (c.data.waker === ended.endpoint.id) c.end()
+        if (!presenceMoved(ended.endpoint.id)) bridge?.changed(ended.endpoint.id)
+        return ended
+      }
       case "spawn_exit": {
         const { spawner, ...result } = core.spawnExit(
           actor,
@@ -1288,6 +1329,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
             unapplied: params.unapplied as string[] | undefined,
             exits: params.exits as number[] | undefined,
             started: params.started as boolean | undefined,
+            run: params.run as number | undefined,
+            reply_to: params.reply_to as string | undefined,
           }),
         )
         if (result.handback) {

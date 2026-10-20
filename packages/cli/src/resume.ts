@@ -163,7 +163,8 @@ export function agyHooksProblem(env: Env, cwd: string): string | undefined {
   return `${CLI_NAME} agy: agy has no ${CLI_NAME} hooks, so it cannot report the conversation to resume; run ${CLI_NAME} setup --write`
 }
 
-function readConversation(file: string | undefined): string | undefined {
+/** the conversation id agy's hooks wrote to `file`, when it is one */
+export function readConversation(file: string | undefined): string | undefined {
   if (!file) return undefined
   try {
     const id = readFileSync(file, "utf8").trim()

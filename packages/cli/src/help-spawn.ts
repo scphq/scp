@@ -10,8 +10,7 @@ export const SPAWN_HELP = `${CLI_NAME} spawn [flags] [--] <harness cmd...>: run 
   --no-push             your stop does not wait on it; its messages and handback still reach you after your tool
                         calls or with another worker's push
   --bg | --fg           --bg (the default in an agent's shell or without a terminal on stdout) returns at once;
-                        --fg (the default at a human's terminal) runs it in the foreground, passing on its output
-                        and exit code: scripts that need the exit code pass --fg
+                        --fg (the default at a terminal) passes on its output and exit code, as scripts need
   --handback-bytes N    hand back only the last N bytes of its final output (1 to ${LIMITS.handbackBytes})
   --peek local          peekable from its start
   --scope P --rules S --in S --out S --allow S --group G --under EP --ttl S --labels K=V,...
@@ -28,6 +27,8 @@ messages it never applied as steer not applied: <text>. A worker that never join
 back its last ${LIMITS.stderrBytes / 1024} KB of stderr.
 Steer: ${CLI_NAME} send <name> <text>; a claude -p or codex exec prompt gets a note naming you and your steer key.
 A codex exec worker that exited before a late steer is resumed with it (codex exec resume, at most twice).
+A codex exec, agy -p, grok -p or muse exec worker stays resumable: a message resumes its session (--idle S, detached
+default 1800 s; ${CLI_NAME} end <name> lets it go; --durable hibernates it instead).
 Harnesses: codex gets -c overrides that hand it the grant (also behind env, timeout, nohup or nice); a ${CLI_NAME}
 command from its workspace-write sandbox needs -c sandbox_workspace_write.network_access=true. codex exec
 gets --skip-git-repo-check outside a git repo, and with its prompt in argv piped stdin only under --fg. Workers

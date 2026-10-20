@@ -116,7 +116,11 @@ describe("relay MCP shim, in process", () => {
     try {
       await parent.hello({ claim: { handle: "link-parent", harness: "cli" } })
       await child.call("relay_whoami")
+      const human = { kind: "human", tty: true } as const
+      broker.core.claim({ handle: "link-keeper", harness: "cli" })
+      broker.core.adopt(human, { endpoint: "link-child", parent: "link-keeper" })
       const { requested: id } = await parent.request<{ requested: string }>("adopt", { endpoint: "link-child" })
+      broker.core.unlink(human, { endpoint: "link-child" })
       const accepted = await child.call("relay_link_accept", { id: id.slice(-6) })
       expect(accepted.isError).not.toBe(true)
       expect(textOf(accepted)).toBe("me/link-child now sits under me/link-parent as its worker")
@@ -898,6 +902,38 @@ describe("relay MCP shim, in process", () => {
       expect(pushes()).toHaveLength(1)
     } finally {
       peer.close()
+      a.close()
+      await a.done
+    }
+  })
+
+  test("a channel push of a stopped subagent's message carries the subagent in its block and meta", async () => {
+    const key = `pid:${process.pid}:Sat-Oct-17-09:00:00-2026`
+    const claim = { session: key, process: key, lineage: [key] }
+    const a = shim(broker, { handle: "chan-root", channels: true, launched: true, claim })
+    const peer = await RelayClient.connect(broker.socket)
+    const hook = await RelayClient.connect(broker.socket)
+    try {
+      await a.request("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code", version: "2" } })
+      a.notify("notifications/initialized")
+      const root = () => broker.core.list({ all: true }).find((e) => e.address === "me/chan-root")
+      for (let i = 0; i < 500 && root()?.wake !== "channels"; i++) await Bun.sleep(10)
+      const sub = await hook.hello({
+        transient: true,
+        claim: { handle: "chan-root", harness: "claude-code", ...claim, subagent: { id: "f00dfeed01", type: "Explore" } },
+      })
+      await hook.request("status", { state: "done" })
+      await peer.hello({ claim: { handle: "sub-pusher", harness: "codex" } })
+      await peer.request("send", { to: sub.endpoint!.address, body: "for the subagent" })
+      const pushes = () => a.messages().filter((m) => m.method === "notifications/claude/channel")
+      for (let i = 0; i < 500 && !pushes().length; i++) await Bun.sleep(10)
+      const params = pushes()[0]!.params as { content: string; meta: Record<string, string> }
+      expect(params.meta).toMatchObject({ for: "me/chan-root-explore-f00d", subagent: "f00dfeed01" })
+      expect(params.content).toContain('for="me/chan-root-explore-f00d" subagent="f00dfeed01">')
+      expect(params.content).toContain("[for your subagent me/chan-root-explore-f00d (id f00dfeed01), which has stopped")
+    } finally {
+      peer.close()
+      hook.close()
       a.close()
       await a.done
     }

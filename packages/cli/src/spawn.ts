@@ -1,10 +1,25 @@
 import { spawn, spawnSync } from "node:child_process"
-import { closeSync, existsSync, constants as files, fstatSync, openSync, readFileSync, readSync, realpathSync, type Stats, writeSync } from "node:fs"
-import { constants, homedir } from "node:os"
+import { randomBytes } from "node:crypto"
+import {
+  closeSync,
+  existsSync,
+  constants as files,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  rmSync,
+  type Stats,
+  writeSync,
+} from "node:fs"
+import { constants, homedir, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { parseArgs } from "node:util"
 import {
   CLI_NAME,
+  type EndpointView,
   type Envelope,
   PEEK,
   findSecret,
@@ -30,9 +45,28 @@ import {
   selectorList,
   walkNow,
 } from "./common"
+import {
+  firstRun,
+  framed,
+  type Held,
+  type HoldRef,
+  holdClaim,
+  holdEndpoint,
+  holdLoop,
+  idleSeconds,
+  refProblem,
+  type Resumable,
+  resumable,
+  resumeBase,
+  resumeSession,
+  SPAWN_IDLE_S,
+  watchSignals,
+  wokeBy,
+} from "./hold"
 import { steerPrompt } from "./hooks"
-import { detectHarness, spawnerKey } from "./identity"
-import { agyRules, agySettingsFile, mcpFile, mountedEntry } from "./setup"
+import { detectHarness, type MuseLaunch, processKey, spawnerKey, writeMuseLaunch } from "./identity"
+import { readConversation } from "./resume"
+import { agyRules, agySettingsFile, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF, note } from "./term"
 
 export { SPAWN_HELP } from "./help-spawn"
@@ -57,10 +91,11 @@ const SPAWNER_IDENTITY = [
   "SCP_HARNESS_PID",
   SPAWN_RUNNER,
   "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+  "SCP_AGY_CONVERSATION_FILE",
 ]
 
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
-const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_UNDER", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING"]
+const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_UNDER", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING", "SCP_SESSION", "SCP_HARNESS_PID"]
 
 /** the harness's environment: ours without the spawner's identity, plus the grant's variables and --labels */
 export function spawnEnvironment(parent: Env, grant: Record<string, string>, labels?: string): Record<string, string> {
@@ -228,6 +263,14 @@ const MUSE_VALUED = new Set([
   "--approval-judge",
   "--sandbox-network",
   "--echo-delay-ms",
+  "--prompt-file",
+  "--session-id",
+  "--context-compaction-strategy",
+  "--context-compaction-soft-threshold",
+  "--context-compaction-hard-threshold",
+  "--output-schema",
+  "--max-model-steps",
+  "--max-tool-output-bytes",
 ])
 export const MUSE_MODE = "--contributor-mode"
 
@@ -246,6 +289,55 @@ function museOptionsEnd(args: string[], start = 0): number {
     i += word.includes("=") ? 1 : MUSE_VALUED.has(word) || MUSE_OPTIONAL[word]?.has(args[i + 1] ?? "") ? 2 : 1
   }
   return i
+}
+
+const MUSE_SESSION = "--session-id"
+/** muse exec's options a resume leaves out: the first prompt's file and images, the session id it sets itself, and a new worktree */
+const MUSE_FIRST_ONLY = new Set(["--prompt-file", "--image", MUSE_SESSION, "-w", "--worktree", "--worktree-base", "--worktree-existing"])
+
+/** one of muse's options, or its exec subcommand: where it is, how many words it takes, its flag and value */
+type MuseOption = { at: number; size: number; flag: string; value?: string }
+
+/** a headless `muse [opts] exec [opts] [prompt]` that logs its session: where exec is, where its options end, them read by arity, the session it names */
+function museExec(args: string[]): { exec: number; end: number; options: MuseOption[]; session?: string } | undefined {
+  const exec = museOptionsEnd(args)
+  if (args[exec] !== "exec") return undefined
+  const end = museOptionsEnd(args, exec + 1)
+  const operands = args[end] === "--" ? args.slice(end + 1) : args.slice(end)
+  if (operands.length > 1) return undefined
+  const options: MuseOption[] = []
+  for (let i = 0; i < end; ) {
+    const word = args[i]!
+    const eq = word.startsWith("-") ? word.indexOf("=") : -1
+    const size = i === exec || eq > 0 ? 1 : MUSE_VALUED.has(word) || MUSE_OPTIONAL[word]?.has(args[i + 1] ?? "") ? 2 : 1
+    const flag = eq > 0 ? word.slice(0, eq) : word
+    options.push({ at: i, size, flag, ...(eq > 0 ? { value: word.slice(eq + 1) } : size === 2 ? { value: args[i + 1]! } : {}) })
+    i += size
+  }
+  if (options.some((option) => option.flag === "--no-session-log" || option.flag === "--api-key-stdin")) return undefined
+  const session = options.findLast((option) => option.flag === MUSE_SESSION)?.value
+  return { exec, end, options, ...(session !== undefined ? { session } : {}) }
+}
+
+/** a muse exec spawn may resume: with its own session id, else with `--session-id <uuid>` after exec, the session returned */
+export function museFirstRun(command: string[], uuid: () => string): { command: string[]; session: string } | undefined {
+  const at = programAt(command)
+  const run = museExec(command.slice(at + 1))
+  if (!run) return undefined
+  if (run.session !== undefined) return { command, session: run.session }
+  const session = uuid()
+  const exec = at + 1 + run.exec + 1
+  return { command: [...command.slice(0, exec), MUSE_SESSION, session, ...command.slice(exec)], session }
+}
+
+/** a resumed muse exec's words before its prompt: its options without {@link MUSE_FIRST_ONLY}, then `--session-id <session>` */
+export function museResumeBase(command: string[], session: string): string[] | undefined {
+  const at = programAt(command)
+  const args = command.slice(at + 1)
+  const run = museExec(args)
+  if (!run) return undefined
+  const kept = run.options.flatMap((option) => (MUSE_FIRST_ONLY.has(option.flag) ? [] : args.slice(option.at, option.at + option.size)))
+  return [...command.slice(0, at + 1), ...kept, MUSE_SESSION, session]
 }
 
 /** where muse's contributor mode goes: after exec, which takes its own, else right after the program */
@@ -651,6 +743,24 @@ function tee(from: NodeJS.ReadableStream, to: NodeJS.WritableStream): { bytes: (
   return { bytes: () => new Uint8Array(tail), cut: () => cut }
 }
 
+/** for a muse process `pid`, whose shim and hooks Muse starts without SCP_* variables: a launch file with the run's identity, and its remover */
+function museLaunchFile(argv: string[], env: Record<string, string>, pid: number | undefined): () => void {
+  const program = argv[programAt(argv)]
+  if (!pid || program === undefined || basename(program) !== "muse" || (!env.SCP_NAME && !env.SCP_GRANT)) return () => {}
+  const launcher = Number(env.SCP_HARNESS_PID)
+  const launch: MuseLaunch = {
+    ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}),
+    ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}),
+    ...(env.SCP_SESSION ? { session: env.SCP_SESSION } : {}),
+    ...(Number.isInteger(launcher) && launcher > 1 ? { launcher: processKey(launcher) } : {}),
+  }
+  try {
+    return writeMuseLaunch(processKey(pid), launch, env)
+  } catch {
+    return () => {}
+  }
+}
+
 /** Tee captured output, retain its tail and forward signals. Detached harnesses lead a process group; terminal Ctrl-C already reaches it. */
 export function runHarness(
   argv: string[],
@@ -678,6 +788,7 @@ export function runHarness(
       env,
       detached: group,
     })
+    const unlaunch = museLaunchFile(argv, env, child.pid)
     if (piped && child.stdin) {
       child.stdin.on("error", () => {})
       child.stdin.write(piped.first)
@@ -710,6 +821,7 @@ export function runHarness(
     const done = async (code: number) => {
       if (settled) return
       settled = true
+      unlaunch()
       if (open > 0) {
         const timer = setTimeout(() => {
           for (const pipe of pipes) pipe.destroy()
@@ -903,6 +1015,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   let values = parsed.values
   const { command } = parsed
   const bytes = values["handback-bytes"] === undefined ? undefined : handbackBytes(values["handback-bytes"] as string)
+  if (!values.help) durableCheck(values, command, cwd)
   const runner = process.env[SPAWN_RUNNER]
   delete process.env[SPAWN_RUNNER]
   if (typeof values.via === "string") return (await import("./remote-spawn")).viaSpawn(values, command, cwd)
@@ -966,33 +1079,143 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   if (agy) note(agy)
   const started =
     handshake && ((failed?: { message: string; code: number }) => handshake(failed ? { error: failed.message, code: failed.code } : { name, pid: process.pid }))
-  const launch = (argv: string[], extra: Parameters<typeof runHarness>[2] = {}) =>
-    runHarness(harnessArgv(argv, env), env, { group: runner !== undefined, ...(closedStdin(argv) ? { stdin: "ignore" as const } : {}), ...extra })
-  const first = steerArgv(command, steer)
-  const stdin = closedStdin(first) ? await harnessStdin(agentShell(process.env) ? STDIN_WAIT_MS : undefined) : undefined
-  let run = await launch(first, { ...(started ? { started } : {}), ...(stdin ? { stdin } : {}) })
-  if (!run.started) {
-    await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, "", walk, [], [], false)
-    return run.code
-  }
-  const exits = [Date.now()]
-  let unapplied: string[] = []
-  for (let round = 0; round < STEER_RESUMES && run.code === 0 && resumeArgv(command, "", ""); round++) {
-    const pending = await spawnSteers(values, cwd, grant.SCP_GRANT!, walk, true)
-    if (!pending?.session || !pending.steers.length) break
-    const resumed = await launch(resumeArgv(command, pending.session, steerPrompt(pending.steers))!)
-    exits.push(Date.now())
-    if (resumed.code !== 0) {
-      unapplied = pending.steers.map((message) => message.id)
-      break
+  const launch = (argv: string[], extra: Parameters<typeof runHarness>[2] = {}, runEnv: Record<string, string> = env) =>
+    runHarness(harnessArgv(argv, runEnv), runEnv, { group: runner !== undefined, ...(closedStdin(argv) ? { stdin: "ignore" as const } : {}), ...extra })
+  const idleS = spawnIdle(values, runner !== undefined)
+  const harness = idleS > 0 ? resumable(command) : undefined
+  const signals = harness ? watchSignals() : undefined
+  const agyDir = harness === "agy" ? mkdtempSync(join(tmpdir(), "scp-spawn-agy-")) : undefined
+  if (agyDir) env.SCP_AGY_CONVERSATION_FILE = join(agyDir, "conversation")
+  try {
+    const opening = harness ? firstRun(command) : { command }
+    const first = steerArgv(opening.command, steer)
+    const stdin = closedStdin(first) ? await harnessStdin(agentShell(process.env) ? STDIN_WAIT_MS : undefined) : undefined
+    let run = await launch(first, { ...(started ? { started } : {}), ...(stdin ? { stdin } : {}) })
+    if (!run.started) {
+      await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, "", walk, [], [], false)
+      return run.code
     }
-    run = resumed
+    const exits = [Date.now()]
+    let unapplied: string[] = []
+    for (let round = 0; round < STEER_RESUMES && run.code === 0 && resumeArgv(command, "", ""); round++) {
+      const pending = await spawnSteers(values, cwd, grant.SCP_GRANT!, walk, true)
+      if (!pending?.session || !pending.steers.length) break
+      const resumed = await launch(resumeArgv(command, pending.session, steerPrompt(pending.steers))!)
+      exits.push(Date.now())
+      if (resumed.code !== 0) {
+        unapplied = pending.steers.map((message) => message.id)
+        break
+      }
+      run = resumed
+    }
+    const worker = await spawnSteers(values, cwd, grant.SCP_GRANT!, walk, false)
+    const replies =
+      worker?.session && worker.transcript ? repliesOutput(transcriptReplies(worker.transcript, worker.session, claudeTranscripts(process.env)), bytes) : ""
+    const session =
+      harness && worker?.joined && !signals?.caught()
+        ? resumeSession(
+            command,
+            harness === "agy" ? readConversation(env.SCP_AGY_CONVERSATION_FILE) : harness === "grok" || harness === "muse" ? opening.session : worker.session,
+          )
+        : undefined
+    const held = session
+      ? await holdWorker({ command, harness: harness!, session, name, cwd, walk, grant: grant.SCP_GRANT!, env, idleS, durable: values.durable === true })
+      : undefined
+    await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, replies || harnessOutput(run, bytes), walk, unapplied, exits, true, stderrOutput(run))
+    if (held && signals) {
+      let n = 1
+      await holdLoop(held.held, {
+        idleS,
+        signals,
+        resume: async (messages) => {
+          const resumed = await launch([...held.base, framed(messages)], { stdin: "ignore" }, held.env)
+          const woke = wokeBy(messages)
+          await spawnExit(values, cwd, grant.SCP_GRANT!, resumed.code, name, harnessOutput(resumed, bytes), walk, [], [], true, stderrOutput(resumed), {
+            run: ++n,
+            ...(woke ? { reply_to: woke } : {}),
+          })
+        },
+      })
+    }
+    return run.code
+  } finally {
+    signals?.stop()
+    if (agyDir) rmSync(agyDir, { recursive: true, force: true })
   }
-  const worker = await spawnSteers(values, cwd, grant.SCP_GRANT!, walk, false)
-  const replies =
-    worker?.session && worker.transcript ? repliesOutput(transcriptReplies(worker.transcript, worker.session, claudeTranscripts(process.env)), bytes) : ""
-  await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, replies || harnessOutput(run, bytes), walk, unapplied, exits, true, stderrOutput(run))
-  return run.code
+}
+
+/** how long spawn holds a worker it can resume: --idle, else ${SPAWN_IDLE_S} s when detached or --durable, else (in the foreground) not at all */
+function spawnIdle(values: Values, detached: boolean): number {
+  if (typeof values.idle === "string") return idleSeconds(values.idle)
+  return detached || values.durable === true ? SPAWN_IDLE_S : 0
+}
+
+/** holds a worker's endpoint for resumed runs of its harness session, durably with `durable`: the held connection, the resume's words and environment */
+async function holdWorker(options: {
+  command: string[]
+  harness: Resumable
+  session: string
+  name: string
+  cwd: string
+  walk: Walk
+  grant: string
+  env: Record<string, string>
+  idleS: number
+  durable: boolean
+}): Promise<{ held: Held; base: string[]; env: Record<string, string> } | undefined> {
+  const base = resumeBase(options.command, options.session)
+  if (!base) return undefined
+  const cwd = resolve(options.cwd)
+  const durable = (endpoint: EndpointView) => {
+    if (!options.durable || !endpoint.parent) return undefined
+    const ref = durableRef(options.harness, options.session, cwd, base, options.idleS, endpoint.parent, options.env)
+    const problem = refProblem(ref)
+    if (problem) note(`${CLI_NAME} spawn: ${options.name} is held, not durably: ${problem}`)
+    return problem ? undefined : ref
+  }
+  const key = randomBytes(16).toString("hex")
+  const claim = holdClaim({
+    name: options.name,
+    harness: options.harness,
+    cwd,
+    session: key,
+    lineage: options.walk.keys,
+    grant: options.grant,
+    env: options.env,
+  })
+  const held = await holdEndpoint(claim, durable, note)
+  return held ? { held, base, env: { ...options.env, SCP_SESSION: key, SCP_HARNESS_PID: String(process.pid) } } : undefined
+}
+
+/** a durable spawn's hibernation ref ({@link HoldRef}), its program found on PATH so the broker's waker runs the same binary */
+function durableRef(
+  harness: Resumable,
+  session: string,
+  cwd: string,
+  base: string[],
+  idleS: number,
+  parent: string,
+  env: Record<string, string | undefined>,
+): string {
+  const at = programAt(base)
+  const program = base[at]!.includes("/") ? resolve(cwd, base[at]!) : (whichOnPath(base[at]!, env) ?? base[at]!)
+  const argv = base.map((word, i) => (i === at ? program : word))
+  return JSON.stringify({ harness, session, cwd, argv, idle_s: Number.isFinite(idleS) ? idleS : null, parent } satisfies HoldRef)
+}
+
+/** `--durable`: a command spawn can resume whose resume fits a hibernation ref, and an idle timeout that holds it at all */
+function durableCheck(values: Values, command: string[], cwd: string): void {
+  if (typeof values.idle === "string") idleSeconds(values.idle)
+  if (values.durable !== true) return
+  if (typeof values.idle === "string" && idleSeconds(values.idle) === 0) throw new RelayUsage("--durable holds the worker: it does not go with --idle 0")
+  const harness = resumable(command)
+  const base = harness ? resumeBase(command, "0".repeat(64)) : undefined
+  if (!harness || !base)
+    throw new RelayUsage(
+      "--durable resumes a headless session: codex exec, agy -p, grok -p with its prompt in the command (codex not --ephemeral), or muse exec with a session log",
+    )
+  const problem = refProblem(durableRef(harness, "0".repeat(64), resolve(cwd), base, SPAWN_IDLE_S, `me/${"x".repeat(63)}`, process.env))
+  if (problem) throw new RelayUsage(`--durable cannot keep this worker: ${problem}`)
 }
 
 /** Validate spawn flags and the harness command before starting a runner. */
@@ -1106,7 +1329,7 @@ async function spawnSteers(
   token: string,
   walk: Walk,
   take: boolean,
-): Promise<{ session: string | null; steers: Envelope[]; transcript?: string | null } | undefined> {
+): Promise<{ session: string | null; steers: Envelope[]; transcript?: string | null; joined?: boolean } | undefined> {
   try {
     const opened = await open("spawn", values as Identity, cwd, false, walk)
     const client = localClient(opened.client, opened.broker, "spawn")
@@ -1133,12 +1356,14 @@ async function spawnExit(
   exits: number[] = [],
   started = true,
   stderr = "",
+  later: { run?: number; reply_to?: string } = {},
 ): Promise<void> {
   try {
     const opened = await open("spawn", values as Identity, cwd, false, walk)
     const client = localClient(opened.client, opened.broker, "spawn")
     try {
       await client.spawnExit({
+        ...later,
         grant: token,
         code: Math.min(code, 255),
         ...(output ? { output } : {}),
