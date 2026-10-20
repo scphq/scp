@@ -276,6 +276,25 @@ describe("mesh brokers", () => {
     expect(await code(impl.request("send", { to: ["b/review", "c/review"], body: "split" }))).toBe("invalid_params")
   })
 
+  test("a rename on one machine renames the mirror in place, and the wake binding is carried", async () => {
+    const account = accountKey()
+    const b = await machine(account, "b")
+    const a = await machine(account, "a", { peers: [b.addr!], listen: null })
+    const impl = await agent(a.broker, "impl")
+    const review = await agent(b.broker, "review")
+    const before = await waitFor(() => listed(impl, "me/b/review"), "remote review")
+    expect(before.wake).toBeNull()
+    const sent = await impl.request<SendResult>("send", { to: "b/review", body: "look" })
+    const question = (await review.request<Inbox>("inbox", { wait_s: 2 })).messages[0]!
+    await review.request("rename", { handle: "critic" })
+    const after = await waitFor(() => listed(impl, "me/b/critic"), "renamed mirror")
+    expect(after.id).toBe(before.id)
+    expect(await listed(impl, "me/b/review")).toBeUndefined()
+    await review.request("send", { to: "a/impl", body: "looked", kind: "reply", reply_to: question.id })
+    const reply = (await impl.request<Inbox>("inbox", { wait_s: 2 })).messages.find((row) => row.body.text === "looked")!
+    expect(reply).toMatchObject({ reply_to: sent.id, from: { address: "me/b/critic" } })
+  })
+
   test("the receiving broker's judge gates messages from other machines", async () => {
     const account = accountKey()
     const root = mkdtempSync(join(tmpdir(), "mesh-judge-"))

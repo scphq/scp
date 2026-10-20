@@ -140,6 +140,9 @@ export function startMesh(options: MeshOptions): MeshLink {
     })
   }
 
+  /** handles local endpoints had before a rename, carried in the next record so peers rename their mirror in place */
+  const renames = new Map<string, string>()
+
   function outward(view: EndpointView): object {
     return {
       ...core.mirrorScope(view.id),
@@ -152,6 +155,8 @@ export function startMesh(options: MeshOptions): MeshLink {
       status: view.status ? { state: view.status.state, note: view.status.note } : null,
       presence: view.presence,
       last_seen: view.last_seen,
+      ...(view.kind === "agent" ? { wake: view.wake ?? null } : {}),
+      ...(renames.has(view.id) ? { was: renames.get(view.id) } : {}),
     }
   }
 
@@ -218,6 +223,7 @@ export function startMesh(options: MeshOptions): MeshLink {
         throw new RelayError("too_large", "the mesh record is too large")
       own = record
       ownJson = json
+      renames.clear()
       broadcast([own])
     } catch (error) {
       report(error)
@@ -339,6 +345,7 @@ export function startMesh(options: MeshOptions): MeshLink {
         if (params.protocol !== PROTOCOL || params.acct !== acct) return refuse(link, "wrong protocol or account")
         if (!verifyCert(params.cert, trust) || params.cert.account !== account) return refuse(link, "invalid certificate")
         if (params.cert.machine === machine) return refuse(link, `the peer is also named ${machine}: give one of them another --machine`)
+        if (rival(params.cert.machine, params.cert.key)) return refuse(link, `machine ${params.cert.machine} is already linked with another machine key`)
         if (typeof params.nonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(params.nonce)) return refuse(link, "invalid nonce")
         if (!validPublicKey(params.kx)) return refuse(link, "invalid key exchange")
         link.cert = params.cert
@@ -548,7 +555,10 @@ export function startMesh(options: MeshOptions): MeshLink {
       server.on("connection", (socket) => {
         let pending = 0
         for (const link of links) if (!link.peer && !link.authenticated) pending++
-        if (pending >= PENDING_INBOUND) return socket.close(1013, "too many links authenticating")
+        if (pending >= PENDING_INBOUND) {
+          socket.on("error", () => {})
+          return socket.close(1013, "too many links authenticating")
+        }
         const link = attach(socket, null)
         if (stopped) close(link, 1000, "mesh stopped")
       })
@@ -628,10 +638,8 @@ export function startMesh(options: MeshOptions): MeshLink {
     if (handle === null) throw new RelayError("policy_refused", `${sender} is not mirrored to the mesh, so it can't message other machines`)
     const link = linked(name)
     if (!link) throw new RelayError("unavailable", `machine ${name} is not linked to this one over the mesh`, 5)
-    if (rebuildTimer) {
-      clearTimeout(rebuildTimer)
-      rebuild()
-    }
+    clearTimeout(rebuildTimer)
+    rebuild()
     const clientId = params.client_id ?? newId("fwd")
     const sent: SendParams = { ...params, client_id: clientId, to: routes as string[] }
     delete (sent as { wait_s?: unknown }).wait_s
@@ -700,7 +708,10 @@ export function startMesh(options: MeshOptions): MeshLink {
     forward,
     changed: schedule,
     resync: schedule,
-    renamed: schedule,
+    renamed: (endpoint, was) => {
+      if (!renames.has(endpoint)) renames.set(endpoint, was)
+      schedule()
+    },
     activity: () => {},
     relink,
     status,

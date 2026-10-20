@@ -1277,7 +1277,7 @@ This section is experimental and non-normative: it describes the phase-1 mesh wi
 
 **Machine records and presence.**
 
-- A machine signs `MachineRecord {v: 1, acct, machine, epoch, seq, endpoints, cert, sig}` with its machine key. `endpoints` are the local non-system endpoints matching `*`, carrying the fields section 14.2 mirrors, unredacted, at most 512.
+- A machine signs `MachineRecord {v: 1, acct, machine, epoch, seq, endpoints, cert, sig}` with its machine key. `endpoints` are the local non-system endpoints matching `*`, carrying the fields section 14.2 mirrors, unredacted, at most 512; an endpoint renamed since the previous record carries `was`, its handle before, so peers rename their mirror in place.
 - Records are ordered by `(epoch, seq)`, where `epoch` is the broker start in ms and `seq` starts at 1 and increments when `endpoints` change. A valid record replaces a stored one only when newer.
 - On authentication each side sends `records {records}` with its own record and the third-party records it holds; accepted records are mirrored into the broker and passed on in `records {records}` to the other authenticated links, so a machine learns of machines it is not directly linked to.
 - Presence is capped by link liveness: endpoints of a machine with no live direct link show `offline`, and a stored record is re-applied when a direct link authenticates.
