@@ -1084,6 +1084,33 @@ describe("machine waker for messages from other accounts", () => {
     expect(env.bob.xinbox()).toBe(2)
   })
 
+  test("a retry at the reset that cannot load the contacts is kept and wakes once they load", async () => {
+    const events: any[] = []
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return { ok: true }
+    }
+    const env = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: 1, targetPerHour: Number.POSITIVE_INFINITY } })
+    const start = env.clock.now
+    env.bob.db.query(`INSERT INTO wake_limits (key, n, since) VALUES (?, 1, ?)`).run(`account:${env.alice.id}`, start)
+    const sent = await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "capped"))
+    await settle()
+    env.bob.db.query(`INSERT INTO machine_wakes (machine, next, fails) VALUES ('desk', 0, 0)`).run()
+    env.bob.hub.clearWakeHold("desk")
+    await settle()
+    env.bob.unknown.on = true
+    env.clock.now = start + 3_600_000
+    await env.bob.hub.alarm(async () => true)
+    await settle()
+    expect(events).toEqual([])
+    expect(retryAt(env)).toBe(start + 3_660_000)
+    env.bob.unknown.on = false
+    env.clock.now = start + 3_660_000
+    await env.bob.hub.alarm(async () => true)
+    await settle()
+    expect(events.map((e) => e.message.id)).toEqual([sent.id])
+  })
+
   test("the sender cap still bounds new messages while a queued retry of a counted one passes", async () => {
     const events: any[] = []
     const machineWake = async (event: any) => {

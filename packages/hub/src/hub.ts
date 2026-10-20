@@ -672,7 +672,8 @@ export class RelayHub {
       this.declineRetryMs(),
       now,
     )
-    await this.wakeQueued([...new Set([...unheld, ...retried].map((row) => row.machine))])
+    const retrying = new Set(retried.map((row) => row.machine))
+    await this.wakeQueued([...new Set([...unheld.map((row) => row.machine), ...retrying])], retrying)
     return this.nextAlarm()
   }
 
@@ -1382,7 +1383,11 @@ export class RelayHub {
       this.write(socket, { jsonrpc: "2.0", method: "deliver", params: { seq, endpoint: target.remote, message: envelope } })
       pushed = true
     }
-    if (!pushed && this.wakeOptions.crossAccount) this.machineWake(target.machine, target.id, envelope, fromAccountId)
+    if (!pushed && this.wakeOptions.crossAccount) {
+      const call = this.wakeCall(target.machine)
+      this.machineWake(target.machine, target.id, envelope, fromAccountId)
+      if (this.wakeCall(target.machine) !== call) this.wakeCounted(fromAccountId, seq, this.now())
+    }
     this.wake(target.id)
     this.fleet({
       type: "message",
@@ -1668,22 +1673,27 @@ export class RelayHub {
 
   /**
    * after holds on `machines` ended: for each, one waker call for its oldest queued message a delivery would have called for, under the
-   * same debounce, waking and per-hour caps; another account's only with cross-account wakes on, against the contacts as they are now
+   * same debounce, waking and per-hour caps; another account's only with cross-account wakes on, against the contacts as they are now.
+   * A `retrying` machine whose scan a racing call or a failed contacts load cut short keeps a retry a debounce (at least a minute) later
    */
-  private async wakeQueued(machines: string[]): Promise<void> {
+  private async wakeQueued(machines: string[], retrying: ReadonlySet<string> = new Set()): Promise<void> {
     if (!machines.length || (!this.deps.machineWake && !this.deps.fetch)) return
     const before = new Map(machines.map((machine) => [machine, this.wakeCall(machine)]))
+    let loaded = true
     if (this.wakeOptions.crossAccount && this.deps.crossAccount) {
       this.wakeCalls++
       try {
-        this.relay.xsenders(await this.xinbound().catch(() => null))
+        const senders = await this.xinbound().catch(() => null)
+        loaded = senders !== null
+        this.relay.xsenders(senders)
       } finally {
         this.wakeCalls = Math.max(0, this.wakeCalls - 1)
       }
     }
     for (const [machine, call] of before) {
       try {
-        this.wakeQueuedOn(machine, call)
+        const again = retrying.has(machine) ? this.now() + this.declineRetryMs() : Number.POSITIVE_INFINITY
+        this.wakeQueuedOn(machine, call, again, loaded ? Number.POSITIVE_INFINITY : again)
       } catch (error) {
         this.deps.log?.("relay_action", {
           account: this.account,
@@ -1701,11 +1711,15 @@ export class RelayHub {
   }
 
   /**
-   * the queued-mail wake of `machine`; nothing once a call other than `before` started, as a message arriving meanwhile makes. When only
-   * per-hour caps refused another account's message, the alarm retries once the earliest such refusal's windows reset
+   * the queued-mail wake of `machine`; nothing once a call other than `before` started, as a message arriving meanwhile makes, though a
+   * retry at `aborted` stays. When only per-hour caps refused another account's message, the alarm retries once the earliest such
+   * refusal's windows reset, or at `retry` if that is sooner; a call for another message keeps that retry unless it is accepted
    */
-  private wakeQueuedOn(machine: string, before: string | null): void {
-    if (this.wakeCall(machine) !== before) return
+  private wakeQueuedOn(machine: string, before: string | null, aborted: number, retry: number): void {
+    if (this.wakeCall(machine) !== before) {
+      this.retryWake(machine, aborted)
+      return
+    }
     const now = this.now()
     const state = this.wakeState(machine, now)
     if (state && state.next > now) return
@@ -1713,32 +1727,42 @@ export class RelayHub {
     if (!this.deps.machineWake && !one(this.deps.sql, `SELECT 1 FROM machines WHERE name = ? AND wake_url IS NOT NULL AND wake_secret IS NOT NULL`, machine))
       return
     const tried = new Set<string>()
-    let retry = Number.POSITIVE_INFINITY
+    const capped = new Set<string>()
     for (let page = this.relay.pending(machine, 0); page.length; page = this.relay.pending(machine, page.at(-1)!.seq)) {
       for (const delivery of page) {
         const key = `${delivery.recipient} ${delivery.message.from.address}`
         if (tried.has(key)) continue
-        tried.add(key)
         const fromAccountId = this.relay.xaccountOf(delivery.seq) ?? undefined
         if (fromAccountId !== undefined) {
-          if (!this.wakeOptions.crossAccount || !this.wakeTarget(machine, delivery.recipient, delivery.message, now)) continue
-          const reset = this.wakeAdmitted(fromAccountId, delivery.recipient, delivery.message.id, now, true)
+          if (!this.wakeOptions.crossAccount || !this.wakeTarget(machine, delivery.recipient, delivery.message, now)) {
+            tried.add(key)
+            continue
+          }
+          const reset = this.wakeAdmitted(fromAccountId, delivery.recipient, now, delivery.seq)
           if (reset !== null) {
             retry = Math.min(retry, reset)
-            this.deps.log?.("relay_action", { account: this.account, machine, method: "machine_wake", code: "rate_limited" })
+            if (!capped.has(key)) this.deps.log?.("relay_action", { account: this.account, machine, method: "machine_wake", code: "rate_limited" })
+            capped.add(key)
             continue
           }
         }
+        tried.add(key)
+        this.retryWake(machine, retry)
         this.machineWake(machine, delivery.recipient, delivery.message)
         if (this.wakeCall(machine) !== before) return
       }
     }
-    if (Number.isFinite(retry))
-      this.deps.sql.all(
-        `INSERT INTO machine_wakes (machine, next, fails, retry_at) VALUES (?, 0, 0, ?) ON CONFLICT (machine) DO UPDATE SET retry_at = excluded.retry_at`,
-        machine,
-        retry,
-      )
+    this.retryWake(machine, retry)
+  }
+
+  /** has the alarm scan `machine`'s queued mail again at `at`, unless that is Infinity */
+  private retryWake(machine: string, at: number): void {
+    if (!Number.isFinite(at)) return
+    this.deps.sql.all(
+      `INSERT INTO machine_wakes (machine, next, fails, retry_at) VALUES (?, 0, 0, ?) ON CONFLICT (machine) DO UPDATE SET retry_at = excluded.retry_at`,
+      machine,
+      at,
+    )
   }
 
   /** a row that no longer shows waking, to watchers and the dashboard */
@@ -1784,10 +1808,10 @@ export class RelayHub {
 
   /**
    * counts one machine waker call a message of the account `fromAccountId` causes for `recipient`; null, or counting nothing past a cap,
-   * when the refusing windows reset (Infinity under a cap of 0). A sender's window counts a message once: with `queued`, a message it
+   * when the refusing windows reset (Infinity under a cap of 0). With the queued message's `seq`, a message the sender's live window
    * already counted is charged to the target cap only
    */
-  private wakeAdmitted(fromAccountId: string, recipient: string, messageId: string, now: number, queued: boolean): number | null {
+  private wakeAdmitted(fromAccountId: string, recipient: string, now: number, seq?: number): number | null {
     const sender = `account:${fromAccountId}`
     const caps: [string, number][] = [
       [sender, this.wakeOptions.senderAccountPerHour],
@@ -1800,18 +1824,24 @@ export class RelayHub {
         return row && now - row.since < WAKE_HOUR_MS ? { key, cap, n: row.n, since: row.since } : { key, cap, n: 0, since: now }
       })
     const window = counts.find((c) => c.key === sender)
-    const mark = `message:${fromAccountId} ${messageId}`
     const counted =
-      queued &&
+      seq !== undefined &&
       window !== undefined &&
       window.n > 0 &&
-      one(this.deps.sql, `SELECT 1 FROM wake_limits WHERE key = ? AND since = ?`, mark, window.since) !== undefined
+      one(this.deps.sql, `SELECT 1 FROM wake_limits WHERE key = ? AND since = ?`, `seq:${seq}`, window.since) !== undefined
     const charged = counted ? counts.filter((c) => c !== window) : counts
     const full = charged.filter((c) => c.n >= c.cap)
     if (full.length) return Math.max(...full.map((c) => (c.n > 0 ? c.since + WAKE_HOUR_MS : Number.POSITIVE_INFINITY)))
     for (const c of charged) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, ?, ?)`, c.key, c.n + 1, c.since)
-    if (window && !counted) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, 1, ?)`, mark, window.since)
+    if (seq !== undefined && !counted) this.wakeCounted(fromAccountId, seq, now)
     return null
+  }
+
+  /** marks the queued message `seq` counted in its sender account's live window, so the window charges its later wakes to the target only */
+  private wakeCounted(fromAccountId: string, seq: number, now: number): void {
+    const row = one<{ since: number }>(this.deps.sql, `SELECT since FROM wake_limits WHERE key = ?`, `account:${fromAccountId}`)
+    if (this.wakeOptions.senderAccountPerHour === Number.POSITIVE_INFINITY || !row || now - row.since >= WAKE_HOUR_MS) return
+    this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, 1, ?)`, `seq:${seq}`, row.since)
   }
 
   /** `recipient`'s view while it is a hibernated row of `machine`, not waking, that no decline of this message or its sender holds */
@@ -1846,7 +1876,7 @@ export class RelayHub {
       ? null
       : one<{ wake_url: string | null; wake_secret: string | null }>(this.deps.sql, `SELECT wake_url, wake_secret FROM machines WHERE name = ?`, machine)
     if (!embedded && (!waker?.wake_url || !waker.wake_secret)) return
-    if (fromAccountId !== undefined && this.wakeAdmitted(fromAccountId, recipient, message.id, now, false) !== null) {
+    if (fromAccountId !== undefined && this.wakeAdmitted(fromAccountId, recipient, now) !== null) {
       this.deps.log?.("relay_action", { account: this.account, machine, method: "machine_wake", code: "rate_limited" })
       return
     }
