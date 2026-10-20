@@ -935,21 +935,23 @@ export class RelayCore {
   ): { endpoint: EndpointView; token?: string; created?: true } {
     const now = this.now()
     this.endExited(now)
+    const ticketed = !transient && scope.ticket !== undefined ? this.ticketed(scope.ticket, harness) : undefined
     const bare = transient && fields.session !== null && BARE_PID_KEY.test(fields.session)
-    let row = fields.session
-      ? one<EndpointRow>(
-          this.sql,
-          `SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR ${GENERIC_SQL})
+    let row =
+      fields.session && !ticketed
+        ? one<EndpointRow>(
+            this.sql,
+            `SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR ${GENERIC_SQL})
            AND (session = ? OR (? = 1 AND substr(session, 1, ?) = ? AND (connections = 0 OR hook_seen >= ?)))
            AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY COALESCE(last_seen, created_at) DESC LIMIT 1`,
-          harness,
-          fields.session,
-          bare ? 1 : 0,
-          fields.session.length + 1,
-          `${fields.session}:`,
-          now - LIMITS.hookOnlineS * 1000,
-        )
-      : undefined
+            harness,
+            fields.session,
+            bare ? 1 : 0,
+            fields.session.length + 1,
+            `${fields.session}:`,
+            now - LIMITS.hookOnlineS * 1000,
+          )
+        : undefined
     let session = fields.session
     let stopBlocks: number | null = null
     let moved: number[] = []
@@ -994,8 +996,6 @@ export class RelayCore {
         exactFrom = hooks
       }
     } else if (row && transient) session = row.session
-    const ticketed = !transient && scope.ticket !== undefined ? this.ticketed(scope.ticket, harness) : undefined
-    if (ticketed) row = undefined
     const resumed =
       ticketed ??
       (!row && open && !scope.exact && !scope.subagent && fields.harness_session
@@ -2129,8 +2129,8 @@ export class RelayCore {
     const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
     if (actor.kind === "endpoint" && target.id !== me.id) throw new RelayError("scope_refused", "an agent hibernates only itself")
     if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint hibernates")
-    if (actor.kind === "endpoint" && set.wake === SPAWN_PROVIDER && (target.hold_ref === null || set.ref !== target.hold_ref))
-      throw new RelayError("invalid_params", `an agent hibernates by ${SPAWN_PROVIDER} only with the ref its durable hold gave`)
+    if (set.wake === SPAWN_PROVIDER && (target.hold_ref === null || set.ref !== target.hold_ref))
+      throw new RelayError("invalid_params", `${SPAWN_PROVIDER} hibernates only a durably held worker, with the ref its hold gave`)
     return { endpoint: this.setHibernation(me, target, set) }
   }
 
@@ -2143,6 +2143,7 @@ export class RelayCore {
     const me = this.actorRow(actor)
     if (actor.kind !== "human") throw new RelayError("scope_refused", "only the human hibernates every agent")
     const set = this.hibernation(params, options)
+    if (set.wake === SPAWN_PROVIDER) throw new RelayError("invalid_params", `${SPAWN_PROVIDER} hibernates only a durably held worker, by its own ref`)
     const now = this.now()
     const targets = this.sql
       .all<EndpointRow>(
@@ -6187,12 +6188,12 @@ function subagentKind(type: string | undefined): string {
   return word ? word.toLowerCase().slice(0, 16) : "agent"
 }
 
-/** `<root handle>-<short type>-<first 4 alphanumerics of id>`, the root's part clipped so the whole leaves room for a `-<n>` suffix */
 /** the line a held spawn's handback ends with */
 function heldLine(address: string): string {
   return `${address} stays resumable: message it to resume its session`
 }
 
+/** `<root handle>-<short type>-<first 4 alphanumerics of id>`, the root's part clipped so the whole leaves room for a `-<n>` suffix */
 export function subagentHandle(root: string, subagent: { id: string; type?: string }): string {
   const tail = `-${subagentKind(subagent.type)}-${subagent.id
     .toLowerCase()

@@ -191,6 +191,16 @@ describe("a held spawn", () => {
     expect(core.claim({ handle: "w1", harness: "codex", process: key(26), session: "env:new", ticket: second }).endpoint.id).toBe(worker.id)
   })
 
+  test("provider spawn hibernates only a durably held worker with its own ref, whoever asks", () => {
+    const { core, worker, hold } = setup()
+    const human = { kind: "human" as const, tty: false }
+    expect(code(() => core.hibernate(human, { endpoint: "main", wake: "spawn", ref: REF }))).toBe("invalid_params")
+    expect(code(() => core.hibernateAll(human, { wake: "spawn", ref: REF }))).toBe("invalid_params")
+    hold(REF)
+    expect(code(() => core.hibernate(human, { endpoint: "w1", wake: "spawn", ref: `${REF} ` }))).toBe("invalid_params")
+    expect(core.hibernate(human, { endpoint: "w1", wake: "spawn", ref: REF }).endpoint.id).toBe(worker.id)
+  })
+
   test("only a spawn hibernation mints a wake ticket", () => {
     const { core, main, worker } = setup()
     core.hibernate({ kind: "endpoint", id: worker.id, auth: "session" }, { wake: "vm", ref: "box" })

@@ -203,7 +203,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  A codex exec worker runs no stop hook, so a message you send after its last step
                                                  would be lost: spawn resumes its session with it (codex exec resume, by the session
                                                  id its hooks report), at most twice, before the handback.
-                                                 A codex exec, agy -p or grok -p worker stays resumable after it exits (wake
+                                                 A codex exec, agy -p, grok -p or muse exec worker stays resumable after it exits (wake
                                                  spawn-resume): spawn holds its endpoint, and each message to it resumes the same
                                                  session, every run handing back again as a reply. --idle S (default 1800 s when
                                                  detached, none in the foreground; Infinity: until ended; 0: never held) lets it go

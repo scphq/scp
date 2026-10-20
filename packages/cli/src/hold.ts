@@ -209,11 +209,18 @@ export function watchSignals(): { caught: () => boolean; next: Promise<void>; st
  */
 export async function holdLoop(
   held: Held,
-  options: { idleS: number; signals: ReturnType<typeof watchSignals>; resume: (messages: Envelope[]) => Promise<void> },
+  options: {
+    idleS: number
+    signals: ReturnType<typeof watchSignals>
+    resume: (messages: Envelope[]) => Promise<void>
+    /** runs as the hold lets go, before a durable hold hibernates */
+    letGo?: () => void
+  },
 ): Promise<"idle" | "ended" | "signal"> {
   const { client } = held
   const idleMs = options.idleS * 1000
   const finish = async (why: "idle" | "signal"): Promise<"idle" | "signal"> => {
+    options.letGo?.()
     if (held.durable) await client.request("hibernate", { wake: SPAWN_PROVIDER, ref: held.durable }).catch(() => {})
     client.close()
     return why
@@ -387,6 +394,7 @@ async function wakeRunner(env: Env): Promise<number> {
     await holdLoop(held, {
       idleS: ref.idle_s ?? Number.POSITIVE_INFINITY,
       signals,
+      letGo: () => spare?.close(),
       resume: async (messages) => {
         const run = await runHarness(harnessArgv([...ref.argv, framed(messages)], runEnv, SELF, undefined, ref.cwd), runEnv, {
           capture: true,
@@ -409,7 +417,10 @@ async function wakeRunner(env: Env): Promise<number> {
           await client.request("status", { state: "done", note: `exited ${code}` })
         }
         try {
-          await handBack(held.client.closed && spare ? spare : held.client)
+          await handBack(held.client).catch(async (error: unknown) => {
+            if (!spare || !held.client.closed) throw error
+            await handBack(spare)
+          })
         } catch (error) {
           note(`${CLI_NAME} spawn-wake: could not hand ${handle}'s result back: ${error instanceof Error ? error.message : String(error)}`)
         }

@@ -1100,6 +1100,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "status": {
         core.status(me, params.state, params.note)
         const view = core.whoami(me)
+        if (params.state === "done" && core.wakesRoot(me)) wake(me)
         notifyFleet({ type: "status", endpoint: view.address, status: view.status })
         bridge?.changed(me)
         return view
