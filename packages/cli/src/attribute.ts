@@ -69,15 +69,22 @@ export async function attribute(
       return undefined
     }
     client = connected
+    let bound: Awaited<ReturnType<RelayClient["hello"]>>
     try {
-      await client.hello({ observe: true, lineage: walk.keys, ...(self.length ? { self } : {}), ...(grant ? { grant } : {}), cwd, brief: true })
-      caller = (await client.rules()).address
+      bound = await client.hello({ observe: true, lineage: walk.keys, ...(self.length ? { self } : {}), ...(grant ? { grant } : {}), cwd, brief: true })
     } catch (error) {
       if (grant) return undefined
       throw error
     }
+    caller = bound.endpoint?.address
+    try {
+      caller = (await client.rules()).address
+    } catch (error) {
+      if (caller !== undefined) throw error
+      return undefined
+    }
     const own = caller.slice(caller.lastIndexOf("/") + 1)
-    if (env.SCP_NAME && env.SCP_NAME !== own) {
+    if (env.SCP_NAME && env.SCP_NAME.replace(/^me\//, "") !== own) {
       unlinked(`$SCP_NAME names ${env.SCP_NAME}, but this shell runs under ${caller}`)
       caller = undefined
       return undefined
@@ -114,4 +121,4 @@ export const underText = (attribution: Attribution | undefined): string => (attr
 
 /** the help line of a launcher's --root */
 export const ROOT_HELP = `  run from an agent's shell, it links under that agent by itself (as under env $(${CLI_NAME} spawn-env)); a $SCP_GRANT minted for it
-  applies instead, a resumed session keeps its place, and --root starts it as a root.`
+  applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.`

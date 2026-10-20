@@ -347,8 +347,8 @@ export async function claudeCommand(
 const CLAUDE_HELP = `${CLI_NAME} claude [--name N | --as N] [--root] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake it
 ${CLI_NAME} claude --bg [--name N] [--root] [--] [claude args...]   start it in the background (claude --bg) with an scp mount that claims N and
                                                  a grant, so it links under you; messages wake it through its inbox. Prints its short id and address
-  Run from an agent's shell, it links under that agent by itself, as under env $(${CLI_NAME} spawn-env --name N), unless $SCP_GRANT
-  is set (that grant applies) or --root starts it as a root
+  Run from an agent's shell, it links under that agent by itself, as under env $(${CLI_NAME} spawn-env --name N); a grant minted for
+  it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root
 ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first
   --resume <id> of a live background session attaches to it: it is already woken through claude-inbox
 `

@@ -215,6 +215,22 @@ describe("attribute", () => {
     expect(warned).toEqual(["swarm codex: not linked under the agent that ran it (refused); it starts as a root, swarm adopt <name> links it later"])
   })
 
+  test("a caller bound by hello whose rules fail is still unlinked as a root, and $SCP_NAME may carry me/", async () => {
+    const warned: string[] = []
+    const bound = {
+      hello: async () => ({ endpoint: { address: "me/lead" } }),
+      rules: async () => {
+        throw new Error("gone")
+      },
+      close: () => {},
+    } as unknown as RelayClient
+    expect(await attribute("pi", {}, {}, project, (line) => warned.push(line), { walk, connect: async () => bound })).toEqual({ env: {} })
+    expect(warned).toEqual([expect.stringContaining("(gone)")])
+    const grants: unknown[] = []
+    const named = await attribute("pi", {}, { SCP_NAME: "me/lead" }, project, () => {}, { walk, connect: async () => fakeClient("me/lead", grants) })
+    expect(named?.parent).toBe("me/lead")
+  })
+
   test("a broker that never answers costs at most the timeout, and warns only once a harness runs the shell", async () => {
     const warned: string[] = []
     const stuck = (harness?: string) => ({

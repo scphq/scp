@@ -245,7 +245,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   ${CLI_NAME} t3code [--name N] --thread THREAD [--base-dir DIR]
                                                  wakes a T3 Code thread: each new message starts or steers its turn
   Run from an agent's shell, these launchers and ${CLI_NAME} claude link what they start under that agent by themselves, with the
-  grant ${CLI_NAME} spawn-env --name N would mint there; $SCP_GRANT set uses that grant instead, --root starts it as a root.
+  grant ${CLI_NAME} spawn-env --name N would mint there; a grant minted for it in $SCP_GRANT applies instead (an agent's own spent
+  grant is replaced), a resumed session keeps its place, and --root starts it as a root.
   ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
