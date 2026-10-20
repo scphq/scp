@@ -1,5 +1,12 @@
 # @scp-dev/broker
 
+## 0.6.3
+
+### Patch Changes
+
+- Updated dependencies [906bb6c]
+  - @scp-dev/hub@0.8.1
+
 ## 0.6.2
 
 ### Patch Changes
