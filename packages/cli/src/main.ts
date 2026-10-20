@@ -244,6 +244,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  runs grok headless: each new message resumes its session as a turn
   ${CLI_NAME} t3code [--name N] --thread THREAD [--base-dir DIR]
                                                  wakes a T3 Code thread: each new message starts or steers its turn
+  Run from an agent's shell, these launchers and ${CLI_NAME} claude link what they start under that agent by themselves, with the
+  grant ${CLI_NAME} spawn-env --name N would mint there; $SCP_GRANT set uses that grant instead, --root starts it as a root.
   ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
@@ -280,8 +282,8 @@ agent sessions:
                                                  it while idle (claude --dangerously-load-development-channels server:scp; SCP_NAME=N)
   --channels pushes messages into a Claude Code that ${CLI_NAME} claude started; setup mounts claude's shim with it.
   Without --name, ${CLI_NAME} claude asks the session to pick its own name with ${CLI_NAME} name <name>.
-  ${CLI_NAME} claude --bg [--name N] [--] [claude args...]   the same in the background (claude --bg): an scp mount claims N and
-                                                 $SCP_GRANT, so under env $(${CLI_NAME} spawn-env --name N) it links under you; prints its short id
+  ${CLI_NAME} claude --bg [--name N] [--root] [--] [claude args...]   the same in the background (claude --bg): an scp mount claims N
+                                                 and a grant, so from your shell it links under you; prints its short id, address and parent
   ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first; --resume of a live bg session attaches
   ${CLI_NAME} join [<handle>]                    put the session that runs this shell on the relay (it then shows in list,
                                                  peers can message it, and its hooks hand it new messages), named <handle>

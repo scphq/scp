@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
+import { attribute, attributed, ROOT_HELP } from "./attribute"
 import { RelayUsage } from "./common"
 import { opencodePlugin } from "./hooks"
 import { gitToplevel } from "./identity"
@@ -10,14 +11,16 @@ import { mcpFile, mountedEntry, whichOnPath } from "./setup"
 
 type Env = Record<string, string | undefined>
 
-export const OPENCODE_HELP = `${CLI_NAME} opencode [--name N | --as N] [--] [opencode args...]
+export const OPENCODE_HELP = `${CLI_NAME} opencode [--name N | --as N] [--root] [--] [opencode args...]
   runs OpenCode with your own config and arguments, wake on: the ${CLI_NAME} plugin wakes the session on a new message, and opens
   one when none is open yet. Refuses to start without the current plugin; ${CLI_NAME} setup --write installs it.
-  $SCP_OPENCODE_BIN picks the opencode binary (default opencode on PATH).`
+  $SCP_OPENCODE_BIN picks the opencode binary (default opencode on PATH).
+${ROOT_HELP}`
 
 /** the opencode argv and the env it runs with: the name becomes $SCP_NAME, the harness opencode, wake on */
-export function opencodeLaunch(args: string[], env: Env, bin: string): { argv: string[]; env: Env } {
+export function opencodeLaunch(args: string[], env: Env, bin: string): { name?: string; root?: true; argv: string[]; env: Env } {
   let name: string | undefined
+  let root = false
   const rest: string[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
@@ -29,11 +32,14 @@ export function opencodeLaunch(args: string[], env: Env, bin: string): { argv: s
       name = args[++i]
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} opencode ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
+    else if (arg === "--root") root = true
     else rest.push(arg)
   }
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
   return {
+    ...(name !== undefined ? { name } : {}),
+    ...(root ? { root: true as const } : {}),
     argv: [bin, ...rest],
     env: { ...env, SCP_HARNESS: "opencode", SCP_WAKE: "1", ...(name !== undefined ? { SCP_NAME: name } : {}) },
   }
@@ -87,11 +93,13 @@ export async function opencodeCommand(
   }
   const bin = env.SCP_OPENCODE_BIN || whichOnPath("opencode", env)
   if (!bin) throw new RelayUsage(`opencode is not on PATH: install it with npm i -g opencode-ai, then run ${CLI_NAME} setup --write`)
-  const launch = opencodeLaunch(args, env, bin)
+  const parsed = opencodeLaunch(args, env, bin)
   const problem = pluginProblem(env, cwd)
   if (problem) throw new RelayUsage(problem)
   const hint = opencodeMountHint(env, cwd)
   if (hint) err(hint)
+  const attribution = await attribute("opencode", parsed, env, cwd, err)
+  const launch = attribution ? opencodeLaunch(args, attributed(env, attribution), bin) : parsed
   return await new Promise<number>((resolve, reject) => {
     const child = spawn(launch.argv[0]!, launch.argv.slice(1), { env: launch.env as NodeJS.ProcessEnv, stdio: "inherit" })
     const forward = (signal: NodeJS.Signals) => child.kill(signal)

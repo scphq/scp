@@ -10,6 +10,7 @@ import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { type Claim, CLI_NAME, RelayError, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { parse } from "smol-toml"
+import { attribute, attributed, ROOT_HELP } from "./attribute"
 import { RelayUsage, startDaemon } from "./common"
 import { readPsTable, relayIdentity } from "./identity"
 import { CODEX_VALUED, codexMount, codexOverrides, toml } from "./spawn"
@@ -20,17 +21,23 @@ type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 type Transport = { request(method: string, params: Json): Promise<Json> }
 
-export const CODEX_HELP = `${CLI_NAME} codex [--name N | --as N] [--headless] [--resume THREAD] [--] [codex args...]
+export const CODEX_HELP = `${CLI_NAME} codex [--name N | --as N] [--root] [--headless] [--resume THREAD] [--] [codex args...]
   every codex argument, profile and config value is honoured; a -- after codex arguments is passed through.
   runs codex with relay messages waking an idle thread or steering a running turn; approvals stay with the TUI.
   --headless runs an ambient worker without a TUI; --resume THREAD reopens its thread.
-  $SCP_CODEX_BIN picks the codex binary (default codex on PATH).`
+  $SCP_CODEX_BIN picks the codex binary (default codex on PATH).
+${ROOT_HELP}`
 
 /** the codex arguments and environment, without the launching session's identity */
-export function codexLaunch(args: string[], env: Env, _self: string[]): { name?: string; headless: boolean; resume?: string; codexArgs: string[]; env: Env } {
+export function codexLaunch(
+  args: string[],
+  env: Env,
+  _self: string[],
+): { name?: string; headless: boolean; root?: true; resume?: string; codexArgs: string[]; env: Env } {
   let name: string | undefined
   let resume: string | undefined
   let headless = false
+  let root = false
   const codexArgs: string[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
@@ -43,6 +50,7 @@ export function codexLaunch(args: string[], env: Env, _self: string[]): { name?:
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} codex ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
     else if (arg === "--headless") headless = true
+    else if (arg === "--root") root = true
     else if (arg === "--resume") {
       resume = args[++i]
       if (resume === undefined) throw new RelayUsage(`${CLI_NAME} codex --resume takes a thread`)
@@ -55,6 +63,7 @@ export function codexLaunch(args: string[], env: Env, _self: string[]): { name?:
   return {
     ...(name !== undefined ? { name } : {}),
     headless,
+    ...(root ? { root: true as const } : {}),
     ...(resume !== undefined ? { resume } : {}),
     codexArgs: resume !== undefined && !headless ? ["resume", resume, ...codexArgs] : codexArgs,
     env: { ...clean, SCP_HARNESS: "codex", SCP_SHIM_BINDING: randomBytes(16).toString("hex"), ...(name !== undefined ? { SCP_NAME: name } : {}) },
@@ -358,8 +367,10 @@ export async function codexCommand(args: string[]): Promise<number> {
     process.stdout.write(`${CODEX_HELP}\n`)
     return 0
   }
-  const launch = codexLaunch(args, process.env, SELF)
   const cwd = process.cwd()
+  const parsed = codexLaunch(args, process.env, SELF)
+  const attribution = await attribute("codex", parsed, process.env, cwd, (line) => void process.stderr.write(`${line}\n`))
+  const launch = attribution ? codexLaunch(args, attributed(process.env, attribution), SELF) : parsed
   const bin = launch.env.SCP_CODEX_BIN || "codex"
   const overrides = [...codexOverrides(launch.env, codexMount(launch.env), SELF), ...serverOptions(launch.codexArgs, launch.env)]
   const dir = mkdtempSync(join(tmpdir(), "scp-codex-"))

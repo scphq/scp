@@ -43,6 +43,8 @@ import {
   open,
   RelayUsage,
   selectorList,
+  SPAWN_RUNNER,
+  spawnEnvironment,
   walkNow,
 } from "./common"
 import {
@@ -70,39 +72,15 @@ import { agyRules, agySettingsFile, mcpFile, mountedEntry, whichOnPath } from ".
 import { SELF, note } from "./term"
 
 export { SPAWN_HELP } from "./help-spawn"
+export { SPAWN_RUNNER, spawnEnvironment } from "./common"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 
 const SERVER = "scp"
 
-/** set for a detached spawn's runner: the walk of the shell that ran `swarm spawn`, as JSON */
-export const SPAWN_RUNNER = "SCP_SPAWN_RUNNER"
-
-/** the spawner's own identity, which the harness it starts must not inherit */
-const SPAWNER_IDENTITY = [
-  "SCP_NAME",
-  "SCP_SESSION",
-  "SCP_GRANT",
-  "SCP_PARENT",
-  "SCP_UNDER",
-  "SCP_HARNESS",
-  "SCP_SHIM_BINDING",
-  "SCP_HARNESS_PID",
-  SPAWN_RUNNER,
-  "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
-  "SCP_AGY_CONVERSATION_FILE",
-]
-
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
 const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_UNDER", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING", "SCP_SESSION", "SCP_HARNESS_PID"]
-
-/** the harness's environment: ours without the spawner's identity, plus the grant's variables and --labels */
-export function spawnEnvironment(parent: Env, grant: Record<string, string>, labels?: string): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [key, value] of Object.entries(parent)) if (value !== undefined && !SPAWNER_IDENTITY.includes(key)) env[key] = value
-  return { ...env, ...grant, ...(labels !== undefined ? { SCP_LABELS: labels } : {}) }
-}
 
 /** codex's scp entry in its user config, if it has one */
 export function codexMount(env: Env): Json | undefined {

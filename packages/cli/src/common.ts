@@ -438,3 +438,28 @@ export function stamp(iso: string): string {
 
 /** names the `swarm claude` launcher's pid, so only the Claude Code it started (not a nested or spawned one) takes channel pushes */
 export const CHANNELS_ENV = "SCP_CHANNELS"
+
+/** set for a detached spawn's runner: the walk of the shell that ran `swarm spawn`, as JSON */
+export const SPAWN_RUNNER = "SCP_SPAWN_RUNNER"
+
+/** the spawner's own identity, which the harness it starts must not inherit */
+const SPAWNER_IDENTITY = [
+  "SCP_NAME",
+  "SCP_SESSION",
+  "SCP_GRANT",
+  "SCP_PARENT",
+  "SCP_UNDER",
+  "SCP_HARNESS",
+  "SCP_SHIM_BINDING",
+  "SCP_HARNESS_PID",
+  SPAWN_RUNNER,
+  "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+  "SCP_AGY_CONVERSATION_FILE",
+]
+
+/** the harness's environment: ours without the spawner's identity, plus the grant's variables and --labels */
+export function spawnEnvironment(parent: Record<string, string | undefined>, grant: Record<string, string>, labels?: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parent)) if (value !== undefined && !SPAWNER_IDENTITY.includes(key)) env[key] = value
+  return { ...env, ...grant, ...(labels !== undefined ? { SCP_LABELS: labels } : {}) }
+}
