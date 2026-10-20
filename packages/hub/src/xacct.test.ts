@@ -1015,6 +1015,127 @@ describe("machine waker for messages from other accounts", () => {
     }
     expect(events.map((e) => e.endpoints[0])).toEqual(["bob/desk/review", "bob/desk/spare"])
   })
+
+  const retryAt = (env: { bob: { db: Database } }) =>
+    (env.bob.db.query(`SELECT retry_at FROM machine_wakes WHERE machine = 'desk'`).get() as { retry_at: number | null } | null)?.retry_at ?? null
+
+  test("an owner declined across holds keeps waking for a contact's queued message, counted once; a capped retry waits for the reset", async () => {
+    const events: any[] = []
+    let answer: { ok: boolean; declined?: "budget" } = { ok: false, declined: "budget" }
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return answer
+    }
+    const env = await asleep({ machineWake, wake: { crossAccount: true, declineHoldS: 300, senderAccountPerHour: 2, targetPerHour: 4 } })
+    const alarm = async (at: number) => {
+      env.clock.now = at
+      await env.bob.hub.alarm(async () => true)
+      await settle()
+    }
+    const start = env.clock.now
+    const sent = await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "one"))
+    await settle()
+    for (let hold = 1; hold <= 4; hold++) await alarm(start + hold * 300_000)
+    expect(events.map((e) => e.message.id)).toEqual([sent.id, sent.id, sent.id, sent.id])
+    expect(env.bob.db.query(`SELECT n FROM wake_limits WHERE key LIKE 'account:%'`).get()).toEqual({ n: 1 })
+    expect(retryAt(env)).toBe(start + 3_600_000)
+    expect(env.bob.hub.nextAlarm()).toBeGreaterThan(env.clock.now)
+
+    for (const at of [1_800_000, 2_400_000, 3_599_999]) await alarm(start + at)
+    expect(events.length).toBe(4)
+    env.bob.wake()
+    answer = { ok: true }
+    await alarm(start + 3_600_000)
+    expect(events.map((e) => e.message.id)).toEqual([sent.id, sent.id, sent.id, sent.id, sent.id])
+    expect(retryAt(env)).toBeNull()
+    await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "while waking"))
+    await alarm(start + 3_660_000)
+    expect(events.length).toBe(5)
+    expect(env.bob.xinbox()).toBe(2)
+  })
+
+  test("a queued message the sender cap refused wakes once at the reset, even when a new message arrives then", async () => {
+    const events: any[] = []
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return { ok: true }
+    }
+    const env = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: 1, targetPerHour: Number.POSITIVE_INFINITY } })
+    const start = env.clock.now
+    env.bob.db.query(`INSERT INTO wake_limits (key, n, since) VALUES (?, 1, ?)`).run(`account:${env.alice.id}`, start)
+    await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "capped"))
+    await settle()
+    env.bob.db.query(`INSERT INTO machine_wakes (machine, next, fails) VALUES ('desk', 0, 0)`).run()
+    expect(env.bob.hub.clearWakeHold("desk")).toBe(1)
+    await settle()
+    expect(events).toEqual([])
+    expect(retryAt(env)).toBe(start + 3_600_000)
+    expect(env.bob.hub.clearWakeHold("desk")).toBe(1)
+    await settle()
+    expect(events).toEqual([])
+    expect(retryAt(env)).toBe(start + 3_600_000)
+
+    env.clock.now = start + 3_600_000
+    const fresh = await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "at the reset"))
+    await settle()
+    await env.bob.hub.alarm(async () => true)
+    await settle()
+    env.clock.now += 120_000
+    await env.bob.hub.alarm(async () => true)
+    await settle()
+    expect(events.map((e) => e.message.id)).toEqual([fresh.id])
+    expect(retryAt(env)).toBeNull()
+    expect(env.bob.xinbox()).toBe(2)
+  })
+
+  test("a retry at the reset that cannot load the contacts is kept and wakes once they load", async () => {
+    const events: any[] = []
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return { ok: true }
+    }
+    const env = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: 1, targetPerHour: Number.POSITIVE_INFINITY } })
+    const start = env.clock.now
+    env.bob.db.query(`INSERT INTO wake_limits (key, n, since) VALUES (?, 1, ?)`).run(`account:${env.alice.id}`, start)
+    const sent = await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "capped"))
+    await settle()
+    env.bob.db.query(`INSERT INTO machine_wakes (machine, next, fails) VALUES ('desk', 0, 0)`).run()
+    env.bob.hub.clearWakeHold("desk")
+    await settle()
+    env.bob.unknown.on = true
+    env.clock.now = start + 3_600_000
+    await env.bob.hub.alarm(async () => true)
+    await settle()
+    expect(events).toEqual([])
+    expect(retryAt(env)).toBe(start + 3_660_000)
+    env.bob.unknown.on = false
+    env.clock.now = start + 3_660_000
+    await env.bob.hub.alarm(async () => true)
+    await settle()
+    expect(events.map((e) => e.message.id)).toEqual([sent.id])
+  })
+
+  test("the sender cap still bounds new messages while a queued retry of a counted one passes", async () => {
+    const events: any[] = []
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return { ok: true }
+    }
+    const env = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: 1, targetPerHour: Number.POSITIVE_INFINITY } })
+    const first = await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "one"))
+    await settle()
+    env.clock.now += 61_000
+    await env.alice.ok(env.laptop, "forward", forward("bob/desk/review", "two"))
+    await settle()
+    expect(events.length).toBe(1)
+    expect(env.bob.hub.clearWakeHold("desk")).toBe(1)
+    await settle()
+    env.clock.now += 61_000
+    await env.alice.ok(env.laptop, "forward", forward("bob/desk/spare", "three"))
+    await settle()
+    expect(events.map((e) => e.message.id)).toEqual([first.id, first.id])
+    expect(env.bob.db.query(`SELECT n FROM wake_limits WHERE key LIKE 'account:%'`).get()).toEqual({ n: 1 })
+  })
 })
 
 describe("a broker's side of cross-account messages", () => {
