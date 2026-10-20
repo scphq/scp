@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, rmdirSync, unlinkSync } from "node:fs"
 import { createServer, type Server } from "node:net"
@@ -68,6 +69,8 @@ export interface BrokerOptions {
   presenceEveryMs?: number | undefined
   /** how often the broker checks it still owns its socket and lock, stopping once another broker or a wiped state directory took them (default 2 s) */
   ownershipEveryMs?: number | undefined
+  /** when a process started, as a harness-instance key spells it (default `ps`); a spawn's worker stops counting once its process's differs */
+  startOf?: ((pid: number, expected: string) => string | undefined) | undefined
   /** where a judge model's key_env is read (default the broker's environment) */
   env?: Record<string, string | undefined> | undefined
   /** the judge model client for a policy's `judge.model` (default the provider's HTTP API) */
@@ -204,6 +207,33 @@ function running(pid: number): boolean {
   }
 }
 
+const STARTS_TTL_MS = 5000
+const starts = new Map<number, { start: string | undefined; at: number }>()
+
+/**
+ * when `pid` started, as a harness-instance key spells it (`ps -o lstart=` in the C locale, runs of whitespace as `-`), cached a few seconds
+ * while it matches `expected`; a mismatch is read again, so a pid reused since never fails against the old start
+ */
+function startedAt(pid: number, expected: string): string | undefined {
+  const now = Date.now()
+  const cached = starts.get(pid)
+  if (cached && cached.at > now - STARTS_TTL_MS && cached.start === expected) return cached.start
+  let start: string | undefined
+  try {
+    const out = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2000,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" },
+    })
+    const text = out.status === 0 && !out.error ? (out.stdout?.toString() ?? "").trim().replace(/\s+/g, "-") : ""
+    start = /^[A-Za-z0-9:-]{1,64}$/.test(text) ? text : undefined
+  } catch {}
+  if (start === undefined) return undefined
+  if (starts.size > 1024) starts.clear()
+  starts.set(pid, { start, at: now })
+  return start
+}
+
 /** who a connection acts for, for the calls only the harness process holding an endpoint may make through its hooks */
 function hookOf(s: Conn<Connection>): { transient: boolean; process?: string } {
   return { transient: s.data.transient === true, ...(s.data.process ? { process: s.data.process } : {}) }
@@ -253,6 +283,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       hash: (value) => createHash("sha256").update(value).digest("hex"),
       transaction: (fn) => db.transaction(fn),
       alive: running,
+      startOf: options.startOf ?? startedAt,
     })
     core.migrate()
     core.relabelMachine()
@@ -463,6 +494,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   /** counts `s` as the waker of `endpoint`, or of none, and reports the presence that moves */
+  /** the endpoint's waiting calls return and look again, as when it turned wakeable */
+  function release(endpoint: string) {
+    const waiting = waiters.get(endpoint)
+    waiters.delete(endpoint)
+    for (const fn of waiting ?? []) fn()
+  }
+
   function setWaker(s: Conn<Connection>, endpoint: string | undefined) {
     const was = s.data.waker
     if (was === endpoint) return
@@ -475,6 +513,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     if (endpoint) {
       core.waker(endpoint, true)
       presenceMoved(endpoint)
+      release(endpoint)
     }
     for (const root of [was, endpoint]) if (root) subagentsMoved(root)
   }
@@ -658,7 +697,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     peek: ReturnType<typeof hookOf> & { prompts?: number; peek: boolean },
     s: Conn<Connection>,
   ): Promise<void> {
-    const gathering = (r: StopWaitResult) => workerResults(r) > 0 && !r.more && !r.prompted && othersRunning(r) > 0
+    const gathering = (r: StopWaitResult) => workerResults(r) > 0 && !r.more && !r.prompted && !r.wakeable && othersRunning(r) > 0
     const cap = Date.now() + LIMITS.pushGraceS * 1000
     let quiet = Date.now() + LIMITS.pushQuietS * 1000
     let results = workerResults(result)
@@ -1027,7 +1066,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const changed = core.setWake(me, params.via, { ...hookOf(s), ref: params.ref })
         setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
         if (!presenceMoved(me) && changed) bridge?.changed(me)
-        if (changed) subagentsMoved(me)
+        if (changed) {
+          subagentsMoved(me)
+          release(me)
+        }
         return { changed }
       }
       case "rename": {
@@ -1140,7 +1182,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const options = { ...hookOf(s), ...(typeof params.prompts === "number" ? { prompts: params.prompts } : {}) }
         const peek = { ...options, peek: true }
         let result = core.stopWait(me, peek)
-        const idle = (r: StopWaitResult) => !r.messages.length && !r.more && r.workers.length + r.starting > 0 && r.pushes_left > 0 && !r.prompted
+        const idle = (r: StopWaitResult) =>
+          !r.messages.length && !r.more && r.workers.length + r.starting > 0 && r.pushes_left > 0 && !r.prompted && !r.wakeable
         while (idle(result) && !s.data.closed && Date.now() < deadline) {
           await waitFor(me, Math.min(STOP_RECHECK_MS, deadline - Date.now()), s)
           if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")

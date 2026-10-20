@@ -20,7 +20,7 @@ Every hook runs `swarm hook <harness> [event]` with the harness's JSON payload o
 | Stop | Names each unanswered request; holds the stop while a `--require-reply` request waits; with running workers, waits for their next message (stop push) |
 | Session end | Sets status `done` |
 
-Stop push: while workers you started with `swarm spawn` run, a stop waits up to 600 s for their next message or handback and continues the turn with it. `--push-wait <s>` changes the wait, `0` turns it off, and `SCP_PUSH_WAIT` lowers it for one session.
+Stop push: while workers you started with `swarm spawn` run, a stop waits up to 600 s for their next message or handback and continues the turn with it. Claude Code and Codex show "waiting for worker messages (swarm)" meanwhile, and a prompt hook that runs ends the wait. A session that a message wakes anyway (one that wakes when idle, below) does not wait: its turn ends and the worker's message wakes it. A worker counts only while it, or the `swarm spawn` that started it, still runs. `--push-wait <s>` changes the wait, `0` turns it off, and `SCP_PUSH_WAIT` lowers it for one session.
 
 ## Per harness
 

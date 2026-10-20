@@ -347,6 +347,8 @@ export interface CoreOptions {
   capEverySender?: boolean
   /** whether a process is running; without it every process holding an endpoint counts as running */
   alive?: (pid: number) => boolean
+  /** when a process started, as a full harness-instance key spells it (Appendix E.3), checked against `expected`; undefined when it cannot be read */
+  startOf?: (pid: number, expected: string) => string | undefined
   /** this host's machine name: what `machine:` selectors match for its endpoints */
   machine?: string
   /** the short hostname, matched by `machine:` selectors when `machine` is not set */
@@ -519,6 +521,7 @@ export class RelayCore {
   protected readonly tx: <T>(fn: () => T) => T
   private readonly capEverySender: boolean
   private readonly alive: (pid: number) => boolean
+  private readonly startOf: ((pid: number, expected: string) => string | undefined) | undefined
   private readonly hostMachine: string | null
   private readonly namedMachine: string | null
   private readonly hostname: string | null
@@ -542,6 +545,7 @@ export class RelayCore {
     this.tx = options.transaction ?? ((fn) => fn())
     this.capEverySender = options.capEverySender === true
     this.alive = options.alive ?? (() => true)
+    this.startOf = options.startOf
     this.hostMachine = options.machine ?? options.hostname ?? null
     this.namedMachine = options.machine ?? null
     this.hostname = options.hostname ?? null
@@ -2866,8 +2870,8 @@ export class RelayCore {
    * above zero and fewer than ${LIMITS.stopBlocks} printed holds ({@link stopHeld}) since the session started; it also lists in `nudge` the other
    * requests it has not replied to and no hook nudged about ({@link nudged}), up to ${LIMITS.injectMessages}, the rest counted in `nudge_more`.
    * `block` says whether to keep the agent from stopping: forced, or with a nudge. A stop also counts its live spawned `workers` and the
-   * `worker_unread` messages {@link stopWait} would show, and with either, the `pushes_left` of the prompt's and the `prompts` mark its wait
-   * passes on. A stop that asks for `directives` is also held, fewer than ${LIMITS.directiveHolds} times a session ({@link restated}), for its
+   * `worker_unread` messages {@link stopWait} would show, and with either, the `pushes_left` of the prompt's, the `prompts` mark its wait
+   * passes on and `wakeable` when a message wakes the endpoint anyway ({@link wakes}), so the stop need not wait. A stop that asks for `directives` is also held, fewer than ${LIMITS.directiveHolds} times a session ({@link restated}), for its
    * parent's messages the agent may not have seen ({@link lateDirectives}): shown and offered within ${LIMITS.pushBytes} bytes, all their seqs in
    * `directive_seqs`. Any call says `brief` once the session was shown the full preamble ({@link briefed}), and one that is no stop names in
    * `intro` the spawner of an endpoint a `swarm spawn` grant placed, with the grant's steer key in `intro_key`, until a hook showed it
@@ -2893,6 +2897,7 @@ export class RelayCore {
     worker_unread?: number
     pushes_left?: number
     prompts?: number
+    wakeable?: true
     brief?: true
     intro?: string
     intro_key?: string
@@ -2953,7 +2958,9 @@ export class RelayCore {
         ...(total > nudge.length ? { nudge_more: total - nudge.length } : {}),
         ...(workers.length + starting ? { workers: workers.length + starting } : {}),
         ...(fromWorkers ? { worker_unread: fromWorkers } : {}),
-        ...(workers.length + starting + fromWorkers ? { pushes_left: this.pushesLeft(me), prompts: me.prompts ?? 0 } : {}),
+        ...(workers.length + starting + fromWorkers
+          ? { pushes_left: this.pushesLeft(me), prompts: me.prompts ?? 0, ...(wakes(me) ? { wakeable: true as const } : {}) }
+          : {}),
         ...(late.length ? { directives: shown.map((row) => this.envelope(row, row.seq)), directive_seqs: late.map((row) => row.seq) } : {}),
         ...brief,
       }
@@ -3050,7 +3057,8 @@ export class RelayCore {
    * workers ({@link liveWorkers}) by address and those not joined yet in `starting`. With a worker's message to show, the other unread
    * messages no hook has shown or holds follow theirs ({@link pushOthers}), `others_shown` of them, held with them; `others` counts the other
    * unread ones left. A live worker's messages wait ${LIMITS.pushGapS} s after a push showed one of its own ({@link pushed}), and with no
-   * push left since the last prompt nothing is shown. `prompted` says a prompt came since inject handed out the `prompts` mark. A hook of
+   * push left since the last prompt nothing is shown. `prompted` says a prompt came since inject handed out the `prompts` mark, `wakeable` that
+   * a message wakes the endpoint anyway ({@link wakes}), which ends a wait. A hook of
    * another process than the one holding the endpoint gets nothing. `peek`: the same answer, nothing held (`hold` null) or marked received.
    */
   stopWait(endpoint: string, options: { transient?: boolean; process?: string; prompts?: number; peek?: boolean } = {}): StopWaitResult {
@@ -3087,6 +3095,7 @@ export class RelayCore {
       ...(others.length ? { others_shown: others.length } : {}),
       pushes_left: left,
       ...(options.prompts !== undefined && options.prompts !== (me.prompts ?? 0) ? { prompted: true as const } : {}),
+      ...(wakes(me) ? { wakeable: true as const } : {}),
       ...(me.briefed ? { brief: true as const } : {}),
     }
   }
@@ -3175,11 +3184,13 @@ export class RelayCore {
 
   /**
    * The endpoint's live spawned workers: its unrevoked spawn grants (minted by `swarm spawn` without --no-push, never by spawn-env) from its
-   * current spawn that are either unspent and unexpired (`starting`: the harness has not joined yet) or spent by an endpoint whose status is not
-   * done and whose presence is not offline, or offline while its `swarm spawn` process still runs without having handed back (as while it
-   * resumes a codex exec worker); `paced` those a push showed a message from in the last ${LIMITS.pushGapS} s. spawn_exit marks a
-   * spender done and revokes an unspent grant, so a worker goes when its harness exits, else when its presence lapses or its grant expires; an
-   * unspent grant whose `swarm spawn` process is gone (killed before it could report the exit) is revoked here.
+   * current spawn that are either unspent and unexpired while their `swarm spawn` process runs (`starting`: the harness has not joined yet),
+   * or spent by an endpoint whose status is not done and that is either not offline (by its hooks alone only while its harness process runs)
+   * or kept by its `swarm spawn` process, which still runs without having handed back (as while it resumes a codex exec worker); `paced`
+   * those a push showed a message from in the last ${LIMITS.pushGapS} s. A process runs while its pid does and, where its start time reads,
+   * it started when its key says ({@link running}). spawn_exit marks a spender done and revokes an unspent grant, so a worker goes when its
+   * harness exits, else when its presence lapses or its grant expires; an unspent grant whose `swarm spawn` pid is gone (killed before it
+   * could report the exit) is revoked here.
    */
   private liveWorkers(me: EndpointRow, now: number, noPush = false): { workers: EndpointRow[]; starting: number; paced: string[]; unjoined: string[] } {
     const grants = this.sql.all<Pick<GrantRow, "token_hash" | "used_by" | "bound_process" | "pushed_at" | "handback" | "name">>(
@@ -3196,15 +3207,27 @@ export class RelayCore {
       if (grant.used_by === null) {
         if (pid && !this.alive(pid))
           this.sql.all(`UPDATE grants SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL AND used_by IS NULL`, now, grant.token_hash)
-        else unjoined.push(grant.name ?? "")
+        else if (!pid || this.running(grant.bound_process!)) unjoined.push(grant.name ?? "")
         continue
       }
       const row = this.byId(grant.used_by)
-      if (!row || row.status_state === "done" || (this.presence(row, now) === "offline" && (grant.handback !== null || !pid || !this.alive(pid)))) continue
+      if (!row || row.status_state === "done") continue
+      const harness = this.presence(row, now) !== "offline" && !(row.connections === 0 && row.process && this.localRow(row) && !this.running(row.process))
+      if (!harness && (grant.handback !== null || !pid || !this.running(grant.bound_process!))) continue
       workers.set(row.id, row)
       if (grant.pushed_at !== null && grant.pushed_at > now - LIMITS.pushGapS * 1000) paced.add(row.id)
     }
     return { workers: [...workers.values()], starting: unjoined.length, paced: [...paced], unjoined }
+  }
+
+  /** whether the process of a harness-instance key runs: its pid does and, for a full key whose start time reads, it started then */
+  private running(key: string): boolean {
+    const match = /^pid:(\d+)(?::([A-Za-z0-9:-]+))?$/.exec(key)
+    const pid = Number(match?.[1])
+    if (!pid) return true
+    if (!this.alive(pid)) return false
+    const started = match![2] === undefined ? undefined : this.startOf?.(pid, match![2])
+    return started === undefined || started === match![2]
   }
 
   /**
@@ -6247,6 +6270,15 @@ function presenceOf(row: EndpointRow, now: number): Presence {
   if (!row.hook_seen) return "offline"
   if (row.hook_seen >= now - LIMITS.hookOnlineS * 1000) return "online"
   return row.hook_seen >= now - LIMITS.hookIdleS * 1000 ? "idle" : "offline"
+}
+
+/**
+ * a wake whose waker holds a live connection, on a row not hibernated: a message wakes it, so its stop need not wait on its workers. A spawn's
+ * hold does not count, since a held worker's run that ends hands back to its parent
+ */
+function wakes(row: EndpointRow): boolean {
+  const wake = wakeOf(row)
+  return wake !== null && wake !== "spawn-resume" && row.wakers > 0 && !row.hibernate
 }
 
 /** a wake with a live waker, or a hook waker that left within LIMITS.restartGraceS */

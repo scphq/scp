@@ -101,7 +101,9 @@ describe("swarm hooks install", () => {
     expect(merged.permissions).toEqual({ allow: ["Bash(ls)"] })
     expect(merged.hooks.Notification).toEqual(existing.hooks.Notification)
     expect(merged.hooks.PostToolUse).toEqual([{ matcher: "Bash", hooks: [{ type: "command", command: "my-linter" }] }, created.hooks.PostToolUse[0]])
-    expect(merged.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: `swarm hook claude ${PUSH_WAIT} 600`, timeout: 630 }] }])
+    expect(merged.hooks.Stop).toEqual([
+      { hooks: [{ type: "command", command: `swarm hook claude ${PUSH_WAIT} 600`, timeout: 630, statusMessage: "waiting for worker messages (swarm)" }] },
+    ])
     expect(statSync(file).mode & 0o777).toBe(0o600)
     const backups = readdirSync(join(project, ".claude")).filter((name) => /^settings\.json\.bak-\d{14}$/.test(name))
     expect(backups).toHaveLength(1)
@@ -169,7 +171,13 @@ describe("swarm hooks install", () => {
     const { root, project, lines, install } = setup()
     install({ harness: "claude", scope: "project", write: true, blockStop: true })
     const claude = JSON.parse(readFileSync(join(project, ".claude", "settings.json"), "utf8"))
-    expect(claude.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: `swarm hook claude ${BLOCK_STOP} ${PUSH_WAIT} 600`, timeout: 630 }] }])
+    expect(claude.hooks.Stop).toEqual([
+      {
+        hooks: [
+          { type: "command", command: `swarm hook claude ${BLOCK_STOP} ${PUSH_WAIT} 600`, timeout: 630, statusMessage: "waiting for worker messages (swarm)" },
+        ],
+      },
+    ])
     expect(claude.hooks.UserPromptSubmit[0].hooks[0].async).toBeUndefined()
     expect(lines.join("\n")).toContain(
       "a stop names each request not yet answered once, and is held while a require_reply request waits (at most 3 times a session)",
@@ -203,7 +211,9 @@ describe("swarm hooks install", () => {
     install({ harness: "codex", scope: "user", write: true })
     const codex = JSON.parse(readFileSync(join(root, ".codex", "hooks.json"), "utf8"))
     expect(codex.hooks.SessionEnd).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 2 }] }])
-    expect(codex.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: `swarm hook codex ${PUSH_WAIT} 600`, timeout: 630 }] }])
+    expect(codex.hooks.Stop).toEqual([
+      { hooks: [{ type: "command", command: `swarm hook codex ${PUSH_WAIT} 600`, timeout: 630, statusMessage: "waiting for worker messages (swarm)" }] },
+    ])
     expect(lines.join("\n")).toContain(`add ${BLOCK_STOP} to also hold it while messages are unread`)
     expect(codex.hooks.PostToolUse).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 5, async: true }] }])
     expect(codex.hooks.SubagentStop).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 5, async: true }] }])
@@ -286,11 +296,25 @@ describe("swarm hooks install", () => {
     expect(existsSync(join(root, ".claude"))).toBe(false)
   })
 
-  test("the stop hook runs in the foreground everywhere setup installs it, with or without the flag", () => {
+  test("the stop hook runs in the foreground everywhere setup installs it, with or without the flag, saying what it waits for while it may", () => {
     for (const harness of ["claude", "codex"] as const) {
-      expect(hookEntries(harness).Stop).toEqual([{ hooks: [{ type: "command", command: `swarm hook ${harness} ${PUSH_WAIT} 600`, timeout: 630 }] }])
+      expect(hookEntries(harness, { pushWait: 0 }).Stop).toEqual([
+        { hooks: [{ type: "command", command: `swarm hook ${harness} ${PUSH_WAIT} 0`, timeout: 5 }] },
+      ])
+      expect(hookEntries(harness).Stop).toEqual([
+        { hooks: [{ type: "command", command: `swarm hook ${harness} ${PUSH_WAIT} 600`, timeout: 630, statusMessage: "waiting for worker messages (swarm)" }] },
+      ])
       expect(hookEntries(harness, { blockStop: true }).Stop).toEqual([
-        { hooks: [{ type: "command", command: `swarm hook ${harness} ${BLOCK_STOP} ${PUSH_WAIT} 600`, timeout: 630 }] },
+        {
+          hooks: [
+            {
+              type: "command",
+              command: `swarm hook ${harness} ${BLOCK_STOP} ${PUSH_WAIT} 600`,
+              timeout: 630,
+              statusMessage: "waiting for worker messages (swarm)",
+            },
+          ],
+        },
       ])
       expect(hookEntries(harness).SubagentStop![0]!.hooks[0]!.async).toBe(true)
     }
