@@ -72,7 +72,8 @@ type Link = {
   cert: MachineCert | null
   nonce: string
   peerNonce: string | null
-  exchange: Exchange
+  /** dropped once the channel keys are derived */
+  exchange: Exchange | null
   peerKx: string | null
   channel: Channel | null
   authenticated: boolean
@@ -271,7 +272,8 @@ export function startMesh(options: MeshOptions): MeshLink {
       link.peer.attempt = 0
     }
     const record = records.get(name)
-    if (first && record) apply(record)
+    if (record && record.cert.key !== link.cert!.key) records.delete(name)
+    else if (first && record) apply(record)
     notify(link, "records", { records: [own, ...[...records.values()].filter((row) => row.machine !== name)] })
   }
 
@@ -348,7 +350,7 @@ export function startMesh(options: MeshOptions): MeshLink {
             peer_nonce: link.peerNonce,
             nonce: link.nonce,
             peer_kx: link.peerKx,
-            kx: link.exchange.public,
+            kx: link.exchange!.public,
           }),
         })
         return
@@ -356,16 +358,17 @@ export function startMesh(options: MeshOptions): MeshLink {
       if (frame.method === "mesh_auth" && link.cert) {
         const peer = link.cert.machine
         if (rival(peer, link.cert.key)) return refuse(link, `machine ${peer} is already linked with another machine key`)
-        const payload = { acct, from: peer, to: machine, peer_nonce: link.nonce, nonce: link.peerNonce, peer_kx: link.exchange.public, kx: link.peerKx }
+        const payload = { acct, from: peer, to: machine, peer_nonce: link.nonce, nonce: link.peerNonce, peer_kx: link.exchange!.public, kx: link.peerKx }
         if (!verifyPayload(link.cert.key, SIGN_DOMAIN.auth, payload, params.sig)) return refuse(link, "invalid authentication")
-        const own = { from_nonce: link.nonce, from_kx: link.exchange.public }
+        const own = { from_nonce: link.nonce, from_kx: link.exchange!.public }
         const theirs = { from_nonce: link.peerNonce!, from_kx: link.peerKx! }
         link.channel = openChannel(
-          link.exchange,
+          link.exchange!,
           link.peerKx!,
           { acct, from: machine, to: peer, ...own, to_nonce: theirs.from_nonce, to_kx: theirs.from_kx },
           { acct, from: peer, to: machine, ...theirs, to_nonce: own.from_nonce, to_kx: own.from_kx },
         )
+        link.exchange = null
         authenticated(link)
         return
       }
@@ -433,7 +436,7 @@ export function startMesh(options: MeshOptions): MeshLink {
       }),
     }
     links.add(link)
-    const hello = () => notify(link, "mesh_hello", { protocol: PROTOCOL, acct, cert, nonce: link.nonce, kx: link.exchange.public })
+    const hello = () => notify(link, "mesh_hello", { protocol: PROTOCOL, acct, cert, nonce: link.nonce, kx: link.exchange!.public })
     socket.on("open", hello)
     socket.on("message", (data, binary) => {
       if (stopped || socket.readyState !== WebSocket.OPEN) return

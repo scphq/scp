@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { RelayClient, socketPath } from "@scp-dev/broker"
+import { alive } from "./testing/fixtures"
 
 setDefaultTimeout(90_000)
 
@@ -41,15 +42,20 @@ function present(row: Listed["endpoints"][number] | undefined): boolean {
   return !!row && row.presence !== "offline"
 }
 
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer()
-    server.once("error", reject)
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address()
-      server.close(() => (address && typeof address === "object" ? resolve(address.port) : reject(new Error("no port"))))
-    })
-  })
+/** distinct free loopback ports, all held open at once while they are picked */
+async function freePorts(count: number): Promise<number[]> {
+  const servers = Array.from({ length: count }, () => createServer())
+  const ports = await Promise.all(
+    servers.map(
+      (server) =>
+        new Promise<number>((resolve, reject) => {
+          server.once("error", reject)
+          server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port))
+        }),
+    ),
+  )
+  await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))))
+  return ports
 }
 
 /** one machine: its own HOME and relay dir, driven only through the swarm CLI and its broker socket */
@@ -108,7 +114,6 @@ class Machine {
   }
 
   async init(args: string[], stdin?: string) {
-    this.port ||= await freePort()
     return this.ok(["mesh", "init", "--machine", this.name, "--listen", this.addr, ...args], stdin === undefined ? {} : { stdin })
   }
 
@@ -151,7 +156,10 @@ class Machine {
 
   async stop() {
     for (const client of this.clients.splice(0)) client.close()
-    await this.swarm(["daemon", "stop"])
+    const lock = join(this.dir, "broker.lock")
+    const pid = existsSync(lock) ? Number(readFileSync(lock, "utf8").split(":")[0]) : 0
+    await this.ok(["daemon", "stop"])
+    if (pid > 0) await until(async () => !alive(pid), `${this.name}'s broker to exit`)
   }
 }
 
@@ -170,12 +178,21 @@ describe("mesh across real brokers", () => {
   })
 
   afterAll(async () => {
-    for (const machine of [a, b, c]) await machine.stop()
-    rmSync(root, { recursive: true, force: true })
+    try {
+      for (const machine of [a, b, c]) {
+        try {
+          await machine.stop()
+        } catch (error) {
+          console.error(error)
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("setup: init, copy the account key, add peers; a broker started before its peer links once the peer is up", async () => {
-    b.port = await freePort()
+    ;[a.port, b.port, c.port] = (await freePorts(3)) as [number, number, number]
     const out = await a.init(["--account", "team"])
     expect(out).toContain("machine: laptop")
     await b.init(["--account-key", "-"], readFileSync(join(a.dir, "mesh", "account.key"), "utf8"))

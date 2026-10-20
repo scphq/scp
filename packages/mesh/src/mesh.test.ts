@@ -535,6 +535,22 @@ describe("mesh brokers", () => {
     const self = await rawPeer(b, account, "b")
     await waitFor(() => self.closeCode(), "same name close")
     expect(self.closeCode()).toBe(1008)
+    first.socket.close()
+    await waitFor(() => !b.mesh.status().mesh.links.some((row) => row.machine === "c"), "c unlinked")
+    const later = signRecord(key, {
+      v: 1,
+      acct: accountId(account.public),
+      machine: "c",
+      epoch: Date.now() + 1_000_000,
+      seq: 1,
+      endpoints: [],
+      cert: issueCert(account, "c", key),
+    })
+    relay.notify("records", { records: [later] })
+    await waitFor(() => b.mesh.status().mesh.machines.find((row) => row.machine === "c")?.endpoints === 0, "the stored rival record")
+    const back = await rawPeer(b, account, "c", { key: first.key })
+    await carried(b, back)
+    expect(b.mesh.status().mesh.machines.find((row) => row.machine === "c")).toMatchObject({ endpoints: 1, linked: true })
   })
 
   test("a silent authenticated peer is closed after three heartbeats", async () => {

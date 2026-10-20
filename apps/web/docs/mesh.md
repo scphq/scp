@@ -36,7 +36,7 @@ swarm mesh init --account lab --machine alpha --listen 100.64.0.1:7700
 swarm daemon restart
 ```
 
-Copy `~/.local/state/scp/mesh/account.key` to each other machine over a channel you trust, then import it there and add a peer. `--account-key -` reads it from stdin, so one ssh command can carry it:
+Copy `~/.local/state/scp/mesh/account.key` to each other machine over a channel you trust, then import it there and add a peer. `--account-key -` reads it from stdin, so one ssh command can carry it (with `swarm` on the remote PATH, or the full `bun <clone>/packages/cli/src/cli.ts` in its place):
 
 ```sh
 ssh beta swarm mesh init --account-key - --machine beta --listen 100.64.0.2:7700 < ~/.local/state/scp/mesh/account.key
