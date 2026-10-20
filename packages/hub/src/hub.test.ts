@@ -1675,9 +1675,9 @@ describe("machine waker", () => {
   })
 
   describe("mail queued while a hold was on", () => {
-    function held(wake: Partial<HubWakeOptions> = {}) {
+    function held(wake: Partial<HubWakeOptions> = {}, declines = 1) {
       const events: Call[] = []
-      const answers: { ok: boolean; declined?: string }[] = [{ ok: false, declined: "budget" }]
+      const answers: { ok: boolean; declined?: string }[] = Array.from({ length: declines }, () => ({ ok: false, declined: "budget" }))
       const env = setup({
         machineWake: async (event) => {
           events.push(event as unknown as Call)
@@ -1712,6 +1712,26 @@ describe("machine waker", () => {
       await env.hub.alarm(async () => true)
       await calls(env.events, 3)
       expect(env.events.length).toBe(2)
+    })
+
+    test("a hold shorter than the debounce retries queued mail at most once a debounce window", async () => {
+      const env = held({ declineHoldS: 0 }, 3)
+      await declined(env)
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 2)
+      expect(env.events.length).toBe(1)
+      expect(env.hub.nextAlarm()).toBeLessThanOrEqual(env.clock.now + LIMITS.wakeDebounceS * 1000)
+      env.clock.now += LIMITS.wakeDebounceS * 1000
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 2)
+      expect(env.events.length).toBe(2)
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 3)
+      expect(env.events.length).toBe(2)
+      env.clock.now += LIMITS.wakeDebounceS * 1000
+      await env.hub.alarm(async () => true)
+      await calls(env.events, 3)
+      expect(env.events.length).toBe(3)
     })
 
     test("clearWakeHold wakes the machine for queued mail at once", async () => {

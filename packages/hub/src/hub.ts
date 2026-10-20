@@ -661,7 +661,8 @@ export class RelayHub {
     }
     for (const view of this.relay.endWaking(now)) this.wokeNot(view)
     const unheld = this.deps.sql.all<{ machine: string }>(
-      `UPDATE machine_wakes SET declined = NULL, declined_message = NULL, declined_from = NULL, declined_until = NULL WHERE declined_until <= ? RETURNING machine`,
+      `UPDATE machine_wakes SET declined = NULL, declined_message = NULL, declined_from = NULL, declined_until = NULL WHERE MAX(declined_until, next + ?) <= ? RETURNING machine`,
+      this.declineRetryMs(),
       now,
     )
     await this.wakeQueued(unheld.map((row) => row.machine))
@@ -676,7 +677,12 @@ export class RelayHub {
     const stored = this.core?.wakingDue() ?? null
     const running = this.wakeCalls > 0 ? now + MACHINE_WAKE_TIMEOUT_MS + this.wakeOptions.wakingTimeoutS * 1000 : null
     const waking = stored === null || running === null ? (stored ?? running) : Math.min(stored, running)
-    const unheld = one<{ at: number | null }>(this.deps.sql, `SELECT MIN(declined_until) AS at FROM machine_wakes`)?.at ?? null
+    const unheld =
+      one<{ at: number | null }>(
+        this.deps.sql,
+        `SELECT MIN(MAX(declined_until, next + ?)) AS at FROM machine_wakes WHERE declined_until IS NOT NULL`,
+        this.declineRetryMs(),
+      )?.at ?? null
     const retention = [held, trueUp, waking === null ? null : Math.max(waking, now), unheld === null ? null : Math.max(unheld, now)].reduce<number | null>(
       (at, next) => (next === null ? at : at === null ? next : Math.min(at, next)),
       null,
@@ -1636,6 +1642,11 @@ export class RelayHub {
     return machines.length
   }
 
+  /** the least time from a declined call to the wake for queued mail its hold's end makes, so a short hold cannot loop at the alarm */
+  private declineRetryMs(): number {
+    return Math.max(this.wakeOptions.debounceS * 1000, MIN_ALARM_MS)
+  }
+
   /** clears the machine waker holds of `machine`, or of every machine; the machines it cleared */
   private forgetWakeHold(machine?: string): string[] {
     const rows =
@@ -1652,37 +1663,48 @@ export class RelayHub {
    */
   private async wakeQueued(machines: string[]): Promise<void> {
     if (!machines.length || (!this.deps.machineWake && !this.deps.fetch)) return
-    try {
-      if (this.wakeOptions.crossAccount && this.deps.crossAccount) {
-        const senders = await this.xinbound()
-        if (senders) this.relay.xsenders(senders)
+    const before = new Map(machines.map((machine) => [machine, this.wakeCall(machine)]))
+    if (this.wakeOptions.crossAccount && this.deps.crossAccount) {
+      this.relay.xsenders(await this.xinbound().catch(() => null))
+    }
+    for (const [machine, call] of before) {
+      try {
+        this.wakeQueuedOn(machine, call)
+      } catch (error) {
+        this.deps.log?.("relay_action", {
+          account: this.account,
+          machine,
+          method: "machine_wake",
+          code: "failed",
+          error: error instanceof Error ? error.name : "error",
+        })
       }
-      for (const machine of machines) this.wakeQueuedOn(machine)
-    } catch (error) {
-      this.deps.log?.("relay_action", { account: this.account, method: "machine_wake", code: "failed", error: error instanceof Error ? error.name : "error" })
     }
   }
 
-  private wakeQueuedOn(machine: string): void {
+  private wakeCall(machine: string): string | null {
+    return one<{ call: string | null }>(this.deps.sql, `SELECT call FROM machine_wakes WHERE machine = ?`, machine)?.call ?? null
+  }
+
+  /** the queued-mail wake of `machine`; nothing once a call other than `before` started, as a message arriving meanwhile makes */
+  private wakeQueuedOn(machine: string, before: string | null): void {
+    if (this.wakeCall(machine) !== before) return
     const now = this.now()
     const state = this.wakeState(machine, now)
     if (state && state.next > now) return
     if (this.deps.sockets().some((s) => s.conn.role === "bridge" && s.conn.subscribed && s.conn.machine === machine && !this.gone.has(s.conn.id))) return
     if (!this.deps.machineWake && !one(this.deps.sql, `SELECT 1 FROM machines WHERE name = ? AND wake_url IS NOT NULL AND wake_secret IS NOT NULL`, machine))
       return
-    const call = () => one<{ call: string | null }>(this.deps.sql, `SELECT call FROM machine_wakes WHERE machine = ?`, machine)?.call ?? null
-    const before = call()
     const tried = new Set<string>()
     for (let page = this.relay.pending(machine, 0); page.length; page = this.relay.pending(machine, page.at(-1)!.seq)) {
       for (const delivery of page) {
         const key = `${delivery.recipient} ${delivery.message.from.address}`
         if (tried.has(key)) continue
         tried.add(key)
-        const other = delivery.endpoint ? this.relay.xreceived(delivery.endpoint, delivery.message.id) : null
-        const fromAccountId = other?.seq === delivery.seq ? other.from_account : undefined
+        const fromAccountId = this.relay.xaccountOf(delivery.seq) ?? undefined
         if (fromAccountId !== undefined && !this.wakeOptions.crossAccount) continue
         this.machineWake(machine, delivery.recipient, delivery.message, fromAccountId)
-        if (call() !== before) return
+        if (this.wakeCall(machine) !== before) return
       }
     }
   }
@@ -1791,19 +1813,20 @@ export class RelayHub {
     /** the call's outcome, unless a cleared hold, a new hibernation or a new registration replaced its state while it ran */
     const settle = (ok: boolean, declined: WakeDecline | undefined) => {
       const at = this.now()
-      if (one<{ call: string | null }>(this.deps.sql, `SELECT call FROM machine_wakes WHERE machine = ?`, machine)?.call !== call) return
+      if (this.wakeCall(machine) !== call) return
+      const kept = held && (held.until === null || held.until > at) ? held : null
       if (declined) {
         const until = Number.isFinite(options.declineHoldS) ? at + options.declineHoldS * 1000 : null
         this.setWakeState(machine, { next: now, fails, declined: { reason: declined, message: message.id, from: message.from.address, until } })
       } else if (ok) {
         const until = at + options.wakingTimeoutS * 1000
         const marked = this.relay.markWaking(recipient, until)
-        this.setWakeState(machine, { next: marked ? Math.max(scheduled, until) : scheduled, fails: 0, declined: held })
+        this.setWakeState(machine, { next: marked ? Math.max(scheduled, until) : scheduled, fails: 0, declined: kept })
         if (marked) this.fleet({ type: "presence", machine, endpoint: view.address, presence: "hibernated", waking: true })
       } else {
         const next = fails + 1
         const backoff = Math.min(options.debounceS * 2 ** next, Math.max(options.backoffMaxS, options.debounceS))
-        this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: held })
+        this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: kept })
       }
     }
     this.wakeCalls++
