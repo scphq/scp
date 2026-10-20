@@ -335,6 +335,8 @@ export interface EndpointView {
   wake_failed?: string
   /** a hibernated agent's provider declined the last wake */
   wake_declined?: WakeDecline
+  /** a hub's hibernated row whose machine waker accepted a wake, until its session reclaims it or the wake times out */
+  waking?: true
 }
 
 export type PeekLevel = "local"

@@ -46,7 +46,7 @@ export function graphData(g: IdentifiedGraph | null): Html {
       presence: n.presence,
       status: n.status,
       wake: n.wake && n.wake !== "none" ? n.wake : null,
-      how: n.wake && n.wake !== "none" ? wakeHow(n.wake) : null,
+      how: n.waking ? "its machine is waking" : n.wake && n.wake !== "none" ? wakeHow(n.wake) : null,
       parent: n.parent,
     };
   });
@@ -911,11 +911,11 @@ function onEvent(ev) {
   if (ev.type === "message" && Array.isArray(ev.to)) for (const to of ev.to) pulse(ev.from, to, ev.kind, true);
   else if (ev.type === "presence") {
     const n = data.nodes.find((x) => x.address === ev.endpoint);
-    if (!n) return refresh();
+    if (!n || typeof ev.waking === "boolean" || n.presence === "hibernated") return refresh();
     if (n.presence === ev.presence) return;
     n.presence = ev.presence;
     const m = data.machines.find((x) => x.name === n.machine);
-    if (m && ev.presence !== "offline") m.online = true;
+    if (m && ev.presence !== "offline" && ev.presence !== "hibernated") m.online = true;
     apply();
   } else if (ev.type === "endpoints" || ev.type === "hello") refresh();
 }

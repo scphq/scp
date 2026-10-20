@@ -222,6 +222,19 @@ Before delivering to a hibernated local agent the broker runs its provider's wak
 
 - `swarm machine wake-url <url> [--secret-env VAR]` registers the machine's webhook (`machine_wake {url, secret}`), the secret read from `$VAR`, default `SCP_MACHINE_WAKE_SECRET`, never from argv; `swarm machine wake-url --clear` clears it.
 - A hub embedded in a provider's platform takes an optional `machineWake(event)` function in place of registered URLs (the `RelayHub` dependency), called in-process for any machine with the payload object below and answering `{ok, status?, declined?}`; no url or secret is stored. Without it, the registered webhook is used.
+- The `RelayHub` dependency `wake` overrides `HUB_WAKE`, how and how often the machine waker is called (SPEC section 19.3):
+
+  | Option | Default | Meaning |
+  | --- | --- | --- |
+  | `crossAccount` | `false` | a message from another account's contact calls the waker too |
+  | `senderAccountPerHour` | `6` | calls messages from one other account may cause, an hour |
+  | `targetPerHour` | `12` | calls messages from other accounts may cause for one endpoint, an hour |
+  | `debounceS` | `60` | the least time between two calls for one machine |
+  | `backoffMaxS` | `900` | the longest backoff after failed calls |
+  | `wakingTimeoutS` | `debounceS` | how long a row shows `waking` after an accepted call before it falls back to hibernated |
+  | `declineHoldS` | `Infinity` | how long a decline holds calls for its message and sender; `Infinity` until it clears as SPEC section 19.3 says |
+
+  The per-hour caps and `declineHoldS` take `Infinity`; the durations are finite. `RelayHub.clearWakeHold(machine?)` forgets a machine's (or every machine's) decline, debounce and backoff, for example once the provider's budget allows wakes again. The holds and the per-hour counts live in the hub's SQL storage (tables `machine_wakes` and `wake_limits`), and a row's waking deadline in its endpoint row.
 
 ### Runners
 

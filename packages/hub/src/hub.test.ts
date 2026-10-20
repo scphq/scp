@@ -2,7 +2,18 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { LIMITS, PROTOCOL, type Sql, type SqlValue } from "@scp-dev/core"
-import { type DashboardEvent, GRAPH_MINUTES, GRAPH_MINUTES_MAX, HUB_LIMITS, type HubConn, type HubGrant, type HubLimits, RelayHub, type HubSocket } from "./hub"
+import {
+  type DashboardEvent,
+  GRAPH_MINUTES,
+  GRAPH_MINUTES_MAX,
+  HUB_LIMITS,
+  type HubConn,
+  type HubGrant,
+  type HubLimits,
+  type HubWakeOptions,
+  RelayHub,
+  type HubSocket,
+} from "./hub"
 
 const START = 1_800_000_000_000
 
@@ -42,6 +53,7 @@ function setup(
     dashboard?: (event: DashboardEvent) => void
     fetch?: ConstructorParameters<typeof RelayHub>[0]["fetch"]
     machineWake?: ConstructorParameters<typeof RelayHub>[0]["machineWake"]
+    wake?: Partial<HubWakeOptions>
   } = {},
 ) {
   const clock = { now: START }
@@ -55,7 +67,7 @@ function setup(
   }
   const live = new Set<FakeSocket>()
   const logs: { event: string; fields: Record<string, unknown> }[] = []
-  const hub = new RelayHub({
+  const deps: ConstructorParameters<typeof RelayHub>[0] = {
     sql,
     hash: (value) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
     transaction: (fn) => db.transaction(fn)(),
@@ -67,8 +79,16 @@ function setup(
     ...(options.dashboard ? { dashboard: options.dashboard } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.machineWake ? { machineWake: options.machineWake } : {}),
-  })
+    ...(options.wake ? { wake: options.wake } : {}),
+  }
+  let hub = new RelayHub(deps)
   hub.init({ user: "ada" })
+  /** a fresh hub on the same storage, as after the object was evicted or restarted */
+  function restart(): RelayHub {
+    hub = new RelayHub(deps)
+    hub.init({ user: "ada" })
+    return hub
+  }
   let nextId = 1
 
   function connect(tokenId = "tok_a", actorId: string | null = null, extra: { [K in keyof HubGrant]?: HubGrant[K] | undefined } = {}): FakeSocket {
@@ -112,7 +132,7 @@ function setup(
     hub.closed(socket)
   }
 
-  return { hub, db, clock, live, logs, writes, connect, rpc, ok, fails, bridge, disconnect }
+  return { hub, db, clock, live, logs, writes, connect, rpc, ok, fails, bridge, disconnect, restart }
 }
 
 describe("machines", () => {
@@ -1451,5 +1471,214 @@ describe("machine waker", () => {
     await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "two" } })
     await calls(sent, 2)
     expect(sent.length).toBe(1)
+  })
+
+  test("an accepted wake shows the row waking until its claim mirrors in; without one it falls back after wakingTimeoutS", async () => {
+    const events: Call[] = []
+    const dash: DashboardEvent[] = []
+    const { bridge, ok, disconnect, clock, hub } = setup({
+      machineWake: async (event) => {
+        events.push(event as unknown as Call)
+        return { ok: true }
+      },
+      dashboard: (event) => dash.push(event),
+      wake: { wakingTimeoutS: 300 },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    const shown = async () => (await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review")
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await calls(events, 1)
+    expect(await shown()).toMatchObject({ presence: "hibernated", wake: "hook:vm", waking: true })
+    expect(hub.graph().nodes.find((n) => n.address === "ada/desk/review")).toMatchObject({ presence: "hibernated", waking: true })
+    expect(dash).toContainEqual(expect.objectContaining({ type: "presence", endpoint: "ada/desk/review", presence: "hibernated", waking: true }))
+    clock.now += 120_000
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "while waking" } })
+    await calls(events, 2)
+    expect(events.length).toBe(1)
+    clock.now += 180_000
+    expect((await shown()).waking).toBeUndefined()
+    await hub.alarm(async () => true)
+    expect(dash).toContainEqual(expect.objectContaining({ type: "presence", endpoint: "ada/desk/review", presence: "hibernated", waking: false }))
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "after the timeout" } })
+    await calls(events, 2)
+    expect(events.length).toBe(2)
+    expect(await shown()).toMatchObject({ waking: true })
+    await bridge("desk", [{ address: "me/review" }])
+    const live = await shown()
+    expect(live.presence).toBe("online")
+    expect(live.waking).toBeUndefined()
+  })
+
+  test("a wake accepted after the claim already mirrored in never shows the live row waking", async () => {
+    let accept: (answer: { ok: boolean }) => void = () => {}
+    const { bridge, ok, disconnect } = setup({ machineWake: () => new Promise((resolve) => (accept = resolve)) })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await bridge("desk", [{ address: "me/review" }])
+    accept({ ok: true })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const row = (await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review")
+    expect(row.presence).toBe("online")
+    expect(row.waking).toBeUndefined()
+  })
+
+  test("the debounce and backoff are the embedder's; a new hibernation clears them, so the next message wakes at once", async () => {
+    const events: Call[] = []
+    const { bridge, ok, disconnect, clock } = setup({
+      machineWake: async (event) => {
+        events.push(event as unknown as Call)
+        return { ok: false }
+      },
+      wake: { debounceS: 5, backoffMaxS: 20 },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    const send = async (body: string, after: number) => {
+      clock.now += after * 1000
+      await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body } })
+      await calls(events, events.length + 1)
+      return events.length
+    }
+    expect(await send("one", 0)).toBe(1)
+    expect(await send("inside 10 s", 5)).toBe(1)
+    expect(await send("after 10 s", 5)).toBe(2)
+    expect(await send("inside 20 s", 10)).toBe(2)
+    const back = await bridge("desk", [{ address: "me/review" }])
+    await ok(back, "mirror", {
+      full: false,
+      endpoints: [{ address: "me/review", kind: "agent", harness: "claude-code", presence: "hibernated", wake: "hook:vm" }],
+    })
+    disconnect(back)
+    expect(await send("after a new hibernation", 0)).toBe(3)
+  })
+
+  test("a decline hold lives in storage: a restarted hub keeps it until its expiry or clearWakeHold", async () => {
+    const events: Call[] = []
+    const machineWake = async (event: unknown) => {
+      events.push(event as Call)
+      return { ok: false, declined: "budget" }
+    }
+    const { bridge, ok, disconnect, clock, restart } = setup({ machineWake, wake: { declineHoldS: 600 } })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    const send = async (body: string) => {
+      await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body } })
+      await calls(events, events.length + 1)
+      return events.length
+    }
+    expect(await send("one")).toBe(1)
+    const fresh = restart()
+    expect(await send("after a restart")).toBe(1)
+    clock.now += 599_000
+    expect(await send("inside the hold")).toBe(1)
+    clock.now += 1000
+    expect(await send("after the hold")).toBe(2)
+    restart()
+    expect(await send("held again")).toBe(2)
+    expect(fresh.clearWakeHold("desk")).toBe(1)
+    expect(await send("after clearWakeHold")).toBe(3)
+  })
+
+  test("waking survives a restart; clearWakeHold ends it and the debounce, so the next message calls at once", async () => {
+    const events: Call[] = []
+    const dash: DashboardEvent[] = []
+    const machineWake = async (event: unknown) => {
+      events.push(event as Call)
+      return { ok: true }
+    }
+    const { bridge, ok, disconnect, restart } = setup({ machineWake, dashboard: (event) => dash.push(event), wake: { wakingTimeoutS: 600 } })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    const send = async (body: string) => {
+      await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body } })
+      await calls(events, events.length + 1)
+      return events.length
+    }
+    expect(await send("one")).toBe(1)
+    const fresh = restart()
+    expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBe(true)
+    expect(await send("while waking")).toBe(1)
+    expect(fresh.clearWakeHold()).toBe(1)
+    expect(dash).toContainEqual(expect.objectContaining({ type: "presence", endpoint: "ada/desk/review", waking: false }))
+    expect(await send("after clearWakeHold")).toBe(2)
+  })
+
+  test("a new registration while a call runs drops that call's outcome: no waking, no debounce", async () => {
+    const sent: Call[] = []
+    let answer: (status: number) => void = () => {}
+    const { bridge, ok, disconnect } = setup({
+      fetch: (url, init) => {
+        sent.push({ url, headers: init.headers, body: init.body })
+        return new Promise((resolve) => {
+          answer = (status) => resolve({ status })
+        })
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    const desk = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+    await ok(desk, "machine_wake", { url: "https://wake.example/hook", secret: SECRET })
+    disconnect(desk)
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await calls(sent, 1)
+    const again = await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }])
+    await ok(again, "machine_wake", { url: "https://wake.example/other", secret: SECRET })
+    disconnect(again)
+    answer(200)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBeUndefined()
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "two" } })
+    await calls(sent, 2)
+    expect(sent.map((c) => c.url)).toEqual(["https://wake.example/hook", "https://wake.example/other"])
+  })
+
+  test("a call answered after its hold was cleared and a new call started in the same millisecond changes nothing", async () => {
+    const answers: ((answer: { ok: boolean; declined?: string }) => void)[] = []
+    const { bridge, ok, disconnect, hub } = setup({ machineWake: () => new Promise((resolve) => answers.push(resolve)) })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }, { address: "me/lead" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    hub.clearWakeHold("desk")
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "two" } })
+    expect(answers.length).toBe(2)
+    answers[0]!({ ok: true })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect((await ok(laptop, "list", {})).endpoints.find((e: any) => e.address === "ada/desk/review").waking).toBeUndefined()
+    answers[1]!({ ok: false, declined: "budget" })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "three" } })
+    expect(answers.length).toBe(2)
+  })
+
+  test("a call for another sender keeps the earlier sender's decline, whatever its outcome", async () => {
+    const answers: { ok: boolean; declined?: string }[] = [{ ok: false, declined: "budget" }, { ok: false }]
+    const events: Call[] = []
+    const { bridge, ok, disconnect, clock } = setup({
+      machineWake: async (event) => {
+        events.push(event as unknown as Call)
+        return answers.shift() ?? { ok: false }
+      },
+    })
+    const laptop = await bridge("laptop", [{ address: "me/impl" }, { address: "me/lead" }])
+    disconnect(await bridge("desk", [{ address: "me/review", presence: "hibernated", wake: "hook:vm" }]))
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "one" } })
+    await calls(events, 1)
+    await ok(laptop, "forward", { from: "lead", params: { to: "desk/review", body: "two" } })
+    await calls(events, 2)
+    expect(events.length).toBe(2)
+    clock.now += LIMITS.wakeBackoffMaxS * 1000
+    await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "declined sender again" } })
+    await calls(events, 3)
+    expect(events.length).toBe(2)
+  })
+
+  test("wake durations must be finite; a per-hour cap or the decline hold may be Infinity", () => {
+    expect(() => setup({ wake: { debounceS: Number.POSITIVE_INFINITY } })).toThrow(RangeError)
+    expect(() => setup({ wake: { wakingTimeoutS: -1 } })).toThrow(RangeError)
+    expect(() => setup({ wake: { senderAccountPerHour: Number.NaN } })).toThrow(RangeError)
+    expect(() =>
+      setup({ wake: { senderAccountPerHour: Number.POSITIVE_INFINITY, targetPerHour: Number.POSITIVE_INFINITY, declineHoldS: Number.POSITIVE_INFINITY } }),
+    ).not.toThrow()
   })
 })
