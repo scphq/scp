@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
-import { attribute, attributed, ROOT_HELP } from "./attribute"
+import { attribute, attributed, hasFlag, ROOT_HELP } from "./attribute"
 import { RelayUsage } from "./common"
 
 type Env = Record<string, string | undefined>
@@ -57,7 +57,8 @@ export async function piCommand(args: string[]): Promise<number> {
   }
   const extension = extensionPath(process.env)
   const parsed = piLaunch(args, process.env, extension)
-  const attribution = await attribute("pi", parsed, process.env, process.cwd(), (line) => void process.stderr.write(`${line}\n`))
+  const resume = hasFlag(parsed.argv.slice(3), ["-c", "--continue", "-r", "--resume", "--session"])
+  const attribution = await attribute("pi", { ...parsed, resume }, process.env, process.cwd(), (line) => void process.stderr.write(`${line}\n`))
   const launch = attribution ? piLaunch(args, attributed(process.env, attribution), extension) : parsed
   return await new Promise<number>((resolve, reject) => {
     const child = spawn(launch.argv[0]!, launch.argv.slice(1), { env: launch.env as NodeJS.ProcessEnv, stdio: "inherit" })

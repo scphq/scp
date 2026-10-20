@@ -79,7 +79,7 @@ swarm grok --name review                             # waits; the first message 
 - grok gets `--allow` rules for the relay messaging tools unless you pass your own permission flags. A headless agy needs the `mcp(scp/...)` allow rules `swarm setup` writes; `swarm agy` warns without them.
 - `$SCP_AGY_BIN` and `$SCP_GROK_BIN` pick the binaries.
 
-Every launcher (`swarm claude`, including `--bg`, `swarm codex`, `muse`, `pi`, `opencode`, `agy`, `grok` and `t3code`) run from an agent's shell links the session it starts under that agent by itself: it mints the grant `swarm spawn-env --name N` would, with the agent's own authority. `swarm claude --bg` then prints `under me/<agent>` after the address. A grant already in `$SCP_GRANT` is used as is, `--root` starts the session as a root, and from a plain terminal nothing changes. If the grant cannot be minted, the session still starts, unlinked, with a one-line warning.
+Every launcher (`swarm claude`, including `--bg`, `swarm codex`, `muse`, `pi`, `opencode`, `agy`, `grok` and `t3code`) run from an agent's shell links the session it starts under that agent by itself: it mints the grant `swarm spawn-env --name N` would, with the agent's own authority. `swarm claude --bg` then prints `under me/<agent>` after the address. A grant minted for the session in `$SCP_GRANT` is used as is (an agent's own spent grant is replaced), `--root` starts the session as a root, a resumed session keeps its place, and from a plain terminal nothing changes. If the grant cannot be minted, the session still starts, unlinked, with a one-line warning.
 
 ## Any other harness
 

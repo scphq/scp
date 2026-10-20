@@ -164,6 +164,10 @@ function liveAgents(bin: string, env: Env): Agent[] {
   }
 }
 
+/** whether claude's options resume or continue a stored session */
+export const resumes = (args: string[]): boolean =>
+  optionsOf(args).some((arg) => ["-c", "--continue", "-r", "--resume", "--from-pr"].includes(arg) || arg.startsWith("--resume="))
+
 /** the session `--resume`/`-r` names among claude's options */
 export function resumeTarget(args: string[]): string | undefined {
   const options = optionsOf(args)
@@ -318,7 +322,7 @@ export async function claudeCommand(
   const { name, bg, root, args } = claudeArgv(argv)
   if (!bin) throw new RelayUsage("claude is not on PATH")
   if (bg) {
-    const attribution = await attribute("claude", { name, root }, env, cwd, err, deps.attribute)
+    const attribution = await attribute("claude", { name, root, resume: resumes(args) }, env, cwd, err, deps.attribute)
     return backgroundCommand(name, args, attributed(env, attribution), cwd, bin, out, attribution)
   }
   const resume = resumeTarget(args)
@@ -331,7 +335,7 @@ export async function claudeCommand(
   const hint = external ? undefined : args.includes("--strict-mcp-config") ? STRICT_HINT : mountHint(env, cwd)
   if (hint) throw new RelayUsage(hint)
   if (external) err(`${CLI_NAME} claude: using your --mcp-config; it needs the scp server with --channels for messages to wake this session`)
-  const launchEnv = attributed(env, await attribute("claude", { name, root }, env, cwd, err, deps.attribute))
+  const launchEnv = attributed(env, await attribute("claude", { name, root, resume: resumes(args) }, env, cwd, err, deps.attribute))
   return runClaude(
     bin,
     claudeLaunchArgs(args, namePrompt(name, args, launchEnv, cwd)),

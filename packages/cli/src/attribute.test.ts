@@ -37,8 +37,8 @@ function env(extra: Record<string, string> = {}): Record<string, string> {
   return { ...out, PATH: `${bin}:${process.env.PATH}`, SCP_DIR: dir, ...extra }
 }
 
-/** `swarm <args>` from a shell, as an agent's harness runs one: `agent` names the endpoint whose lineage holds that shell, else none does */
-async function launch(args: string[], extra: Record<string, string> = {}, agent?: string) {
+/** `swarm <args>` from a shell, as an agent's harness runs one: `agent` names the endpoint whose lineage holds that shell (claimed with `grant`), else none does */
+async function launch(args: string[], extra: Record<string, string> = {}, agent?: string, grant?: string) {
   const shell = Bun.spawn(["sh", "-c", 'read go; "$0" --no-env-file "$@"; :', process.execPath, entry, ...args], {
     cwd: project,
     stdin: "pipe",
@@ -48,7 +48,7 @@ async function launch(args: string[], extra: Record<string, string> = {}, agent?
   })
   const held = agent ? await RelayClient.connect(broker.socket) : undefined
   const key = processKey(shell.pid)
-  await held?.hello({ claim: { handle: agent!, harness: "claude-code", process: key, lineage: [key] } })
+  await held?.hello({ claim: { handle: agent!, harness: "claude-code", process: key, lineage: [key], ...(grant ? { grant } : {}) } })
   shell.stdin.write("go\n")
   shell.stdin.end()
   const [stdout, stderr, code] = await Promise.all([new Response(shell.stdout).text(), new Response(shell.stderr).text(), shell.exited])
@@ -96,17 +96,28 @@ const endpoint = (address: string) => broker.core.list({ all: true }).find((e) =
 
 describe("swarm claude --bg from an agent's shell", () => {
   // first: a session the hook test below claims has this test process for its harness, so every later shell would find it
-  test("--root, a grant already set, or a shell no agent runs pass no new grant", async () => {
-    const rooted = await launch(["claude", "--bg", "--root", "--name", "solo"], {}, "lead2")
-    expect([rooted.code, rooted.scp.env.SCP_GRANT]).toEqual([0, ""])
-    expect(rooted.stdout).not.toContain(" under ")
+  test("--root, a grant minted for the session, or a shell no agent runs pass no new grant; --root drops the caller's identity", async () => {
     const given = `krt_${"a".repeat(64)}`
+    const rooted = await launch(["claude", "--bg", "--root"], { SCP_NAME: "lead2", SCP_GRANT: given }, "lead2")
+    expect([rooted.code, rooted.scp.env.SCP_GRANT, rooted.scp.env.SCP_NAME]).toEqual([0, "", undefined])
+    expect(rooted.stdout).not.toContain(" under ")
     const explicit = await launch(["claude", "--bg", "--name", "kid"], { SCP_GRANT: given }, "lead3")
-    expect(explicit.scp.env.SCP_GRANT).toBe(given)
+    expect([explicit.stderr, explicit.scp.env.SCP_GRANT]).toEqual(["", given])
     expect(explicit.stdout).not.toContain(" under ")
     const human = await launch(["claude", "--bg", "--name", "mine"])
     expect([human.code, human.stderr, human.scp.env.SCP_GRANT]).toEqual([0, "", ""])
     expect(human.stdout).not.toContain(" under ")
+  })
+
+  test("a spawned agent's own spent grant in its shell is replaced by a fresh grant under that agent", async () => {
+    const top = broker.core.claim({ handle: "top", harness: "codex" }).endpoint
+    const { token } = broker.core.grant({ kind: "endpoint", id: top.id, auth: "session" }, { name: "mid" })
+    const run = await launch(["claude", "--bg", "--name", "leaf"], { SCP_NAME: "mid", SCP_GRANT: token }, "mid", token)
+    expect(run.stderr).toBe("")
+    expect(run.stdout).toContain("is me/leaf on SCP under me/mid;")
+    expect(run.scp.env.SCP_GRANT).toMatch(/^krt_[0-9a-f]{64}$/)
+    expect(run.scp.env.SCP_GRANT).not.toBe(token)
+    expect(endpoint("me/mid")).toMatchObject({ parent: "me/top" })
   })
 
   test("mints a grant as spawn-env would, says so, and the session links under the agent even when its hook claims first", async () => {
@@ -157,10 +168,13 @@ describe("a foreground launcher from an agent's shell", () => {
   })
 })
 
-/** a broker client that binds the caller to `address`, recording its grant requests, or failing the grant with `fail` */
-function fakeClient(address: string | undefined, grants: unknown[], fail?: Error): RelayClient {
+/** a broker client that binds the caller to `address`, recording its hello and grant requests, failing the grant with `fail`, or never answering hello */
+function fakeClient(address: string | undefined, grants: unknown[], fail?: Error, hellos: unknown[] = [], hang = false): RelayClient {
   return {
-    hello: async () => ({}),
+    hello: (params: unknown) => {
+      hellos.push(params)
+      return hang ? new Promise(() => {}) : Promise.resolve({})
+    },
     rules: async () => {
       if (!address) throw new RelayError("unauthorized", "no endpoint")
       return { address }
@@ -175,16 +189,18 @@ function fakeClient(address: string | undefined, grants: unknown[], fail?: Error
 }
 
 describe("attribute", () => {
-  const walk = { keys: ["pid:2"], self: [] }
+  const walk = { keys: ["pid:2"], self: [] as string[] }
 
-  test("names the grant by --name, else by a $SCP_NAME that is not the caller's own, and swaps the caller's identity for it", async () => {
+  test("names the grant by --name only, refuses a $SCP_NAME of another agent, and swaps the caller's identity for the grant", async () => {
     const grants: unknown[] = []
+    const warned: string[] = []
     const deps = { walk, connect: async () => fakeClient("me/lead", grants) }
     const named = await attribute("pi", { name: "kid" }, { SCP_NAME: "lead" }, project, () => {}, deps)
     expect(named).toEqual({ env: { SCP_GRANT: "krt_new", SCP_NAME: "kid" }, parent: "me/lead" })
     await attribute("pi", {}, { SCP_NAME: "lead" }, project, () => {}, deps)
-    await attribute("pi", {}, { SCP_NAME: "other" }, project, () => {}, deps)
-    expect(grants).toEqual([{ name: "kid" }, {}, { name: "other" }])
+    expect(await attribute("pi", {}, { SCP_NAME: "other" }, project, (line) => warned.push(line), deps)).toBeUndefined()
+    expect(grants).toEqual([{ name: "kid" }, {}])
+    expect(warned).toEqual([expect.stringContaining("($SCP_NAME names other, but this shell runs under me/lead)")])
     const caller = { PATH: "/bin", SCP_NAME: "lead", SCP_SESSION: "s", SCP_UNDER: "me/top", SCP_HARNESS: "claude-code" }
     expect(attributed(caller, named)).toEqual({ PATH: "/bin", SCP_GRANT: "krt_new", SCP_NAME: "kid" })
     expect(attributed(caller, undefined)).toBe(caller)
@@ -195,8 +211,39 @@ describe("attribute", () => {
     expect(await attribute("codex", {}, {}, project, (line) => warned.push(line), { walk, connect: async () => fakeClient(undefined, []) })).toBeUndefined()
     expect(warned).toEqual([])
     const refused = { walk, connect: async () => fakeClient("me/lead", [], new RelayError("scope_refused", "refused")) }
-    expect(await attribute("codex", {}, {}, project, (line) => warned.push(line), refused)).toBeUndefined()
+    expect(await attribute("codex", {}, {}, project, (line) => warned.push(line), refused)).toEqual({ env: {} })
     expect(warned).toEqual(["swarm codex: not linked under the agent that ran it (refused); it starts as a root, swarm adopt <name> links it later"])
+  })
+
+  test("a broker that never answers costs at most the timeout, and warns only once a harness runs the shell", async () => {
+    const warned: string[] = []
+    const stuck = (harness?: string) => ({
+      walk: { keys: ["pid:2"], self: ["pid:2"], ...(harness ? { harness } : {}) },
+      timeoutMs: 50,
+      connect: async () => fakeClient("me/lead", [], undefined, [], true),
+    })
+    expect(await attribute("pi", {}, {}, project, (line) => warned.push(line), stuck())).toBeUndefined()
+    expect(warned).toEqual([])
+    expect(await attribute("pi", {}, {}, project, (line) => warned.push(line), stuck("claude-code"))).toBeUndefined()
+    expect(warned).toEqual([expect.stringContaining("(no answer from the relay broker within 50 ms)")])
+  })
+
+  test("binds as spawn-env would: self from the agent's own shell, lineage only at a terminal; a resumed session mints nothing", async () => {
+    const hellos: unknown[] = []
+    const grants: unknown[] = []
+    const deps = (tty: boolean) => ({
+      walk: { keys: ["pid:2", "pid:1"], self: ["pid:2"] },
+      tty,
+      connect: async () => fakeClient("me/lead", grants, undefined, hellos),
+    })
+    await attribute("claude", {}, {}, project, () => {}, deps(false))
+    await attribute("claude", {}, {}, project, () => {}, deps(true))
+    expect(hellos).toEqual([
+      { observe: true, lineage: ["pid:2", "pid:1"], self: ["pid:2"], cwd: project, brief: true },
+      { observe: true, lineage: ["pid:2", "pid:1"], cwd: project, brief: true },
+    ])
+    expect(await attribute("claude", { resume: true }, {}, project, () => {}, deps(false))).toBeUndefined()
+    expect(grants).toHaveLength(2)
   })
 
   test("swarm claude still launches when the mint fails, with no grant and the warning", async () => {

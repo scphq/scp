@@ -10,7 +10,7 @@ import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { type Claim, CLI_NAME, RelayError, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { parse } from "smol-toml"
-import { attribute, attributed, ROOT_HELP } from "./attribute"
+import { attribute, attributed, optionsBefore, ROOT_HELP } from "./attribute"
 import { RelayUsage, startDaemon } from "./common"
 import { readPsTable, relayIdentity } from "./identity"
 import { CODEX_VALUED, codexMount, codexOverrides, toml } from "./spawn"
@@ -369,7 +369,8 @@ export async function codexCommand(args: string[]): Promise<number> {
   }
   const cwd = process.cwd()
   const parsed = codexLaunch(args, process.env, SELF)
-  const attribution = await attribute("codex", parsed, process.env, cwd, (line) => void process.stderr.write(`${line}\n`))
+  const resume = parsed.resume !== undefined || optionsBefore(parsed.codexArgs).includes("resume")
+  const attribution = await attribute("codex", { ...parsed, resume }, process.env, cwd, (line) => void process.stderr.write(`${line}\n`))
   const launch = attribution ? codexLaunch(args, attributed(process.env, attribution), SELF) : parsed
   const bin = launch.env.SCP_CODEX_BIN || "codex"
   const overrides = [...codexOverrides(launch.env, codexMount(launch.env), SELF), ...serverOptions(launch.codexArgs, launch.env)]

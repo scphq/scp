@@ -272,17 +272,18 @@ export async function museCommand(args: string[]): Promise<number> {
   const cwd = process.cwd()
   const log = (line: string) => void process.stderr.write(`${line}\n`)
   const parsed = museLaunch(args, process.env)
-  const attribution = await attribute("muse", { ...parsed, dir: museBroker(process.env) }, process.env, cwd, log)
-  const launch = attribution ? museLaunch(args, attributed(process.env, attribution)) : parsed
   try {
-    if (!mountedEntry("muse", mcpFile("muse", launch.env)))
+    if (!mountedEntry("muse", mcpFile("muse", parsed.env)))
       throw new RelayUsage(`${CLI_NAME} muse: Muse has no scp MCP mount, so messages cannot wake this session; run ${CLI_NAME} setup --write`)
   } catch (error) {
     if (error instanceof RelayUsage) throw error
     throw new RelayUsage(
-      `${CLI_NAME} muse: ${mcpFile("muse", launch.env)} is unreadable, so the scp mount is unchecked; fix it or run ${CLI_NAME} setup --write`,
+      `${CLI_NAME} muse: ${mcpFile("muse", parsed.env)} is unreadable, so the scp mount is unchecked; fix it or run ${CLI_NAME} setup --write`,
     )
   }
+  const resume = parsed.resume !== undefined
+  const attribution = await attribute("muse", { ...parsed, resume, dir: museBroker(process.env) }, process.env, cwd, log)
+  const launch = attribution ? museLaunch(args, attributed(process.env, attribution)) : parsed
   const broker = museBroker(launch.env)
   if (relayDir(launch.env) !== broker) log(`${CLI_NAME} muse: Muse starts its shim and hooks without SCP_DIR or XDG_STATE_HOME, so this session uses ${broker}`)
   const env: Env = { ...launch.env, SCP_DIR: broker }

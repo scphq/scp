@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
-import { attribute, attributed, ROOT_HELP } from "./attribute"
+import { attribute, attributed, hasFlag, ROOT_HELP } from "./attribute"
 import { RelayUsage } from "./common"
 import { opencodePlugin } from "./hooks"
 import { gitToplevel } from "./identity"
@@ -98,7 +98,8 @@ export async function opencodeCommand(
   if (problem) throw new RelayUsage(problem)
   const hint = opencodeMountHint(env, cwd)
   if (hint) err(hint)
-  const attribution = await attribute("opencode", parsed, env, cwd, err)
+  const resume = hasFlag(parsed.argv.slice(1), ["-c", "--continue", "-s", "--session"])
+  const attribution = await attribute("opencode", { ...parsed, resume }, env, cwd, err)
   const launch = attribution ? opencodeLaunch(args, attributed(env, attribution), bin) : parsed
   return await new Promise<number>((resolve, reject) => {
     const child = spawn(launch.argv[0]!, launch.argv.slice(1), { env: launch.env as NodeJS.ProcessEnv, stdio: "inherit" })

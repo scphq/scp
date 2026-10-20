@@ -202,7 +202,8 @@ export async function resumeCommand(
     const note = agyNote(["agy", "-p", "", ...parsed.base], env, "agy")
     if (note) err(note)
   }
-  const attribution = await attribute(harness, parsed, env, cwd, err)
+  const resume = parsed.opening[0] === "--resume" || parsed.opening[0] === "--conversation"
+  const attribution = await attribute(harness, { ...parsed, resume }, env, cwd, err)
   const launch = attribution ? resumeLaunch(harness, args, attributed(env, attribution)) : parsed
   const runEnv: Env = { ...launch.env, SCP_HARNESS_PID: String(process.pid) }
   const claim = relayIdentity({ harness, fallbackHarness: harness, cwd, env: runEnv, harnessPid: () => process.pid })
