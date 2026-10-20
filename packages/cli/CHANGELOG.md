@@ -1,5 +1,21 @@
 # @scp-dev/cli
 
+## 0.10.0
+
+### Minor Changes
+
+- adff5e5: A message to a stopped in-process subagent wakes its root: the root's waker is pushed the message tagged `for` the subagent (framed to continue it by its id), the subagent shows the root's wake and stays idle while that waker lives, and the message stays unread for the subagent without being shown twice. An agent now adopts a local root it may message directly (from its session or its shell), a child under another parent is still asked to consent, and `swarm join --under` in a codex sandbox that blocks the relay socket names `relay_join {under}` and the codex setting instead of a bare socket error; the relay dashboard words hook and spawn wakes.
+- adff5e5: Wakeable spawns: a codex exec, agy -p, grok -p or muse exec worker stays held after its run (wake `spawn-resume`), and each message resumes the same harness session and hands the run back as a reply, until `--idle`, `swarm end <worker>` (`spawn_end`) or a signal. `--durable` hibernates the worker instead, also after a crash or broker restart, and the broker's built-in `spawn` waker resumes it on the next message as the same endpoint (a one-time wake ticket), keeping its labels, groups, peek and caps.
+
+### Patch Changes
+
+- Updated dependencies [adff5e5]
+- Updated dependencies [adff5e5]
+  - @scp-dev/core@0.7.0
+  - @scp-dev/broker@0.6.0
+  - @scp-dev/mcp@0.3.0
+  - @scp-dev/hub@0.7.2
+
 ## 0.9.0
 
 ### Minor Changes

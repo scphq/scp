@@ -1,5 +1,13 @@
 # @scp-dev/hub
 
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [adff5e5]
+- Updated dependencies [adff5e5]
+  - @scp-dev/core@0.7.0
+
 ## 0.7.1
 
 ### Patch Changes
