@@ -133,6 +133,26 @@ describe("broker, stop_wait", () => {
     expect((await hook.stopWait(0)).pushes_left).toBe(19)
   })
 
+  test("a session a message wakes waits on no worker: a wait ends as its waker connects, and the next returns at once with what the workers sent", async () => {
+    const { main, hook, worker } = await setup()
+    const started = Date.now()
+    const waiting = hook.stopWait(10)
+    await Bun.sleep(150)
+    await main.request("wake", { via: "channels" })
+    expect(await waiting).toMatchObject({ messages: [], workers: ["me/w1"], wakeable: true })
+    expect(Date.now() - started).toBeLessThan(2000)
+    await worker.request("send", { to: "main", body: "done-42" })
+    const quick = Date.now()
+    const result = await hook.stopWait(10)
+    expect(result).toMatchObject({ wakeable: true, workers: ["me/w1"] })
+    expect(result.messages.map((m) => m.body.text)).toEqual(["done-42"])
+    expect(Date.now() - quick).toBeLessThan(LIMITS.pushQuietS * 1000)
+    await main.request("wake", { via: "none" })
+    const held = Date.now()
+    expect(await hook.stopWait(0.3)).not.toHaveProperty("wakeable")
+    expect(Date.now() - held).toBeGreaterThanOrEqual(250)
+  })
+
   test("a no_push worker holds no stop: its message stays an ordinary unread one", async () => {
     const { broker, main, hook, token } = await setup()
     await main.spawnExit({ grant: token, code: 0 })

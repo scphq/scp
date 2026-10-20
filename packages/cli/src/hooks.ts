@@ -247,6 +247,8 @@ export interface Injected {
   /** with either: the pushes left since the last prompt, and the prompts mark a wait passes on to end at the next prompt */
   pushes_left?: number
   prompts?: number
+  /** with either: a message wakes the session anyway, so the stop only shows what its workers already sent and never waits */
+  wakeable?: true
   /** the session was shown the full preamble: the brief marker stands for it (an older broker leaves it out) */
   brief?: true
   /** not on a stop: the spawner of an endpoint `swarm spawn` placed, until a hook confirms it showed {@link introText} */
@@ -702,8 +704,10 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (result.status !== "fulfilled" || !result.value) return tldr ? hookReply(format, event.kind, tldr) : undefined
     const continues = !stop || format !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
     if (stop && !result.value.block) {
-      if (waits === undefined || !PUSHES.has(format) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) return
-      return await push(client, format, waits * 1000, began, result.value.prompts, options, continues)
+      const wakes = result.value.wakeable === true
+      if (waits === undefined || !PUSHES.has(format) || !(wakes ? result.value.worker_unread : result.value.workers || result.value.worker_unread)) return
+      if (result.value.pushes_left === 0) return
+      return await push(client, format, wakes ? 0 : waits * 1000, began, result.value.prompts, options, continues)
     }
     const directive = stop ? directiveText(format, result.value) : undefined
     const forced = stop && (result.value.forced ?? true)
@@ -858,7 +862,7 @@ async function subagentHook(
   return reply
 }
 
-/** Waits for worker messages, allowing the broker's grace period to gather results before the deadline. */
+/** Waits for worker messages, allowing the broker's grace period to gather results before the deadline; a session a message wakes waits no longer. */
 async function push(
   client: RelayClient,
   harness: string,
@@ -876,7 +880,15 @@ async function push(
       wait_s: Math.max(0, Math.min(LIMITS.waitMaxS, (end - Date.now()) / 1000)),
       ...(prompts !== undefined ? { prompts } : {}),
     })
-    if (result.messages.length || result.more || result.prompted || result.pushes_left === 0 || !(result.workers.length + result.starting) || Date.now() >= end)
+    if (
+      result.messages.length ||
+      result.more ||
+      result.prompted ||
+      result.wakeable ||
+      result.pushes_left === 0 ||
+      !(result.workers.length + result.starting) ||
+      Date.now() >= end
+    )
       break
   }
   const text = pushText(result)
@@ -957,13 +969,16 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
 export type HookHarness = "claude" | "codex" | "opencode" | "agy" | "muse"
 export type Scope = "project" | "user" | "local"
 
-type Handler = { type: "command"; command: string; timeout: number; async?: true }
+type Handler = { type: "command"; command: string; timeout: number; async?: true; statusMessage?: string }
 type Group = { matcher?: string; hooks: Handler[] }
 
+/** what the harness shows while a stop that may wait on workers runs */
+export const STOP_STATUS = `waiting for worker messages (${CLI_NAME})`
+
 /** the stop's flags: the unread hold, then the push wait (always written, so 0 keeps it off), and its timeout in seconds */
-function stopArgs(options: { blockStop?: boolean; pushWait?: number }): { args: string[]; timeout: number } {
+function stopArgs(options: { blockStop?: boolean; pushWait?: number }): { args: string[]; timeout: number; waits: boolean } {
   const wait = options.pushWait ?? PUSH_WAIT_DEFAULT_S
-  return { args: [...(options.blockStop ? [BLOCK_STOP] : []), PUSH_WAIT, String(wait)], timeout: wait > 0 ? wait + PUSH_TIMEOUT_MARGIN_S : 5 }
+  return { args: [...(options.blockStop ? [BLOCK_STOP] : []), PUSH_WAIT, String(wait)], timeout: wait > 0 ? wait + PUSH_TIMEOUT_MARGIN_S : 5, waits: wait > 0 }
 }
 
 /** Prompt, stop, session end and Claude subagent context run in the foreground; activity runs in the background. */
@@ -977,7 +992,11 @@ export function hookEntries(harness: "claude" | "codex", options: { blockStop?: 
     SessionStart: [{ hooks: [background] }],
     UserPromptSubmit: [{ hooks: [foreground] }],
     PostToolUse: [harness === "claude" ? { matcher: "*", hooks: [background, ...subagent] } : { hooks: [background] }],
-    Stop: [{ hooks: [{ type: "command", command: [command, ...stop.args].join(" "), timeout: stop.timeout }] }],
+    Stop: [
+      {
+        hooks: [{ type: "command", command: [command, ...stop.args].join(" "), timeout: stop.timeout, ...(stop.waits ? { statusMessage: STOP_STATUS } : {}) }],
+      },
+    ],
     SubagentStop: [{ hooks: [background, ...subagent.map((handler) => ({ ...handler, async: true as const }))] }],
     SessionEnd: [{ hooks: [{ type: "command", command, timeout: 2 }] }],
   }

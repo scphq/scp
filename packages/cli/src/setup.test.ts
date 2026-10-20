@@ -866,6 +866,21 @@ describe("relay setup installs hooks by default", () => {
     expect(existsSync(userHooks(f).opencode)).toBe(false)
   })
 
+  test("a stop hook from an earlier swarm without its status line is rewritten with one, which the harness shows while the stop waits", () => {
+    const f = fixture()
+    expect(setup(f, { write: true }).code).toBe(0)
+    for (const harness of ["claude", "codex"] as const) {
+      const [stop] = hookEntries(harness).Stop![0]!.hooks
+      expect(stop!.statusMessage).toBe("waiting for worker messages (swarm)")
+      const { statusMessage: _, ...earlier } = stop!
+      put(userHooks(f)[harness], `${JSON.stringify({ hooks: { ...hookEntries(harness), Stop: [{ hooks: [earlier] }] } }, null, 2)}\n`, 0o644)
+    }
+    expect(setup(f).text).toContain("hooks: merge the swarm hooks into ~/.claude/settings.json")
+    expect(setup(f, { write: true }).code).toBe(0)
+    expect(readJson(userHooks(f).claude).hooks.Stop).toEqual(hookEntries("claude").Stop)
+    expect(readJson(userHooks(f).codex).hooks.Stop).toEqual(hookEntries("codex").Stop)
+  })
+
   test("hooks with a background stop from an earlier swarm are outdated and rewritten with a foreground one", () => {
     const f = fixture()
     expect(setup(f, { write: true }).code).toBe(0)

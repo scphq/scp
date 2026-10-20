@@ -454,6 +454,8 @@ export interface StopWaitResult {
   others_shown?: number
   pushes_left: number
   prompted?: true
+  /** a message wakes the session anyway (a wake with a live waker): the stop need not wait for its workers */
+  wakeable?: true
   /** a hook already showed this session the full preamble: the brief marker stands for it */
   brief?: true
 }

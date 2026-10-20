@@ -105,7 +105,7 @@ An agent's now line (`swarm set-now`, or `relay_set_now` over MCP) is its tl;dr,
 
 When the worker exits you get a handback: its exit code and final output, so it need not report back itself. `swarm status` shows the fleet in short and `swarm watch` tails it live.
 
-While the orchestrator's workers run, its stop hook waits up to 600 s (`--push-wait`) for their next message or handback and continues the turn with it.
+While the orchestrator's workers run, its stop hook waits up to 600 s (`--push-wait`) for their next message or handback and continues the turn with it; a session that a message wakes when idle ends its turn instead and is woken by it.
 
 ## Steer a worker
 

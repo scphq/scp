@@ -12,6 +12,7 @@ const key = (pid: number) => `pid:${pid}:Fri-Oct-17-09:00:00-2026`
 function setup() {
   const clock = { now: 1_800_000_000_000 }
   const dead = new Set<number>()
+  const starts = new Map<number, string>()
   const db = new Database(":memory:")
   const sql: Sql = { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
   const core = new RelayCore(sql, {
@@ -19,6 +20,7 @@ function setup() {
     hash: (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
     transaction: <T>(fn: () => T): T => db.transaction(fn)(),
     alive: (pid: number) => !dead.has(pid),
+    startOf: (pid: number) => starts.get(pid),
   })
   core.migrate()
   const main = core.claim({ handle: "main", harness: "claude-code", process: key(1), lineage: [key(1)] }).endpoint
@@ -38,7 +40,7 @@ function setup() {
             .endpoint
     return { grant: grant.token, steer: grant.steer, endpoint }
   }
-  return { core, clock, db, dead, main, as, spawn }
+  return { core, clock, db, dead, starts, main, as, spawn }
 }
 
 describe("relation on delivered envelopes", () => {
@@ -256,6 +258,53 @@ describe("stop_wait", () => {
     expect((db.query("SELECT name FROM grants WHERE revoked_at IS NOT NULL").all() as { name: string }[]).map((g) => g.name)).toEqual(["w1"])
     dead.add(1020)
     expect(core.inject(main.id, { stop: true })).not.toHaveProperty("workers")
+  })
+
+  test("a spawn process whose start time differs from its key's stops counting as starting, unrevoked, and counts again when it matches", () => {
+    const { core, db, starts, main, spawn } = setup()
+    spawn("w1", 10, { join: false })
+    expect(core.stopWait(main.id).starting).toBe(1)
+    starts.set(1010, "Sat-Oct-18-10:00:00-2026")
+    expect(core.stopWait(main.id).starting).toBe(0)
+    expect(core.inject(main.id, { stop: true })).not.toHaveProperty("workers")
+    expect(db.query("SELECT name FROM grants WHERE revoked_at IS NOT NULL").all()).toEqual([])
+    starts.set(1010, "Fri-Oct-17-09:00:00-2026")
+    expect(core.stopWait(main.id).starting).toBe(1)
+  })
+
+  test("a worker present only by its hooks counts while its harness runs, else only while its spawn runs to hand back", () => {
+    const { core, clock, db, dead, starts, main, spawn } = setup()
+    const w1 = spawn("w1", 10).endpoint!
+    core.disconnect(w1.id)
+    db.query("UPDATE endpoints SET hook_seen = ? WHERE id = ?").run(clock.now, w1.id)
+    dead.add(1010)
+    expect(core.stopWait(main.id).workers).toEqual(["me/w1"])
+    starts.set(10, "Sat-Oct-18-10:00:00-2026")
+    expect(core.stopWait(main.id).workers).toEqual([])
+    starts.delete(10)
+    dead.delete(1010)
+    dead.add(10)
+    expect(core.stopWait(main.id).workers).toEqual(["me/w1"])
+    dead.add(1010)
+    expect(core.stopWait(main.id).workers).toEqual([])
+  })
+
+  test("a session a message wakes is told so while its waker holds a live connection, still shown what its workers sent; never once hibernated", () => {
+    const { core, db, main, spawn } = setup()
+    const w1 = spawn("w1", 10).endpoint!
+    expect(core.inject(main.id, { stop: true })).not.toHaveProperty("wakeable")
+    core.setWake(main.id, "channels")
+    expect(core.inject(main.id, { stop: true })).not.toHaveProperty("wakeable")
+    core.waker(main.id, true)
+    expect(core.inject(main.id, { stop: true })).toMatchObject({ workers: 1, wakeable: true })
+    core.send(w1.id, { to: "main", body: "done" })
+    expect(core.stopWait(main.id)).toMatchObject({ workers: ["me/w1"], messages: [{ body: { text: "done" } }], wakeable: true })
+    db.query("UPDATE endpoints SET hibernate = 'spawn' WHERE id = ?").run(main.id)
+    expect(core.stopWait(main.id)).not.toHaveProperty("wakeable")
+    db.query("UPDATE endpoints SET hibernate = NULL WHERE id = ?").run(main.id)
+    core.waker(main.id, false, { grace: true })
+    expect(core.stopWait(main.id)).not.toHaveProperty("wakeable")
+    expect(core.inject(main.id, { stop: true })).not.toHaveProperty("wakeable")
   })
 
   test("a no_push worker is not waited on: its messages and handbacks stay ordinary unread ones, counted in others", () => {
