@@ -238,6 +238,8 @@ export interface Claim {
   groups?: string[]
   /** an agent address a root claim links under, as a join under does; a refused link keeps the claim, audited */
   under?: string
+  /** a `kwt_` wake ticket a `spawn` waker run got: takes back the endpoint hibernated by `spawn` it was minted for, as its resumed session */
+  ticket?: string
 }
 
 export type ScopeDirection = "in" | "out"

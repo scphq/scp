@@ -197,6 +197,7 @@ export function startWakers(options: {
       SCP_WAKE_FROM: job.message.from ?? "",
       SCP_WAKE_KIND: job.message.kind,
       SCP_WAKE_THREAD: job.message.thread,
+      ...(job.ticket ? { SCP_WAKE_TICKET: job.ticket } : {}),
     }
     const result = await exec(config, `${JSON.stringify(event)}\n`, env)
     const declined = result.ok ? null : declineOf(result.code, result.stdout)

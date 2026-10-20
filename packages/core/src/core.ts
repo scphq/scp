@@ -297,6 +297,8 @@ export interface EndpointRow {
   declined_from: string | null
   /** a held spawn's durable ref: when its holding connection goes without a hibernate or spawn_end, the broker hibernates it by `spawn` with this ref */
   hold_ref: string | null
+  /** the hash of the wake ticket the last `spawn` waker run got: a claim with it takes the hibernated row back as its resumed session */
+  wake_ticket: string | null
 }
 
 /** a wake hook run that is due: the hibernated endpoint, its provider and ref, and the newest unread message's metadata (never a body) */
@@ -308,6 +310,8 @@ export interface WakeJob {
   ref: string | null
   message: { id: string; from: string | null; kind: MessageKind; thread: string; created_at: string }
   unread: number
+  /** for provider {@link SPAWN_PROVIDER}: a one-time ticket with which the run's claim takes the endpoint back as its resumed session */
+  ticket?: string
 }
 
 export interface MessageRow {
@@ -434,8 +438,8 @@ interface ClaimScope {
   groups: string[]
   cwd: string | null
   exact?: boolean
-  /** the agent the claim asks to sit under (rule 7); naming the parent a row hibernated by `spawn` sits under restarts that row in place */
-  under?: string
+  /** the hash of the claim's wake ticket */
+  ticket?: string
   /** the claimant's nearest harness process, the end of its shell's walk (`self`), when that walk begins its lineage */
   nearest?: string
   /** a hook's claim for a subagent of the endpoint `root` */
@@ -443,6 +447,7 @@ interface ClaimScope {
 }
 
 const GRANT_TOKEN = /^krt_[0-9a-f]{64}$/
+const WAKE_TICKET = /^kwt_[0-9a-f]{64}$/
 /** a harness's session id as its hooks name it: a UUID or a similar token */
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 /** a wake provider's name, as hibernate takes it and a waker is configured under */
@@ -616,6 +621,7 @@ export class RelayCore {
       ["declined_message", "TEXT"],
       ["declined_from", "TEXT"],
       ["hold_ref", "TEXT"],
+      ["wake_ticket", "TEXT"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -795,6 +801,8 @@ export class RelayCore {
     if (leaked) throw new RelayError("secret_refused", `the claim looks like it carries a credential (${leaked})`)
     if (claim.grant !== undefined && (typeof claim.grant !== "string" || !GRANT_TOKEN.test(claim.grant)))
       throw new RelayError("invalid_params", "grant is a krt_ token")
+    if (claim.ticket !== undefined && (typeof claim.ticket !== "string" || !WAKE_TICKET.test(claim.ticket)))
+      throw new RelayError("invalid_params", "ticket is a kwt_ wake ticket")
     const scope: ClaimScope = {
       handle: wanted,
       lineage: lineageKeys(claim.lineage),
@@ -803,7 +811,7 @@ export class RelayCore {
       groups: groupNames(claim.groups, "groups"),
       cwd: fields.cwd,
       exact: claim.exact === true && !subagent,
-      ...(under !== null && !subagent ? { under } : {}),
+      ...(claim.ticket !== undefined && !subagent ? { ticket: this.hash(claim.ticket) } : {}),
     }
     const self = lineageKeys(options.self)
     const nearest = self.at(-1)
@@ -986,10 +994,13 @@ export class RelayCore {
         exactFrom = hooks
       }
     } else if (row && transient) session = row.session
+    const ticketed = !transient && scope.ticket !== undefined ? this.ticketed(scope.ticket, harness) : undefined
+    if (ticketed) row = undefined
     const resumed =
-      !row && open && !scope.exact && !scope.subagent && fields.harness_session
+      ticketed ??
+      (!row && open && !scope.exact && !scope.subagent && fields.harness_session
         ? this.resumable(harness, fields.harness_session, scope, fields, now)
-        : undefined
+        : undefined)
     if (resumed) row = resumed
     let joined = row !== undefined && !resumed
     let own = false
@@ -1014,9 +1025,7 @@ export class RelayCore {
         const ended = held.hook_ended !== null || (held.last_seen ?? held.created_at) < now - LIMITS.restartGraceS * 1000
         if (
           (!transient || own || ended) &&
-          (this.restarts(held, this.placement(scope, now).parent, fields.process) ||
-            this.redeems(held, scope, { harness, ...fields }) ||
-            (!transient && this.placedUnder(held, scope)))
+          (this.restarts(held, this.placement(scope, now).parent, fields.process) || this.redeems(held, scope, { harness, ...fields }))
         )
           row = held
       } else if (
@@ -1041,7 +1050,7 @@ export class RelayCore {
     if (exactFrom && exactFrom.id !== row.id) ({ moved, stopBlocks } = this.leaveHooks(exactFrom, row.id))
     const fresh = created || joined || resumed ? null : this.incarnates(row, scope, fields.process, now)
     const token = transient || live ? undefined : `kre_${randomHex(32)}`
-    const field = (column: string) => (transient ? `COALESCE(?, ${column})` : "?")
+    const field = (column: string) => (transient || ticketed ? `COALESCE(?, ${column})` : "?")
     if (session) this.sql.all(`UPDATE endpoints SET session = NULL WHERE session = ? AND harness = ? AND id != ?`, session, harness, row.id)
     const keep = (transient && (joined || own)) || live
     this.sql.all(
@@ -1055,7 +1064,7 @@ export class RelayCore {
       fields.model,
       fields.cwd,
       fields.parent,
-      transient && fields.labels === "{}" ? null : fields.labels,
+      ticketed || (transient && fields.labels === "{}") ? null : fields.labels,
       session,
       fields.process,
       ...(keep ? [] : [token ? this.hash(token) : null]),
@@ -1297,16 +1306,14 @@ export class RelayCore {
   }
 
   /**
-   * whether a claim's `under` names the local agent that `row`, hibernated by the built-in {@link SPAWN_PROVIDER} waker, sits under: the
-   * waker's runner taking the worker back where it is, as a restart in place
+   * the local row hibernated by {@link SPAWN_PROVIDER} whose current wake ticket hashes to `ticket`, connectionless and of a fitting harness:
+   * the waker run it was given to taking it back as its resumed session. An unknown or spent ticket is unauthorized
    */
-  private placedUnder(row: EndpointRow, scope: ClaimScope): boolean {
-    if (scope.under === undefined || row.parent_ep === null || row.hibernate !== SPAWN_PROVIDER) return false
-    try {
-      return this.resolve(scope.under).id === row.parent_ep
-    } catch {
-      return false
-    }
+  private ticketed(ticket: string, harness: string): EndpointRow {
+    const row = one<EndpointRow>(this.sql, `SELECT * FROM endpoints WHERE kind = 'agent' AND wake_ticket = ? AND hibernate = ?`, ticket, SPAWN_PROVIDER)
+    if (!row || !this.localRow(row) || !harnessFits(row.harness, harness)) throw new RelayError("unauthorized", "the wake ticket is unknown or spent")
+    if (row.connections > 0) throw new RelayError("unavailable", "the endpoint is still held: try again once it lets go")
+    return row
   }
 
   /**
@@ -2247,7 +2254,8 @@ export class RelayCore {
       endpoint,
       now,
     )!.n
-    this.sql.all(`UPDATE endpoints SET wake_tried = ? WHERE id = ?`, now, endpoint)
+    const ticket = row.hibernate === SPAWN_PROVIDER ? `kwt_${randomHex(32)}` : undefined
+    this.sql.all(`UPDATE endpoints SET wake_tried = ?, wake_ticket = ? WHERE id = ?`, now, ticket ? this.hash(ticket) : null, endpoint)
     const sender = this.byId(newest.from_ep)
     return {
       endpoint,
@@ -2257,6 +2265,7 @@ export class RelayCore {
       ref: row.wake_ref,
       message: { id: newest.id, from: sender ? this.address(sender) : null, kind: newest.kind, thread: newest.thread, created_at: iso(newest.created_at)! },
       unread,
+      ...(ticket ? { ticket } : {}),
     }
   }
 
@@ -2321,7 +2330,7 @@ export class RelayCore {
   private clearHibernation(endpoint: string): void {
     this.sql.all(
       `UPDATE endpoints SET hibernate = NULL, wake_ref = NULL, wake_eta = NULL, hibernated_at = NULL, wake_tried = NULL, wake_fails = 0, wake_note = NULL,
-       wake_declined = NULL, declined_message = NULL, declined_from = NULL WHERE id = ?`,
+       wake_declined = NULL, declined_message = NULL, declined_from = NULL, wake_ticket = NULL WHERE id = ?`,
       endpoint,
     )
   }

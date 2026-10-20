@@ -324,8 +324,9 @@ async function wakeRunner(env: Env): Promise<number> {
   const ref = parseHoldRef(env.SCP_WAKE_REF)
   const handle = env.SCP_WAKE_HANDLE
   const address = env.SCP_WAKE_ENDPOINT
-  if (!ref || !handle || !address) {
-    reply({ error: "no resumable ref" })
+  const ticket = env.SCP_WAKE_TICKET
+  if (!ref || !handle || !address || !ticket) {
+    reply({ error: ticket ? "no resumable ref" : "no wake ticket: this broker cannot hand the endpoint back" })
     return 1
   }
   const session = randomBytes(16).toString("hex")
@@ -338,8 +339,7 @@ async function wakeRunner(env: Env): Promise<number> {
     session: `env:${session}`,
     process: processKey(process.pid),
     exact: true,
-    under: ref.parent,
-    labels: labelsFor(env),
+    ticket,
   }
   for (const deadline = Date.now() + RECLAIM_MS; !held && Date.now() < deadline; ) {
     held = await holdEndpoint(
@@ -364,6 +364,7 @@ async function wakeRunner(env: Env): Promise<number> {
     SCP_WAKE_FROM: _f,
     SCP_WAKE_KIND: _k,
     SCP_WAKE_THREAD: _t,
+    SCP_WAKE_TICKET: _w,
     SCP_GRANT: _g,
     SCP_PARENT: _pa,
     ...clean

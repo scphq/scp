@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { afterEach, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -272,7 +273,8 @@ test("a durable worker hibernates when let go; a message wakes it through the bu
   const runner = f.spawn("--durable", "--idle", "2", "--name", "hd", "--", "codex", "exec", "go")
   await f.next("hd")
   await waitFor(() => !alive(runner), 15_000, "the runner to hibernate and exit")
-  expect(await f.view("hd")).toMatchObject({ presence: "hibernated", wake: "hook:spawn" })
+  const asleep = await f.view("hd")
+  expect(asleep).toMatchObject({ presence: "hibernated", wake: "hook:spawn" })
 
   const steer = await f.lead.request<{ id: string }>("send", { to: "hd", body: "wake up and continue" })
   const back = await f.next("hd")
@@ -283,6 +285,16 @@ test("a durable worker hibernates when let go; a message wakes it through the bu
   expect(resumed.argv.at(-1)).toContain("wake up and continue")
   expect(resumed.address).toBe("me/hd")
   expect((await f.view("hd"))?.parent).toBe("me/lead")
+  expect((await f.view("hd"))?.labels).toEqual(asleep!.labels)
+  const db = new Database(join(f.env.SCP_DIR!, "relay.db"), { readonly: true })
+  const audits = (event: string) => db.query("SELECT detail FROM audit WHERE event = ?").all(event) as { detail: string }[]
+  expect(audits("scope_reset")).toEqual([])
+  expect(
+    audits("claim")
+      .map((a) => JSON.parse(a.detail))
+      .filter((a) => a.handle === "hd" && a.resumed),
+  ).toHaveLength(1)
+  db.close()
   await until(async () => (await f.view("hd"))?.presence === "hibernated", 15_000, "the woken worker to hibernate again")
 })
 

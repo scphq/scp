@@ -1,8 +1,8 @@
 const KEY_KIND = "[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"
 const KEY_END = new RegExp(String.raw`-----END ${KEY_KIND}[^\n]*\n?`)
 
-/** the prefixes, without their `_`, of the tokens this implementation issues: `kre_` resume tokens and `scp_` */
-export const DEFAULT_IMPLEMENTATION_PREFIXES: readonly string[] = ["scp", "kre"]
+/** the prefixes, without their `_`, of the tokens this implementation issues: `kre_` resume tokens, `kwt_` wake tickets and `scp_` */
+export const DEFAULT_IMPLEMENTATION_PREFIXES: readonly string[] = ["scp", "kre", "kwt"]
 
 const PREFIX = /^[A-Za-z0-9]{1,32}$/
 

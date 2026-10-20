@@ -145,27 +145,57 @@ describe("a held spawn", () => {
     expect(core.hibernateHeld(worker.id)).toEqual([])
   })
 
-  test("a claim naming the parent a worker hibernated by spawn sits under takes it back in place, as the built-in waker's runner does", () => {
-    const { core, worker, hold, row } = setup()
+  test("a spawn waker run's ticket takes the hibernated worker back as its resumed session, never an incarnation", () => {
+    const { core, db, main, worker, hold, audit } = setup()
     hold(REF)
-    core.hibernate({ kind: "endpoint", id: worker.id, auth: "session" }, { wake: "vm", ref: "box" })
+    db.query(`UPDATE endpoints SET labels = '{"team":"a"}', peek = 'local', title = 'durable' WHERE id = ?`).run(worker.id)
+    db.query("INSERT INTO group_members (name, endpoint, added_by, at) VALUES ('crew', ?, ?, 0)").run(worker.id, main.id)
     core.waker(worker.id, false)
-    core.disconnect(worker.id)
-    expect(code(() => core.claim({ handle: "w1", harness: "codex", exact: true, process: key(19), session: "env:vm", under: "me/main" }))).toBe("unauthorized")
-    core.hibernate({ kind: "human", tty: true }, { endpoint: "w1", wake: "none" })
-    core.claim({ handle: "w1", harness: "codex", cwd: "/w", session: "env:held", process: key(9), lineage: [key(1)], exact: true })
-    core.setWake(worker.id, "spawn-resume", { ref: REF })
-    core.waker(worker.id, true)
     core.hibernateHeld(worker.id)
+    core.disconnect(worker.id)
+    core.send(main.id, { to: "w1", body: "remember?" })
+    const job = core.wakeDue(worker.id)!
+    const ticket = job.ticket!
+    expect(ticket).toMatch(/^kwt_[0-9a-f]{64}$/)
+    expect(code(() => core.claim({ handle: "w1", harness: "codex", exact: true, process: key(20), session: "env:woken" }))).toBe("unauthorized")
+    expect(code(() => core.claim({ handle: "w1", harness: "codex", process: key(21), session: "env:x", ticket: `kwt_${"0".repeat(64)}` }))).toBe("unauthorized")
+    expect(code(() => core.claim({ handle: "w1", harness: "grok", process: key(21), session: "env:x", ticket }))).toBe("unauthorized")
+    const back = core.claim({ handle: "w1", harness: "codex", exact: true, process: key(22), session: "env:woken", ticket }).endpoint
+    expect([back.id, back.parent, back.presence, back.title]).toEqual([worker.id, "me/main", "online", "durable"])
+    expect(back.labels).toMatchObject({ team: "a" })
+    expect(db.query("SELECT peek, hibernate, wake_ticket FROM endpoints WHERE id = ?").get(worker.id)).toEqual({
+      peek: "local",
+      hibernate: null,
+      wake_ticket: null,
+    })
+    expect(db.query("SELECT name FROM group_members WHERE endpoint = ?").all(worker.id)).toEqual([{ name: "crew" }])
+    expect(audit("scope_reset")).toEqual([])
+    expect(audit("claim").at(-1)).toMatchObject({ handle: "w1", resumed: true })
+    core.disconnect(worker.id)
+    expect(code(() => core.claim({ handle: "w1", harness: "codex", process: key(23), session: "env:again", ticket }))).toBe("unauthorized")
+  })
+
+  test("a wake ticket waits while the endpoint is still held, and a newer run's ticket replaces it", () => {
+    const { core, clock, main, worker, hold } = setup()
+    hold(REF)
+    core.hibernate({ kind: "endpoint", id: worker.id, auth: "session" }, { wake: "spawn", ref: REF })
+    core.send(main.id, { to: "w1", body: "wake" })
+    const first = core.wakeDue(worker.id)!.ticket!
+    expect(code(() => core.claim({ handle: "w1", harness: "codex", process: key(24), session: "env:early", ticket: first }))).toBe("unavailable")
     core.waker(worker.id, false)
     core.disconnect(worker.id)
-    expect(code(() => core.claim({ handle: "w1", harness: "codex", exact: true, process: key(20), session: "env:woken" }))).toBe("unauthorized")
-    expect(code(() => core.claim({ handle: "w1", harness: "codex", exact: true, process: key(21), session: "env:other", under: "elsewhere" }))).toBe(
-      "unauthorized",
-    )
-    const back = core.claim({ handle: "w1", harness: "codex", exact: true, process: key(22), session: "env:woken", under: "me/main" }).endpoint
-    expect([back.id, back.parent, back.presence]).toEqual([worker.id, "me/main", "online"])
-    expect(row(worker.id)).toMatchObject({ hibernate: null })
+    clock.now += 61_000
+    const second = core.wakeDue(worker.id)!.ticket!
+    expect(second).not.toBe(first)
+    expect(code(() => core.claim({ handle: "w1", harness: "codex", process: key(25), session: "env:old", ticket: first }))).toBe("unauthorized")
+    expect(core.claim({ handle: "w1", harness: "codex", process: key(26), session: "env:new", ticket: second }).endpoint.id).toBe(worker.id)
+  })
+
+  test("only a spawn hibernation mints a wake ticket", () => {
+    const { core, main, worker } = setup()
+    core.hibernate({ kind: "endpoint", id: worker.id, auth: "session" }, { wake: "vm", ref: "box" })
+    core.send(main.id, { to: "w1", body: "wake" })
+    expect(core.wakeDue(worker.id)?.ticket).toBeUndefined()
   })
 
   test("spawn_end lets the worker go: its wake, durable ref and spawn hibernation clear, for its spawner or an ancestor only", () => {
