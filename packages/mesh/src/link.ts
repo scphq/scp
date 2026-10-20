@@ -171,6 +171,12 @@ export function startMesh(options: MeshOptions): MeshLink {
     return latest
   }
 
+  /** a live link to a machine of this name under another machine key: two machines share a name */
+  function rival(name: string, key: string): boolean {
+    const live = linked(name)
+    return !!live && live.cert!.key !== key
+  }
+
   function apply(record: MachineRecord) {
     try {
       core.mirror(record.machine, record.endpoints, { full: true, auth: "account+bridge" })
@@ -327,7 +333,8 @@ export function startMesh(options: MeshOptions): MeshLink {
       const params = object(frame.params, "params")
       if (frame.method === "mesh_hello" && !link.cert) {
         if (params.protocol !== PROTOCOL || params.acct !== acct) return refuse(link, "wrong protocol or account")
-        if (!verifyCert(params.cert, trust) || params.cert.account !== account || params.cert.machine === machine) return refuse(link, "invalid certificate")
+        if (!verifyCert(params.cert, trust) || params.cert.account !== account) return refuse(link, "invalid certificate")
+        if (params.cert.machine === machine) return refuse(link, `the peer is also named ${machine}: give one of them another --machine`)
         if (typeof params.nonce !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(params.nonce)) return refuse(link, "invalid nonce")
         if (!validPublicKey(params.kx)) return refuse(link, "invalid key exchange")
         link.cert = params.cert
@@ -348,6 +355,7 @@ export function startMesh(options: MeshOptions): MeshLink {
       }
       if (frame.method === "mesh_auth" && link.cert) {
         const peer = link.cert.machine
+        if (rival(peer, link.cert.key)) return refuse(link, `machine ${peer} is already linked with another machine key`)
         const payload = { acct, from: peer, to: machine, peer_nonce: link.nonce, nonce: link.peerNonce, peer_kx: link.exchange.public, kx: link.peerKx }
         if (!verifyPayload(link.cert.key, SIGN_DOMAIN.auth, payload, params.sig)) return refuse(link, "invalid authentication")
         const own = { from_nonce: link.nonce, from_kx: link.exchange.public }
@@ -368,7 +376,7 @@ export function startMesh(options: MeshOptions): MeshLink {
       if (!Array.isArray(params.records)) return refuse(link, "invalid records")
       const accepted: MachineRecord[] = []
       for (const record of params.records) {
-        if (!verifyRecord(record, trust) || record.cert.account !== account || record.machine === machine) continue
+        if (!verifyRecord(record, trust) || record.cert.account !== account || record.machine === machine || rival(record.machine, record.cert.key)) continue
         const previous = records.get(record.machine)
         if (previous && (record.epoch < previous.epoch || (record.epoch === previous.epoch && record.seq <= previous.seq))) continue
         records.set(record.machine, record)
