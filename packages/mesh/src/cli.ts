@@ -45,7 +45,14 @@ usage:
   swarm mesh status [--json]
   swarm mesh help
 
-Peers should be on a trusted network (for example a tailnet) since frames are not encrypted by the mesh itself.`
+--account-key - reads the key from stdin, for example over ssh:
+  ssh <host> swarm mesh init --account-key - < <state dir>/mesh/account.key
+
+Links are mutually authenticated and sealed, but peers dial each other directly:
+every listening machine needs an address the others reach (a private network or tailnet).
+Changes other than peers take effect after swarm daemon restart.`
+
+const RESTART = "swarm daemon restart applies it"
 
 class UsageError extends Error {}
 
@@ -115,7 +122,8 @@ function init(rest: string[], io: MeshIo, dir: string): number {
 
   const accountKeyPath = values["account-key"] as string | undefined
   let imported: AccountKey | undefined
-  if (accountKeyPath !== undefined) imported = parseAccountKey(readFileSync(accountKeyPath, "utf8"), accountKeyPath)
+  if (accountKeyPath !== undefined)
+    imported = parseAccountKey(readFileSync(accountKeyPath === "-" ? 0 : accountKeyPath, "utf8"), accountKeyPath === "-" ? "stdin" : accountKeyPath)
 
   const givenAccount = values.account as string | undefined
   if (imported && givenAccount !== undefined && givenAccount !== imported.account)
@@ -169,8 +177,8 @@ function init(rest: string[], io: MeshIo, dir: string): number {
   io.out(`account id: ${accountId(accountKey.public)}`)
   io.out(`machine: ${machine}`)
   io.out(`listen: ${listen ?? "dials out only"}`)
-  io.out(`copy ${join(dir, ACCOUNT_KEY_FILE)} to the other machines and run swarm mesh init --account-key <file> there`)
-  io.out("restart the broker (swarm daemon) for it to take effect")
+  io.out(`copy ${join(dir, ACCOUNT_KEY_FILE)} to the other machines and run swarm mesh init --account-key <file> there (- reads stdin)`)
+  io.out(RESTART)
   return 0
 }
 
@@ -212,11 +220,13 @@ function listenCommand(rest: string[], io: MeshIo, dir: string): number {
   if (arg === "off") {
     writeConfig({ ...config, listen: null }, dir)
     io.out("listen: off")
+    io.out(RESTART)
     return 0
   }
   const listen = hostPort(arg, { listen: true })
   writeConfig({ ...config, listen }, dir)
   io.out(`listen: ${listen}`)
+  io.out(RESTART)
   return 0
 }
 
@@ -228,6 +238,7 @@ function setEnabled(rest: string[], io: MeshIo, dir: string, verb: "on" | "off")
   const enabled = verb === "on"
   writeConfig({ ...config, enabled }, dir)
   io.out(enabled ? "mesh enabled" : "mesh disabled")
+  io.out(RESTART)
   return 0
 }
 

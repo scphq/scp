@@ -1259,19 +1259,21 @@ A hub reads contacts, allowlists and the egress and ingress gates from its host 
 
 This section is experimental and non-normative: it describes the phase-1 mesh wire of the reference implementation, may change without notice, and a conforming implementation need not support it.
 
-**Scope.** Brokers of one account link directly over WebSocket (`ws://`) to a static peer list (for example hostnames and ports on a private network or tailnet), with no hub. The mesh is off until it is configured; the broker opens no port and dials nothing before that, nor while it is disabled. A broker with a hub configured (section 14.2) uses the hub and does not start the mesh. Phase 1 has no NAT traversal, rendezvous, offline store, cross-account contacts or revocation. The mesh does not encrypt frames itself: peers belong on a trusted network.
+**Scope.** Brokers of one account link directly over WebSocket (`ws://`) to a static peer list (for example hostnames and ports on a private network or tailnet), with no hub. The mesh is off until it is configured; the broker opens no port and dials nothing before that, nor while it is disabled. A broker with a hub configured (section 14.2) uses the hub and does not start the mesh. Phase 1 has no NAT traversal, rendezvous, offline store, cross-account contacts or revocation: every listening machine needs an address its peers reach directly. Links are mutually authenticated and, after the handshake, sealed with keys from an ephemeral key exchange, so the transport needs no TLS.
 
 **Keys and trust.**
 
 - Every machine of the account holds the same Ed25519 account key. Public keys are written as their 43-character base64url JWK `x`. The account id is `acct_` followed by the first 32 hex characters of the SHA-256 of the `public` string (its base64url text, not the decoded key).
 - Each machine has its own Ed25519 machine key. Its certificate `{v: 1, acct, account, machine, key, sig}` binds `machine` and `key` (`public`) to `acct` and `account`, signed by the account key.
 - Signatures are base64url Ed25519 over a domain string, a newline, and the canonical JSON (keys sorted at every level, `undefined` members omitted) of the payload without `sig`. The signing domains are `scp/1 mesh cert`, `scp/1 mesh record` and `scp/1 mesh auth`.
+- Each link uses a fresh X25519 key pair; its public key `kx` is written like the Ed25519 keys.
 
 **Transport and handshake.**
 
-- Peers connect on WebSocket path `/scp/mesh` and exchange JSON-RPC 2.0 text frames of at most 262144 bytes.
-- On open, both sides send the notification `mesh_hello {protocol: "scp/1", acct, cert, nonce}` (`nonce` is 32 random bytes as 43 base64url characters). Each side verifies `protocol`, `acct`, `cert` (for the same `account` and a different `machine`) and `nonce`, then sends the notification `mesh_auth {sig}` signed by its machine key over `{acct, from: <own machine>, to: <peer machine>, peer_nonce: <peer nonce>, nonce: <own nonce>}`.
-- Refusals close the socket with 1008; no authentication within 10 s closes the link with 1008. A binary frame, a frame that is not a JSON-RPC 2.0 object, and before authentication a request (`id` present) or any frame other than `mesh_hello` then `mesh_auth` close with 1008. An oversize frame is closed by the WebSocket layer with 1009.
+- Peers connect on WebSocket path `/scp/mesh` and exchange JSON-RPC 2.0 frames of at most 262144 bytes of JSON text.
+- On open, both sides send the text notification `mesh_hello {protocol: "scp/1", acct, cert, nonce, kx}` (`nonce` is 32 random bytes as 43 base64url characters). Each side verifies `protocol`, `acct`, `cert` (for the same `account` and a different `machine`), `nonce` and `kx`, then sends the text notification `mesh_auth {sig}` signed by its machine key over `{acct, from: <own machine>, to: <peer machine>, peer_nonce: <peer nonce>, nonce: <own nonce>, peer_kx: <peer kx>, kx: <own kx>}`. A side is authenticated once it verified the peer's `mesh_auth`.
+- **Sealing.** After authentication every frame is a binary WebSocket frame: the JSON text sealed with AES-256-GCM, ciphertext followed by the 16-byte tag, no associated data. The key for frames from machine F to machine T is HKDF-SHA256 (empty salt, 32 bytes) of the X25519 shared secret, with info `scp/1 mesh key`, a newline and the canonical JSON of `{acct, from: F, to: T, from_nonce, to_nonce, from_kx, to_kx}` (the nonces and `kx` values F and T sent in their `mesh_hello`). The 12-byte GCM nonce is 4 zero bytes and a big-endian 64-bit count of the frames sealed in that direction, starting at 0, so a replayed, reordered, dropped or altered frame fails to open. An all-zero shared secret is refused.
+- Refusals close the socket with 1008; no authentication within 10 s closes the link with 1008. A frame that is not a JSON-RPC 2.0 object, a binary frame before authentication, a text frame or a frame that fails to open after it, and before authentication a request (`id` present) or any frame other than `mesh_hello` then `mesh_auth` close with 1008. An oversize frame is closed by the WebSocket layer with 1009. A listener with 64 inbound links still authenticating closes further connections with 1013.
 
 **Machine records and presence.**
 
@@ -1285,7 +1287,7 @@ This section is experimental and non-normative: it describes the phase-1 mesh wi
 
 - The sending broker runs the sender checks of section 14.2 Forwarding (local scope and policy, string body, credential scan, idempotency, sender mirrored; the human handle is `""`), plus: all recipients must be on one other machine (`invalid_params` otherwise), other accounts are `not_found`, and `private` data is always refused (`data_class_refused`).
 - No live link to the target machine is `unavailable` with `retry_after` 5; an answer later than 30 s (or link close) is `unavailable`.
-- The broker sends the request `forward {from: <handle>, params, hop_floor, tty?}` (with `to` rewritten to an array of `<machine>/<handle>`, `client_id` generated when absent, and `attachments` and `wait_s` removed); the answer is the `SendResult` or an error carrying `data.code` and `retry_after`. After a non-duplicate success with deliveries, the sender records the message and its delivery to the mirrored recipients, so replies join the thread.
+- The sender first sends its newer machine record when its endpoints changed since the last one, so the receiver knows a sender claimed just before; then the broker sends the request `forward {from: <handle>, params, hop_floor, tty?}` (with `to` rewritten to an array of `<machine>/<handle>`, `client_id` generated when absent, and `attachments` and `wait_s` removed); the answer is the `SendResult` or an error carrying `data.code` and `retry_after`. After a non-duplicate success with deliveries, the sender records the message and its delivery to the mirrored recipients, so replies join the thread.
 
 **Receiver authority.**
 

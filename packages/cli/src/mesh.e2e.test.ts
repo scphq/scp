@@ -11,9 +11,20 @@ const entry = join(import.meta.dir, "cli.ts")
 const RUNNER = join(import.meta.dir, "testing", "local-ssh-runner.ts")
 
 type Listed = { endpoints: { address: string; presence?: string; parent?: string | null; status?: { state: string; note: string | null } | null }[] }
-type Message = { id: string; seq: number; kind: string; thread: string; reply_to?: string | null; from: { address: string; machine?: string; auth?: string }; body: { text: string } }
+type Message = {
+  id: string
+  seq: number
+  kind: string
+  thread: string
+  reply_to?: string | null
+  from: { address: string; machine?: string; auth?: string }
+  body: { text: string }
+}
 type Inbox = { messages: Message[] }
-type MeshLive = { connected: boolean; mesh?: { listen: string | null; peers: { addr: string; connected: boolean; last_error: string | null }[]; links: { machine: string }[] } }
+type MeshLive = {
+  connected: boolean
+  mesh?: { listen: string | null; peers: { addr: string; connected: boolean; last_error: string | null }[]; links: { machine: string }[] }
+}
 
 async function until<T>(fn: () => Promise<T | undefined | null | false>, what: string, ms = 20_000): Promise<T> {
   const deadline = Date.now() + ms
@@ -96,9 +107,9 @@ class Machine {
     return JSON.parse(await this.ok([...args, "--json"])) as T
   }
 
-  async init(args: string[]) {
+  async init(args: string[], stdin?: string) {
     this.port ||= await freePort()
-    return this.ok(["mesh", "init", "--machine", this.name, "--listen", this.addr, ...args])
+    return this.ok(["mesh", "init", "--machine", this.name, "--listen", this.addr, ...args], stdin === undefined ? {} : { stdin })
   }
 
   /** a long-lived agent session on this machine, so its endpoint stays online */
@@ -155,10 +166,7 @@ describe("mesh across real brokers", () => {
 
   beforeAll(async () => {
     writeFileSync(harness, `console.log("result from " + process.env.SCP_NAME + " under " + process.env.SCP_UNDER)\n`)
-    writeFileSync(
-      runners,
-      JSON.stringify({ vm: { command: [process.execPath, "--no-env-file", RUNNER, "--dir", b.dir, "--machine", "vm"], timeout_s: 60 } }),
-    )
+    writeFileSync(runners, JSON.stringify({ vm: { command: [process.execPath, "--no-env-file", RUNNER, "--dir", b.dir, "--machine", "vm"], timeout_s: 60 } }))
   })
 
   afterAll(async () => {
@@ -170,7 +178,7 @@ describe("mesh across real brokers", () => {
     b.port = await freePort()
     const out = await a.init(["--account", "team"])
     expect(out).toContain("machine: laptop")
-    await b.init(["--account-key", join(a.dir, "mesh", "account.key")])
+    await b.init(["--account-key", "-"], readFileSync(join(a.dir, "mesh", "account.key"), "utf8"))
     await a.ok(["mesh", "add-peer", b.addr])
     await b.ok(["mesh", "add-peer", a.addr])
     const accountA = JSON.parse(readFileSync(join(a.dir, "mesh", "account.key"), "utf8")) as { public: string }
@@ -230,6 +238,20 @@ describe("mesh across real brokers", () => {
     await answerer.request("send", { to: "laptop/lead", body: "48", kind: "reply", reply_to: second.id })
     const waited = await lead.request<{ reply?: { body: { text: string } } }>("ask_wait", { id: later.id, wait_s: 15 })
     expect(waited.reply?.body.text).toBe("48")
+  })
+
+  test("an agent's rules on one machine gate senders on the other", async () => {
+    const closed = await b.agent("closed")
+    await until(async () => present(await a.listed("me/vm/closed")), "vm/closed on laptop")
+    await closed.request("rules_set", { in: ["tree:descendants"] })
+    const refused = await until(async () => {
+      const sent = await a.swarm(["send", "--as", "lead", "vm/closed", "may I"])
+      return sent.code !== 0 ? sent : undefined
+    }, "the mirrored rules on laptop")
+    expect(refused.stderr).toContain("closed")
+    await closed.request("rules_set", { in: ["*"] })
+    await until(async () => (await a.swarm(["send", "--as", "lead", "vm/closed", "now?"])).code === 0, "the opened rules on laptop")
+    expect((await closed.request<Inbox>("inbox", { wait_s: 5 })).messages.map((message) => message.body.text)).toEqual(["now?"])
   })
 
   test("a worker linked under an agent on the other machine shows under it and hands its result back", async () => {
