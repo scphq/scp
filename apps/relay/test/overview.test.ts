@@ -112,6 +112,13 @@ test("a hibernated spawn's wake hook and a held spawn read as words, not wake to
   expect(wakeHow("channels")).toBe("a message wakes it via channels");
 });
 
+test("a hibernated agent its machine is waking reads as waking", () => {
+  const waking = { ...ep("waking", "hibernated"), wake: "hook:vm", waking: true } as unknown as EndpointView;
+  const page = liveRegion({ machines: [], endpoints: [waking], activity: [] }, "acme", Date.now()).value;
+  expect(page).toContain('title="hibernated, its machine is waking"');
+  expect(page).toContain('<span class="mini">waking</span>');
+});
+
 test("the graph data block names each node's machine and label, escapes markup and drops a retired handle", async () => {
   const graphPath = "../src/graph";
   const { graphData }: { graphData(g: unknown): { value: string } } = await import(graphPath);

@@ -25,6 +25,7 @@ import {
   newId,
   one,
   PREAMBLE,
+  PRESENCES,
   type Presence,
   PROTOCOL,
   parseXMessage,
@@ -110,6 +111,8 @@ export interface GraphNode {
   last_seen: string | null
   parent: string | null
   wake?: Wake | null
+  /** a hibernated agent its machine waker is waking */
+  waking?: true
 }
 
 /** `spawn`: parent to child; `message`: sender to recipient, with the count and newest send in the graph's window */
@@ -134,7 +137,7 @@ export const GRAPH_MINUTES_MAX = 60
 
 /** what a read-only dashboard stream sees as it happens: addresses, kinds and presence, never a body, note, summary or label */
 export type DashboardEvent =
-  | { type: "presence"; at: string; machine: string | null; endpoint: string; presence: Presence }
+  | { type: "presence"; at: string; machine: string | null; endpoint: string; presence: Presence; waking?: boolean }
   | { type: "message"; at: string; kind: string; from: string; to: string[]; local?: true }
   | { type: "endpoints"; at: string; machine: string }
 
@@ -150,8 +153,9 @@ export function dashboardEvent(event: Record<string, unknown>, at: string): Dash
   }
   if (event.type === "presence") {
     const endpoint = str(event.endpoint)
-    const presence = event.presence === "online" || event.presence === "idle" || event.presence === "offline" ? event.presence : null
-    return endpoint && presence ? { type: "presence", at, machine: str(event.machine), endpoint, presence } : null
+    const presence = (PRESENCES as readonly unknown[]).includes(event.presence) ? (event.presence as Presence) : null
+    const waking = typeof event.waking === "boolean" ? { waking: event.waking } : {}
+    return endpoint && presence ? { type: "presence", at, machine: str(event.machine), endpoint, presence, ...waking } : null
   }
   return null
 }
@@ -201,7 +205,40 @@ export interface HubDeps {
   ) => Promise<{ status: number; text?: () => Promise<string> }>
   /** the embedder's own machine waker, called in-process for any machine in place of a registered URL; metadata only, never a body or secret */
   machineWake?: (event: MachineWakeEvent) => Promise<{ ok: boolean; status?: number; declined?: WakeDecline }>
+  /** overrides of {@link HUB_WAKE}, how and how often the machine waker is called */
+  wake?: Partial<HubWakeOptions>
 }
+
+/** machine waker options; `Infinity` disables a per-hour cap or makes a decline hold until it clears */
+export interface HubWakeOptions {
+  /** a message from another account's contact calls the machine waker too, within the per-hour caps below */
+  crossAccount: boolean
+  /** machine waker calls messages from one other account may cause, an hour */
+  senderAccountPerHour: number
+  /** machine waker calls messages from other accounts may cause for one endpoint, an hour */
+  targetPerHour: number
+  /** the least time between two calls for one machine */
+  debounceS: number
+  /** the longest backoff after failed calls */
+  backoffMaxS: number
+  /** how long a row shows waking after an accepted call; its machine is not called again meanwhile */
+  wakingTimeoutS: number
+  /** how long a decline holds calls for its message and sender */
+  declineHoldS: number
+}
+
+export const HUB_WAKE: HubWakeOptions = {
+  crossAccount: false,
+  senderAccountPerHour: 6,
+  targetPerHour: 12,
+  debounceS: LIMITS.wakeDebounceS,
+  backoffMaxS: LIMITS.wakeBackoffMaxS,
+  wakingTimeoutS: LIMITS.wakeDebounceS,
+  declineHoldS: Number.POSITIVE_INFINITY,
+}
+
+const WAKE_DURATIONS = ["debounceS", "backoffMaxS", "wakingTimeoutS"] as const satisfies readonly (keyof HubWakeOptions)[]
+const WAKE_HOUR_MS = 3_600_000
 
 /** what a configured judge needs besides its policy */
 export interface HubJudgeOptions {
@@ -250,6 +287,8 @@ const HUB_MIGRATION = [
   `CREATE TABLE IF NOT EXISTS machine_tombstones (name TEXT PRIMARY KEY, actor_id TEXT, user_id TEXT, at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS local_events (from_ep TEXT NOT NULL, to_ep TEXT NOT NULL, at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS local_events_at ON local_events (at)`,
+  `CREATE TABLE IF NOT EXISTS machine_wakes (machine TEXT PRIMARY KEY, next INTEGER NOT NULL, fails INTEGER NOT NULL, declined TEXT, declined_message TEXT, declined_from TEXT, declined_until INTEGER)`,
+  `CREATE TABLE IF NOT EXISTS wake_limits (key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)`,
 ]
 
 /** kinds a bridge reports for a delivery its broker made on its own machine */
@@ -355,13 +394,21 @@ export class RelayHub {
   private readonly limits: Readonly<HubLimits>
   private judgeConfig: { policy: JudgePolicy; options: HubJudgeOptions } | null = null
   private gate: JudgeGate | null = null
-  /** per machine, when its waker may be called next and the calls that failed in a row */
-  private readonly machineWakes = new Map<string, { next: number; fails: number; declined?: { reason: WakeDecline; message: string; from: string } }>()
+  private readonly wakeOptions: Readonly<HubWakeOptions>
 
   constructor(private readonly deps: HubDeps) {
     this.now = deps.now ?? Date.now
     this.limits = { ...HUB_LIMITS, ...deps.limits }
     for (const key of DURATIONS) if (!Number.isFinite(this.limits[key])) throw new RangeError(`hub limit ${key} must be finite`)
+    this.wakeOptions = { ...HUB_WAKE, ...deps.wake }
+    for (const key of WAKE_DURATIONS) {
+      const value = this.wakeOptions[key]
+      if (!Number.isFinite(value) || value < 0) throw new RangeError(`hub wake option ${key} must be a finite number of seconds`)
+    }
+    for (const key of ["senderAccountPerHour", "targetPerHour", "declineHoldS"] as const) {
+      const value = this.wakeOptions[key]
+      if (Number.isNaN(value) || value < 0) throw new RangeError(`hub wake option ${key} must be a number, or Infinity`)
+    }
   }
 
   /** idempotent: migrates and records the account handle (the address user part, e.g. "ada"); call before handling each request */
@@ -598,6 +645,8 @@ export class RelayHub {
       this.gone.clear()
       for (const [key, bucket] of this.buckets) if (bucket.tokens + ((now - bucket.at) * bucket.rate) / 60_000 >= bucket.rate) this.buckets.delete(key)
       this.xcounters?.prune()
+      this.deps.sql.all(`DELETE FROM wake_limits WHERE since <= ?`, now - WAKE_HOUR_MS)
+      this.deps.sql.all(`DELETE FROM machine_wakes WHERE machine NOT IN (SELECT name FROM machines)`)
       this.judgeGate()?.sweep()
       this.setState("last_sweep", now)
     }
@@ -606,6 +655,8 @@ export class RelayHub {
     } else {
       this.deps.sql.all(`DELETE FROM hub_state WHERE key = 'idle_since'`)
     }
+    for (const view of this.relay.wakingTimedOut(now))
+      this.fleet({ type: "presence", machine: view.machine, endpoint: view.address, presence: view.presence, waking: false })
     return this.nextAlarm()
   }
 
@@ -614,7 +665,11 @@ export class RelayHub {
     const now = this.now()
     const trueUp = this.xcounters?.dueAt() ?? null
     const held = this.retentionAlarm(now)
-    const retention = held === null || trueUp === null ? (held ?? trueUp) : Math.min(held, trueUp)
+    const waking = this.core?.wakingDue() ?? null
+    const retention = [held, trueUp, waking === null ? null : Math.max(waking, now)].reduce<number | null>(
+      (at, next) => (next === null ? at : at === null ? next : Math.min(at, next)),
+      null,
+    )
     const sockets = this.deps.sockets()
     if (!sockets.length) return retention
     let validated = this.state("last_validated")
@@ -1301,6 +1356,7 @@ export class RelayHub {
       this.write(socket, { jsonrpc: "2.0", method: "deliver", params: { seq, endpoint: target.remote, message: envelope } })
       pushed = true
     }
+    if (!pushed && this.wakeOptions.crossAccount) this.machineWake(target.machine, target.id, envelope, fromAccountId)
     this.wake(target.id)
     this.fleet({
       type: "message",
@@ -1544,7 +1600,7 @@ export class RelayHub {
   private setMachineWake(machine: string, url: unknown, secret: unknown): { set: boolean } {
     if (url === null || url === undefined) {
       this.deps.sql.all(`UPDATE machines SET wake_url = NULL, wake_secret = NULL WHERE name = ?`, machine)
-      this.machineWakes.delete(machine)
+      this.clearWakeHold(machine)
       this.relay.record("machine_wake_set", null, machine, { machine, set: false })
       return { set: false }
     }
@@ -1553,20 +1609,85 @@ export class RelayHub {
     if (typeof secret !== "string" || secret.length < 16 || secret.length > 256)
       throw new RelayError("invalid_params", "secret is 16 to 256 characters, and a url needs one")
     this.deps.sql.all(`UPDATE machines SET wake_url = ?, wake_secret = ? WHERE name = ?`, url, secret, machine)
-    this.machineWakes.delete(machine)
+    this.clearWakeHold(machine)
     this.relay.record("machine_wake_set", null, machine, { machine, set: true })
     return { set: true }
   }
 
   /**
-   * calls `machine`'s waker for its hibernated `recipient`: the embedder's `machineWake`, else the registered URL, signed. At most once per
-   * debounce window (doubling after failures); a decline counts toward nothing and holds calls for that message and its sender. Metadata only
+   * forgets the machine waker holds of `machine`, or of every machine: a decline, the debounce and the failure backoff, so the next
+   * message to a hibernated row calls its waker at once (for example once an embedder's budget allows wakes again); how many it forgot
    */
-  private machineWake(machine: string, recipient: string, message: Envelope): void {
+  clearWakeHold(machine?: string): number {
+    const rows =
+      machine === undefined
+        ? this.deps.sql.all(`DELETE FROM machine_wakes RETURNING machine`)
+        : this.deps.sql.all(`DELETE FROM machine_wakes WHERE machine = ? RETURNING machine`, machine)
+    return rows.length
+  }
+
+  private wakeState(machine: string, now: number): WakeState | null {
+    const row = one<{
+      next: number
+      fails: number
+      declined: string | null
+      declined_message: string | null
+      declined_from: string | null
+      declined_until: number | null
+    }>(this.deps.sql, `SELECT next, fails, declined, declined_message, declined_from, declined_until FROM machine_wakes WHERE machine = ?`, machine)
+    if (!row) return null
+    const held =
+      row.declined !== null && row.declined_message !== null && row.declined_from !== null && (row.declined_until === null || row.declined_until > now)
+    return {
+      next: row.next,
+      fails: row.fails,
+      declined: held ? { reason: row.declined!, message: row.declined_message!, from: row.declined_from!, until: row.declined_until } : null,
+    }
+  }
+
+  private setWakeState(machine: string, state: WakeState): void {
+    const d = state.declined
+    this.deps.sql.all(
+      `INSERT OR REPLACE INTO machine_wakes (machine, next, fails, declined, declined_message, declined_from, declined_until) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      machine,
+      state.next,
+      state.fails,
+      d?.reason ?? null,
+      d?.message ?? null,
+      d?.from ?? null,
+      d?.until ?? null,
+    )
+  }
+
+  /** counts one machine waker call a message of the account `fromAccountId` causes for `recipient`; false, counting nothing, past a cap */
+  private wakeAdmitted(fromAccountId: string, recipient: string, now: number): boolean {
+    const caps: [string, number][] = [
+      [`account:${fromAccountId}`, this.wakeOptions.senderAccountPerHour],
+      [`endpoint:${recipient}`, this.wakeOptions.targetPerHour],
+    ]
+    const counts = caps
+      .filter(([, cap]) => cap !== Number.POSITIVE_INFINITY)
+      .map(([key, cap]) => {
+        const row = one<{ n: number; since: number }>(this.deps.sql, `SELECT n, since FROM wake_limits WHERE key = ?`, key)
+        return row && now - row.since < WAKE_HOUR_MS ? { key, cap, n: row.n, since: row.since } : { key, cap, n: 0, since: now }
+      })
+    if (counts.some((c) => c.n >= c.cap)) return false
+    for (const c of counts) this.deps.sql.all(`INSERT OR REPLACE INTO wake_limits (key, n, since) VALUES (?, ?, ?)`, c.key, c.n + 1, c.since)
+    return true
+  }
+
+  /**
+   * calls `machine`'s waker for its hibernated `recipient`: the embedder's `machineWake`, else the registered URL, signed. At most once per
+   * debounce window (doubling after failures); an accepted call shows the row waking and holds further calls until it times out; a decline
+   * counts toward nothing and holds calls for that message and its sender. With `fromAccountId`, a message from that other account, within
+   * its per-hour caps. The state lives in storage, so an evicted or restarted hub keeps it. Metadata only
+   */
+  private machineWake(machine: string, recipient: string, message: Envelope, fromAccountId?: string): void {
     const embedded = this.deps.machineWake
     if (!embedded && !this.deps.fetch) return
+    const options = this.wakeOptions
     const now = this.now()
-    const state = this.machineWakes.get(machine)
+    const state = this.wakeState(machine, now)
     if (state && state.next > now) return
     if (state?.declined && (state.declined.message === message.id || state.declined.from === message.from.address)) return
     let view: EndpointView
@@ -1575,13 +1696,17 @@ export class RelayHub {
     } catch {
       return
     }
-    if (view.presence !== "hibernated") return
+    if (view.presence !== "hibernated" || view.waking) return
     const waker = embedded
       ? null
       : one<{ wake_url: string | null; wake_secret: string | null }>(this.deps.sql, `SELECT wake_url, wake_secret FROM machines WHERE name = ?`, machine)
     if (!embedded && (!waker?.wake_url || !waker.wake_secret)) return
+    if (fromAccountId !== undefined && !this.wakeAdmitted(fromAccountId, recipient, now)) {
+      this.deps.log?.("relay_action", { account: this.account, machine, method: "machine_wake", code: "rate_limited" })
+      return
+    }
     const fails = state?.fails ?? 0
-    this.machineWakes.set(machine, { next: now + LIMITS.wakeDebounceS * 1000, fails })
+    this.setWakeState(machine, { next: now + options.debounceS * 1000, fails, declined: null })
     const fromAccount = message.from.account ?? this.account
     const event: MachineWakeEvent = {
       scp: 1,
@@ -1594,13 +1719,21 @@ export class RelayHub {
       same_account: fromAccount === this.account,
     }
     const done = (ok: boolean, detail: { status?: number; error?: string; declined?: WakeDecline }) => {
-      if (detail.declined)
-        this.machineWakes.set(machine, { next: now, fails, declined: { reason: detail.declined, message: message.id, from: message.from.address } })
-      else {
-        const next = ok ? 0 : fails + 1
-        const backoff = ok ? LIMITS.wakeDebounceS : Math.min(LIMITS.wakeDebounceS * 2 ** next, LIMITS.wakeBackoffMaxS)
-        this.machineWakes.set(machine, { next: now + backoff * 1000, fails: next })
-      }
+      try {
+        const at = this.now()
+        if (detail.declined) {
+          const until = Number.isFinite(options.declineHoldS) ? at + options.declineHoldS * 1000 : null
+          this.setWakeState(machine, { next: now, fails, declined: { reason: detail.declined, message: message.id, from: message.from.address, until } })
+        } else if (ok) {
+          const until = at + options.wakingTimeoutS * 1000
+          this.setWakeState(machine, { next: until, fails: 0, declined: null })
+          if (this.relay.markWaking(recipient, until)) this.fleet({ type: "presence", machine, endpoint: view.address, presence: "hibernated", waking: true })
+        } else {
+          const next = fails + 1
+          const backoff = Math.min(options.debounceS * 2 ** next, Math.max(options.backoffMaxS, options.debounceS))
+          this.setWakeState(machine, { next: now + backoff * 1000, fails: next, declined: null })
+        }
+      } catch {}
       try {
         this.relay.record("machine_wake", null, machine, { machine, ok, ...detail })
       } catch {}
@@ -1634,8 +1767,7 @@ export class RelayHub {
 
   /** a machine's endpoint changes: `endpoints` to the other bridges, presence and status to watchers */
   private announce(machine: string, changes: MirrorChange[], full: boolean): void {
-    const waking = this.machineWakes.get(machine)
-    if (waking?.declined && changes.some((c) => c.presence && c.view.presence === "hibernated")) delete waking.declined
+    if (changes.some((c) => c.presence && c.view.presence === "hibernated")) this.clearWakeHold(machine)
     if (full || changes.length) {
       const endpoints = full ? this.relay.remoteRowsOf(machine) : changes.map((c) => (c.was === undefined ? c.view : { ...c.view, was: c.was }))
       this.toBridges(machine, { machine, endpoints, full })
@@ -1833,6 +1965,7 @@ export class RelayHub {
       last_seen: e.last_seen,
       parent: e.parent ?? null,
       ...(e.wake !== undefined ? { wake: e.wake } : {}),
+      ...(e.waking ? { waking: true as const } : {}),
     }))
     const edges: GraphEdge[] = nodes.flatMap((n) =>
       n.parent && n.parent !== n.address && listed.has(n.parent) ? [{ kind: "spawn" as const, from: n.parent, to: n.address }] : [],
@@ -2024,6 +2157,9 @@ export class RelayHub {
 }
 
 const MACHINE_WAKE_URL_CHARS = 2048
+
+/** a machine's waker calls: when the next may be made, the failures in a row, and a decline holding calls for its message and sender */
+type WakeState = { next: number; fails: number; declined: { reason: WakeDecline; message: string; from: string; until: number | null } | null }
 const MACHINE_WAKE_TIMEOUT_MS = 10_000
 
 /** an https URL, or http to this host, with no credentials in it */

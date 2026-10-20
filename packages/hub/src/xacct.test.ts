@@ -16,7 +16,7 @@ import {
   type XMessage,
 } from "@scp-dev/core"
 import { FederatedCore } from "./federation"
-import { type HubConn, RelayHub, type HubSocket } from "./hub"
+import { type HubConn, type HubDeps, RelayHub, type HubSocket } from "./hub"
 
 const START = 1_800_000_000_000
 const hash = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex")
@@ -106,7 +106,9 @@ const root = (handle: string, extra: Record<string, unknown> = {}) => ({
 })
 
 /** two accounts, alice and bob, each a hub on its own database, linked as contacts through a fake link that calls the other hub */
-function setup(options: { link?: boolean; storedBytes?: number } = {}) {
+type Options = { link?: boolean; storedBytes?: number; machineWake?: HubDeps["machineWake"]; wake?: HubDeps["wake"] }
+
+function setup(options: Options = {}) {
   const clock = { now: START }
   const accounts = new Map<string, Account>()
 
@@ -152,6 +154,8 @@ function setup(options: { link?: boolean; storedBytes?: number } = {}) {
       save: () => {},
       ...(options.storedBytes === undefined ? {} : { limits: { storedBytes: options.storedBytes } }),
       ...(options.link === false ? {} : { crossAccount: link }),
+      ...(options.machineWake ? { machineWake: options.machineWake } : {}),
+      ...(options.wake ? { wake: options.wake } : {}),
     }
     let hub = new RelayHub(deps)
     hub.init({ user: handle })
@@ -207,7 +211,7 @@ function setup(options: { link?: boolean; storedBytes?: number } = {}) {
 }
 
 /** alice's laptop with impl (which may write to bob, and takes in only its own tree) and her human; bob's desk with review */
-async function linked(options: { link?: boolean; storedBytes?: number } = {}) {
+async function linked(options: Options = {}) {
   const env = setup(options)
   const { alice, bob } = env
   const laptop = await alice.bridge("laptop", [
@@ -871,6 +875,102 @@ describe("cross-account messages between two account relays", () => {
     const { alice, laptop } = await linked({ link: false })
     expect(await alice.fails(laptop, "forward", forward("bob/desk/review", "x"))).toBe("not_found")
     expect(await code(alice.hub.xreceive("usr_b", {}))).toBe("invalid_params")
+  })
+})
+
+describe("machine waker for messages from other accounts", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+  const hibernated = (handle: string) => root(handle, { presence: "hibernated", wake: "hook:vm" })
+
+  async function asleep(options: Options) {
+    const env = await linked(options)
+    await env.bob.ok(env.desk, "mirror", {
+      full: true,
+      endpoints: [hibernated("review"), hibernated("spare"), root("lead", { rules: { in: ["tree:descendants"] } })],
+    })
+    env.bob.disconnect(env.desk)
+    return env
+  }
+
+  test("off by default: a contact's message to a hibernated endpoint queues and never calls the waker", async () => {
+    const events: unknown[] = []
+    const { alice, laptop, bob } = await asleep({
+      machineWake: async (event) => {
+        events.push(event)
+        return { ok: true }
+      },
+    })
+    expect((await alice.ok(laptop, "forward", forward("bob/desk/review", "hello"))).deliveries[0].offline).toBe(true)
+    await settle()
+    expect(events).toEqual([])
+    expect(bob.xinbox()).toBe(1)
+  })
+
+  test("on, a contact's message wakes it only after the scope, scrubber and gate checks pass, metadata only, and shows it waking", async () => {
+    const events: any[] = []
+    const { alice, bob, laptop } = await asleep({
+      machineWake: async (event) => {
+        events.push(event)
+        return { ok: true }
+      },
+      wake: { crossAccount: true },
+    })
+    expect(await alice.fails(laptop, "forward", forward("bob/desk/review", `here: scp_${"z".repeat(24)}`))).toBe("secret_refused")
+    expect(await alice.fails(laptop, "forward", forward("bob/desk/lead", "not on its in lists"))).toBe("not_found")
+    bob.gate.ingressVerdict = { verdict: "refuse", code: "policy_refused", categories: ["x"] }
+    expect(await alice.fails(laptop, "forward", forward("bob/desk/review", "refused"))).toBe("policy_refused")
+    bob.gate.ingressVerdict = { verdict: "hold", hold_id: "hld_1" }
+    await alice.ok(laptop, "forward", forward("bob/desk/review", "held"))
+    await settle()
+    expect(events).toEqual([])
+    bob.gate.ingressVerdict = { verdict: "pass" }
+    const sent = await alice.ok(laptop, "forward", forward("bob/desk/review", "UNIQUE-XACCT-BODY"))
+    await settle()
+    expect(events).toEqual([
+      {
+        scp: 1,
+        event: "machine_wake",
+        account: "bob",
+        machine: "desk",
+        endpoints: ["bob/desk/review"],
+        message: { id: sent.id, from: "alice/laptop/impl", kind: "message", thread: sent.thread, created_at: expect.any(String) },
+        from_account: "alice",
+        same_account: false,
+      },
+    ])
+    expect(JSON.stringify(events)).not.toContain("UNIQUE-XACCT-BODY")
+    const cli = bob.connect()
+    await bob.ok(cli, "hello", { protocol: PROTOCOL, machine: "ci", claim: { handle: "impl" } })
+    const listed = (await bob.ok(cli, "list", {})).endpoints.find((e: any) => e.address === "bob/desk/review")
+    expect(listed).toMatchObject({ presence: "hibernated", waking: true })
+  })
+
+  test("a sender account and a target each cause at most their per-hour wakes; Infinity lifts a cap", async () => {
+    const events: any[] = []
+    const machineWake = async (event: any) => {
+      events.push(event)
+      return { ok: true }
+    }
+    const sender = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: 2, targetPerHour: Number.POSITIVE_INFINITY } })
+    for (const body of ["one", "two", "three"]) {
+      await sender.alice.ok(sender.laptop, "forward", forward("bob/desk/review", body))
+      await settle()
+      sender.clock.now += 61_000
+    }
+    expect(events.length).toBe(2)
+    sender.clock.now += 3_600_000
+    await sender.alice.ok(sender.laptop, "forward", forward("bob/desk/review", "next hour"))
+    await settle()
+    expect(events.length).toBe(3)
+
+    events.length = 0
+    const target = await asleep({ machineWake, wake: { crossAccount: true, senderAccountPerHour: Number.POSITIVE_INFINITY, targetPerHour: 1 } })
+    for (const to of ["bob/desk/review", "bob/desk/review", "bob/desk/spare"]) {
+      await target.alice.ok(target.laptop, "forward", forward(to, "x"))
+      await settle()
+      target.clock.now += 61_000
+    }
+    expect(events.map((e) => e.endpoints[0])).toEqual(["bob/desk/review", "bob/desk/spare"])
   })
 })
 

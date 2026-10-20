@@ -46,7 +46,7 @@ export function graphData(g: IdentifiedGraph | null): Html {
       presence: n.presence,
       status: n.status,
       wake: n.wake && n.wake !== "none" ? n.wake : null,
-      how: n.wake && n.wake !== "none" ? wakeHow(n.wake) : null,
+      how: n.waking ? "its machine is waking" : n.wake && n.wake !== "none" ? wakeHow(n.wake) : null,
       parent: n.parent,
     };
   });

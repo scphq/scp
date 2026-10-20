@@ -86,6 +86,8 @@ interface FederatedRow extends EndpointRow {
   mirrored_caps: string | null
   /** another machine's row: the presence its bridge mirrored last */
   mirrored_presence: Presence | null
+  /** another machine's hibernated row whose machine waker accepted a wake: until when it shows waking */
+  waking_until: number | null
 }
 
 /** own rules as they cross machines: selector lists per direction */
@@ -298,6 +300,7 @@ export class FederatedCore extends RelayCore {
     if (!columns.includes("scope_epoch")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN scope_epoch INTEGER`)
     if (!columns.includes("mirrored_caps")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_caps TEXT`)
     if (!columns.includes("mirrored_presence")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_presence TEXT`)
+    if (!columns.includes("waking_until")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN waking_until INTEGER`)
     this.sql.all(`CREATE UNIQUE INDEX IF NOT EXISTS endpoints_remote ON endpoints (remote) WHERE remote IS NOT NULL`)
     if (this.xinbox) for (const statement of XACCT_MIGRATION) this.sql.all(statement)
   }
@@ -514,13 +517,18 @@ export class FederatedCore extends RelayCore {
 
   /**
    * a live mirrored row shows the presence its machine mirrored, not one its last_seen decays to here; a hibernated one stays hibernated with
-   * its hook wake after its bridge closed
+   * its hook wake after its bridge closed, and `waking` while a wake its machine waker accepted has not timed out
    */
   protected override view(row: EndpointRow, shown?: Set<string>): EndpointView {
     const view = super.view(row, shown)
-    const { remote, mirrored_presence: mirrored } = row as FederatedRow
+    const { remote, mirrored_presence: mirrored, waking_until: waking } = row as FederatedRow
     if (remote && mirrored === "hibernated")
-      return { ...view, presence: "hibernated", ...(view.kind === "agent" && row.wake && HOOK_WAKE.test(row.wake) ? { wake: row.wake as Wake } : {}) }
+      return {
+        ...view,
+        presence: "hibernated",
+        ...(view.kind === "agent" && row.wake && HOOK_WAKE.test(row.wake) ? { wake: row.wake as Wake } : {}),
+        ...(waking !== null && waking !== undefined && waking > this.now() ? { waking: true as const } : {}),
+      }
     return remote && row.connections > 0 && (mirrored === "online" || mirrored === "idle") ? { ...view, presence: mirrored } : view
   }
 
@@ -709,6 +717,7 @@ export class FederatedCore extends RelayCore {
           token_hash: null,
           connections: live ? 1 : 0,
           mirrored_presence: view.presence,
+          waking_until: view.presence === "hibernated" ? row.waking_until : null,
           last_seen: view.lastSeen ?? (live ? now : (before?.last_seen ?? null)),
           auth: auth ?? row.auth,
           ...(view.kind === "agent" ? this.scopeColumns(machine, view.scope, row, place(view.handle)) : {}),
@@ -894,6 +903,28 @@ export class FederatedCore extends RelayCore {
   }
 
   /** a bridge went away: its mirrored rows show offline */
+  /** shows the mirrored hibernated row `id` waking until `until`; false when the row is not, or no longer, mirrored hibernated */
+  markWaking(id: string, until: number): boolean {
+    return (
+      this.sql.all(
+        `UPDATE endpoints SET waking_until = ? WHERE id = ? AND remote IS NOT NULL AND token_hash IS NULL AND mirrored_presence = 'hibernated' RETURNING id`,
+        until,
+        id,
+      ).length > 0
+    )
+  }
+
+  /** the rows whose waking timed out by `now`, back to plain hibernated */
+  wakingTimedOut(now: number): RemoteView[] {
+    const rows = this.sql.all<{ id: string }>(`UPDATE endpoints SET waking_until = NULL WHERE waking_until <= ? RETURNING id`, now)
+    return rows.map((row) => this.remoteView(this.byId(row.id)!))
+  }
+
+  /** when the next waking row times out, or null */
+  wakingDue(): number | null {
+    return one<{ at: number | null }>(this.sql, `SELECT MIN(waking_until) AS at FROM endpoints WHERE waking_until IS NOT NULL`)?.at ?? null
+  }
+
   markOffline(machine: string): MirrorChange[] {
     const rows = this.sql.all<{ id: string }>(
       `UPDATE endpoints SET connections = 0, last_seen = ? WHERE substr(remote, 1, ?) = ? AND token_hash IS NULL AND connections > 0 RETURNING id`,

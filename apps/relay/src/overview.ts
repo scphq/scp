@@ -72,9 +72,15 @@ export function wakeHow(wake: string): string {
 
 function presence(e: EndpointView): { cell: Html; tip: string } {
   const wake = wakeOf(e);
-  const tip = wake ? `${e.presence}, ${wakeHow(wake)}` : e.presence === "idle" ? "idle, reads messages at its next turn" : e.presence;
+  const tip = e.waking
+    ? "hibernated, its machine is waking"
+    : wake
+      ? `${e.presence}, ${wakeHow(wake)}`
+      : e.presence === "idle"
+        ? "idle, reads messages at its next turn"
+        : e.presence;
   return {
-    cell: html`<span class="dot ${e.presence}${wake ? " wake" : ""}" aria-hidden="true"></span><span class="mini">${e.presence}</span>${wake ? html` <span class="wake-badge">${BOLT}<span class="sr">${wakeHow(wake)}</span></span>` : ""}`,
+    cell: html`<span class="dot ${e.presence}${wake ? " wake" : ""}" aria-hidden="true"></span><span class="mini">${e.waking ? "waking" : e.presence}</span>${wake ? html` <span class="wake-badge">${BOLT}<span class="sr">${wakeHow(wake)}</span></span>` : ""}`,
     tip,
   };
 }
