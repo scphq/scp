@@ -21,7 +21,7 @@ import { RelayUsage } from "./common"
 import { labelsFor, processKey } from "./identity"
 import { linkedHandbackBody } from "./remote-spawn"
 import { resumeLaunch } from "./resume"
-import { harnessArgv, harnessOutput, programAt, resumeArgv, runHarness, stderrOutput } from "./spawn"
+import { harnessArgv, harnessOutput, museFirstRun, museResumeBase, programAt, resumeArgv, runHarness, stderrOutput } from "./spawn"
 import { note, parseSeconds, SELF } from "./term"
 
 type Env = Record<string, string | undefined>
@@ -30,7 +30,7 @@ type Env = Record<string, string | undefined>
 export const SPAWN_IDLE_S = 1800
 
 /** the harnesses whose headless session spawn resumes */
-export type Resumable = "codex" | "agy" | "grok"
+export type Resumable = "codex" | "agy" | "grok" | "muse"
 
 /**
  * a durable spawn's hibernation ref: the harness, its session, the directory it runs in, the resumed run's words before its prompt (which
@@ -62,7 +62,7 @@ export function idleSeconds(value: string): number {
 export function resumable(command: string[]): Resumable | undefined {
   const program = command[programAt(command)]
   const name = program === undefined ? "" : basename(program)
-  return name === "codex" || name === "agy" || name === "grok" ? name : undefined
+  return name === "codex" || name === "agy" || name === "grok" || name === "muse" ? name : undefined
 }
 
 /** a headless agy or grok command (a prompt flag, no `--`) as its launch reads it, with the words before its arguments */
@@ -76,15 +76,19 @@ function headless(harness: "agy" | "grok", command: string[], uuid?: () => strin
   }
 }
 
-/** the first run of a command spawn may resume: a grok without a session of its own starts one it names (`-s <uuid>`), the session returned */
+/**
+ * the first run of a command spawn may resume: a grok or muse exec without a session of its own starts one it names (`-s <uuid>`,
+ * `--session-id <uuid>`), the session returned
+ */
 export function firstRun(command: string[], uuid: () => string = randomUUID): { command: string[]; session?: string } {
+  if (resumable(command) === "muse") return museFirstRun(command, uuid) ?? { command }
   if (resumable(command) !== "grok") return { command }
   const found = headless("grok", command, uuid)
   if (!found?.launch.id) return { command }
   return { command: [...found.prefix, ...found.launch.first!], session: found.launch.id }
 }
 
-/** the session a resumed run of `command` names: codex's from its hooks, agy's from the conversation file, grok's the one it was given */
+/** the session a resumed run of `command` names: codex's from its hooks, agy's from the conversation file, grok's and muse's the one it was given */
 export function resumeSession(command: string[], session: string | null | undefined): string | undefined {
   if (resumable(command) === "agy") session ??= headless("agy", command)?.launch.id
   return session && SESSION.test(session) ? session : undefined
@@ -92,12 +96,14 @@ export function resumeSession(command: string[], session: string | null | undefi
 
 /**
  * a resumed run's words before its prompt, which goes last: `codex exec [opts] resume [opts] <session>`, `agy [args] --conversation <id> -p`,
- * `grok [args] --resume <id> [--allow ...] -p`; undefined for any other command, an ephemeral codex, or one that is not headless
+ * `grok [args] --resume <id> [--allow ...] -p`, `muse [opts] exec [opts] --session-id <id>`; undefined for any other command, an ephemeral
+ * codex, a muse without a session log, or one that is not headless
  */
 export function resumeBase(command: string[], session: string): string[] | undefined {
   if (!SESSION.test(session)) return undefined
   const harness = resumable(command)
   if (harness === "codex") return resumeArgv(command, session, "")?.slice(0, -1)
+  if (harness === "muse") return museResumeBase(command, session)
   if (harness !== "agy" && harness !== "grok") return undefined
   const found = headless(harness, command)
   if (!found) return undefined
@@ -129,7 +135,7 @@ export function parseHoldRef(text: string | undefined): HoldRef | undefined {
   const ref = value as Partial<HoldRef> | null
   if (!ref || typeof ref !== "object") return undefined
   const { harness, session, cwd, argv, idle_s, parent } = ref
-  if (harness !== "codex" && harness !== "agy" && harness !== "grok") return undefined
+  if (harness !== "codex" && harness !== "agy" && harness !== "grok" && harness !== "muse") return undefined
   if (typeof session !== "string" || !SESSION.test(session) || typeof cwd !== "string" || !isAbsolute(cwd)) return undefined
   if (!Array.isArray(argv) || !argv.length || !argv.every((word) => typeof word === "string") || resumable(argv) !== harness) return undefined
   if (idle_s !== null && (typeof idle_s !== "number" || !(idle_s > 0))) return undefined
