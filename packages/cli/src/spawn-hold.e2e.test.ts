@@ -71,8 +71,8 @@ while (existsSync(REC + ".gate") && !existsSync(REC + ".go" + run)) await Bun.sl
 console.log("run " + run + " done")
 `
 
-/** a stand-in for headless agy or grok: it records its arguments, reports agy's conversation through agy's hook, and asks its own shim who it is */
-const fakeTurn = (harness: "agy" | "grok", log: string) => `
+/** a stand-in for headless agy, grok or muse exec: it records its arguments, reports agy's conversation through agy's hook, and asks its own shim who it is */
+const fakeTurn = (harness: "agy" | "grok" | "muse", log: string) => `
 import { appendFileSync } from "node:fs"
 import { spawn, spawnSync } from "node:child_process"
 const args = process.argv.slice(2)
@@ -112,7 +112,7 @@ async function fixture() {
   writeFileSync(join(bin, "codex"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} --no-env-file ${JSON.stringify(join(root, "fake-codex.ts"))} "$@"\n`)
   chmodSync(join(bin, "codex"), 0o755)
   const turns = join(root, "turns.jsonl")
-  for (const harness of ["agy", "grok"] as const) {
+  for (const harness of ["agy", "grok", "muse"] as const) {
     writeFileSync(join(root, `fake-${harness}.ts`), fakeTurn(harness, turns))
     writeFileSync(
       join(bin, harness),
@@ -363,4 +363,38 @@ test("headless agy and grok workers stay resumable: a message resumes the conver
   expect([opened!.address, again!.address]).toEqual(["me/gk", "me/gk"])
   await f.lead.request("spawn_end", { endpoint: "gk" })
   await waitFor(() => !alive(grok), 10_000, "grok's runner to exit")
+})
+
+test("a muse exec worker stays resumable: its first run names a session, a message resumes it with exec --session-id, durably too", async () => {
+  const f = await fixture()
+  const muse = f.spawn("--idle", "60", "--name", "mu", "--", "muse", "exec", "--model", "m", "hi")
+  expect((await f.next("mu")).body.text).toStartWith("worker me/mu finished (exit 0)\n\nturn done")
+  await until(async () => (await f.view("mu"))?.wake === "spawn-resume", 10_000, "muse's hold")
+  const steer = await f.lead.request<{ id: string }>("send", { to: "mu", body: "muse again" })
+  const back = await f.next("mu")
+  expect(back.body.text).toStartWith("worker me/mu finished (exit 0)\n\nturn done")
+  expect(back.reply_to).toBe(steer.id)
+  const [opened, again] = f.turns()
+  const session = opened!.args[opened!.args.indexOf("--session-id") + 1]!
+  expect(session).toMatch(/^[0-9a-f-]{36}$/)
+  expect(opened!.args).toEqual(["exec", "--contributor-mode", "off", "--session-id", session, "--model", "m", "hi"])
+  expect(again!.args.slice(0, -1)).toEqual(["exec", "--contributor-mode", "off", "--model", "m", "--session-id", session])
+  expect(again!.args.at(-1)).toContain("muse again")
+  expect(again!.args.at(-1)).toContain("<relay-message")
+  expect([opened!.address, again!.address]).toEqual(["me/mu", "me/mu"])
+  await f.lead.request("spawn_end", { endpoint: "mu" })
+  await waitFor(() => !alive(muse), 10_000, "muse's runner to exit")
+
+  const durable = f.spawn("--durable", "--idle", "2", "--name", "md", "--", "muse", "exec", "--session-id", "mine-1", "hi")
+  await f.next("md")
+  await waitFor(() => !alive(durable), 15_000, "the muse runner to hibernate and exit")
+  expect(await f.view("md")).toMatchObject({ presence: "hibernated", wake: "hook:spawn" })
+  await f.lead.request("send", { to: "md", body: "wake muse" })
+  expect((await f.next("md")).body.text).toBe("worker me/md finished (exit 0)\n\nturn done")
+  const [, , first, woken] = f.turns()
+  expect(first!.args).toEqual(["exec", "--contributor-mode", "off", "--session-id", "mine-1", "hi"])
+  expect(woken!.args.slice(1, -1)).toEqual(["--contributor-mode", "off", "--session-id", "mine-1"])
+  expect(woken!.args.at(-1)).toContain("wake muse")
+  expect(woken!.address).toBe("me/md")
+  await until(async () => (await f.view("md"))?.presence === "hibernated", 15_000, "the woken muse worker to hibernate again")
 })

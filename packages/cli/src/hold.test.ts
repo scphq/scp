@@ -6,15 +6,14 @@ import { firstRun, framed, idleSeconds, parseHoldRef, refProblem, resumable, res
 const uuid = () => "11111111-2222-3333-4444-555555555555"
 
 describe("a held worker's resume", () => {
-  test("codex exec resumes as exec resume <session>, its prompt last; an ephemeral or prompt-less codex, muse and claude do not", () => {
+  test("codex exec resumes as exec resume <session>, its prompt last; an ephemeral or prompt-less codex and claude do not", () => {
     expect(resumeBase(["codex", "exec", "-m", "o4", "-i", "shot.png", "do it"], "019a-s")).toEqual(["codex", "exec", "resume", "-m", "o4", "019a-s"])
     expect(resumeBase(["env", "A=1", "codex", "exec", "go"], "019a-s")).toEqual(["env", "A=1", "codex", "exec", "resume", "019a-s"])
     expect(resumeBase(["codex", "exec", "--ephemeral", "go"], "019a-s")).toBeUndefined()
     expect(resumeBase(["codex", "exec"], "019a-s")).toBeUndefined()
-    expect(resumeBase(["muse", "exec", "go"], "019a-s")).toBeUndefined()
     expect(resumeBase(["claude", "-p", "go"], "019a-s")).toBeUndefined()
     expect(resumeBase(["codex", "exec", "go"], "bad session")).toBeUndefined()
-    expect([resumable(["/opt/bin/codex", "exec", "go"]), resumable(["muse", "exec", "go"])]).toEqual(["codex", undefined])
+    expect([resumable(["/opt/bin/codex", "exec", "go"]), resumable(["claude", "-p", "go"])]).toEqual(["codex", undefined])
   })
 
   test("agy resumes with --conversation <id> -p; grok with --resume <id>, its allow rules, -p; neither when interactive", () => {
@@ -28,6 +27,31 @@ describe("a held worker's resume", () => {
     expect(grok).not.toContain("old")
     expect(resumeBase(["grok", "-p", "hi", "--always-approve"], "sess-1")).toEqual(["grok", "--always-approve", "--resume", "sess-1", "-p"])
     expect(resumeBase(["grok", "-c"], "sess-1")).toBeUndefined()
+  })
+
+  test("muse exec resumes as exec --session-id <id>, without the first prompt's file, images and worktree; not without a session log", () => {
+    expect(resumeBase(["muse", "--model", "m", "exec", "--yolo", "--image", "a.png", "-w", "create", "--prompt-file", "p.md"], "s-1")).toEqual([
+      "muse",
+      "--model",
+      "m",
+      "exec",
+      "--yolo",
+      "--session-id",
+      "s-1",
+    ])
+    expect(resumeBase(["muse", "exec", "--session-id=old", "-c", "a=1", "--", "go"], "s-1")).toEqual(["muse", "exec", "-c", "a=1", "--session-id", "s-1"])
+    for (const off of [["--no-session-log"], ["--api-key-stdin"]]) expect(resumeBase(["muse", "exec", ...off, "go"], "s-1")).toBeUndefined()
+    expect(resumeBase(["muse", "resume", "--last"], "s-1")).toBeUndefined()
+    expect(resumeBase(["muse", "exec", "go", "on"], "s-1")).toBeUndefined()
+  })
+
+  test("a muse exec's first run names a new session after exec unless it has one; one without a session log names none", () => {
+    expect(firstRun(["muse", "--model", "m", "exec", "--json", "go"], uuid)).toEqual({
+      command: ["muse", "--model", "m", "exec", "--session-id", uuid(), "--json", "go"],
+      session: uuid(),
+    })
+    expect(firstRun(["muse", "exec", "--session-id", "mine", "go"], uuid)).toEqual({ command: ["muse", "exec", "--session-id", "mine", "go"], session: "mine" })
+    expect(firstRun(["muse", "exec", "--no-session-log", "go"], uuid)).toEqual({ command: ["muse", "exec", "--no-session-log", "go"] })
   })
 
   test("a grok's first run names a new session unless it has one; agy's session is its hook's, else its own --conversation", () => {

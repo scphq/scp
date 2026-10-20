@@ -263,6 +263,14 @@ const MUSE_VALUED = new Set([
   "--approval-judge",
   "--sandbox-network",
   "--echo-delay-ms",
+  "--prompt-file",
+  "--session-id",
+  "--context-compaction-strategy",
+  "--context-compaction-soft-threshold",
+  "--context-compaction-hard-threshold",
+  "--output-schema",
+  "--max-model-steps",
+  "--max-tool-output-bytes",
 ])
 export const MUSE_MODE = "--contributor-mode"
 
@@ -281,6 +289,52 @@ function museOptionsEnd(args: string[], start = 0): number {
     i += word.includes("=") ? 1 : MUSE_VALUED.has(word) || MUSE_OPTIONAL[word]?.has(args[i + 1] ?? "") ? 2 : 1
   }
   return i
+}
+
+const MUSE_SESSION = "--session-id"
+/** muse exec's options a resume leaves out: the first prompt's file and images, the session id it sets itself, and a new worktree */
+const MUSE_FIRST_ONLY = new Set(["--prompt-file", "--image", MUSE_SESSION, "-w", "--worktree", "--worktree-base", "--worktree-existing"])
+
+/** a headless `muse [opts] exec [opts] [prompt]` that logs its session: where exec is, where its options end, the session it names */
+function museExec(args: string[]): { exec: number; end: number; session?: string } | undefined {
+  const exec = museOptionsEnd(args)
+  if (args[exec] !== "exec") return undefined
+  const end = museOptionsEnd(args, exec + 1)
+  const operands = args[end] === "--" ? args.slice(end + 1) : args.slice(end)
+  if (operands.length > 1 || hasFlag(args.slice(0, end), ["--no-session-log", "--api-key-stdin"])) return undefined
+  let session: string | undefined
+  for (let i = exec + 1; i < end; i++) {
+    if (args[i] === MUSE_SESSION) session = args[i + 1]
+    else if (args[i]!.startsWith(`${MUSE_SESSION}=`)) session = args[i]!.slice(MUSE_SESSION.length + 1)
+  }
+  return { exec, end, ...(session !== undefined ? { session } : {}) }
+}
+
+/** a muse exec spawn may resume: with its own session id, else with `--session-id <uuid>` after exec, the session returned */
+export function museFirstRun(command: string[], uuid: () => string): { command: string[]; session: string } | undefined {
+  const at = programAt(command)
+  const run = museExec(command.slice(at + 1))
+  if (!run) return undefined
+  if (run.session !== undefined) return { command, session: run.session }
+  const session = uuid()
+  const exec = at + 1 + run.exec + 1
+  return { command: [...command.slice(0, exec), MUSE_SESSION, session, ...command.slice(exec)], session }
+}
+
+/** a resumed muse exec's words before its prompt: its options without {@link MUSE_FIRST_ONLY}, then `--session-id <session>` */
+export function museResumeBase(command: string[], session: string): string[] | undefined {
+  const at = programAt(command)
+  const args = command.slice(at + 1)
+  const run = museExec(args)
+  if (!run) return undefined
+  const kept: string[] = []
+  for (let i = 0; i < run.end; ) {
+    const word = args[i]!
+    const size = i === run.exec || word.includes("=") ? 1 : MUSE_VALUED.has(word) || MUSE_OPTIONAL[word]?.has(args[i + 1] ?? "") ? 2 : 1
+    if (!MUSE_FIRST_ONLY.has(word.includes("=") ? word.slice(0, word.indexOf("=")) : word)) kept.push(...args.slice(i, i + size))
+    i += size
+  }
+  return [...command.slice(0, at + 1), ...kept, MUSE_SESSION, session]
 }
 
 /** where muse's contributor mode goes: after exec, which takes its own, else right after the program */
@@ -1036,7 +1090,10 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
       worker?.session && worker.transcript ? repliesOutput(transcriptReplies(worker.transcript, worker.session, claudeTranscripts(process.env)), bytes) : ""
     const session =
       harness && worker?.joined && !signals?.caught()
-        ? resumeSession(command, harness === "agy" ? readConversation(env.SCP_AGY_CONVERSATION_FILE) : harness === "grok" ? opening.session : worker.session)
+        ? resumeSession(
+            command,
+            harness === "agy" ? readConversation(env.SCP_AGY_CONVERSATION_FILE) : harness === "grok" || harness === "muse" ? opening.session : worker.session,
+          )
         : undefined
     const held = session
       ? await holdWorker({ command, harness: harness!, session, name, cwd, walk, grant: grant.SCP_GRANT!, env, idleS, durable: values.durable === true })
@@ -1131,7 +1188,9 @@ function durableCheck(values: Values, command: string[], cwd: string): void {
   const harness = resumable(command)
   const base = harness ? resumeBase(command, "0".repeat(64)) : undefined
   if (!harness || !base)
-    throw new RelayUsage("--durable resumes a headless session: codex exec, agy -p or grok -p with its prompt in the command (codex not --ephemeral)")
+    throw new RelayUsage(
+      "--durable resumes a headless session: codex exec, agy -p, grok -p with its prompt in the command (codex not --ephemeral), or muse exec with a session log",
+    )
   const problem = refProblem(durableRef(harness, "0".repeat(64), resolve(cwd), base, SPAWN_IDLE_S, `me/${"x".repeat(63)}`, process.env))
   if (problem) throw new RelayUsage(`--durable cannot keep this worker: ${problem}`)
 }
