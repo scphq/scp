@@ -230,7 +230,9 @@ export const ORG_TABS: [OrgTab, string, string][] = [
 export const tabBar = (label: string, tabs: [string, string][], current: string): Html =>
   html`<nav class="tabs" aria-label="${label}">${tabs.map(([href, text]) => html`<a href="${href}"${href === current ? html` aria-current="page"` : ""}>${text}</a>`)}</nav>`;
 
-export function orgHeader(m: Membership, tab: OrgTab): Html {
+export type OrgChromeMember = { org: { handle: string; name: string }; role: Role };
+
+export function orgHeader(m: OrgChromeMember, tab: OrgTab): Html {
   const base = `/orgs/${m.org.handle}`;
   return html`<div class="org-head">
       <p class="label"><a class="mini-link" href="/orgs">Orgs</a> / ${m.org.handle}</p>
@@ -244,13 +246,18 @@ export function orgHeader(m: Membership, tab: OrgTab): Html {
 }
 
 /** an org tab: the header and tab bar, then its body; a live tab refetches its region and listens to the event stream */
-export function orgTab(ctx: Ctx, m: Membership, tab: OrgTab, title: string, body: Html, opts: { live?: boolean; status?: number } = {}): Response {
+export function orgTabChrome(m: OrgChromeMember, tab: OrgTab, body: Html, opts: { live?: boolean } = {}) {
   const app = html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script>`;
   const head = opts.live ? html`${app}<noscript><meta http-equiv="refresh" content="${Math.round(REFRESH_MS / 1000)}"></noscript>` : app;
   const region = opts.live
     ? html`<div class="tab-body" data-live="${REFRESH_MS}" data-events="/orgs/${m.org.handle}/events">${body}</div>`
     : html`<div class="tab-body">${body}</div>`;
-  return page(ctx, { title, nav: "orgs", head }, html`${orgHeader(m, tab)}${region}`, opts.status);
+  return { head, nav: "orgs" as const, body: html`${orgHeader(m, tab)}${region}` };
+}
+
+export function orgTab(ctx: Ctx, m: Membership, tab: OrgTab, title: string, body: Html, opts: { live?: boolean; status?: number } = {}): Response {
+  const { body: content, ...chrome } = orgTabChrome(m, tab, body, opts);
+  return page(ctx, { title, ...chrome }, content, opts.status);
 }
 
 export const notice = (text: string | undefined, err = false): Html | "" =>

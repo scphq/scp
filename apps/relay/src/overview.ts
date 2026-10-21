@@ -419,8 +419,12 @@ if (live) {
     const selecting = String(window.getSelection() || "").length > 0;
     if (!document.hidden && !selecting) {
       try {
-        const res = await fetch(location.href, { credentials: "same-origin", headers: { accept: "text/html" } });
-        const next = res.ok ? new DOMParser().parseFromString(await res.text(), "text/html").querySelector("[data-live]") : null;
+        let next;
+        if (typeof window.scpRegion === "function") next = await window.scpRegion();
+        else {
+          const res = await fetch(location.href, { credentials: "same-origin", headers: { accept: "text/html" } });
+          next = res.ok ? new DOMParser().parseFromString(await res.text(), "text/html").querySelector("[data-live]") : null;
+        }
         if (next) {
           const open = new Set([...live.querySelectorAll("details[open][data-key]")].map((d) => d.getAttribute("data-key")));
           for (const d of next.querySelectorAll("details[data-key]")) if (open.has(d.getAttribute("data-key"))) d.open = true;

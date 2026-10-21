@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/dist
+**/.next
+**/.open-next
+**/.wrangler
+crates/target
+.cargo-target*
+.aws
+.agents
+.codex
