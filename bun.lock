@@ -77,6 +77,15 @@
         "tsup": "^8.5.1",
       },
     },
+    "packages/conformance": {
+      "name": "@scp-dev/conformance",
+      "dependencies": {
+        "@scp-dev/broker": "workspace:*",
+        "@scp-dev/cli": "workspace:*",
+        "@scp-dev/core": "workspace:*",
+        "@scp-dev/hub": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@scp-dev/core",
       "version": "0.8.0",
@@ -620,6 +629,8 @@
     "@scp-dev/broker": ["@scp-dev/broker@workspace:packages/broker"],
 
     "@scp-dev/cli": ["@scp-dev/cli@workspace:packages/cli"],
+
+    "@scp-dev/conformance": ["@scp-dev/conformance@workspace:packages/conformance"],
 
     "@scp-dev/core": ["@scp-dev/core@workspace:packages/core"],
 

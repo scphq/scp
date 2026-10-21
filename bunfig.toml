@@ -1,2 +1,2 @@
 [test]
-preload = ["./packages/cli/src/test-setup.ts"]
+preload = ["./packages/conformance/src/environment.ts", "./packages/cli/src/test-setup.ts"]
