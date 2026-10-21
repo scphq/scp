@@ -15,6 +15,7 @@ const { values } = parseArgs({
     dir: { type: "string" },
     limit: { type: "string", multiple: true },
     wake: { type: "string", multiple: true },
+    "cors-origin": { type: "string", multiple: true },
   },
 });
 const limits: Partial<HubLimits> = Object.fromEntries(
@@ -142,7 +143,19 @@ type Token = {
   expires_at: number | null;
 };
 type Account = { db: Database; hub: RelayHub; sockets: Map<ServerWebSocket<Data>, HubSocket> };
-type Data = { account: string; grant: HubGrant; socket?: HubSocket };
+type Data = { account: string; grant: HubGrant; socket?: HubSocket; dashboard?: boolean; unsubscribe?: () => void };
+const dashboardListeners = new Map<string, Set<(event: unknown) => void>>();
+function subscribe(name: string, listener: (event: unknown) => void) {
+  let listeners = dashboardListeners.get(name);
+  if (!listeners) {
+    listeners = new Set();
+    dashboardListeners.set(name, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
 const accounts = new Map<string, Account>();
 function account(name: string): Account {
   const found = accounts.get(name);
@@ -160,6 +173,9 @@ function account(name: string): Account {
     crossAccount: linkOf(name),
     fetch: globalThis.fetch,
     wake,
+    dashboard: (event) => {
+      for (const listener of dashboardListeners.get(name) ?? []) listener(event);
+    },
   });
   hub.init({ user: name });
   const state = { db, hub, sockets };
@@ -224,6 +240,70 @@ const server = Bun.serve<Data>({
   idleTimeout: 65,
   async fetch(request, srv) {
     const path = new URL(request.url).pathname;
+    if (["session", "overview", "graph", "events"].some((route) => path === `/v1/dashboard/${route}`)) {
+      const headers = new Headers({ "cache-control": "no-store", vary: "origin" });
+      const origin = request.headers.get("origin");
+      if (origin && values["cors-origin"]?.includes(origin)) {
+        headers.set("access-control-allow-origin", origin);
+        headers.set("access-control-allow-headers", "authorization, content-type");
+        headers.set("access-control-allow-methods", "GET, OPTIONS");
+        headers.set("access-control-max-age", "600");
+      }
+      const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
+      if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
+      const token = authenticate(request);
+      if (token instanceof Response) return json({ error: "unauthorized" }, 401);
+      const state = account(token.account);
+      if (path.endsWith("/session")) {
+        const members = credentials.query("SELECT DISTINCT member AS id, member AS name FROM tokens WHERE account = ?").all(token.account);
+        const counts = credentials
+          .query("SELECT device, COUNT(*) AS n FROM tokens WHERE account = ? AND revoked = 0 AND (expires_at IS NULL OR expires_at > ?) GROUP BY device")
+          .all(token.account, Date.now()) as { device: number; n: number }[];
+        return json({
+          org: { handle: token.account, name: token.account },
+          member: { id: token.member, name: token.member, role: token.role },
+          members,
+          devices: counts.find((c) => c.device)?.n ?? 0,
+          tokens: counts.find((c) => !c.device)?.n ?? 0,
+          scoped: !token.device,
+        });
+      }
+      if (path.endsWith("/overview")) return json(state.hub.overview(20));
+      if (path.endsWith("/graph")) {
+        const raw = new URL(request.url).searchParams.get("minutes");
+        const number = raw === null ? 15 : Number(raw);
+        return json(state.hub.graph(Number.isFinite(number) ? Math.min(60, Math.max(1, Math.floor(number))) : 15));
+      }
+      if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        if (srv.upgrade(request, { headers, data: { account: token.account, grant: grant(token), dashboard: true } })) return;
+        return json({ error: "invalid_request" }, 400);
+      }
+      headers.set("content-type", "text/event-stream");
+      let cleanup = () => {};
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const send = (event: unknown) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+          const unsubscribe = subscribe(token.account, send);
+          const heartbeat = setInterval(() => controller.enqueue(new TextEncoder().encode(": heartbeat\n\n")), 25000);
+          const revalidate = setInterval(() => {
+            if (authenticate(request) instanceof Response) {
+              cleanup();
+              controller.close();
+            }
+          }, limits.revalidateMs ?? 300000);
+          cleanup = () => {
+            unsubscribe();
+            clearInterval(heartbeat);
+            clearInterval(revalidate);
+          };
+          send({ type: "hello", at: new Date().toISOString() });
+        },
+        cancel() {
+          cleanup();
+        },
+      });
+      return new Response(stream, { headers });
+    }
     if (path === "/health") return Response.json({ ok: true, service: "scp-relay" });
     if (path === "/_admin" && request.method === "POST") {
       if (request.headers.get("authorization") !== `Bearer ${process.env.SCP_CONFORMANCE_ADMIN}`)
@@ -348,6 +428,19 @@ const server = Bun.serve<Data>({
   },
   websocket: {
     open(ws) {
+      if (ws.data.dashboard) {
+        ws.send(JSON.stringify({ type: "hello", at: new Date().toISOString() }));
+        const unsubscribe = subscribe(ws.data.account, (event) => ws.send(JSON.stringify(event)));
+        const timer = setInterval(() => {
+          const token = credentials.query("SELECT * FROM tokens WHERE id = ?").get(ws.data.grant.tokenId) as Token | null;
+          if (!token || token.revoked || (token.expires_at !== null && token.expires_at <= Date.now())) ws.close(4003, "unauthorized");
+        }, limits.revalidateMs ?? 300000);
+        ws.data.unsubscribe = () => {
+          unsubscribe();
+          clearInterval(timer);
+        };
+        return;
+      }
       const socket: HubSocket = {
         conn: RelayHub.connection(ws.data.grant),
         send: (text) => void ws.send(text),
@@ -357,9 +450,17 @@ const server = Bun.serve<Data>({
       account(ws.data.account).sockets.set(ws, socket);
     },
     async message(ws, message) {
+      if (ws.data.dashboard) {
+        if (String(message) === "ping") ws.send("pong");
+        return;
+      }
       await account(ws.data.account).hub.message(ws.data.socket!, String(message));
     },
     close(ws) {
+      if (ws.data.dashboard) {
+        ws.data.unsubscribe?.();
+        return;
+      }
       const state = account(ws.data.account);
       state.sockets.delete(ws);
       state.hub.closed(ws.data.socket!);

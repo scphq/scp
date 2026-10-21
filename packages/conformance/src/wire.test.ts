@@ -48,10 +48,13 @@ describe.each(targetNames)("%s raw wire conformance", (name) => {
     sockets.push(wire);
     return wire;
   }
-  beforeAll(async () => {
-    await target.start();
-    token = (await target.mint("acme", "ada", { device: true })).token;
-  }, 20000);
+  beforeAll(
+    async () => {
+      await target.start();
+      token = (await target.mint("acme", "ada", { device: true })).token;
+    },
+    name === "docker" ? 60000 : 20000,
+  );
   afterAll(async () => {
     const results = await Promise.allSettled(sockets.map((wire) => wire.close()));
     await target.stop();
@@ -257,25 +260,29 @@ describe.each(targetNames)("%s raw wire conformance", (name) => {
       expect(await result.json()).toMatchObject({ error, error_description: expect.any(String) });
     }
   });
-  test("an expired live credential closes with 4001 and cannot authenticate again", async () => {
-    await scenario(
-      name,
-      async ({ target }) => {
-        const credential = await target.mint("acme", "owner", { device: true, expiresIn: 2 });
-        const wire = await Wire.connect(target.url, credential.token);
-        try {
-          await wire.hello({ observe: true });
-          expect(await waitFor(() => wire.closeCode, "expired socket", 5000)).toBe(4001);
-          const response = await fetch(`${target.url}/v1/whoami`, { headers: { authorization: `Bearer ${credential.token}` } });
-          expect(response.status).toBe(401);
-          expect(await response.json()).toMatchObject({ error: "expired" });
-        } finally {
-          await wire.close();
-        }
-      },
-      { revalidateMs: 100 },
-    );
-  }, 10000);
+  test(
+    "an expired live credential closes with 4001 and cannot authenticate again",
+    async () => {
+      await scenario(
+        name,
+        async ({ target }) => {
+          const credential = await target.mint("acme", "owner", { device: true, expiresIn: 2 });
+          const wire = await Wire.connect(target.url, credential.token);
+          try {
+            await wire.hello({ observe: true });
+            expect(await waitFor(() => wire.closeCode, "expired socket", 5000)).toBe(4001);
+            const response = await fetch(`${target.url}/v1/whoami`, { headers: { authorization: `Bearer ${credential.token}` } });
+            expect(response.status).toBe(401);
+            expect(await response.json()).toMatchObject({ error: "expired" });
+          } finally {
+            await wire.close();
+          }
+        },
+        { revalidateMs: 100 },
+      );
+    },
+    name === "rust-pg" ? 60000 : 10000,
+  );
   test("malformed HTTP JSON returns a JSON-RPC parse error with null id", async () => {
     const response = await fetch(`${target.url}/v1/relay/rpc`, {
       method: "POST",

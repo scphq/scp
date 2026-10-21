@@ -779,6 +779,8 @@ async fn bridge_close_announces_only_presence_changes() {
     );
 }
 
+#[path = "dashboard_tests.rs"]
+mod dashboard_tests;
 #[path = "limit_tests.rs"]
 mod limit_tests;
 #[path = "xacct_tests.rs"]

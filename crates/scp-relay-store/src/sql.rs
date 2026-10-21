@@ -749,6 +749,19 @@ impl<T: Backend> RelayStore for T {
             )
             .await
     }
+    async fn credential_counts(&self, a: &str, now: i64) -> Result<(u64, u64)> {
+        let rows = self.db().rows("SELECT c.kind,COUNT(*) AS n FROM credentials c JOIN members m ON m.id=c.member_id AND m.account_id=c.account_id WHERE c.account_id=$1 AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>$2) GROUP BY c.kind", args![a,now]).await?;
+        let mut counts = (0, 0);
+        for row in rows {
+            let n = row.int("n")? as u64;
+            match row.text("kind")?.as_str() {
+                "device" => counts.0 = n,
+                "token" => counts.1 = n,
+                _ => {}
+            }
+        }
+        Ok(counts)
+    }
     async fn create_credential(&self, c: Credential) -> Result<()> {
         let mut t = self.db().begin("host-credentials").await?;
         t.credential(&c).await?;

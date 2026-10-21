@@ -4,18 +4,22 @@ impl AccountHub {
     pub(super) async fn machines(&self) -> Result<Value> {
         let endpoints = self.endpoints().await?;
         let mut out = Vec::new();
-        for m in self.store.machines(&self.account_id).await? {
+        let machines = self.store.machines(&self.account_id).await?;
+        for m in &machines {
             let online = self
                 .connections
                 .values()
-                .any(|c| holds(c, &m.name, &endpoints));
+                .any(|c| c.socket.is_some() && holds(c, &m.name, &endpoints));
             let bridge = self
                 .connections
                 .values()
-                .any(|c| c.machine == m.name && c.role == "bridge");
+                .any(|c| c.socket.is_some() && c.machine == m.name && c.role == "bridge");
             out.push(json!({"name":m.name,"kind":m.kind,"online":online,"bridge":bridge,"created_at":iso(m.created_at),"last_seen":m.last_seen.map(iso),"wake":self.store.state(&self.account_id,&format!("wake:{}",m.name)).await?.is_some()}));
         }
         for t in self.store.tombstones(&self.account_id).await? {
+            if machines.iter().any(|m| m.name == t.name) {
+                continue;
+            }
             out.push(json!({"name":t.name,"kind":"revoked","online":false,"bridge":false,"created_at":null,"last_seen":iso(t.at)}));
         }
         Ok(json!({"machines":out}))
