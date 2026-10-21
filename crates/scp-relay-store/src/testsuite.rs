@@ -1322,18 +1322,12 @@ mod tests {
             eprintln!("skip PostgreSQL: SCP_RELAY_TEST_PG is unset");
             return;
         };
-        let admin = match PgPoolOptions::new()
+        let admin = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(3))
             .connect(&url)
             .await
-        {
-            Ok(p) => p,
-            Err(_) => {
-                eprintln!("skip PostgreSQL: server is unreachable");
-                return;
-            }
-        };
+            .expect("SCP_RELAY_TEST_PG is set but PostgreSQL is unreachable");
         let name = format!("scp_relay_test_{:016x}", rand::random::<u64>());
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(&admin)

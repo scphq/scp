@@ -41,7 +41,7 @@ async fn bridge(
     g: &Grant,
     machine: &str,
 ) -> (Arc<Mutex<AccountHub>>, String, mpsc::Receiver<String>) {
-    let account = hub.account(&g.user_id).await;
+    let account = hub.account(g).await;
     let id = crate::random("socket_");
     let (texts, rx) = mpsc::channel(1024);
     let (close, _) = watch::channel(None);
@@ -305,7 +305,7 @@ async fn scoped_admission_and_thread_membership() {
 #[tokio::test]
 async fn periodic_expiry_releases_idle_clients_and_preserves_bridges() {
     let (hub, g) = fixture().await;
-    let account = hub.account(&g.user_id).await;
+    let account = hub.account(&g).await;
     account
         .lock()
         .await
@@ -636,7 +636,7 @@ fn credential_scanning_and_redaction_handle_unicode_boundaries() {
 #[tokio::test]
 async fn observer_hello_resets_idle_retention() {
     let (hub, g) = fixture().await;
-    let account = hub.account(&g.user_id).await;
+    let account = hub.account(&g).await;
     account
         .lock()
         .await
@@ -659,23 +659,13 @@ async fn observer_hello_resets_idle_retention() {
 }
 
 #[tokio::test]
-async fn invalid_http_batches_do_not_register_connections() {
+async fn an_empty_http_batch_registers_no_connection() {
     let (hub, g) = fixture().await;
-    for batch in [json!([]), json!(vec![request(1, "hello", json!({})); 65])] {
-        let result = hub.rpc(g.clone(), batch).await;
-        assert!(result.is_object());
-        assert_eq!(result["error"]["code"], -32600);
-        assert!(
-            hub.account(&g.user_id)
-                .await
-                .lock()
-                .await
-                .connections
-                .is_empty()
-        );
-    }
-    let batch = vec![request(1, "missing", json!({})); 64];
-    assert_eq!(hub.rpc(g, json!(batch)).await.as_array().unwrap().len(), 64);
+    let result = hub.rpc(g.clone(), json!([])).await;
+    assert_eq!(result["error"]["code"], -32600);
+    assert!(hub.account(&g).await.lock().await.connections.is_empty());
+    let batch = vec![request(1, "missing", json!({})); 65];
+    assert_eq!(hub.rpc(g, json!(batch)).await.as_array().unwrap().len(), 65);
 }
 
 #[tokio::test]
@@ -685,7 +675,7 @@ async fn cancelled_http_wait_removes_connection_with_large_wait_limit() {
     let mut limits = crate::http::Limits::default();
     limits.apply("httpWaitS=18446744073709551615").unwrap();
     let hub = Arc::new(Hub::new(store, limits));
-    let account = hub.account(&g.user_id).await;
+    let account = hub.account(&g).await;
     let task = {
         let hub = hub.clone();
         tokio::spawn(async move {

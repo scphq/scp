@@ -223,6 +223,38 @@ pub(super) fn cursor(p: &Value) -> Result<i64> {
     }
 }
 
+/// `prefix`, the creation millisecond as 9 base-36 digits, then 16 random hex digits.
 pub(super) fn new_id(prefix: &str) -> String {
-    crate::random(prefix).chars().take(32).collect()
+    let mut ms = u64::try_from(crate::now_ms()).unwrap_or(0);
+    let mut stamp = [b'0'; 9];
+    for digit in stamp.iter_mut().rev() {
+        *digit = b"0123456789abcdefghijklmnopqrstuvwxyz"[(ms % 36) as usize];
+        ms /= 36;
+    }
+    let random = crate::random("");
+    format!(
+        "{prefix}{}{}",
+        String::from_utf8_lossy(&stamp),
+        &random[..16]
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ids_match_the_envelope_schema() {
+        let id = super::new_id("msg_");
+        let rest = id.strip_prefix("msg_").expect("prefix");
+        assert_eq!(rest.len(), 25);
+        assert!(
+            rest[..9]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+        );
+        assert!(
+            rest[9..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+    }
 }

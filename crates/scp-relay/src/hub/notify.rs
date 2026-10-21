@@ -100,6 +100,7 @@ impl AccountHub {
             }
         };
         let mut updated = Vec::new();
+        let mut adopted = Vec::new();
         let bound = c.role == "bridge"
             || rows
                 .iter()
@@ -129,6 +130,7 @@ impl AccountHub {
                     changes
                         .renew_deliveries
                         .push((e.id.clone(), crate::now_ms()));
+                    adopted.push(e.id.clone());
                 }
                 e.last_seen = Some(crate::now_ms());
                 if changed {
@@ -157,6 +159,11 @@ impl AccountHub {
             }
             for view in updated {
                 self.fleet(json!({"type":"presence","machine":c.machine,"endpoint":view["address"],"presence":view["presence"]}));
+            }
+            for endpoint in &adopted {
+                if let Ok(pending) = self.pending(endpoint, 0).await {
+                    let _ = self.push(&pending).await;
+                }
             }
         }
         self.connections.remove(id);

@@ -127,6 +127,7 @@ struct SyncState {
 /// Account-local state serialized behind one asynchronous lock.
 pub struct AccountHub {
     account_id: String,
+    handle: String,
     store: Arc<dyn RelayStore>,
     connections: HashMap<String, Connection>,
     syncs: HashMap<String, SyncState>,
@@ -185,10 +186,7 @@ impl AccountHub {
         Ok(self.store.endpoints(&self.account_id, None).await?)
     }
     fn account_name(&self) -> &str {
-        self.connections
-            .values()
-            .find_map(|c| c.grant.as_ref().map(|g| g.account.as_str()))
-            .unwrap_or("")
+        &self.handle
     }
 }
 /// Account registry shared by both transports.
@@ -238,13 +236,14 @@ impl Hub {
             drained: Notify::new(),
         }
     }
-    async fn account(&self, id: &str) -> Arc<Mutex<AccountHub>> {
+    async fn account(&self, grant: &Grant) -> Arc<Mutex<AccountHub>> {
         let mut accounts = self.accounts.lock().await;
         accounts
-            .entry(id.into())
+            .entry(grant.user_id.clone())
             .or_insert_with(|| {
                 Arc::new(Mutex::new(AccountHub {
-                    account_id: id.into(),
+                    account_id: grant.user_id.clone(),
+                    handle: grant.account.clone(),
                     store: self.store.clone(),
                     connections: HashMap::new(),
                     syncs: HashMap::new(),
@@ -274,12 +273,10 @@ impl Hub {
     }
     /// Process an authenticated HTTP request, including batches in input order.
     pub async fn rpc(&self, grant: Grant, body: Value) -> Value {
-        if let Some(batch) = body.as_array()
-            && (batch.is_empty() || batch.len() > 64)
-        {
-            return json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":if batch.is_empty() {"an empty batch"} else {"at most 64 requests"}}});
+        if body.as_array().is_some_and(Vec::is_empty) {
+            return json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"an empty batch"}});
         }
-        let account = self.account(&grant.user_id).await;
+        let account = self.account(&grant).await;
         let id = crate::random("http_");
         {
             let mut hub = account.lock().await;
@@ -459,7 +456,7 @@ impl Hub {
         frame_bytes: usize,
         revalidate_ms: u64,
     ) {
-        let account = self.account(&grant.user_id).await;
+        let account = self.account(&grant).await;
         let (mut sink, mut stream) = socket.split();
         let (texts, mut rx) = mpsc::channel::<String>(32);
         let (close, mut closing) = watch::channel::<Option<Closure>>(None);
