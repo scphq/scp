@@ -110,3 +110,6 @@ Already published npm versions are skipped; the dashboard publishes after the re
 versions are skipped too. A created release tag is never overwritten, and a manual run of the workflow skips a tagged
 version like a push does: complete a partial release by re-running the failed jobs of its run while its build artifacts last (7 days). A manual run releases a
 version whose push run failed before tagging.
+
+
+If only the crates job of a released version failed, run **Release relay** manually with `crates_only` checked. It publishes the crates missing for the anchor version from the release tag, and nothing else.

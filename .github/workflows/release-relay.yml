@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      crates_only:
+        description: Publish only the crates of the already released version (recovers a failed crates job)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,6 +25,7 @@ jobs:
     outputs:
       release: ${{ steps.gate.outputs.release }}
       version: ${{ steps.gate.outputs.version }}
+      crates_only: ${{ steps.gate.outputs.crates_only }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,9 +34,18 @@ jobs:
           sparse-checkout-cone-mode: false
       - name: Release only an untagged version
         id: gate
+        env:
+          CRATES_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.crates_only }}
         run: |
           version=$(jq -r .version crates/package.json)
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$CRATES_ONLY" = "true" ]; then
+            git ls-remote --exit-code --tags origin "refs/tags/scp-relay@$version" > /dev/null
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "crates_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if git ls-remote --exit-code --tags origin "refs/tags/scp-relay@$version" > /dev/null; then
             echo "::notice::scp-relay@$version is already released"
             echo "release=false" >> "$GITHUB_OUTPUT"
@@ -39,7 +54,6 @@ jobs:
             test "$status" -eq 2
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   prepare:
     needs: gate
@@ -205,19 +219,21 @@ jobs:
           publish npm-packages/dashboard
 
   crates:
-    needs: [prepare, release]
+    needs: [gate, prepare, release]
+    if: always() && (needs.release.result == 'success' || needs.gate.outputs.crates_only == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          ref: scp-relay@${{ needs.gate.outputs.version }}
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
       - name: Publish crates
         working-directory: crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          VERSION: ${{ needs.prepare.outputs.version }}
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
           if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
             echo '::notice::CARGO_REGISTRY_TOKEN is empty; skipping crates publication'
@@ -225,7 +241,7 @@ jobs:
           fi
           missing=()
           for name in scp-relay-store scp-relay-server; do
-            status=$(curl --silent --show-error --retry 3 --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/$name/$VERSION")
+            status=$(curl --silent --show-error --retry 3 --user-agent 'scp-release (https://github.com/scphq/scp)' --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/$name/$VERSION")
             case "$status" in
               200) ;;
               404) missing+=("$name");;
