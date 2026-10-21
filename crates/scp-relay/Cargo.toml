@@ -1,0 +1,28 @@
+[package]
+name = "scp-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+scp-relay-store = { path = "../scp-relay-store" }
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+futures-util.workspace = true
+time.workspace = true
+regex = "=1.13.1"
+
+[dev-dependencies]
+reqwest.workspace = true
+tokio-tungstenite.workspace = true

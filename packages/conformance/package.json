@@ -1,0 +1,13 @@
+{
+  "name": "@scp-dev/conformance",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": { "typecheck": "tsc -p ." },
+  "dependencies": {
+    "@scp-dev/core": "workspace:*",
+    "@scp-dev/hub": "workspace:*",
+    "@scp-dev/broker": "workspace:*",
+    "@scp-dev/cli": "workspace:*"
+  }
+}

@@ -1,0 +1,10 @@
+channels
+pi
+opencode-plugin
+codex-app-server
+claude-inbox
+agy-resume
+grok-resume
+muse-serve
+t3code
+spawn-resume
