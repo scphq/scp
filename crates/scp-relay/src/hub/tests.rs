@@ -771,3 +771,6 @@ async fn bridge_close_announces_only_presence_changes() {
         "hibernated"
     );
 }
+
+#[path = "xacct_tests.rs"]
+mod xacct_tests;

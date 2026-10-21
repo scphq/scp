@@ -315,6 +315,16 @@ impl AccountHub {
                 created_at: now,
             })
         };
+        if let Some(cap) = self.limits.0.get("storedBytes").copied().flatten()
+            && self.store.stored_bytes(&self.account_id).await? as u64
+                + envelope.to_string().len() as u64
+                > cap
+        {
+            return Err(Error::new(
+                "too_large",
+                "the relay holds its cap of messages",
+            ));
+        }
         let mut changes = HubWrite::default();
         if !notice {
             for e in &recipients {

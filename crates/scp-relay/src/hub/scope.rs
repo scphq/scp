@@ -219,6 +219,9 @@ fn same_tree(a: &Endpoint, b: &Endpoint) -> bool {
 }
 pub(super) fn matches(sel: &str, x: &Endpoint, e: &Endpoint, all: &[Endpoint]) -> bool {
     let f = fields(x);
+    if let Some(peer) = f["xaccount"].as_str() {
+        return sel == "acct:*" || sel == format!("acct:{peer}");
+    }
     match sel {
         "*" => true,
         "tree:self" => same_tree(x, e),
@@ -340,6 +343,19 @@ fn admits(
     };
     trail.pop();
     result
+}
+pub(super) fn cross_allowed(e: &Endpoint, dir: &str, peer: &str, all: &[Endpoint]) -> bool {
+    let foreign = Endpoint {
+        id: format!("@{peer}"),
+        machine: "@".into(),
+        handle: "".into(),
+        kind: "agent".into(),
+        token_hash: None,
+        last_seen: None,
+        created_at: 0,
+        fields: json!({"xaccount":peer}).to_string(),
+    };
+    admits(e, dir, &foreign, all, &mut Vec::new())
 }
 pub(super) fn allowed(
     a: &Endpoint,

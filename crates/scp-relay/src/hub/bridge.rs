@@ -51,11 +51,18 @@ impl AccountHub {
                     conn.subscribed = true;
                 }
                 let mut replayed = 0;
-                let mut cursor = after;
+                let mut cursor = 0;
                 loop {
                     let page = self
                         .store
-                        .pending_machine(&self.account_id, &c.machine, cursor, crate::now_ms(), 200)
+                        .pending_machine_x(
+                            &self.account_id,
+                            &c.machine,
+                            cursor.max(after),
+                            cursor,
+                            crate::now_ms(),
+                            200,
+                        )
                         .await?;
                     self.push_with_capacity(&page, true).await?;
                     replayed += page.len();
@@ -66,7 +73,7 @@ impl AccountHub {
                         break;
                     }
                 }
-                Ok(json!({"replayed":replayed,"next":cursor}))
+                Ok(json!({"replayed":replayed,"next":cursor.max(after)}))
             }
             "ack" => self.ack(c, p).await,
             "reject" => self.reject(c, p).await,

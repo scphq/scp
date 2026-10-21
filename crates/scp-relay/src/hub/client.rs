@@ -13,9 +13,6 @@ impl AccountHub {
     ) -> Result<Value> {
         match method {
             "list" => {
-                if p["contacts"] == true {
-                    return Ok(json!({"contacts":[]}));
-                }
                 let mut rows = self.endpoints().await?;
                 rows.retain(|e| {
                     let f = fields(e);

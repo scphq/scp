@@ -103,6 +103,8 @@ mod scope;
 mod send;
 mod sweep;
 mod validation;
+pub mod xacct;
+mod xcounters;
 use crate::iso;
 use scp_relay_store::{Endpoint, HubWrite};
 use validation::{Error, Result, fields, invalid, string, text};
@@ -134,6 +136,9 @@ pub struct AccountHub {
     broken_syncs: std::collections::VecDeque<(String, String)>,
     limits: crate::http::Limits,
     initialized: bool,
+    gate: Arc<dyn xacct::Gate>,
+    xcounters: xcounters::Counters,
+    xkey: Option<String>,
 }
 impl AccountHub {
     async fn initialize(&mut self) -> Result<()> {
@@ -153,7 +158,7 @@ impl AccountHub {
         self.initialized = true;
         Ok(())
     }
-    async fn dispatch(&mut self, id: &str, method: &str, p: &Value) -> Result<Value> {
+    async fn dispatch(&mut self, id: &str, method: &str, p: &Value) -> Result<xacct::Dispatch> {
         self.initialize().await?;
         let conn = self
             .connections
@@ -171,16 +176,31 @@ impl AccountHub {
             return Err(Error::new("unauthorized", "credential was revoked"));
         }
         if method == "hello" {
-            return self.hello(id, &conn, p).await;
+            return self.hello(id, &conn, p).await.map(xacct::Dispatch::Done);
         }
         if conn.role.is_empty() {
             return Err(Error::new("unauthorized", "call hello first"));
         }
-        if conn.role == "bridge" {
+        if method == "list" && p["contacts"] == true {
+            return Ok(xacct::Dispatch::List(
+                self.store
+                    .contacts(&self.account_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| c.config.dir != "in")
+                    .collect(),
+            ));
+        }
+        if conn.role == "bridge" && method == "forward" && self.has_foreign(&p["params"]["to"]) {
+            return self.xforward(&conn, p).await;
+        }
+        let result = if conn.role == "bridge" {
             self.bridge_method(id, &conn, method, p).await
         } else {
             self.client_method(id, &conn, method, p).await
-        }
+        };
+        result.map(xacct::Dispatch::Done)
     }
     async fn endpoints(&self) -> Result<Vec<Endpoint>> {
         Ok(self.store.endpoints(&self.account_id, None).await?)
@@ -197,6 +217,7 @@ pub struct Hub {
     shutdown: watch::Sender<bool>,
     active: AtomicUsize,
     drained: Notify,
+    gate: Arc<dyn xacct::Gate>,
 }
 /// Tracks an accepted upgrade until its socket task has finished.
 pub struct SocketLease(Arc<Hub>);
@@ -234,22 +255,40 @@ impl Hub {
             shutdown,
             active: AtomicUsize::new(0),
             drained: Notify::new(),
+            gate: Arc::new(xacct::PassGate),
+        }
+    }
+    /// Construct a registry with host-supplied cross-account gates.
+    pub fn with_gate(
+        store: Arc<dyn RelayStore>,
+        limits: crate::http::Limits,
+        gate: Arc<dyn xacct::Gate>,
+    ) -> Self {
+        Self {
+            gate,
+            ..Self::new(store, limits)
         }
     }
     async fn account(&self, grant: &Grant) -> Arc<Mutex<AccountHub>> {
+        self.account_by_id(&grant.user_id, &grant.account).await
+    }
+    async fn account_by_id(&self, id: &str, handle: &str) -> Arc<Mutex<AccountHub>> {
         let mut accounts = self.accounts.lock().await;
         accounts
-            .entry(grant.user_id.clone())
+            .entry(id.to_owned())
             .or_insert_with(|| {
                 Arc::new(Mutex::new(AccountHub {
-                    account_id: grant.user_id.clone(),
-                    handle: grant.account.clone(),
+                    account_id: id.to_owned(),
+                    handle: handle.to_owned(),
                     store: self.store.clone(),
                     connections: HashMap::new(),
                     syncs: HashMap::new(),
                     broken_syncs: std::collections::VecDeque::new(),
                     limits: self.limits.clone(),
                     initialized: false,
+                    gate: self.gate.clone(),
+                    xcounters: xcounters::Counters::default(),
+                    xkey: None,
                 }))
             })
             .clone()
@@ -344,7 +383,7 @@ impl Hub {
         } else if bad_wait {
             Err(invalid("wait_s must be a number of seconds"))
         } else {
-            account.lock().await.dispatch(connection, method, &p).await
+            self.execute(account, connection, method, &p).await
         };
         let result = match result {
             Ok(mut value) if matches!(method, "inbox" | "ask" | "ask_wait") => {
@@ -373,10 +412,8 @@ impl Hub {
                     };
                     let query_method = if method == "ask" { "ask_wait" } else { method };
                     if method == "ask" {
-                        value = match account
-                            .lock()
-                            .await
-                            .dispatch(connection, query_method, &query)
+                        value = match self
+                            .execute(account, connection, query_method, &query)
                             .await
                         {
                             Ok(value) => value,
@@ -407,10 +444,8 @@ impl Hub {
                             break Ok(value);
                         }
                         tokio::time::sleep(Duration::from_millis(50)).await;
-                        match account
-                            .lock()
-                            .await
-                            .dispatch(connection, query_method, &query)
+                        match self
+                            .execute(account, connection, query_method, &query)
                             .await
                         {
                             Ok(v) => value = v,

@@ -7,6 +7,7 @@ pub(super) struct Error {
     pub(super) code: String,
     pub(super) message: String,
     pub(super) retry: Option<i64>,
+    pub(super) details: Option<Value>,
 }
 impl Error {
     pub fn new(code: &str, message: &str) -> Self {
@@ -14,6 +15,7 @@ impl Error {
             code: code.into(),
             message: message.into(),
             retry: None,
+            details: None,
         }
     }
     pub fn rate(message: &str, retry: i64) -> Self {
@@ -21,6 +23,7 @@ impl Error {
             code: "rate_limited".into(),
             message: message.into(),
             retry: Some(retry.max(1)),
+            details: None,
         }
     }
     pub fn wire(&self) -> Value {
@@ -32,6 +35,13 @@ impl Error {
         let mut data = json!({"code":self.code});
         if let Some(retry) = self.retry {
             data["retry_after"] = json!(retry);
+        }
+        if let Some(details) = &self.details
+            && let Some(map) = details.as_object()
+        {
+            for (key, value) in map {
+                data[key] = value.clone();
+            }
         }
         json!({"code":number,"message":self.message,"data":data})
     }

@@ -65,6 +65,7 @@ impl AccountHub {
         for e in recipients {
             if let Some(retry) = self.paused(&pair_key(&sender.id, &e.id), now).await? {
                 return Err(Error {
+                    details: None,
                     code: "loop_guard".into(),
                     message: "messages between this pair are paused".into(),
                     retry: Some(retry),
@@ -114,6 +115,7 @@ impl AccountHub {
             let key = tree_key(sender);
             if let Some(retry) = self.paused(&key, now).await? {
                 return Err(Error {
+                    details: None,
                     code: "loop_guard".into(),
                     message: "this tree is paused".into(),
                     retry: Some(retry),
@@ -152,6 +154,7 @@ impl AccountHub {
                         .cloned();
                     self.post_notice(root.as_ref(),true,"relay paused this tree for 10 minutes because it sent too many messages. Messages to the human still pass.",change).await?;
                     return Err(Error {
+                        details: None,
                         code: "loop_guard".into(),
                         message: "tree rate limit".into(),
                         retry: Some(600),
