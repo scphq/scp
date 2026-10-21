@@ -916,9 +916,8 @@ h3 {
   font-size: 0.6875rem;
   line-height: 1.75;
   color: var(--dim);
-  white-space: pre;
-  overflow-x: auto;
-  scrollbar-width: thin;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .snip-body {
