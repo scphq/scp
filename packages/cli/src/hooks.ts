@@ -1040,7 +1040,7 @@ export function hookEntries(
 }
 
 /** a hook command of ours: `swarm hook`, by any path, or the CLI's own script run by an absolute node */
-const OURS = new RegExp(`(^|[\\s/])${CLI_NAME}'?\\s+hook(\\s|$)|/cli/dist/cli\\.js'?\\s+hook\\s+(claude|codex)(\\s|$)`)
+const OURS = new RegExp(`(^|[\\s/])${CLI_NAME}'?\\s+hook(\\s|$)|/(@scp-dev|packages)/cli/dist/cli\\.js'?\\s+hook\\s+(claude|codex)(\\s|$)`)
 
 /** `word` as one POSIX shell word */
 export function shellQuote(word: string): string {

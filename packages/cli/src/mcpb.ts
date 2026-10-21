@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { accessSync, constants, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 import { parseArgs } from "node:util"
@@ -22,6 +22,15 @@ export const CLAUDE_DESKTOP_HELP = `${CLI_NAME} setup claude-desktop [--out FILE
   upgrading either. Install it by opening the file (double-click, or --open). Chat is pull only: the model reads new
   messages when it calls relay_inbox; nothing wakes it. The app's Code tab is Claude Code and uses ${CLI_NAME} setup.
   claude_desktop_config.json is never edited.`
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK)
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}
 
 /** the extension's manifest (MCPB manifest_version 0.3): a binary server that runs the bundled launcher script with /bin/sh */
 export function mcpbManifest(version: string): Record<string, unknown> {
@@ -153,6 +162,7 @@ export function claudeDesktopSetup(options: ClaudeDesktopOptions, deps: ClaudeDe
   const bin = options.bin ?? deps.which(CLI_NAME)
   if (bin === undefined) throw new RelayUsage(`${CLI_NAME} is not on PATH: pass --bin /absolute/path/to/${CLI_NAME}`)
   if (!isAbsolute(bin)) throw new RelayUsage(`--bin takes an absolute path to the ${CLI_NAME} binary`)
+  if (!isExecutableFile(bin)) throw new RelayUsage(`${bin} is not an executable file`)
   const file = options.out ?? defaultMcpbFile(env)
   if (!isAbsolute(file) || !file.endsWith(".mcpb")) throw new RelayUsage("--out takes an absolute path ending in .mcpb")
   const launch = launcher(bin, env, deps.which)

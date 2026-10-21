@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { BLOCK_STOP, claudeVersionFile, hookEntries, musePlugin, opencodePlugin } from "./hooks"
+import { BLOCK_STOP, claudeVersionFile, hookEntries, mergeHooks, musePlugin, opencodePlugin } from "./hooks"
 import { type Added, agyRules, manifestFile, parseSetupArgs, relaySetup, type RunResult, type SetupOptions, verifyMount, verifyMusePlugin } from "./setup"
 
 const SERVER = "scp"
@@ -1244,6 +1244,13 @@ describe("relay setup for desktop apps", () => {
     expect(setup(f, { write: true, undo: true, harness: "codex" }, fakeRun(f), which).code).toBe(0)
     expect(readJson(userHooks(f).codex).hooks).toEqual({ Stop: [{ hooks: [other] }] })
   })
+})
+
+test("a hook of another tool's cli.js is never taken for ours", () => {
+  const foreign = { type: "command", command: "/opt/node /home/u/other/cli/dist/cli.js hook claude --mine" }
+  const merged = mergeHooks({ hooks: { Stop: [{ hooks: [foreign] }] } }, hookEntries("claude", { launcher: ["/opt/node", "/x/@scp-dev/cli/dist/cli.js"] }))
+  expect((merged.hooks as FixtureConfig).Stop[0]).toEqual({ hooks: [foreign] })
+  expect(mergeHooks(merged, {})).toEqual({ hooks: { Stop: [{ hooks: [foreign] }] } })
 })
 
 function mergeHooksFor(harness: "claude" | "codex", launch: string[], other: Record<string, unknown>) {
