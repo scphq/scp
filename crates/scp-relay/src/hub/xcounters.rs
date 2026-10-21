@@ -247,8 +247,9 @@ impl Counters {
                 Self::write(store, account, peer, d, d.count, now).await?;
             }
         }
-        self.pairs.retain(|_, p| now - p.hour.at < 3_600_000);
-        self.threads.retain(|_, w| now - w.at < DAY);
+        self.pairs
+            .retain(|_, p| now - p.hour.at < 3_600_000 && (p.hour.n > 0 || p.minute.n > 0));
+        self.threads.retain(|_, w| now - w.at < DAY && w.n > 0);
         Ok(())
     }
     pub(super) fn refund(&mut self, r: Refund) {

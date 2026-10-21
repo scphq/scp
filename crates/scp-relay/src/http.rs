@@ -215,15 +215,21 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<Identi
         return Err(auth_error("invalid"));
     }
     let now = now_ms();
-    let mut touches = state.touches.lock().await;
-    touches.retain(|_, at| now.saturating_sub(*at) < 10_000);
-    if !touches.contains_key(&identity.credential.id) {
-        state
-            .store
-            .touch_credential(&identity.credential.id, now)
-            .await
-            .map_err(backend)?;
-        touches.insert(identity.credential.id.clone(), now);
+    let due = {
+        let mut touches = state.touches.lock().await;
+        touches.retain(|_, at| now.saturating_sub(*at) < 10_000);
+        let fresh = !touches.contains_key(&identity.credential.id);
+        if fresh {
+            touches.insert(identity.credential.id.clone(), now);
+        }
+        fresh
+    };
+    if due {
+        let id = &identity.credential.id;
+        if let Err(e) = state.store.touch_credential(id, now).await {
+            state.touches.lock().await.remove(id);
+            return Err(backend(e));
+        }
     }
     Ok(identity)
 }
@@ -417,12 +423,21 @@ async fn rpc(
     State(s): State<AppState>,
     method: Method,
     headers: HeaderMap,
-    bytes: Bytes,
+    body: axum::body::Body,
 ) -> ApiResult<Response> {
     let i = authenticate(&s, &headers).await?;
     if method != Method::POST {
         return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
+    // Escapes can shrink six raw bytes to one character, so the exact check runs in the hub.
+    let ceiling = s
+        .limits
+        .frame_bytes()
+        .saturating_mul(6)
+        .saturating_add(1024);
+    let Ok(bytes) = axum::body::to_bytes(body, ceiling).await else {
+        return Ok(Json(s.hub.oversized()).into_response());
+    };
     let body =
         match serde_json::from_slice(&bytes) {
             Ok(body) => body,

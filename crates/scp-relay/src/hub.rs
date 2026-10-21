@@ -381,12 +381,17 @@ impl Hub {
             }
         }
     }
+    /// The JSON-RPC answer to a request above `frameBytes`.
+    pub fn oversized(&self) -> Value {
+        let cap = self.limits.cap("frameBytes").unwrap_or(u64::MAX);
+        json!({"jsonrpc":"2.0","id":null,"error":Error::new("too_large", &format!("a request is at most {cap} bytes")).wire()})
+    }
     /// Process an authenticated HTTP request, including batches in input order.
     pub async fn rpc(&self, grant: Grant, body: Value) -> Value {
         if let Some(cap) = self.limits.cap("frameBytes")
             && body.to_string().encode_utf16().count() as u64 > cap
         {
-            return json!({"jsonrpc":"2.0","id":null,"error":Error::new("too_large", &format!("a request is at most {cap} bytes")).wire()});
+            return self.oversized();
         }
         if body.as_array().is_some_and(Vec::is_empty) {
             return json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"an empty batch"}});
@@ -681,7 +686,8 @@ impl Hub {
                     let retry = account.lock().await.revalidated(&socket_id, result, now).await;
                     if handle.close.borrow().is_some() { break; }
                     let delay = limits::revalidate_delay(revalidate_ms, retry);
-                    revalidate.as_mut().reset(tokio::time::Instant::now() + delay);
+                    let now = tokio::time::Instant::now();
+                    revalidate.as_mut().reset(now.checked_add(delay).unwrap_or(now + Duration::from_secs(1 << 30)));
                 },
                 _=polls.join_next(), if !polls.is_empty()=>{},
                 incoming=stream.next()=>match incoming {
@@ -689,7 +695,7 @@ impl Hub {
                         if text.len()>frame_bytes {handle.frame_too_large(frame_bytes);break;}
                         let body = match serde_json::from_str::<Value>(&text) {
                             Ok(body) => body,
-                            Err(_) => {handle.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse_error"}}).to_string());continue;}
+                            Err(_) => {handle.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}).to_string());continue;}
                         };
                         if matches!(string(&body,"method"),"inbox"|"ask"|"ask_wait") && body["params"]["wait_s"].as_f64().is_some_and(|s|s>0.0) {
                             if polls.len() >= 32 {handle.close(1013,"too many pending requests");break;}
