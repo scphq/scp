@@ -22,6 +22,8 @@ thiserror.workspace = true
 futures-util.workspace = true
 time.workspace = true
 regex = "=1.13.1"
+reqwest = { workspace = true, features = ["rustls-tls"] }
+hmac = "=0.12.1"
 
 [dev-dependencies]
 reqwest.workspace = true
