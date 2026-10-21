@@ -7,9 +7,8 @@ impl AccountHub {
         let list = p["endpoints"]
             .as_array()
             .ok_or_else(|| invalid("endpoints must be a list"))?;
-        if let Some(cap) = self.limits.cap("endpoints")
-            && list.len() as u64 > cap
-        {
+        let cap = self.limits.cap("endpoints").unwrap_or(4096);
+        if list.len() as u64 > cap {
             return Err(Error::new("too_large", &format!("at most {cap} endpoints")));
         }
         let mut parsed = BTreeMap::new();
@@ -77,6 +76,11 @@ impl AccountHub {
             .map(|(name, (raw, _))| (name.clone(), raw.clone()))
             .collect();
         let mut renames = BTreeMap::new();
+        let renamed: HashSet<String> = parsed
+            .values()
+            .map(|(raw, _)| string(raw, "was").to_string())
+            .filter(|was| !was.is_empty())
+            .collect();
         for (name, (raw, mut f)) in parsed {
             seen.insert(name.clone());
             if seen.len() > 65536 {
@@ -86,19 +90,20 @@ impl AccountHub {
                 ));
             }
             let was = string(&raw, "was");
-            let old = original
+            let named = original
                 .iter()
-                .find(|e| {
-                    e.machine == c.machine
-                        && handle(was)
-                        && e.handle == was
-                        && e.token_hash.is_none()
-                })
+                .find(|e| e.machine == c.machine && e.handle == name);
+            let old = named
+                .filter(|_| !renamed.contains(name.as_str()))
                 .or_else(|| {
-                    original
-                        .iter()
-                        .find(|e| e.machine == c.machine && e.handle == name)
+                    original.iter().find(|e| {
+                        e.machine == c.machine
+                            && handle(was)
+                            && e.handle == was
+                            && e.token_hash.is_none()
+                    })
                 })
+                .or(named)
                 .cloned();
             let existing = old
                 .as_ref()

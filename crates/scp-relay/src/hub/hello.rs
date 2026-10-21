@@ -76,13 +76,14 @@ impl AccountHub {
         changes.states.push(("idle_since".into(), None));
         if !human {
             if bound.is_some_and(|m| m.token_id != g.token_id) {
-                self.refusal(
-                    None,
-                    Some(machine),
-                    json!({"code":"unauthorized","machine":machine}),
-                    crate::now_ms(),
-                )
-                .await?;
+                let _ = self
+                    .refusal(
+                        None,
+                        Some(machine),
+                        json!({"code":"unauthorized","machine":machine}),
+                        crate::now_ms(),
+                    )
+                    .await;
                 return Err(Error::new(
                     "unauthorized",
                     &format!(
@@ -102,13 +103,14 @@ impl AccountHub {
                         && (t.actor_id.as_ref() == Some(&g.actor_id)
                             || matches!(g.role, Role::Owner | Role::Admin)))
                 }) {
-                    self.refusal(
-                        None,
-                        Some(machine),
-                        json!({"code":"unauthorized","machine":machine}),
-                        crate::now_ms(),
-                    )
-                    .await?;
+                    let _ = self
+                        .refusal(
+                            None,
+                            Some(machine),
+                            json!({"code":"unauthorized","machine":machine}),
+                            crate::now_ms(),
+                        )
+                        .await;
                     return Err(Error::new(
                         "unauthorized",
                         &format!(

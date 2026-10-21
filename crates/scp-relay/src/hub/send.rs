@@ -12,13 +12,14 @@ impl AccountHub {
         notice: bool,
     ) -> Result<Value> {
         if !notice && let Err(error) = self.room(&p["body"]).await {
-            self.refusal(
-                Some(from),
-                None,
-                json!({"code":error.code}),
-                crate::now_ms(),
-            )
-            .await?;
+            let _ = self
+                .refusal(
+                    Some(from),
+                    None,
+                    json!({"code":error.code}),
+                    crate::now_ms(),
+                )
+                .await;
             return Err(error);
         }
         let result = self.send_inner(c, from, p, floor, notice).await;
@@ -28,13 +29,14 @@ impl AccountHub {
                 "loop_guard" | "rate_limited" | "inbox_full" | "secret_refused"
             )
         {
-            self.refusal(
-                Some(from),
-                None,
-                json!({"code":error.code}),
-                crate::now_ms(),
-            )
-            .await?;
+            let _ = self
+                .refusal(
+                    Some(from),
+                    None,
+                    json!({"code":error.code}),
+                    crate::now_ms(),
+                )
+                .await;
         }
         result
     }
