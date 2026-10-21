@@ -53,11 +53,19 @@ impl AccountHub {
     }
     pub(super) fn fleet(&self, mut event: Value) {
         event["at"] = json!(iso(crate::now_ms()));
+        if let Some(dash) = super::dashboard::dashboard_event(&event) {
+            let _ = self.dashboard.send(dash);
+        }
         for c in self.connections.values().filter(|c| c.watching) {
             if let Some(s) = &c.socket {
                 Self::notification(s, "fleet", &event);
             }
         }
+    }
+    pub(super) fn dashboard_endpoints(&self, machine: &str) {
+        let _ = self
+            .dashboard
+            .send(json!({"type":"endpoints","at":iso(crate::now_ms()),"machine":machine}));
     }
     pub(super) async fn announce(
         &self,
@@ -66,6 +74,9 @@ impl AccountHub {
         full: bool,
         released: bool,
     ) -> Result<()> {
+        if released {
+            self.dashboard_endpoints(machine);
+        }
         let machines = self.store.machines(&self.account_id).await?;
         let bound = machines.iter().find(|m| m.name == machine);
         for c in self

@@ -1,0 +1,251 @@
+name: Release relay
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-relay
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.gate.outputs.release }}
+      version: ${{ steps.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: crates/package.json
+          sparse-checkout-cone-mode: false
+      - name: Release only an untagged version
+        id: gate
+        run: |
+          version=$(jq -r .version crates/package.json)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if git ls-remote --exit-code --tags origin "refs/tags/scp-relay@$version" > /dev/null; then
+            echo "::notice::scp-relay@$version is already released"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            test "$status" -eq 2
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Validate synced versions
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          bun scripts/relay-version.ts --check
+          test "$(bun scripts/relay-version.ts)" = "$VERSION"
+      - name: npm bootstrap preflight
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bun scripts/check-relay-publish-targets.ts
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/crates/target
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates
+          key: ${{ matrix.target }}
+      - name: musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        working-directory: crates
+        env:
+          TARGET: ${{ matrix.target }}
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        shell: bash
+        run: cargo build --release --locked --bin scp-relay --target "$TARGET"
+      - name: Archive and checksum
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: python scripts/relay-archive.py pack "$TARGET" artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: relay-${{ matrix.target }}
+          path: artifacts/*
+          retention-days: 7
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: relay-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: gh release create "scp-relay@$VERSION" artifacts/* --repo "$REPOSITORY" --target "$REVISION" --title "SCP relay $VERSION" --generate-notes
+
+  npm:
+    needs: [prepare, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: relay-*
+          path: artifacts
+          merge-multiple: true
+      - run: bun install --frozen-lockfile
+      - run: bun run --filter @scp-dev/dashboard build
+      - name: Generate and publish relay packages and dashboard
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          publish() {
+            dir=$1
+            name=$(node -p "require('./$dir/package.json').name")
+            status=$(curl --silent --show-error --output "$RUNNER_TEMP/npm-version.json" --write-out '%{http_code}' "https://registry.npmjs.org/$name/$VERSION")
+            if [ "$status" = 200 ]; then
+              echo "Already published: $name@$VERSION"
+            elif [ "$status" = 404 ]; then
+              npm publish "./$dir" --provenance --access public
+            else
+              echo "::error::npm lookup failed for $name: HTTP $status"
+              exit 1
+            fi
+          }
+          while read -r key target; do
+            python scripts/relay-archive.py unpack "$target" artifacts
+            binary=scp-relay
+            if [ "$key" = win32-x64 ]; then binary=scp-relay.exe; fi
+            bun crates/npm/platform.ts "$key" "artifacts/scp-relay-$target/$binary" "npm-packages/$key"
+            publish "npm-packages/$key"
+          done <<'PLATFORMS'
+          linux-x64-gnu x86_64-unknown-linux-gnu
+          linux-arm64-gnu aarch64-unknown-linux-gnu
+          linux-x64-musl x86_64-unknown-linux-musl
+          darwin-arm64 aarch64-apple-darwin
+          darwin-x64 x86_64-apple-darwin
+          win32-x64 x86_64-pc-windows-msvc
+          PLATFORMS
+          publish crates/npm/relay-server
+          mkdir -p npm-packages/dashboard
+          cp packages/dashboard/package.json packages/dashboard/README.md npm-packages/dashboard/
+          cp -R packages/dashboard/dist npm-packages/dashboard/dist
+          (cd npm-packages/dashboard && npm pkg delete private devDependencies scripts)
+          publish npm-packages/dashboard
+
+  crates:
+    needs: [prepare, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+      - name: Publish crates
+        working-directory: crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo '::notice::CARGO_REGISTRY_TOKEN is empty; skipping crates publication'
+            exit 0
+          fi
+          missing=()
+          for name in scp-relay-store scp-relay-server; do
+            status=$(curl --silent --show-error --retry 3 --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/$name/$VERSION")
+            case "$status" in
+              200) ;;
+              404) missing+=("$name");;
+              *) echo "::error::crates lookup failed for $name: HTTP $status"; exit 1;;
+            esac
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "Already published: $VERSION"
+          elif [ "${#missing[@]}" -eq 1 ]; then
+            cargo publish -p "${missing[0]}" --locked
+          else
+            cargo publish --workspace --locked
+          fi
+
+  image:
+    needs: [prepare, release]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/relay-image.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}

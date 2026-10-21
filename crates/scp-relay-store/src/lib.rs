@@ -308,6 +308,8 @@ pub trait RelayStore: Send + Sync + 'static {
     async fn member(&self, account_id: &str, name: &str) -> Result<Option<Member>>;
     /// List members ordered by creation time, then id.
     async fn members(&self, account_id: &str) -> Result<Vec<Member>>;
+    /// Count live devices and tokens for an account at the supplied time.
+    async fn credential_counts(&self, account_id: &str, now: i64) -> Result<(u64, u64)>;
     /// Read this side of a contact, including non-active states.
     async fn contact(&self, account_id: &str, peer_id: &str) -> Result<Option<Contact>>;
     /// Active contacts ordered by peer handle, then id.

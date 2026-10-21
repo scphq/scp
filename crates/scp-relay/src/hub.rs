@@ -102,6 +102,7 @@ impl SocketHandle {
 mod activity;
 mod bridge;
 mod client;
+mod dashboard;
 mod guards;
 mod hello;
 mod limits;
@@ -156,6 +157,7 @@ pub struct AccountHub {
     sockets: Arc<AtomicUsize>,
     revalidation_errors: HashMap<String, i64>,
     wake_options: WakeOptions,
+    dashboard: tokio::sync::broadcast::Sender<Value>,
     owner: std::sync::Weak<Mutex<AccountHub>>,
 }
 impl AccountHub {
@@ -358,6 +360,7 @@ impl Hub {
                         revalidation_errors: HashMap::new(),
                         wake_options: self.wake_options.clone(),
                         owner: owner.clone(),
+                        dashboard: tokio::sync::broadcast::channel(256).0,
                     })
                 })
             })
@@ -594,6 +597,9 @@ impl Hub {
             notified.await;
         }
     }
+    pub(crate) fn dashboard_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
     /// Signal all socket writer tasks to close with 1001.
     pub fn shutdown(&self) {
         self.shutdown.send_replace(true);
@@ -605,6 +611,8 @@ impl Hub {
         socket: WebSocketStream<S>,
         frame_bytes: usize,
         revalidate_ms: u64,
+        auth: crate::AuthChain,
+        request: crate::AuthRequest,
     ) where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -693,7 +701,12 @@ impl Hub {
                 _=&mut expiry=>{account.lock().await.kick(&socket_id, "the token grant expired, reconnect", 4001).await;break;},
                 _=&mut revalidate=>{
                     let now = crate::now_ms();
-                    let result = self.store.credential_by_id(&grant.token_id, now).await;
+                    let result = match auth.authenticate(&request).await {
+                        crate::AuthOutcome::Identity(i) if i.credential.id == grant.token_id => Ok(CredentialLookup::Active(Box::new(i.stored()))),
+                        crate::AuthOutcome::Reject(reason) if reason == "revoked" => Ok(CredentialLookup::Revoked),
+                        crate::AuthOutcome::Unavailable(reason) => Err(scp_relay_store::StoreError::Backend(reason)),
+                        _ => Ok(CredentialLookup::Invalid),
+                    };
                     let retry = account.lock().await.revalidated(&socket_id, result, now).await;
                     if handle.close.borrow().is_some() { break; }
                     let delay = limits::revalidate_delay(revalidate_ms, retry);

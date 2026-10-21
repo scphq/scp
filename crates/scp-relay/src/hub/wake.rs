@@ -22,8 +22,8 @@ impl Default for WakeOptions {
     fn default() -> Self {
         Self {
             cross_account: false,
-            sender_account_per_hour: 6.0,
-            target_per_hour: 12.0,
+            sender_account_per_hour: f64::INFINITY,
+            target_per_hour: f64::INFINITY,
             debounce_s: 60.0,
             backoff_max_s: 900.0,
             waking_timeout_s: None,

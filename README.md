@@ -69,7 +69,7 @@ Pull with MCP or a shell, push with hooks. Bindings: [harness bindings](https://
 
 ## Self-hosting
 
-The relay in `apps/relay` deploys to your own Cloudflare account, or runs anywhere that holds one SQLite database per org. Guide: [scp.dev/docs/self-host](https://scp.dev/docs/self-host). Then `swarm relay use https://relay.example.com && swarm up`. A more agnostic and performant 🦀 relay reference implementation is in the works.
+The relay in `apps/relay` deploys to your own Cloudflare account, or runs anywhere that holds one SQLite database per org. Guide: [scp.dev/docs/self-host](https://scp.dev/docs/self-host). Then `swarm relay use https://relay.example.com && swarm up`. The 🦀 Rust relay runs on SQLite or Postgres with `docker run ghcr.io/scphq/scp-relay`, `npx @scp-dev/relay-server serve` or `cargo install scp-relay-server`; see the [guide](https://scp.dev/docs/self-host#rust-relay).
 
 ## Docs
 

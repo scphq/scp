@@ -65,3 +65,48 @@ once it is deleted. Keep it only for bootstrapping new package names.
 Each job ends with a smoke check that expects a 200 from `https://scp.dev/` or `https://app.scp.dev/health`.
 Both jobs need two repository secrets: `CLOUDFLARE_API_TOKEN` (a token with Workers Scripts, Workers Routes and D1 edit permission)
 and `CLOUDFLARE_ACCOUNT_ID`.
+
+## Relay releases
+
+Changesets versions the Rust relay too. Its version anchor is the private workspace package `scp-relay` in
+`crates/package.json`; `changeset publish` skips it because it is private, and `scripts/check-publish-targets.ts` fails
+the npm release if it ever stops being private. In a PR that changes the relay, the npm wrapper or the dashboard, run
+`bun changeset` and pick `scp-relay`.
+
+The `chore: release` PR then bumps `crates/package.json`, writes `crates/CHANGELOG.md`, and `version-packages` runs
+`bun scripts/relay-version.ts sync`, which copies the version into both crates, the exact store dependency pin,
+`Cargo.lock`, the npm wrapper's version and optional dependencies, and `packages/dashboard/package.json`. CI runs
+`bun scripts/relay-version.ts --check`. The dashboard stays `private: true` in source and is excluded from changesets.
+The wrapper in `crates/npm/relay-server` is outside the Bun workspaces, so changesets and the regular npm publish checks
+ignore it.
+
+Merging the release PR releases the relay: **Release relay** (`release-relay.yml`) runs on every push to `main`, and
+its `gate` job stops there unless the tag `scp-relay@X.Y.Z` for the anchor version does not exist yet. A new version
+checks the synced versions and the npm bootstrap before building, creates `scp-relay@X.Y.Z` at the pushed revision,
+then publishes:
+
+- Six binary archives with SHA-256 checksums on the release: macOS arm64 and x64, Linux glibc arm64
+  and x64, Linux musl x64, and Windows x64.
+- `scp-relay-server` and `scp-relay-store` on crates.io.
+- `@scp-dev/relay-server`, its six optional platform packages, and `@scp-dev/dashboard` on npm, with provenance.
+  The npm job builds the dashboard and removes `private` from a temporary publish copy.
+- `ghcr.io/scphq/scp-relay` and `ghcr.io/scphq/scp-dashboard` for amd64 and arm64, tagged `vX.Y.Z`, `X.Y` and `latest`, with provenance,
+  SBOMs and a keyless signature on the manifest digest. Main pushes also publish `edge`.
+
+One-time setup:
+
+1. After the first image push, set both GHCR packages' visibility to **Public**.
+2. Add `CARGO_REGISTRY_TOKEN` with permission to publish both crates. With no token, the crates job
+   reports a notice and skips publication.
+3. Bootstrap all eight npm names: either set a temporary `NPM_TOKEN` repository secret for the first
+   release, or manually publish each platform package, the wrapper and the dashboard once. Trusted publishing cannot
+   create a new name. With missing names and no token, `prepare` fails before builds, tags or uploads.
+4. For each npm package, configure a trusted publisher on npmjs.com for owner `scphq`, repository
+   `scp`, workflow filename `release-relay.yml`, and no environment. Configure it shortly before a release.
+5. Once OIDC publication works for every name, remove `NPM_TOKEN` and revoke the bootstrap token.
+
+The npm job uses Node 24 and passes `NPM_TOKEN` as `NODE_AUTH_TOKEN` only as a bootstrap fallback.
+Already published npm versions are skipped; the dashboard publishes after the relay wrapper. Already published crate
+versions are skipped too. A created release tag is never overwritten, and a manual run of the workflow skips a tagged
+version like a push does: complete a partial release by re-running the failed jobs of its run while its build artifacts last (7 days). A manual run releases a
+version whose push run failed before tagging.

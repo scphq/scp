@@ -3,15 +3,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
 import type { XAllow, XLimits } from "@scp-dev/core";
-import type { HubWakeOptions } from "@scp-dev/hub";
-import { postgresServer, relayBinary } from "./environment";
+import { HUB_LIMITS, type HubWakeOptions } from "@scp-dev/hub";
+import { DockerTarget } from "./docker-target";
+import { containerImage, postgresServer, relayBinary, selectedTargets } from "./environment";
+export { DockerTarget } from "./docker-target";
 
 export type ContactOp = "invite" | "accept" | "decline" | "revoke" | "block" | "update";
 export type ContactOptions = { allow?: XAllow[]; dir?: "in" | "out" | "both"; limits?: XLimits | null };
 export type MintOptions = { device?: boolean; name?: string; expiresIn?: number };
 
 export interface Target {
-  start(limits?: Record<string, number>, wake?: Partial<HubWakeOptions>): Promise<{ url: string }>;
+  start(limits?: Record<string, number>, wake?: Partial<HubWakeOptions>, extraServeArgs?: string[]): Promise<{ url: string }>;
   mint(account: string, member: string, opts?: MintOptions): Promise<{ token: string; credentialId: string }>;
   revoke(credentialId: string): Promise<void>;
   contact(op: ContactOp, account: string, peer: string, opts?: ContactOptions): Promise<{ account: string; peer: string; state: string | null }>;
@@ -20,8 +22,10 @@ export interface Target {
   stop(): Promise<void>;
   readonly url: string;
 }
-export const targetNames = ["ts", "rust-sqlite", ...(postgresServer ? ["rust-pg"] : [])];
-export const enabled = (name: string) => name === "ts" || !!relayBinary;
+export const targetNames = ["ts", "rust-sqlite", ...(postgresServer ? ["rust-pg"] : []), ...(containerImage ? ["docker"] : [])].filter(
+  (name) => !selectedTargets || selectedTargets.includes(name),
+);
+export const enabled = (name: string) => (name === "docker" ? !!containerImage : name === "ts" || !!relayBinary);
 
 export async function waitFor<T>(check: () => T | Promise<T>, what: string, timeoutMs = 10000): Promise<Exclude<T, undefined | null | false>> {
   const deadline = Date.now() + timeoutMs;
@@ -42,9 +46,9 @@ export async function terminate(child: Subprocess) {
     clearTimeout(timer);
   }
 }
-export async function command(args: string[], env: Record<string, string | undefined> = process.env) {
+export async function command(args: string[], env: Record<string, string | undefined> = process.env, timeoutMs = 10000) {
   const child = Bun.spawn(args, { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 10000);
+  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
   try {
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     if (code !== 0) throw new Error(`command failed (${code}): ${stderr}`);
@@ -64,10 +68,22 @@ export class ProcessTarget implements Target {
   private admin?: InstanceType<typeof Bun.SQL>;
   private limits: Record<string, number> = {};
   private wake: Partial<HubWakeOptions> = {};
-  constructor(readonly name: string) {}
-  async start(limits: Record<string, number> = {}, wake: Partial<HubWakeOptions> = {}) {
-    this.limits = limits;
-    this.wake = wake;
+  private docker?: DockerTarget;
+  private extraServeArgs: string[] = [];
+  constructor(readonly name: string) {
+    if (name === "docker") this.docker = new DockerTarget();
+  }
+  async start(limits: Record<string, number> = {}, wake: Partial<HubWakeOptions> = {}, extraServeArgs: string[] = []) {
+    const rustLimits = { ...HUB_LIMITS, ...limits };
+    const rustWake = { senderAccountPerHour: 6, targetPerHour: 12, ...wake };
+    if (this.docker) {
+      const result = await this.docker.start(rustLimits, rustWake, extraServeArgs);
+      this.url = result.url;
+      return result;
+    }
+    this.limits = this.name === "ts" ? limits : rustLimits;
+    this.extraServeArgs = extraServeArgs;
+    this.wake = this.name === "ts" ? wake : rustWake;
     if (this.name === "rust-pg" && !this.database) {
       this.database = `scp_conformance_${crypto.randomUUID().replaceAll("-", "")}`;
       this.admin = new Bun.SQL(postgresServer!);
@@ -85,6 +101,7 @@ export class ProcessTarget implements Target {
       this.name === "ts"
         ? [process.execPath, "--no-env-file", join(import.meta.dir, "reference-server.ts"), "--listen", listen, "--dir", this.root]
         : [resolve(relayBinary!), "serve", "--listen", listen, "--store", this.store];
+    args.push(...this.extraServeArgs);
     for (const [key, value] of Object.entries(this.limits)) args.push("--limit", `${key}=${value}`);
     for (const [key, value] of Object.entries(this.wake)) args.push("--wake", `${key}=${value}`);
     const child = Bun.spawn(args, { env: { ...process.env, SCP_CONFORMANCE_ADMIN: this.secret }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -112,10 +129,14 @@ export class ProcessTarget implements Target {
         }
       }
     })();
-    this.url = await waitFor(() => {
-      if (child.exitCode !== null) throw new Error(`relay exited (${child.exitCode}): ${stderr}`);
-      return listening;
-    }, `${this.name} listening`);
+    this.url = await waitFor(
+      () => {
+        if (child.exitCode !== null) throw new Error(`relay exited (${child.exitCode}): ${stderr}`);
+        return listening;
+      },
+      `${this.name} listening`,
+      this.name === "rust-pg" ? 60000 : 10000,
+    );
     await waitFor(async () => (await fetch(`${this.url}/health`)).ok, "relay health");
   }
   private async tsAdmin(body: object) {
@@ -128,6 +149,7 @@ export class ProcessTarget implements Target {
     return response.json();
   }
   async mint(account: string, member: string, opts: MintOptions = {}) {
+    if (this.docker) return this.docker.mint(account, member, opts);
     if (this.name === "ts") return (await this.tsAdmin({ action: "mint", account, member, ...opts })) as { token: string; credentialId: string };
     await command([resolve(relayBinary!), "account", "create", account, "--store", this.store]);
     const output = JSON.parse(
@@ -149,6 +171,7 @@ export class ProcessTarget implements Target {
     return { token: output.token as string, credentialId: output.credential_id as string };
   }
   async revoke(credentialId: string) {
+    if (this.docker) return this.docker.revoke(credentialId);
     if (this.name === "ts") {
       await this.tsAdmin({ action: "revoke", credentialId });
       return;
@@ -156,6 +179,7 @@ export class ProcessTarget implements Target {
     await command([resolve(relayBinary!), "token", "revoke", "--store", this.store, credentialId]);
   }
   async contact(op: ContactOp, account: string, peer: string, opts: ContactOptions = {}) {
+    if (this.docker) return this.docker.contact(op, account, peer, opts);
     if (this.name === "ts")
       return (await this.tsAdmin({ action: "contact", op, account, peer, ...opts })) as { account: string; peer: string; state: string | null };
     const args = [resolve(relayBinary!), "contact", op, peer, "--store", this.store, "--account", account];
@@ -165,6 +189,7 @@ export class ProcessTarget implements Target {
     return JSON.parse(await command(args)) as { account: string; peer: string; state: string | null };
   }
   async device(op: "approve" | "deny", userCode: string, account?: string, member?: string) {
+    if (this.docker) return this.docker.device(op, userCode, account, member);
     if (this.name === "ts") {
       await this.tsAdmin({ action: op, userCode, account, member });
       return;
@@ -180,11 +205,13 @@ export class ProcessTarget implements Target {
     ]);
   }
   async restart() {
+    if (this.docker) return this.docker.restart();
     if (this.child) await terminate(this.child);
     await this.launch();
   }
   async stop() {
     try {
+      if (this.docker) await this.docker.stop();
       if (this.child) await terminate(this.child);
     } finally {
       try {

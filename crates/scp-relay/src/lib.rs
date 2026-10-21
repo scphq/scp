@@ -1,5 +1,8 @@
 //! Self-hosted SCP relay authentication and transport foundation.
 pub mod admin;
+pub mod auth;
+pub use auth::{AuthChain, AuthOutcome, AuthRequest, Identity, RelayAuth};
+mod dashboard;
 pub mod http;
 pub mod hub;
 

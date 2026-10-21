@@ -7,7 +7,7 @@ impl AccountHub {
         let list = p["endpoints"]
             .as_array()
             .ok_or_else(|| invalid("endpoints must be a list"))?;
-        let cap = self.limits.cap("endpoints").unwrap_or(4096);
+        let cap = self.limits.cap("endpoints").unwrap_or(1_000_000);
         if list.len() as u64 > cap {
             return Err(Error::new("too_large", &format!("at most {cap} endpoints")));
         }
@@ -321,6 +321,13 @@ impl AccountHub {
             if before.is_some_and(|e| fields(e)["status"] != v["status"]) {
                 self.fleet(json!({"type":"status","machine":c.machine,"endpoint":v["address"],"status":v["status"]}));
             }
+        }
+        if full
+            || notifications
+                .iter()
+                .any(|v| v.get("was").is_some() || !original.iter().any(|e| e.id == v["id"]))
+        {
+            self.dashboard_endpoints(&c.machine);
         }
         Ok(json!({"changed":notifications.len()}))
     }

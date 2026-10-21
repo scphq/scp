@@ -11,5 +11,5 @@
     "version": true,
     "tag": false
   },
-  "ignore": ["@scp-dev/web"]
+  "ignore": ["@scp-dev/web", "@scp-dev/dashboard"]
 }

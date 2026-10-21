@@ -1,13 +1,25 @@
 [package]
-name = "scp-relay"
+name = "scp-relay-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
 repository.workspace = true
 
+description = "Self-hosted SCP relay server with SQLite and PostgreSQL storage"
+homepage = "https://scp.dev"
+readme = "README.md"
+keywords = ["scp", "relay", "agents", "messaging"]
+categories = ["network-programming", "command-line-utilities"]
+
+[lib]
+name = "scp_relay"
+
+[[bin]]
+name = "scp-relay"
+path = "src/main.rs"
+
 [dependencies]
-scp-relay-store = { path = "../scp-relay-store" }
+scp-relay-store = { path = "../scp-relay-store", version = "=0.1.0" }
 tokio.workspace = true
 axum.workspace = true
 serde.workspace = true

@@ -1,6 +1,8 @@
 //! Hosted-relay JSON routes and pre-RPC authentication checks.
 use crate::{
-    admin, hash,
+    admin,
+    auth::{AuthChain, AuthOutcome, AuthRequest, NativeAuth},
+    hash,
     hub::{Grant, Hub},
     now_ms, random, valid_name,
 };
@@ -23,25 +25,25 @@ impl Default for Limits {
     fn default() -> Self {
         Self(
             [
-                ("machines", 16),
-                ("endpoints", 512),
-                ("sockets", 64),
-                ("frameBytes", 262144),
-                ("callsPerMinute", 120),
-                ("bridgeCallsPerMinute", 600),
-                ("accountCallsPerMinute", 1200),
-                ("acksPerMinute", 1200),
-                ("accountAcksPerMinute", 4800),
-                ("storedBytes", 256 * 1024 * 1024),
-                ("refusalsPerMinute", 10),
-                ("clientMachineIdleS", 14 * 86400),
-                ("idlePurgeS", 30 * 86400),
-                ("httpWaitS", 25),
-                ("revalidateMs", 300000),
-                ("deniedS", 3600),
+                ("machines", None),
+                ("endpoints", None),
+                ("sockets", None),
+                ("frameBytes", Some(16777216)),
+                ("callsPerMinute", None),
+                ("bridgeCallsPerMinute", None),
+                ("accountCallsPerMinute", None),
+                ("acksPerMinute", None),
+                ("accountAcksPerMinute", None),
+                ("storedBytes", None),
+                ("refusalsPerMinute", None),
+                ("clientMachineIdleS", Some(14 * 86400)),
+                ("idlePurgeS", Some(30 * 86400)),
+                ("httpWaitS", Some(25)),
+                ("revalidateMs", Some(300000)),
+                ("deniedS", Some(3600)),
             ]
             .into_iter()
-            .map(|(k, v)| (k.into(), Some(v)))
+            .map(|(k, v)| (k.into(), v))
             .collect(),
         )
     }
@@ -80,13 +82,13 @@ impl Limits {
     pub fn cap(&self, key: &str) -> Option<u64> {
         self.0.get(key).copied().flatten()
     }
-    fn frame_bytes(&self) -> usize {
+    pub(crate) fn frame_bytes(&self) -> usize {
         self.0
             .get("frameBytes")
             .copied()
             .flatten()
-            .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
-            .unwrap_or(usize::MAX)
+            .map(|n| usize::try_from(n).unwrap_or(16777216))
+            .unwrap_or(16777216)
     }
 }
 /// Shared application dependencies. public_url has no trailing slash.
@@ -96,9 +98,22 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub public_url: String,
     pub limits: Limits,
-    touches: Arc<tokio::sync::Mutex<std::collections::HashMap<String, i64>>>,
+    pub auth: AuthChain,
+    pub cors_origins: Vec<String>,
 }
 impl AppState {
+    /// Replace native authentication with an ordered chain supplied by the embedder.
+    /// Serve the router with `into_make_service_with_connect_info::<SocketAddr>()`
+    /// so proxy methods receive the actual TCP peer. Methods run again for sockets.
+    pub fn with_auth(mut self, chain: AuthChain) -> Self {
+        self.auth = chain;
+        self
+    }
+    /// Allow exact browser origins on the public dashboard API.
+    pub fn with_cors_origins(mut self, origins: Vec<String>) -> Self {
+        self.cors_origins = origins;
+        self
+    }
     /// Configure machine webhook calls before serving requests.
     pub fn with_wake(mut self, options: crate::hub::WakeOptions) -> Self {
         self.hub = Arc::new(Hub::new(self.store.clone(), self.limits.clone()).with_wake(options));
@@ -108,43 +123,47 @@ impl AppState {
     pub fn new(store: Arc<dyn RelayStore>, public_url: String, limits: Limits) -> Self {
         Self {
             hub: Arc::new(Hub::new(store.clone(), limits.clone())),
+            auth: AuthChain(vec![Arc::new(NativeAuth::new(store.clone()))]),
             store,
             public_url: public_url.trim_end_matches('/').into(),
             limits,
-            touches: Arc::default(),
+            cors_origins: Vec::new(),
         }
     }
 }
 /// Build the relay router. JSON bodies are limited independently of socket frames.
 pub fn router(state: AppState) -> Router {
     let frame_bytes = state.limits.frame_bytes();
-    Router::new()
+    let routes = Router::new()
         .route(
             "/health",
             get(|| async { Json(json!({"ok":true,"service":"scp-relay"})) }),
-        )
-        .route(
-            "/device",
-            get(|| async {
-                "Run scp-relay device approve <code> --account <handle> --member <name>"
-            }),
         )
         .route("/v1/whoami", get(whoami))
         .route("/v1/device/code", post(device_code))
         .route("/v1/device/token", post(device_token))
         .route("/v1/relay/ws", any(ws))
-        .route("/v1/relay/rpc", any(rpc).layer(DefaultBodyLimit::disable()))
+        .route("/v1/relay/rpc", any(rpc).layer(DefaultBodyLimit::disable()));
+    let routes = crate::dashboard::routes(routes, &state)
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error":"not_found"}))) })
+        .route(
+            "/device",
+            get(|| async {
+                "Run scp-relay device approve <code> --account <handle> --member <name>"
+            }),
+        );
+    routes
         .layer(DefaultBodyLimit::max(frame_bytes))
         .with_state(state)
 }
-struct ApiError(StatusCode, Value);
+#[derive(Debug)]
+pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) Value);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(self.1)).into_response()
     }
 }
-type ApiResult<T> = std::result::Result<T, ApiError>;
+pub(crate) type ApiResult<T> = std::result::Result<T, ApiError>;
 fn auth_error(error: &str) -> ApiError {
     ApiError(
         StatusCode::UNAUTHORIZED,
@@ -157,7 +176,7 @@ fn device_error(error: &str, description: &str) -> ApiError {
         json!({"error":error,"error_description":description}),
     )
 }
-fn backend(e: StoreError) -> ApiError {
+pub(crate) fn backend(e: StoreError) -> ApiError {
     tracing::error!(error=%e,"store operation failed");
     ApiError(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -186,52 +205,50 @@ fn input(headers: &HeaderMap, bytes: &Bytes) -> ApiResult<Value> {
     }
     Ok(v)
 }
-async fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<Identity> {
-    let raw = headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| auth_error("unauthorized"))?;
-    let mut parts = raw.split_whitespace();
-    let scheme = parts.next().ok_or_else(|| auth_error("unauthorized"))?;
-    let secret = parts.next().ok_or_else(|| auth_error("unauthorized"))?;
-    if !scheme.eq_ignore_ascii_case("Bearer") || parts.next().is_some() {
-        return Err(auth_error("unauthorized"));
-    }
-    if secret.len() > 128 || !(secret.starts_with("scp_d_") || secret.starts_with("scp_t_")) {
-        return Err(auth_error("invalid"));
-    }
-    let identity = match state
-        .store
-        .credential_by_hash(&hash(secret), now_ms())
-        .await
-        .map_err(backend)?
-    {
-        CredentialLookup::Active(i) => *i,
-        CredentialLookup::Invalid => return Err(auth_error("invalid")),
-        CredentialLookup::Revoked => return Err(auth_error("revoked")),
-        CredentialLookup::Expired => return Err(auth_error("expired")),
-    };
-    if (identity.credential.kind == CredentialKind::Device) != secret.starts_with("scp_d_") {
-        return Err(auth_error("invalid"));
-    }
-    let now = now_ms();
-    let due = {
-        let mut touches = state.touches.lock().await;
-        touches.retain(|_, at| now.saturating_sub(*at) < 10_000);
-        let fresh = !touches.contains_key(&identity.credential.id);
-        if fresh {
-            touches.insert(identity.credential.id.clone(), now);
+pub(crate) async fn authenticate(
+    state: &AppState,
+    request: &AuthRequest,
+) -> ApiResult<crate::Identity> {
+    match state.auth.authenticate(request).await {
+        AuthOutcome::Identity(i) => Ok(*i),
+        AuthOutcome::Reject(reason) => Err(auth_error(&reason)),
+        AuthOutcome::Unavailable(reason) => {
+            tracing::error!(error=%reason,"authentication backend failed");
+            Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error":"server_error"}),
+            ))
         }
-        fresh
-    };
-    if due {
-        let id = &identity.credential.id;
-        if let Err(e) = state.store.touch_credential(id, now).await {
-            state.touches.lock().await.remove(id);
-            return Err(backend(e));
-        }
+        AuthOutcome::Pass => Err(auth_error("unauthorized")),
     }
-    Ok(identity)
+}
+/// Validated TLS client certificate supplied by an embedding TLS listener.
+#[derive(Clone)]
+pub struct TlsClientCertDer(pub Vec<u8>);
+/// Captures transport metadata once for authentication and socket revalidation.
+pub(crate) struct RequestAuth(pub AuthRequest);
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RequestAuth {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|p| p.0)
+            .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+        Ok(Self(AuthRequest {
+            method: parts.method.clone(),
+            path: parts.uri.path().into(),
+            headers: parts.headers.clone(),
+            peer,
+            tls_client_cert_der: parts
+                .extensions
+                .get::<TlsClientCertDer>()
+                .map(|cert| cert.0.clone()),
+        }))
+    }
 }
 /// Map a resolved credential into the hub's trusted account/member context.
 pub fn grant(i: &Identity) -> Grant {
@@ -253,15 +270,18 @@ pub fn grant(i: &Identity) -> Grant {
         account: i.account.handle.clone(),
     }
 }
-async fn whoami(State(s): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let i = authenticate(&s, &headers).await?;
-    let g = grant(&i);
-    let c = i.credential;
+async fn whoami(
+    State(s): State<AppState>,
+    RequestAuth(request): RequestAuth,
+) -> ApiResult<Json<Value>> {
+    let i = authenticate(&s, &request).await?;
+    let g = i.grant();
+    let c = i.stored().credential;
     Ok(Json(
         json!({"kind":c.kind,"org":i.account.handle,"email":i.member.email,"role":i.member.role,"label":c.name,"ambient":g.scoped,"endpoint_labels":g.labels,"expires_at":c.expires_at.map(crate::iso)}),
     ))
 }
-async fn device_code(
+pub(crate) async fn device_code(
     State(s): State<AppState>,
     headers: HeaderMap,
     bytes: Bytes,
@@ -337,7 +357,7 @@ async fn device_code(
         json!({"device_code":code,"user_code":shown,"verification_uri":uri,"verification_uri_complete":format!("{uri}?code={shown}"),"expires_in":900,"interval":5}),
     ))
 }
-async fn device_token(
+pub(crate) async fn device_token(
     State(s): State<AppState>,
     headers: HeaderMap,
     bytes: Bytes,
@@ -421,11 +441,11 @@ async fn device_token(
 }
 async fn rpc(
     State(s): State<AppState>,
+    RequestAuth(request): RequestAuth,
     method: Method,
-    headers: HeaderMap,
     body: axum::body::Body,
 ) -> ApiResult<Response> {
-    let i = authenticate(&s, &headers).await?;
+    let i = authenticate(&s, &request).await?;
     if method != Method::POST {
         return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
@@ -446,14 +466,15 @@ async fn rpc(
             )
             .into_response()),
         };
-    Ok(Json(s.hub.rpc(grant(&i), body).await).into_response())
+    Ok(Json(s.hub.rpc(i.grant(), body).await).into_response())
 }
 async fn ws(
     State(s): State<AppState>,
+    RequestAuth(auth_request): RequestAuth,
     headers: HeaderMap,
     mut request: Request,
 ) -> ApiResult<Response> {
-    let i = authenticate(&s, &headers).await?;
+    let i = authenticate(&s, &auth_request).await?;
     if !headers
         .get("upgrade")
         .and_then(|h| h.to_str().ok())
@@ -485,7 +506,7 @@ async fn ws(
         .copied()
         .flatten()
         .unwrap_or(300_000);
-    let lease = s.hub.track(&grant(&i)).await.ok_or_else(|| {
+    let lease = s.hub.track(&i.grant()).await.ok_or_else(|| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             json!({"error":"too_many_sockets"}),
@@ -506,7 +527,14 @@ async fn ws(
             )
             .await;
             s.hub
-                .websocket(grant(&i), socket, frame, revalidate_ms)
+                .websocket(
+                    i.grant(),
+                    socket,
+                    frame,
+                    revalidate_ms,
+                    s.auth.clone(),
+                    auth_request,
+                )
                 .await;
         }
     });
@@ -514,33 +542,29 @@ async fn ws(
 }
 
 #[cfg(test)]
-mod tests {
+mod default_tests {
     use super::*;
-    #[tokio::test]
-    async fn credential_touch_advances_after_ten_seconds() {
-        let store = connect("sqlite::memory:").await.unwrap();
-        admin::account(store.as_ref(), "touch").await.unwrap();
-        let (a, m) = admin::member(store.as_ref(), "touch", "member", None, None)
-            .await
-            .unwrap();
-        let (secret, c) = admin::credential(&a, &m, true, "cli".into(), None);
-        store.create_credential(c.clone()).await.unwrap();
-        let state = AppState::new(store.clone(), "http://localhost".into(), Limits::default());
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", format!("Bearer {secret}").parse().unwrap());
-        assert!(authenticate(&state, &headers).await.is_ok());
-        let old = now_ms() - 10_000;
-        state.touches.lock().await.insert(c.id.clone(), old);
-        assert!(authenticate(&state, &headers).await.is_ok());
-        assert!(state.touches.lock().await[&c.id] > old);
-        let CredentialLookup::Active(identity) =
-            store.credential_by_id(&c.id, now_ms()).await.unwrap()
-        else {
-            panic!("inactive credential")
-        };
-        assert_eq!(
-            identity.credential.last_used_at,
-            Some(state.touches.lock().await[&c.id])
-        );
+    #[test]
+    fn self_host_caps_are_unlimited_and_frames_remain_bounded() {
+        let mut limits = Limits::default();
+        for key in [
+            "machines",
+            "endpoints",
+            "sockets",
+            "callsPerMinute",
+            "bridgeCallsPerMinute",
+            "accountCallsPerMinute",
+            "acksPerMinute",
+            "accountAcksPerMinute",
+            "storedBytes",
+            "refusalsPerMinute",
+        ] {
+            assert_eq!(limits.cap(key), None, "{key}");
+        }
+        assert_eq!(limits.frame_bytes(), 16777216);
+        limits.apply("frameBytes=Infinity").unwrap();
+        assert_eq!(limits.frame_bytes(), 16777216);
+        limits.apply("machines=4").unwrap();
+        assert_eq!(limits.cap("machines"), Some(4));
     }
 }

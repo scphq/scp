@@ -108,7 +108,7 @@ function nowList(o: Overview, now: number, handle: string): Html {
   </section>`;
 }
 
-interface Side {
+export interface Side {
   devices: number;
   tokens: number;
   /** held messages an owner or admin can review; null when there is nothing to show */

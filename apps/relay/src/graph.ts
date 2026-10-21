@@ -2,7 +2,7 @@ import type { User } from "./env";
 import { hubEvents, hubGraph } from "./hub/routes";
 import { Html, html, stamp } from "./html";
 import type { IdentifiedGraph } from "./identity";
-import { orgHeader, requireMember } from "./orgs";
+import { type OrgChromeMember, orgHeader, requireMember } from "./orgs";
 import { APP_JS, harnessIcon, ICON_PATHS, REFRESH_MS, shown, wakeHow } from "./overview";
 import { HttpError } from "./util";
 import { type Ctx, checkOrigin, page } from "./web";
@@ -98,10 +98,11 @@ export async function graphPage(ctx: Ctx, user: User, handle: string): Promise<R
 export async function graphTabPage(ctx: Ctx, user: User, handle: string): Promise<Response> {
   const m = await requireMember(ctx.env.DB, handle, user.id);
   const g = await hubGraph(ctx.env, m.org.id);
-  return page(
-    ctx,
-    { title: `${m.org.name} graph`, nav: "orgs", head: graphAssets() },
-    html`${orgHeader(m, "graph")}
+  return page(ctx, { title: `${m.org.name} graph`, nav: "orgs", head: graphAssets() }, graphTab(m, g));
+}
+
+export function graphTab(m: OrgChromeMember, g: IdentifiedGraph | null): Html {
+  return html`${orgHeader(m, "graph")}
       <div class="graph gfull gtab" data-graph data-full data-events="/orgs/${m.org.handle}/events" aria-label="Live graph of agents and their links">
         ${canvas}
         <div class="g-over g-left">
@@ -115,8 +116,7 @@ export async function graphTabPage(ctx: Ctx, user: User, handle: string): Promis
         </div>
         <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
         ${g ? "" : html`<p class="g-empty mini">The hub did not answer. This page retries on its own.</p>`}
-      </div>`,
-  );
+      </div>`;
 }
 
 /** `/orgs/<handle>/events`: a member's same-origin WebSocket of presence, endpoint and message metadata from the org hub */

@@ -1,0 +1,33 @@
+{
+  "name": "@scp-dev/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Optional dashboard for the SCP relay",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scphq/scp.git",
+    "directory": "packages/dashboard"
+  },
+  "bin": {
+    "scp-dashboard": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "typecheck": "tsc -p . && tsc -p src/browser",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@scp-dev/core": "workspace:*",
+    "@scp-dev/hub": "workspace:*",
+    "@cloudflare/workers-types": "^4.20260601.0"
+  }
+}

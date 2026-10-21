@@ -409,7 +409,9 @@ async fn socket(
 }
 #[tokio::test]
 async fn websocket_frames_expiry_and_shutdown() {
-    let s = start().await;
+    let mut limits = Limits::default();
+    limits.apply("frameBytes=262144").unwrap();
+    let s = start_with_limits(limits).await;
     admin::account(s.store.as_ref(), "acme").await.unwrap();
     let (secret, _) = mint(&s, true, None).await;
     let mut ws = socket(&s, &secret).await;
@@ -748,7 +750,9 @@ async fn shutdown_waits_for_peer_close() {
 
 #[tokio::test]
 async fn frames_above_transport_limit_close_gracefully() {
-    let s = start().await;
+    let mut limits = Limits::default();
+    limits.apply("frameBytes=262144").unwrap();
+    let s = start_with_limits(limits).await;
     admin::account(s.store.as_ref(), "acme").await.unwrap();
     let (secret, _) = mint(&s, true, None).await;
     let mut ws = socket(&s, &secret).await;

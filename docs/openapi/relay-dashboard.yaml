@@ -1,0 +1,585 @@
+openapi: 3.1.0
+info:
+  title: Relay dashboard API
+  version: v1
+  description: Stable v1. Accounts come only from resolved identities. All responses use Cache-Control no-store.
+    Authentication follows the configured relay auth chain. Native auth accepts bearer credentials;
+    trusted-header auth accepts identity headers only from configured TCP proxy peers. Header names are configurable.
+    Methods run in order, the first identity wins, and rejection stops the chain.
+security:
+  - bearerAuth: []
+  - trustedHeaderUser: []
+  - trustedHeaderEmail: []
+paths:
+  /v1/dashboard/session:
+    get:
+      operationId: session
+      responses:
+        "200":
+          description: Caller account data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          description: Missing or invalid identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Authentication backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Store or hub failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    options:
+      security: []
+      description: Exact configured origins receive allow-origin, allow-headers authorization and content-type,
+        allow-methods GET and OPTIONS, max-age 600 and Vary origin. No credentials. Unknown origins receive no
+        access-control headers.
+      responses:
+        "204":
+          description: Preflight
+  /v1/dashboard/overview:
+    get:
+      operationId: overview
+      responses:
+        "200":
+          description: Caller account data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Overview"
+        "401":
+          description: Missing or invalid identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Authentication backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Store or hub failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    options:
+      security: []
+      description: Exact configured origins receive allow-origin, allow-headers authorization and content-type,
+        allow-methods GET and OPTIONS, max-age 600 and Vary origin. No credentials. Unknown origins receive no
+        access-control headers.
+      responses:
+        "204":
+          description: Preflight
+  /v1/dashboard/graph:
+    get:
+      operationId: graph
+      responses:
+        "200":
+          description: Caller account data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubGraph"
+        "401":
+          description: Missing or invalid identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Authentication backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Store or hub failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      parameters:
+        - in: query
+          name: minutes
+          description: Floored and clamped to 1..60. Invalid input uses 15.
+          schema:
+            type: number
+            default: 15
+    options:
+      security: []
+      description: Exact configured origins receive allow-origin, allow-headers authorization and content-type,
+        allow-methods GET and OPTIONS, max-age 600 and Vary origin. No credentials. Unknown origins receive no
+        access-control headers.
+      responses:
+        "204":
+          description: Preflight
+  /v1/dashboard/events:
+    get:
+      operationId: events
+      responses:
+        "101":
+          description: WebSocket event stream; event messages match DashboardEvent, text ping receives pong
+        "200":
+          description: SSE data fields contain DashboardEvent JSON
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          description: Malformed WebSocket upgrade
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Authentication backend unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Store or hub failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+      description: WebSocket with Upgrade websocket, otherwise SSE. Hello first, then DashboardEvent JSON. Text ping
+        receives pong. Invalid identity closes WebSocket 4003 or ends SSE at the configured revalidation
+        interval. SSE sends one data field per event and a comment heartbeat every 25 seconds.
+    options:
+      security: []
+      description: Exact configured origins receive allow-origin, allow-headers authorization and content-type,
+        allow-methods GET and OPTIONS, max-age 600 and Vary origin. No credentials. Unknown origins receive no
+        access-control headers.
+      responses:
+        "204":
+          description: Preflight
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    trustedHeaderUser:
+      type: apiKey
+      in: header
+      name: X-Forwarded-User
+      description: Default user header for trusted-header auth. Must come from a configured trusted proxy.
+    trustedHeaderEmail:
+      type: apiKey
+      in: header
+      name: X-Forwarded-Email
+      description: Default email header for trusted-header auth, also accepted without a user header.
+        Must come from a configured trusted proxy.
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          enum:
+            - unauthorized
+            - server_error
+            - invalid_request
+      required:
+        - error
+      additionalProperties: false
+    Member:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      required:
+        - id
+        - name
+    Session:
+      type: object
+      properties:
+        org:
+          type: object
+          properties:
+            handle:
+              type: string
+            name:
+              type: string
+          required:
+            - handle
+            - name
+        member:
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            role:
+              enum:
+                - owner
+                - admin
+                - member
+          required:
+            - id
+            - name
+            - role
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/Member"
+        devices:
+          type: integer
+          minimum: 0
+        tokens:
+          type: integer
+          minimum: 0
+        scoped:
+          type: boolean
+      required:
+        - org
+        - member
+        - members
+        - devices
+        - tokens
+        - scoped
+      additionalProperties: false
+    MachineRow:
+      type: object
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+        online:
+          type: boolean
+        bridge:
+          type: boolean
+        created_at:
+          type:
+            - string
+            - "null"
+        last_seen:
+          type:
+            - string
+            - "null"
+        wake:
+          type: boolean
+      required:
+        - name
+        - kind
+        - online
+        - bridge
+        - created_at
+        - last_seen
+    EndpointView:
+      type: object
+      properties:
+        id:
+          type: string
+        address:
+          type: string
+        kind:
+          enum:
+            - agent
+            - human
+            - system
+        presence:
+          enum:
+            - online
+            - idle
+            - offline
+            - hibernated
+        harness:
+          type:
+            - string
+            - "null"
+        title:
+          type:
+            - string
+            - "null"
+        status:
+          type:
+            - object
+            - "null"
+        last_seen:
+          type:
+            - string
+            - "null"
+        parent:
+          type:
+            - string
+            - "null"
+      required:
+        - id
+        - address
+        - kind
+        - presence
+      additionalProperties: true
+    ActivityRow:
+      type: object
+      properties:
+        id:
+          type: integer
+        at:
+          type: string
+          format: date-time
+        endpoint:
+          type: string
+        kind:
+          type: string
+        tool:
+          type:
+            - string
+            - "null"
+        summary:
+          type:
+            - string
+            - "null"
+        agent:
+          type:
+            - string
+            - "null"
+      required:
+        - id
+        - at
+        - endpoint
+        - kind
+        - tool
+        - summary
+        - agent
+    Overview:
+      type: object
+      properties:
+        machines:
+          type: array
+          items:
+            $ref: "#/components/schemas/MachineRow"
+        endpoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/EndpointView"
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityRow"
+      required:
+        - machines
+        - endpoints
+        - activity
+      additionalProperties: false
+    GraphNode:
+      type: object
+      properties:
+        address:
+          type: string
+        kind:
+          type: string
+        harness:
+          type:
+            - string
+            - "null"
+        title:
+          type:
+            - string
+            - "null"
+        presence:
+          enum:
+            - online
+            - idle
+            - offline
+            - hibernated
+        status:
+          type:
+            - object
+            - "null"
+        last_seen:
+          type:
+            - string
+            - "null"
+        parent:
+          type:
+            - string
+            - "null"
+        wake:
+          type:
+            - string
+            - "null"
+        waking:
+          const: true
+      required:
+        - address
+        - kind
+        - harness
+        - title
+        - presence
+        - status
+        - last_seen
+        - parent
+    GraphEdge:
+      oneOf:
+        - type: object
+          properties:
+            kind:
+              const: spawn
+            from:
+              type: string
+            to:
+              type: string
+          required:
+            - kind
+            - from
+            - to
+          additionalProperties: false
+        - type: object
+          properties:
+            kind:
+              const: message
+            from:
+              type: string
+            to:
+              type: string
+            count:
+              type: integer
+            last_at:
+              type: string
+              format: date-time
+          required:
+            - kind
+            - from
+            - to
+            - count
+            - last_at
+          additionalProperties: false
+    GraphMachine:
+      allOf:
+        - $ref: "#/components/schemas/MachineRow"
+        - type: object
+          properties:
+            actor:
+              type:
+                - string
+                - "null"
+          required:
+            - actor
+    HubGraph:
+      type: object
+      properties:
+        minutes:
+          type: integer
+          minimum: 1
+          maximum: 60
+        machines:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphMachine"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+      required:
+        - minutes
+        - machines
+        - nodes
+        - edges
+      additionalProperties: false
+    DashboardEvent:
+      oneOf:
+        - type: object
+          properties:
+            type:
+              const: hello
+            at:
+              type: string
+              format: date-time
+          required:
+            - type
+            - at
+          additionalProperties: false
+        - type: object
+          properties:
+            type:
+              const: presence
+            at:
+              type: string
+              format: date-time
+            machine:
+              type:
+                - string
+                - "null"
+            endpoint:
+              type: string
+            presence:
+              enum:
+                - online
+                - idle
+                - offline
+                - hibernated
+            waking:
+              type: boolean
+          required:
+            - type
+            - at
+            - machine
+            - endpoint
+            - presence
+          additionalProperties: false
+        - type: object
+          properties:
+            type:
+              const: message
+            at:
+              type: string
+              format: date-time
+            kind:
+              type: string
+            from:
+              type: string
+            to:
+              type: array
+              items:
+                type: string
+            local:
+              const: true
+          required:
+            - type
+            - at
+            - kind
+            - from
+            - to
+          additionalProperties: false
+        - type: object
+          properties:
+            type:
+              const: endpoints
+            at:
+              type: string
+              format: date-time
+            machine:
+              type: string
+          required:
+            - type
+            - at
+            - machine
+          additionalProperties: false

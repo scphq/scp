@@ -33,6 +33,7 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
     );
     assert_eq!(s.account("alpha").await.unwrap(), Some(a.clone()));
     assert!(s.account("absent").await.unwrap().is_none());
+    credential_counts_suite(s.clone()).await;
     contacts_suite(s.clone()).await;
     xinbox_suite(s.clone()).await;
     for account in [&a, &b] {
@@ -1666,6 +1667,45 @@ async fn limits_suite(s: Arc<dyn RelayStore>) {
     .await
     .unwrap();
     assert_eq!(s.stored_bytes("limits").await.unwrap(), 0);
+}
+
+async fn credential_counts_suite(s: Arc<dyn RelayStore>) {
+    let a = s
+        .create_account(Account {
+            id: "counts".into(),
+            handle: "counts".into(),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+    s.create_member(Member {
+        id: "counts-member".into(),
+        account_id: a.id.clone(),
+        name: "owner".into(),
+        email: None,
+        role: Role::Owner,
+        created_at: 0,
+    })
+    .await
+    .unwrap();
+    assert_eq!(s.credential_counts(&a.id, 0).await.unwrap(), (0, 0));
+    assert_eq!(s.credential_counts("absent", 0).await.unwrap(), (0, 0));
+    for (name, kind, expiry, revoked) in [
+        ("counts-device", CredentialKind::Device, None, None),
+        ("counts-token", CredentialKind::Token, Some(100), None),
+        ("counts-expired", CredentialKind::Token, Some(50), None),
+        ("counts-revoked", CredentialKind::Device, None, Some(40)),
+    ] {
+        let mut c = credential(name, &a.id, "counts-member");
+        c.kind = kind;
+        c.expires_at = expiry;
+        c.revoked_at = revoked;
+        s.create_credential(c).await.unwrap();
+    }
+    assert_eq!(s.credential_counts(&a.id, 49).await.unwrap(), (1, 2));
+    assert_eq!(s.credential_counts(&a.id, 50).await.unwrap(), (1, 1));
+    assert_eq!(s.credential_counts(&a.id, 100).await.unwrap(), (1, 0));
+    assert_eq!(s.credential_counts("a", 49).await.unwrap(), (0, 0));
 }
 
 #[cfg(test)]

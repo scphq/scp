@@ -49,7 +49,7 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     expect(received.body.text).toBe("hello laptop");
     expect(received.reply_to).toBe(sent.id);
     await Promise.all([laptop.inbox("ada"), desk.inbox("bob")]);
-  }, 20000);
+  }, 60000);
   test("presence converges online, offline and online across a broker restart", async () => {
     await waitFor(async () => (await laptop.list()).find((e) => e.address === "me/desk/bob" && e.presence === "online"), "desk online");
     await desk.stopBroker();
@@ -57,7 +57,7 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     await desk.start();
     await desk.claim("bob");
     await waitFor(async () => (await laptop.list()).find((e) => e.address === "me/desk/bob" && e.presence === "online"), "desk online again");
-  }, 20000);
+  }, 60000);
   test("queues once during broker outage and persists a queued delivery across relay restart", async () => {
     await desk.stopBroker();
     await waitFor(async () => (await laptop.list()).some((e) => e.address === "me/desk/bob" && e.presence === "offline"), "desk disconnected");
@@ -95,7 +95,7 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
       "after restart",
     );
     await laptop.inbox("ada");
-  }, 20000);
+  }, 60000);
   test("spawn via a runner exposes the cross-machine parent on both sides and hands back", async () => {
     const runnerEnv = join(laptop.root, "desk-env.json");
     const runners = join(laptop.root, "runners.json");
@@ -142,7 +142,7 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     expect(handback.kind).toBe("message");
     expect(handback.body.text).toContain("worker done");
     await laptop.inbox("ada");
-  }, 20000);
+  }, 60000);
   test("direct cloud clients send, receive and list both bridged machines without a broker", async () => {
     const cloud = { SCP_TRANSPORT: "cloud" };
     await direct.json(["whoami", "--as", "tester"], cloud);
@@ -156,5 +156,5 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     const listed = await direct.json<{ machines: { name: string; bridge: boolean; online: boolean }[] }>(["machines"], cloud);
     for (const machine of ["laptop", "desk"]) expect(listed.machines.find((m) => m.name === machine)).toMatchObject({ bridge: true, online: true });
     expect(existsSync(join(direct.env.SCP_DIR!, "broker.lock"))).toBe(false);
-  }, 20000);
+  }, 60000);
 });

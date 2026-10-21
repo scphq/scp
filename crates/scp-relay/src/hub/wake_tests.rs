@@ -274,7 +274,7 @@ impl Env {
 #[tokio::test]
 async fn signed_metadata_debounce_waking_timeout_and_restart() {
     let mut server = Server::new(vec![], false).await;
-    let mut e = env(&server, &["debounceS=0.04", "wakingTimeoutS=1"]).await;
+    let mut e = env(&server, &["debounceS=0.04", "wakingTimeoutS=30"]).await;
     let sent = e.send("root").await;
     let (headers, raw) = server.call().await;
     assert_eq!(headers["content-type"], "application/json");
@@ -300,7 +300,21 @@ async fn signed_metadata_debounce_waking_timeout_and_restart() {
     server.none().await;
     e.restart().await;
     assert_eq!(e.shown().await["waking"], true);
-    tokio::time::sleep(Duration::from_millis(1010)).await;
+    {
+        let h = e.local.lock().await;
+        let mut row = h
+            .endpoints()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == e.target)
+            .unwrap();
+        let mut f = fields(&row);
+        f["waking_until"] = json!(crate::now_ms() - 1);
+        row.fields = f.to_string();
+        h.store.put_endpoint(&h.account_id, row).await.unwrap();
+    }
+    e.due().await;
     assert!(e.shown().await.get("waking").is_none());
     e.local
         .lock()
@@ -344,9 +358,15 @@ async fn failures_double_backoff_and_waking_defaults_to_debounce() {
     let state = e.settled().await;
     assert_eq!(state.fails, 1);
     assert_eq!(state.next, at + 1000);
+    {
+        let h = e.local.lock().await;
+        let mut held = state.clone();
+        held.next = crate::now_ms() + 60000;
+        h.set_wake_state("desk", &held).await.unwrap();
+    }
     e.send("root").await;
     server.none().await;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    e.due().await;
     e.send("root").await;
     let (headers, _) = server.call().await;
     let at: i64 = headers["x-scp-timestamp"]
@@ -358,9 +378,11 @@ async fn failures_double_backoff_and_waking_defaults_to_debounce() {
     assert_eq!(state.fails, 2);
     assert_eq!(state.next, at + 1500);
     e.due().await;
+    let before = crate::now_ms();
     e.send("root").await;
     server.call().await;
     let state = e.settled().await;
+    let finished = crate::now_ms();
     assert_eq!(state.fails, 0);
     let h = e.local.lock().await;
     let row = h
@@ -371,7 +393,7 @@ async fn failures_double_backoff_and_waking_defaults_to_debounce() {
         .find(|x| x.id == e.target)
         .unwrap();
     let until = fields(&row)["waking_until"].as_i64().unwrap();
-    assert!(until - crate::now_ms() > 70 && until - crate::now_ms() <= 500);
+    assert!(until >= before + 500 && until <= finished + 500);
 }
 #[tokio::test]
 async fn decline_expiry_retries_oldest_queued_mail_and_clear_is_host_only() {
@@ -385,7 +407,7 @@ async fn decline_expiry_retries_oldest_queued_mail_and_clear_is_host_only() {
     .await;
     let mut e = env(
         &server,
-        &["debounceS=0.01", "wakingTimeoutS=2", "declineHoldS=2"],
+        &["debounceS=0.01", "wakingTimeoutS=30", "declineHoldS=30"],
     )
     .await;
     let first = e.send("root").await;
