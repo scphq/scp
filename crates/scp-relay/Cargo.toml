@@ -20,6 +20,9 @@ hex.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 futures-util.workspace = true
+hyper = "=1.12.0"
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+tokio-tungstenite.workspace = true
 async-trait.workspace = true
 time.workspace = true
 regex = "=1.13.1"
@@ -29,4 +32,3 @@ subtle = "=2.6.1"
 
 [dev-dependencies]
 reqwest.workspace = true
-tokio-tungstenite.workspace = true

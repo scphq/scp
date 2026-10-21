@@ -1656,6 +1656,8 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "hyper",
+ "hyper-util",
  "rand 0.8.5",
  "regex",
  "reqwest",

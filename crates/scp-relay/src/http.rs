@@ -6,8 +6,8 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    body::Bytes,
-    extract::{DefaultBodyLimit, State, WebSocketUpgrade},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -451,10 +451,7 @@ async fn rpc(
 async fn ws(
     State(s): State<AppState>,
     headers: HeaderMap,
-    upgrade: std::result::Result<
-        WebSocketUpgrade,
-        axum::extract::ws::rejection::WebSocketUpgradeRejection,
-    >,
+    mut request: Request,
 ) -> ApiResult<Response> {
     let i = authenticate(&s, &headers).await?;
     if !headers
@@ -464,8 +461,22 @@ async fn ws(
     {
         return Ok(StatusCode::UPGRADE_REQUIRED.into_response());
     }
-    let upgrade = upgrade
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, json!({"error":"invalid_request"})))?;
+    let response = tokio_tungstenite::tungstenite::handshake::server::create_response_with_body(
+        &request,
+        Body::empty,
+    )
+    .map_err(|_| ApiError(StatusCode::BAD_REQUEST, json!({"error":"invalid_request"})))?;
+    if request
+        .extensions()
+        .get::<hyper::upgrade::OnUpgrade>()
+        .is_none()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"invalid_request"}),
+        ));
+    }
+    let upgrade = hyper::upgrade::on(&mut request);
     let frame = s.limits.frame_bytes();
     let revalidate_ms = s
         .limits
@@ -480,15 +491,26 @@ async fn ws(
             json!({"error":"too_many_sockets"}),
         )
     })?;
-    Ok(upgrade
-        .max_message_size(frame)
-        .max_frame_size(frame)
-        .on_upgrade(move |socket| async move {
-            let _lease = lease;
+    let transport_limit = frame.saturating_add(frame.clamp(1, 1 << 20));
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(transport_limit))
+        .max_frame_size(Some(transport_limit));
+    // Retain raw transport access for draining after WebSocket capacity errors.
+    tokio::spawn(async move {
+        let _lease = lease;
+        if let Ok(upgraded) = upgrade.await {
+            let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                hyper_util::rt::TokioIo::new(upgraded),
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                Some(config),
+            )
+            .await;
             s.hub
                 .websocket(grant(&i), socket, frame, revalidate_ms)
                 .await;
-        }))
+        }
+    });
+    Ok(response)
 }
 
 #[cfg(test)]
