@@ -4,6 +4,8 @@ use validation::{pattern, seqs};
 impl AccountHub {
     pub(super) async fn ack(&self, c: &Connection, p: &Value) -> Result<Value> {
         let requested = seqs(p)?;
+        let cross = self.store.xinbox(&self.account_id).await?;
+        let mut xendpoints = Vec::new();
         let mut changes = HubWrite::default();
         let now = crate::now_ms();
         for mut e in self.endpoints().await?.into_iter().filter(|e| {
@@ -13,9 +15,10 @@ impl AccountHub {
                 e.id == c.endpoint
             }
         }) {
+            xendpoints.push(e.id.clone());
             let mut messages = Vec::new();
             for mut d in self.pending(&e.id, 0).await? {
-                if requested.contains(&d.seq) {
+                if requested.contains(&d.seq) && !cross.iter().any(|x| x.seq == d.seq) {
                     messages.push(self.delivery_value(&d, false).await?);
                     d.acked_at = Some(now);
                     changes.deliveries.push(d);
@@ -37,8 +40,10 @@ impl AccountHub {
                 changes.endpoints.push(e);
             }
         }
-        let count = changes.deliveries.len();
-        self.store.hub_write(&self.account_id, changes).await?;
+        let count = self
+            .store
+            .acknowledge(&self.account_id, changes, &xendpoints, &requested, now)
+            .await?;
         Ok(json!({"acked":count}))
     }
     pub(super) async fn reject(&mut self, c: &Connection, p: &Value) -> Result<Value> {
@@ -50,6 +55,28 @@ impl AccountHub {
             return Err(invalid("code is an error code"));
         }
         let rows = self.endpoints().await?;
+        if let Some(x) = self
+            .store
+            .xinbox(&self.account_id)
+            .await?
+            .into_iter()
+            .find(|x| x.seq == seq && !x.acked)
+            && let Some(e) = rows.iter().find(|e| {
+                e.machine == c.machine
+                    && e.token_hash.is_none()
+                    && format!("{}/{}", e.machine, e.handle) == x.endpoint
+            })
+        {
+            self.store
+                .xack(
+                    &self.account_id,
+                    std::slice::from_ref(&e.id),
+                    &[seq],
+                    crate::now_ms(),
+                )
+                .await?;
+            return Ok(json!({"rejected":true}));
+        }
         for e in rows
             .iter()
             .filter(|e| e.machine == c.machine && e.token_hash.is_none())

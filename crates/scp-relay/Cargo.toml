@@ -20,10 +20,12 @@ hex.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 futures-util.workspace = true
+async-trait.workspace = true
 time.workspace = true
 regex = "=1.13.1"
 reqwest = { workspace = true, features = ["rustls-tls"] }
 hmac = "=0.12.1"
+subtle = "=2.6.1"
 
 [dev-dependencies]
 reqwest.workspace = true

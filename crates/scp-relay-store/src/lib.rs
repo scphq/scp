@@ -6,8 +6,10 @@
 //! unless documented otherwise. Constraint violations return `Conflict`; all
 //! other failures return `Backend`. Failed writes leave no partial changes.
 
+mod contacts;
 mod sql;
 use async_trait::async_trait;
+pub use contacts::*;
 use serde::{Deserialize, Serialize};
 pub use sql::{PostgresStore, SqliteStore, connect};
 use std::{collections::BTreeMap, sync::Arc};
@@ -302,6 +304,58 @@ pub trait RelayStore: Send + Sync + 'static {
     async fn member(&self, account_id: &str, name: &str) -> Result<Option<Member>>;
     /// List members ordered by creation time, then id.
     async fn members(&self, account_id: &str) -> Result<Vec<Member>>;
+    /// Read this side of a contact, including non-active states.
+    async fn contact(&self, account_id: &str, peer_id: &str) -> Result<Option<Contact>>;
+    /// Active contacts ordered by peer handle, then id.
+    async fn contacts(&self, account_id: &str) -> Result<Vec<Contact>>;
+    /// Invite atomically on both accounts; crossed invites activate both.
+    async fn contact_invite(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Accept an incoming invitation, activating both with default permissions.
+    async fn contact_accept(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Delete only this side's incoming invitation.
+    async fn contact_decline(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Delete both sides except blocked rows.
+    async fn contact_revoke(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Block here and delete the peer's row atomically.
+    async fn contact_block(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Replace this active contact's permissions, validating bounds.
+    async fn contact_update(
+        &self,
+        account_id: &str,
+        peer_id: &str,
+        config: ContactConfig,
+        now: i64,
+    ) -> Result<()>;
+    /// All retained cross-account inbox rows, ordered by sequence.
+    async fn xinbox(&self, account_id: &str) -> Result<Vec<XInbox>>;
+    /// Insert message, delivery and inbox metadata atomically, or return its duplicate.
+    async fn xinsert(
+        &self,
+        account_id: &str,
+        message: Message,
+        inbox: XInbox,
+    ) -> Result<(XInbox, bool)>;
+    /// Advance each endpoint's cross-account cursor over the leading requested run.
+    async fn xack(
+        &self,
+        account_id: &str,
+        endpoints: &[String],
+        seqs: &[i64],
+        now: i64,
+    ) -> Result<usize>;
+    /// Apply local receipts and advance cross-account cursors in one transaction.
+    async fn acknowledge(
+        &self,
+        account_id: &str,
+        changes: HubWrite,
+        endpoints: &[String],
+        seqs: &[i64],
+        now: i64,
+    ) -> Result<usize>;
+    /// Delete inbox messages from accounts that are no longer inbound contacts.
+    async fn xprune(&self, account_id: &str) -> Result<u64>;
+    /// Total retained envelope bytes, including cross-account inbox messages.
+    async fn stored_bytes(&self, account_id: &str) -> Result<i64>;
     // Host credentials.
     /// Insert a credential. Duplicate hash/id or live token name is Conflict.
     async fn create_credential(&self, credential: Credential) -> Result<()>;
@@ -414,6 +468,16 @@ pub trait RelayStore: Send + Sync + 'static {
         account_id: &str,
         machine: &str,
         after: i64,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Delivery>>;
+    /// Pending deliveries with an independent cross-account replay cursor.
+    async fn pending_machine_x(
+        &self,
+        account_id: &str,
+        machine: &str,
+        after: i64,
+        xafter: i64,
         now: i64,
         limit: usize,
     ) -> Result<Vec<Delivery>>;
