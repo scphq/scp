@@ -23,9 +23,10 @@ export function detectHarness(env: Env): string | undefined {
   if (env.MUSE_SESSION_ID) return "muse"
   if (env.OPENCODE === "1") return "opencode"
   if (env.ANTIGRAVITY_AGENT === "1" || env.ANTIGRAVITY_CONVERSATION_ID) return "agy"
-  if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_IS_COWORK === "1") return "claude-code"
+  if (env.CLAUDECODE === "1") return "claude-code"
   if (env.CODEX_THREAD_ID) return "codex"
   if (inferring(env) && (env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED)) return "codex"
+  if (env.CLAUDE_CODE_IS_COWORK === "1") return "claude-code"
   return undefined
 }
 
@@ -382,8 +383,8 @@ export function harnessOf(args: string | undefined): string | undefined {
 export const inferring = (env: Env): boolean => env.SCP_HARNESS_DETECT !== "0"
 
 /** the harness process `pid` runs, from the ps table */
-export function harnessAt(pid: number, table: PsCommTable | undefined = readPsTable()): string | undefined {
-  return inferring(process.env) ? harnessOf(table?.get(pid)?.args) : undefined
+export function harnessAt(pid: number, table: PsCommTable | undefined = readPsTable(), env: Env = process.env): string | undefined {
+  return inferring(env) ? harnessOf(table?.get(pid)?.args) : undefined
 }
 
 let roots: string[] | undefined
@@ -578,7 +579,7 @@ export function codexDesktop(env: Env, pid: number, table: () => PsCommTable | u
   if (env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE === "Codex Desktop") return true
   if (!inferring(env)) return false
   const args = table()?.get(pid)?.args
-  const binary = args && /^(\/[^\n]*?\.app\/Contents\/Resources\/codex-cli\/(?:[^\n]*\/)?codex)(?:\s|$)/.exec(args)?.[1]
+  const binary = args && /^(\/[^\n]*?\.app\/Contents\/Resources\/codex-cli\/(?:[^\n]*\/)?codex)\s+app-server(?:\s|$)/.exec(args)?.[1]
   return !!binary && !/\s\//.test(binary)
 }
 
@@ -588,6 +589,24 @@ export function hookFormat(claimed: string, provider: string): string {
   if (harness === "claude-desktop" || harness === "claude-cowork") return "claude-code"
   if (harness === "codex-desktop") return "codex"
   return harness
+}
+
+/** the session label shared by shims, hooks and shells */
+export function harnessVariant(
+  detected: string,
+  env: Env,
+  pid = process.ppid,
+  table: () => PsCommTable | undefined = readPsTable,
+  hosted: (pid: number) => boolean = (at) => t3Hosted(env, at, table),
+): string {
+  const provider = hookFormat(detected, detected)
+  if ((provider === "codex" || provider === "claude-code") && hosted(pid)) return T3CODE
+  if (provider === "claude-code") {
+    if (detected === "claude-cowork" || env.CLAUDE_CODE_IS_COWORK === "1") return "claude-cowork"
+    if (detected === "claude-desktop" || env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop") return "claude-desktop"
+  }
+  if (provider === "codex" && (detected === "codex-desktop" || codexDesktop(env, pid, table))) return "codex-desktop"
+  return provider
 }
 
 export interface IdentityInput {
@@ -624,16 +643,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     table ??= { value: input.psTable ? input.psTable() : readPsTable() }
     return table.value
   }
-  const hosted = (provider === "codex" || provider === "claude-code") && (input.t3Hosted ? input.t3Hosted(pid) : t3Hosted(input.env, pid, ps))
-  const harness = hosted
-    ? T3CODE
-    : provider === "claude-code" && input.env.CLAUDE_CODE_IS_COWORK === "1"
-      ? "claude-cowork"
-      : provider === "claude-code" && (detected === "claude-desktop" || input.env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop")
-        ? "claude-desktop"
-        : provider === "codex" && (detected === "codex-desktop" || codexDesktop(input.env, pid, ps))
-          ? "codex-desktop"
-          : provider
+  const harness = harnessVariant(detected, input.env, pid, ps, input.t3Hosted)
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
   const own = processKey(pid, input.startOf)
   const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env) : undefined

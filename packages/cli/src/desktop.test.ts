@@ -1,9 +1,9 @@
 import { Readable } from "node:stream"
 import { expect, test } from "bun:test"
 import type { RelayClient } from "@scp-dev/broker"
-import { spawnEnvironment } from "./common"
+import { claimHarness, spawnEnvironment, walkNow } from "./common"
 import { runHook } from "./hooks"
-import { codexShell, hookFormat, hookHarnessPid, parsePsCommTable, relayIdentity } from "./identity"
+import { detectHarness, harnessVariant, codexShell, hookFormat, hookHarnessPid, parsePsCommTable, relayIdentity } from "./identity"
 
 const bundle = "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server --listen stdio://"
 const ps = (args: string, parent = "launchd") => parsePsCommTable(`77 10 Wed Oct 21 09:00:00 2026 ${args}\n10 1 Wed Oct 21 08:00:00 2026 ${parent}`)
@@ -35,6 +35,8 @@ test("desktop environment markers label only their provider and preserve Claude 
 test("the desktop bundle's codex process labels MCP shims without the originator", () => {
   expect(claim("codex", {}, bundle).harness).toBe("codex-desktop")
   expect(claim("codex", {}, "/Applications/Codex Desktop.app/Contents/Resources/codex-cli/codex app-server").harness).toBe("codex-desktop")
+  expect(claim("codex", {}, bundle.replace("app-server", "exec")).harness).toBe("codex")
+  expect(claim("codex", {}, bundle.replace("app-server", "app-server-other")).harness).toBe("codex")
   expect(claim("codex", { SCP_HARNESS_DETECT: "0" }, bundle).harness).toBe("codex")
   expect(claim("codex", {}, "/extensions/codex/bin/codex app-server").harness).toBe("codex")
   expect(claim("codex", {}, "/Applications/Codex.app/Contents/MacOS/codex app-server").harness).toBe("codex")
@@ -56,9 +58,7 @@ test("explicit desktop labels retain provider session keys, hook formats and she
   expect(hookFormat("t3code", "codex-desktop")).toBe("codex")
   expect(hookHarnessPid({ CLAUDE_PID: "77" }, "claude-desktop", 99, () => undefined)).toBe(77)
   expect(codexShell({ SCP_HARNESS: "codex-desktop" })).toBe(true)
-  expect(spawnEnvironment({ CLAUDE_CODE_ENTRYPOINT: "claude-desktop", CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" }, {})).toEqual({
-    CLAUDE_CODE_ENTRYPOINT: "claude-desktop",
-  })
+  expect(spawnEnvironment({ CLAUDE_CODE_ENTRYPOINT: "claude-desktop", CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" }, {})).toEqual({})
 })
 
 test("desktop hooks retain provider replies and Claude harness_session", async () => {
@@ -98,4 +98,40 @@ test("desktop hooks retain provider replies and Claude harness_session", async (
     if (provider === "claude") expect(hosted.claim?.harness_session).toBe("hook-session")
     else expect(JSON.parse(hosted.reply!)).toMatchObject({ decision: "block", reason: expect.any(String) })
   }
+})
+
+const coworkEnv = {
+  CLAUDE_CODE_IS_COWORK: "1",
+  CLAUDE_CODE_ENTRYPOINT: "claude-desktop",
+  CLAUDE_CODE_MESSAGING_SOCKET: "/fake/socket",
+  CLAUDE_CODE_MESSAGING_TOKEN: "fake-token",
+  CLAUDE_CODE_SESSION_ID: "fake-session",
+  CLAUDE_CODE_WORKSPACE_HOST_PATHS: "/fake/workspace",
+}
+
+test("workers drop the parent desktop and Cowork session identity, with explicit grants still applied", () => {
+  expect(spawnEnvironment({ ...coworkEnv, PATH: "/bin" }, {})).toEqual({ PATH: "/bin" })
+  expect(spawnEnvironment(coworkEnv, { CLAUDE_CODE_SESSION_ID: "explicit-session" })).toEqual({ CLAUDE_CODE_SESSION_ID: "explicit-session" })
+})
+
+test("codex markers take precedence over inherited Cowork markers", () => {
+  for (const marker of [{ CODEX_THREAD_ID: "thread" }, { CODEX_SANDBOX: "seatbelt" }, { CODEX_SANDBOX_NETWORK_DISABLED: "1" }])
+    expect(detectHarness({ ...coworkEnv, ...marker })).toBe("codex")
+})
+
+test("shell claims and process walks use the session's hosted label", () => {
+  for (const [env, provider, label, args] of [
+    [{ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop" }, "claude-code", "claude-desktop", "claude"],
+    [{ CLAUDECODE: "1", ...coworkEnv }, "claude-code", "claude-cowork", "claude"],
+    [{ CODEX_THREAD_ID: "thread", CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" }, "codex", "codex-desktop", "codex app-server"],
+  ] as const) {
+    expect(claimHarness({}, env, undefined)).toBe(label)
+    expect(claimHarness({}, env, { keys: [], self: [], harness: provider })).toBe(label)
+    const walk = walkNow(env, 77, ps(args))
+    expect(walk.harness).toBe(label)
+    expect(claimHarness({}, env, walk)).toBe(label)
+    expect(harnessVariant(provider, env, 77, () => ps(args, "t3 serve"))).toBe("t3code")
+  }
+  expect(walkNow({}, 77, ps(bundle)).harness).toBe("codex-desktop")
+  expect(walkNow({}, 77, ps(bundle.replace("app-server", "exec"))).harness).toBe("codex")
 })

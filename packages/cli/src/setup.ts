@@ -25,7 +25,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { TOOLS } from "@scp-dev/mcp"
 import { RelayUsage } from "./common"
-import { AGY_HOOK_SET, agyHookSet, BLOCK_STOP, claudeVersionFile, hasOurHooks, hookEntries, mergeHooks, musePlugin, opencodePlugin } from "./hooks"
+import { AGY_HOOK_SET, agyHookSet, BLOCK_STOP, claudeVersionFile, hasOurHooks, hookEntries, mergeHooks, musePlugin, opencodePlugin, shellQuote } from "./hooks"
 import { hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
 import { launcher } from "./launcher"
@@ -734,6 +734,8 @@ function planAgyRules(plan: Plan, ctx: Ctx, remove: boolean) {
   })
 }
 
+const launcherPrefixes = (launch?: string[]): string[] => (launch ? [launch.map(shellQuote).join(" ")] : [])
+
 function hookContent(kind: Hooked, existing: string | undefined, blockStop: boolean, launch?: string[]): string {
   const options = { blockStop }
   if (kind === "opencode") return opencodePlugin(options)
@@ -743,7 +745,7 @@ function hookContent(kind: Hooked, existing: string | undefined, blockStop: bool
     if (!isObject(settings)) throw new Error("not a JSON object")
     return `${JSON.stringify({ ...settings, [AGY_HOOK_SET]: agyHookSet(options) }, null, 2)}\n`
   }
-  return `${JSON.stringify(mergeHooks(settings, hookEntries(kind, { ...options, ...(launch ? { launcher: launch } : {}) })), null, 2)}\n`
+  return `${JSON.stringify(mergeHooks(settings, hookEntries(kind, { ...options, ...(launch ? { launcher: launch } : {}) }), launcherPrefixes(launch)), null, 2)}\n`
 }
 
 /** what `hooks install --scope user --write` would write, or undefined when the file already has it */
@@ -772,12 +774,12 @@ function holdsStops(kind: Hooked, target: string): boolean {
 }
 
 /** whether a hooks file already has hooks of ours, whatever their version */
-function hasHooks(kind: Hooked, target: string): boolean {
+function hasHooks(kind: Hooked, target: string, launch?: string[]): boolean {
   try {
     const file = resolved(target)
     if (!existsSync(file)) return false
     if (kind === "opencode" || kind === "muse") return true
-    if (kind !== "agy") return hasOurHooks(file)
+    if (kind !== "agy") return hasOurHooks(file, launcherPrefixes(launch))
     return AGY_HOOK_SET in (readJson(file) ?? {})
   } catch {
     return false
@@ -847,7 +849,7 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     const others =
       kind === "claude" ? [hooksTarget("claude", "local", env, cwd), hooksTarget("claude", "project", env, cwd)] : [hooksTarget("codex", "project", env, cwd)]
     for (const other of new Set(others))
-      if (other !== file && hasOurHooks(other))
+      if (other !== file && hasOurHooks(other, launcherPrefixes(launch)))
         note(plan, harness, `hooks: warning, ${other} already runs the ${CLI_NAME} hooks: in that project every event reports twice; remove them there`)
   }
   const blocked = linkProblem(file, false)
@@ -863,7 +865,7 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     return
   }
   const held = had && !ctx.blockStop ? ` (it keeps ${BLOCK_STOP}, which the file has)` : ctx.blockStop && !had ? `, with ${BLOCK_STOP}` : ""
-  const manifest = hasHooks(kind, file) ? undefined : remember({ harness, kind: "hooks", file })
+  const manifest = hasHooks(kind, file, ctx.hookLaunch) ? undefined : remember({ harness, kind: "hooks", file })
   if (kind === "muse") {
     const dir = pluginDir(file)
     const record = museInstalled(env)
@@ -945,7 +947,7 @@ function planUnhooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     }
   }
   if (!items.length) {
-    if (harness !== "grok" && hasHooks(kind, file)) note(plan, harness, `hooks: keeps the hooks in ${file}, which setup did not add`)
+    if (harness !== "grok" && hasHooks(kind, file, ctx.hookLaunch)) note(plan, harness, `hooks: keeps the hooks in ${file}, which setup did not add`)
     return
   }
   for (const path of new Set(items.map((item) => item.file)))
@@ -1036,7 +1038,7 @@ function planUnhook(plan: Plan, harness: SetupHarness, kind: Hooked, file: strin
           return rest
         }
         if (!isObject(config.hooks)) return undefined
-        const merged = mergeHooks(config, {})
+        const merged = mergeHooks(config, {}, launcherPrefixes(ctx.hookLaunch))
         return JSON.stringify(merged.hooks) === JSON.stringify(config.hooks) ? undefined : merged
       },
       now,
@@ -1248,7 +1250,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
   }
   if (options.hooks === false) out(`hooks: ${options.undo ? "kept (--no-hooks)" : "not installed (--no-hooks); only the MCP shim is mounted"}`)
   const mounts = launcher(bin, env, which)
-  let hookLaunch: string[] | undefined
+  let hookLaunch: string[] | undefined = onPath ? launcher(onPath, env, which).argv : undefined
   if (!options.undo) {
     const how = mounts.node ? `, run by ${mounts.node} since it is a node script and a desktop app's PATH may have no node` : ""
     if (options.bin !== undefined) out(`mounts run: ${mounts.argv.map(shellWord).join(" ")} (from --bin${how}; they break if that file moves)`)
@@ -1259,7 +1261,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
       )
     }
     if (mounts.problem) out(`! ${mounts.problem}: a harness started without your PATH may not start the mount`)
-    const help = run([bin, "help", "--all"]).output
+    const help = run([...mounts.argv, "help", "--all"]).output
     if (!help.includes(`${CLI_NAME} mcp`)) {
       out(`! ${bin} has no \`${CLI_NAME} mcp\` (its \`help --all\` does not list it): update it, or pass --bin with a ${CLI_NAME} that has the relay`)
       if (options.write) return 1

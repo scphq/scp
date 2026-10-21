@@ -45,20 +45,22 @@ function shebang(file: string): string | undefined {
 }
 
 /** a per-shell directory that disappears with the shell (fnm's multishells) */
-const TRANSIENT = /\/[^/]*multishells?\//
+const TRANSIENT = /\/[^/]*multishells?[^/]*\//
 
-/** a node path that outlives this shell: kept as found (a version manager's shim or Homebrew's link survives upgrades), resolved when it lives in a per-shell directory */
-function lasting(node: string): string {
-  return TRANSIENT.test(node) ? real(node) : node
+/** a path that outlives this shell: kept as found (a version manager's shim or Homebrew's link survives upgrades), resolved when it lives in a per-shell directory */
+function lasting(path: string): string {
+  return TRANSIENT.test(path) ? real(path) : path
 }
 
-/** the node a shebang names: an absolute interpreter as is, `env node` (or a bare `node`) the one next to `bin`, else on PATH */
-function nodeFor(line: string, bin: string, which: (name: string) => string | undefined): string | undefined {
+/** the node a shebang names: an absolute interpreter as is, `env node` the one next to `bin` or in its install prefix's bin, else on PATH */
+function nodeFor(line: string, bin: string, target: string, which: (name: string) => string | undefined): string | undefined {
   const words = line.split(/\s+/).filter(Boolean)
   const program = words[0] ?? ""
   if (basename(program) !== "env" && /^\//.test(program)) return executable(program) ? program : undefined
-  const sibling = join(dirname(bin), "node")
-  if (executable(sibling)) return sibling
+  for (const dir of [dirname(bin), join(dirname(target), "..", "..", "..", "..", "..", "bin")]) {
+    const sibling = join(dir, "node")
+    if (executable(sibling)) return sibling
+  }
   return which("node")
 }
 
@@ -70,8 +72,8 @@ function nodeFor(line: string, bin: string, which: (name: string) => string | un
 export function launcher(bin: string, env: Env, which: (name: string) => string | undefined): Launcher {
   const target = real(bin)
   const line = shebang(target)
-  if (!line || !/(^|[\s/])node(\s|$)/.test(line)) return { argv: [bin] }
-  const node = nodeFor(line, bin, which)
+  if (!line || !/(^|[\s/])node(\s|$)/.test(line)) return { argv: [lasting(bin)] }
+  const node = nodeFor(line, bin, target, which)
   if (!node) return { argv: [bin], problem: `${bin} is a node script and no node was found next to it or on PATH (${env.PATH ?? ""})` }
   const stable = lasting(node)
   return { argv: [stable, target], node: stable }

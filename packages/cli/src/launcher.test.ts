@@ -71,4 +71,16 @@ describe("launcher", () => {
     expect(lost.argv).toEqual([join(home, "b/swarm")])
     expect(lost.problem).toContain("no node was found")
   })
+
+  test("a user symlink to an nvm script finds node in the install prefix, and a native binary in an fnm multishell resolves", () => {
+    const home = root()
+    const prefix = join(home, ".nvm/versions/node/v22.13.0")
+    put(join(prefix, "bin/node"), "#!/bin/sh\n")
+    put(join(prefix, "lib/node_modules/@scp-dev/cli/dist/cli.js"), SCRIPT)
+    link(join(prefix, "lib/node_modules/@scp-dev/cli/dist/cli.js"), join(home, "bin/swarm"))
+    expect(launcher(join(home, "bin/swarm"), {}, none).argv).toEqual([join(prefix, "bin/node"), join(prefix, "lib/node_modules/@scp-dev/cli/dist/cli.js")])
+    put(join(home, "native/swarm"), "\u007fELF")
+    link(join(home, "native"), join(home, "tmp/fnm-multishell-1-2"))
+    expect(launcher(join(home, "tmp/fnm-multishell-1-2/swarm"), {}, none).argv).toEqual([join(home, "native/swarm")])
+  })
 })

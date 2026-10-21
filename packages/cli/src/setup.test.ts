@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { BLOCK_STOP, claudeVersionFile, hookEntries, mergeHooks, musePlugin, opencodePlugin } from "./hooks"
+import { BLOCK_STOP, claudeVersionFile, hookEntries, hasOurHooks, shellQuote, mergeHooks, musePlugin, opencodePlugin } from "./hooks"
 import { type Added, agyRules, manifestFile, parseSetupArgs, relaySetup, type RunResult, type SetupOptions, verifyMount, verifyMusePlugin } from "./setup"
 
 const SERVER = "scp"
@@ -122,7 +122,7 @@ function fakeRun(f: Fixture, options: { relayHelp?: (bin: string) => string; fai
     f.cwds.push(cwd)
     const [cli, ...args] = argv
     const name = basename(cli!)
-    if (args[0] === "help") return { code: 0, output: options.relayHelp?.(cli!) ?? HELP }
+    if (args.at(-2) === "help" && args.at(-1) === "--all") return { code: 0, output: options.relayHelp?.(cli!) ?? HELP }
     if (name === "claude" && args[0] === "--version") return { code: 0, output: "2.1.100 (Claude Code)\n" }
     if (options.fail === name && args[1] !== "list" && args[1] !== "get") return { code: 1, output: "boom\n" }
     const { env, command } = addArgs(args)
@@ -1232,7 +1232,7 @@ describe("relay setup for desktop apps", () => {
   test("--undo removes the absolute hooks it wrote and keeps the others", () => {
     const f = fixture()
     const bin = join(f.home, "node-bin")
-    const script = join(f.home, "pkg/@scp-dev/cli/dist/cli.js")
+    const script = join(f.home, "unusual path/cli.js")
     put(join(bin, "node"), "#!/bin/sh\n", 0o755)
     put(script, "#!/usr/bin/env node\n", 0o755)
     symlinkSync(script, join(bin, "swarm"))
@@ -1240,7 +1240,9 @@ describe("relay setup for desktop apps", () => {
     put(userHooks(f).codex, `${JSON.stringify({ hooks: { Stop: [{ hooks: [other] }] } }, null, 2)}\n`, 0o644)
     const which = (name: string) => (name === "swarm" ? join(bin, "swarm") : undefined)
     expect(setup(f, { write: true, harness: "codex" }, fakeRun(f), which).code).toBe(0)
-    expect(JSON.stringify(readJson(userHooks(f).codex))).toContain(`${realpathSync(script)} hook codex`)
+    const prefix = [join(bin, "node"), realpathSync(script)].map(shellQuote).join(" ")
+    expect(hasOurHooks(userHooks(f).codex, [prefix])).toBe(true)
+    expect(setup(f, { write: true, harness: "codex" }, fakeRun(f), which).text).toContain("hooks: up to date")
     expect(setup(f, { write: true, undo: true, harness: "codex" }, fakeRun(f), which).code).toBe(0)
     expect(readJson(userHooks(f).codex).hooks).toEqual({ Stop: [{ hooks: [other] }] })
   })
@@ -1257,3 +1259,44 @@ function mergeHooksFor(harness: "claude" | "codex", launch: string[], other: Rec
   const entries = hookEntries(harness, { launcher: launch })
   return { ...entries, Stop: [{ hooks: [other] }, ...entries.Stop!] }
 }
+
+test("hook ownership matches only a launcher at the start of the command", () => {
+  const f = fixture()
+  const file = join(f.home, "ownership.json")
+  for (const command of [
+    "swarm hook claude",
+    "/a/b/swarm hook codex --push-wait 600",
+    "/swarm hook claude",
+    "'/a b/swarm' hook claude",
+    "'/a b/node' '/x y/@scp-dev/cli/dist/cli.js' hook claude --cowork-only",
+    "/bin/node /work/packages/cli/dist/cli.js hook codex",
+    `${shellQuote("/a'b/node")} ${shellQuote("/x'y/@scp-dev/cli/dist/cli.js")} hook claude`,
+  ]) {
+    const settings = { hooks: { Stop: [{ hooks: [{ type: "command", command }] }] } }
+    put(file, JSON.stringify(settings), 0o600)
+    expect(hasOurHooks(file)).toBe(true)
+    expect(mergeHooks(settings, {})).toEqual({ hooks: {} })
+  }
+  for (const command of [
+    'notify-send "swarm hook done"',
+    "echo x; swarm hook",
+    "/home/u/other/cli/dist/cli.js hook claude",
+    "/opt/node /home/u/other/cli/dist/cli.js hook claude",
+    "echo /x/@scp-dev/cli/dist/cli.js hook claude",
+    "echo '/bin/swarm' hook claude",
+    "/a/swarm-other hook claude",
+    "/bin/not-node /x/@scp-dev/cli/dist/cli.js hook claude",
+  ]) {
+    const settings = { hooks: { Stop: [{ hooks: [{ type: "command", command }] }] } }
+    put(file, JSON.stringify(settings), 0o600)
+    expect(hasOurHooks(file)).toBe(false)
+    expect(mergeHooks(settings, {})).toEqual(settings)
+  }
+  const prefix = ["/a b/node", "/opt/scp/cli.js"].map(shellQuote).join(" ")
+  const settings = { hooks: { Stop: [{ hooks: [{ type: "command", command: `${prefix} hook claude` }] }] } }
+  put(file, JSON.stringify(settings), 0o600)
+  expect(hasOurHooks(file)).toBe(false)
+  expect(hasOurHooks(file, [prefix])).toBe(true)
+  expect(mergeHooks(settings, {}, [prefix])).toEqual({ hooks: {} })
+  expect(mergeHooks(settings, {}, [`${prefix}-other`])).toEqual(settings)
+})

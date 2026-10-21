@@ -1039,24 +1039,35 @@ export function hookEntries(
   }
 }
 
-/** a hook command of ours: `swarm hook`, by any path, or the CLI's own script run by an absolute node */
-const OURS = new RegExp(`(^|[\\s/])${CLI_NAME}'?\\s+hook(\\s|$)|/(@scp-dev|packages)/cli/dist/cli\\.js'?\\s+hook\\s+(claude|codex)(\\s|$)`)
+/** the launcher is the first command word, never an argument or a later shell command */
+const WORD = String.raw`[^\s'";|&<>\x60$\\]*`
+const QUOTED = String.raw`(?:[^']|'\\'')*`
+const wordEnding = (ending: string) => `(?:${WORD}/${ending}|${ending}|'${QUOTED}/${ending}'|'${ending}')`
+const OURS = new RegExp(
+  `^(?:${wordEnding(CLI_NAME)}\\s+hook(?:\\s|$)|${wordEnding("node")}\\s+(?:${WORD}/(?:@scp-dev|packages)/cli/dist/cli\\.js|'${QUOTED}/(?:@scp-dev|packages)/cli/dist/cli\\.js')\\s+hook\\s+[a-z][a-z0-9-]*(?:\\s|$))`,
+)
 
 /** `word` as one POSIX shell word */
 export function shellQuote(word: string): string {
   return /^[A-Za-z0-9._/=@:+-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`
 }
-const ours = (handler: unknown) => typeof handler === "object" && handler !== null && OURS.test(String((handler as Json).command ?? ""))
+const ours = (handler: unknown, prefixes: readonly string[]) => {
+  if (typeof handler !== "object" || handler === null) return false
+  const command = String((handler as Json).command ?? "")
+  return OURS.test(command) || prefixes.some((prefix) => command.startsWith(`${prefix} hook `))
+}
 
 /** whether a Claude Code or Codex settings file already runs our hooks; false when it is missing or unreadable */
-export function hasOurHooks(file: string): boolean {
+export function hasOurHooks(file: string, prefixes: readonly string[] = []): boolean {
   try {
     const hooks = (JSON.parse(readFileSync(file, "utf8")) as Json).hooks
     if (typeof hooks !== "object" || hooks === null) return false
     return Object.values(hooks).some(
       (groups) =>
         Array.isArray(groups) &&
-        groups.some((group: unknown) => Array.isArray((group as Json | null)?.hooks) && ((group as Json).hooks as unknown[]).some(ours)),
+        groups.some(
+          (group: unknown) => Array.isArray((group as Json | null)?.hooks) && ((group as Json).hooks as unknown[]).some((handler) => ours(handler, prefixes)),
+        ),
     )
   } catch {
     return false
@@ -1064,7 +1075,7 @@ export function hasOurHooks(file: string): boolean {
 }
 
 /** `settings` with our hooks in place: other keys and other hooks kept, any earlier entries of ours replaced */
-export function mergeHooks(settings: unknown, entries: Record<string, Group[]>): Json {
+export function mergeHooks(settings: unknown, entries: Record<string, Group[]>, prefixes: readonly string[] = []): Json {
   if (typeof settings !== "object" || settings === null || Array.isArray(settings)) throw new Error("the settings file is not a JSON object")
   const hooks = (settings as Json).hooks ?? {}
   if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) throw new Error("its hooks key is not an object")
@@ -1077,7 +1088,7 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>):
     const kept = groups
       .map((group: unknown) => {
         if (typeof group !== "object" || group === null || !Array.isArray((group as Json).hooks)) return group
-        return { ...(group as Json), hooks: ((group as Json).hooks as unknown[]).filter((handler) => !ours(handler)) }
+        return { ...(group as Json), hooks: ((group as Json).hooks as unknown[]).filter((handler) => !ours(handler, prefixes)) }
       })
       .filter(
         (group) => !(typeof group === "object" && group !== null && Array.isArray((group as Json).hooks) && ((group as Json).hooks as unknown[]).length === 0),
