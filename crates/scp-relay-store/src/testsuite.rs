@@ -649,6 +649,7 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
     }
     reply_suite(s.clone()).await;
     hub_suite(s.clone()).await;
+    limits_suite(s.clone()).await;
 }
 async fn reply_suite(s: Arc<dyn RelayStore>) {
     let mut request = message("asked");
@@ -1206,6 +1207,149 @@ fn message(id: &str) -> Message {
         expires_at: 1000,
         envelope: "{\"body\":\"hello\"}".into(),
     }
+}
+
+async fn limits_suite(s: Arc<dyn RelayStore>) {
+    s.create_account(Account {
+        id: "limits".into(),
+        handle: "limits".into(),
+        created_at: 0,
+    })
+    .await
+    .unwrap();
+    let endpoint = |id: &str, handle: &str| Endpoint {
+        id: id.into(),
+        machine: "host".into(),
+        handle: handle.into(),
+        kind: "agent".into(),
+        token_hash: None,
+        last_seen: None,
+        created_at: 0,
+        fields: "{}".into(),
+    };
+    let one = endpoint("one", "a");
+    let two = endpoint("two", "b");
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![one.clone(), two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut swapped_one = one.clone();
+    swapped_one.handle = "b".into();
+    let mut swapped_two = two.clone();
+    swapped_two.handle = "a".into();
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![swapped_one.clone(), swapped_two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.endpoints("limits", None).await.unwrap(),
+        vec![swapped_two.clone(), swapped_one.clone()]
+    );
+    let mut invalid = swapped_one.clone();
+    invalid.handle = "a".into();
+    assert!(
+        s.hub_write(
+            "limits",
+            HubWrite {
+                endpoints: vec![invalid],
+                ..HubWrite::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        s.endpoints("limits", None).await.unwrap(),
+        vec![swapped_two, swapped_one]
+    );
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![one.clone(), two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut chain_one = one.clone();
+    chain_one.handle = "b".into();
+    let mut chain_two = two.clone();
+    chain_two.handle = "c".into();
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![chain_one.clone(), chain_two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.endpoints("limits", None).await.unwrap(),
+        vec![chain_one, chain_two]
+    );
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 0);
+    assert_eq!(s.stored_bytes("missing").await.unwrap(), 0);
+    let message = Message {
+        id: "size".into(),
+        thread: "thread".into(),
+        reply_to: None,
+        kind: "message".into(),
+        from_ep: one.id.clone(),
+        to_addr: "host/c".into(),
+        created_at: 1,
+        expires_at: 100,
+        envelope: serde_json::json!({"body":{"text":"ü🙂"}}).to_string(),
+    };
+    let mut delivery = s
+        .store_message(
+            "limits",
+            message,
+            vec![NewDelivery {
+                endpoint: two.id,
+                expires_at: 100,
+                state: "{}".into(),
+            }],
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 6);
+    assert_eq!(s.stored_bytes("missing").await.unwrap(), 0);
+    delivery.acked_at = Some(2);
+    s.update_delivery("limits", delivery).await.unwrap();
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 6);
+    s.hub_write(
+        "limits",
+        HubWrite {
+            sweep_at: Some(101),
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 6);
+    s.hub_write(
+        "limits",
+        HubWrite {
+            sweep_at: Some(604800100),
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 0);
 }
 
 #[cfg(test)]

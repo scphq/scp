@@ -76,6 +76,10 @@ impl Limits {
     pub fn duration(&self, key: &str, fallback: u64) -> u64 {
         self.0.get(key).copied().flatten().unwrap_or(fallback)
     }
+    /// Read a cap; None disables it.
+    pub fn cap(&self, key: &str) -> Option<u64> {
+        self.0.get(key).copied().flatten()
+    }
     fn frame_bytes(&self) -> usize {
         self.0
             .get("frameBytes")
@@ -92,6 +96,7 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub public_url: String,
     pub limits: Limits,
+    touches: Arc<tokio::sync::Mutex<std::collections::HashMap<String, i64>>>,
 }
 impl AppState {
     /// Build shared state for a listener and its HTTP and WebSocket routes.
@@ -101,6 +106,7 @@ impl AppState {
             store,
             public_url: public_url.trim_end_matches('/').into(),
             limits,
+            touches: Arc::default(),
         }
     }
 }
@@ -122,7 +128,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/device/code", post(device_code))
         .route("/v1/device/token", post(device_token))
         .route("/v1/relay/ws", any(ws))
-        .route("/v1/relay/rpc", any(rpc))
+        .route("/v1/relay/rpc", any(rpc).layer(DefaultBodyLimit::disable()))
         .fallback(|| async { (StatusCode::NOT_FOUND, Json(json!({"error":"not_found"}))) })
         .layer(DefaultBodyLimit::max(frame_bytes))
         .with_state(state)
@@ -203,11 +209,17 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<Identi
     if (identity.credential.kind == CredentialKind::Device) != secret.starts_with("scp_d_") {
         return Err(auth_error("invalid"));
     }
-    state
-        .store
-        .touch_credential(&identity.credential.id, now_ms())
-        .await
-        .map_err(backend)?;
+    let now = now_ms();
+    let mut touches = state.touches.lock().await;
+    touches.retain(|_, at| now.saturating_sub(*at) < 10_000);
+    if !touches.contains_key(&identity.credential.id) {
+        state
+            .store
+            .touch_credential(&identity.credential.id, now)
+            .await
+            .map_err(backend)?;
+        touches.insert(identity.credential.id.clone(), now);
+    }
     Ok(identity)
 }
 /// Map a resolved credential into the hub's trusted account/member context.
@@ -406,8 +418,14 @@ async fn rpc(
     if method != Method::POST {
         return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
-    let body = serde_json::from_slice(&bytes)
-        .map_err(|_| device_error("invalid_request", "Invalid JSON body."))?;
+    let body =
+        match serde_json::from_slice(&bytes) {
+            Ok(body) => body,
+            Err(_) => return Ok(Json(
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}),
+            )
+            .into_response()),
+        };
     Ok(Json(s.hub.rpc(grant(&i), body).await).into_response())
 }
 async fn ws(
@@ -436,7 +454,12 @@ async fn ws(
         .copied()
         .flatten()
         .unwrap_or(300_000);
-    let lease = s.hub.track();
+    let lease = s.hub.track(&grant(&i)).await.ok_or_else(|| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error":"too_many_sockets"}),
+        )
+    })?;
     Ok(upgrade
         .max_message_size(frame)
         .max_frame_size(frame)
@@ -446,4 +469,36 @@ async fn ws(
                 .websocket(grant(&i), socket, frame, revalidate_ms)
                 .await;
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn credential_touch_advances_after_ten_seconds() {
+        let store = connect("sqlite::memory:").await.unwrap();
+        admin::account(store.as_ref(), "touch").await.unwrap();
+        let (a, m) = admin::member(store.as_ref(), "touch", "member", None, None)
+            .await
+            .unwrap();
+        let (secret, c) = admin::credential(&a, &m, true, "cli".into(), None);
+        store.create_credential(c.clone()).await.unwrap();
+        let state = AppState::new(store.clone(), "http://localhost".into(), Limits::default());
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {secret}").parse().unwrap());
+        assert!(authenticate(&state, &headers).await.is_ok());
+        let old = now_ms() - 10_000;
+        state.touches.lock().await.insert(c.id.clone(), old);
+        assert!(authenticate(&state, &headers).await.is_ok());
+        assert!(state.touches.lock().await[&c.id] > old);
+        let CredentialLookup::Active(identity) =
+            store.credential_by_id(&c.id, now_ms()).await.unwrap()
+        else {
+            panic!("inactive credential")
+        };
+        assert_eq!(
+            identity.credential.last_used_at,
+            Some(state.touches.lock().await[&c.id])
+        );
+    }
 }

@@ -168,12 +168,8 @@ impl AccountHub {
                             .await?
                         {
                             let reply = self.delivery_value(&d, true).await?;
-                            if d.acked_at.is_none() {
-                                self.ack(c, &json!({"seqs":[d.seq]})).await?;
-                            } else {
-                                self.received(&c.endpoint, std::slice::from_ref(&reply))
-                                    .await?;
-                            }
+                            self.received(&c.endpoint, std::slice::from_ref(&reply))
+                                .await?;
                             return Ok(json!({"id":request,"reply":reply}));
                         }
                         Ok(if stored.expires_at <= crate::now_ms() {
