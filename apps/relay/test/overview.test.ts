@@ -2,6 +2,7 @@ import type { EndpointView, Presence } from "@scp-dev/core";
 import { expect, test } from "bun:test";
 
 interface OverviewModule {
+  harnessIcon(harness: string | null): string;
   orderRows(endpoints: EndpointView[]): { e: EndpointView; depth: number; anc: string[]; kids: number }[];
   liveRegion(o: { machines: unknown[]; endpoints: EndpointView[]; activity: unknown[] }, handle: string, now: number): { value: string };
   fleetTrees(endpoints: EndpointView[]): { root: EndpointView; kids: EndpointView[] }[];
@@ -10,7 +11,7 @@ interface OverviewModule {
 }
 /** loaded by path so the test typecheck (Bun types) does not pull in the Workers types */
 const path = "../src/overview";
-const { orderRows, liveRegion, fleetTrees, fleetStrip, wakeHow }: OverviewModule = await import(path);
+const { harnessIcon, orderRows, liveRegion, fleetTrees, fleetStrip, wakeHow }: OverviewModule = await import(path);
 
 const ep = (handle: string, presence: Presence, parent?: string, labels: Record<string, string> = {}): EndpointView => ({
   id: `ep_${handle}`,
@@ -224,4 +225,11 @@ test("the fleet counts a child on another machine under its orchestrator", () =>
   const worker = { ...ep("worker", "online"), address: "acme/vm/worker", labels: { machine: "vm" }, parent: "acme/box/lead" };
   const trees = fleetTrees([ep("lead", "online"), worker]);
   expect(trees.map((t) => [t.root.address, t.kids.map((k) => k.address)])).toEqual([["acme/box/lead", ["acme/vm/worker"]]]);
+});
+
+test("desktop harnesses reuse their provider icons", () => {
+  expect(harnessIcon("claude-cowork")).toBe(harnessIcon("claude-code"));
+  expect(harnessIcon("claude-desktop-chat")).toBe(harnessIcon("claude-code"));
+  expect(harnessIcon("claude-desktop")).toBe(harnessIcon("claude-code"));
+  expect(harnessIcon("codex-desktop")).toBe(harnessIcon("codex"));
 });

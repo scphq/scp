@@ -343,3 +343,16 @@ test("shim bindings are private, validate the process key and pid, and preserve 
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test("codex desktop shims publish recoverable bindings", () => {
+  const dir = mkdtempSync(join(process.env.HOME!, "desktop-bindings-"))
+  const env = { SCP_DIR: dir, SCP_SHIM_BINDING: "d".repeat(32) }
+  const claim = { process: "pid:500:start", handle: "desktop", harness: "codex-desktop" }
+  const clear = writeShimBinding(claim, env)
+  try {
+    expect(readShimBinding(env, 600, parsePsCommTable("600 500 Wed Oct 21 09:00:00 2026 sh"))).toEqual(claim)
+  } finally {
+    clear()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

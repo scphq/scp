@@ -22,7 +22,18 @@ import {
 } from "@scp-dev/core"
 import { connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
 import { prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
-import { harnessAt, hookFormat, hookHarness, hookHarnessPid, normalizeHarness, processKey, psStart, relayIdentity, sessionKey } from "./identity"
+import {
+  type IdentityInput,
+  harnessAt,
+  hookFormat,
+  hookHarness,
+  hookHarnessPid,
+  normalizeHarness,
+  processKey,
+  psStart,
+  relayIdentity,
+  sessionKey,
+} from "./identity"
 import { membership } from "./session"
 
 export { SUBAGENT }
@@ -209,7 +220,7 @@ function peekTurn(event: HookEvent, named: string, payload: Json): { role: "user
   return { role, text }
 }
 
-export interface HookOptions {
+export interface HookOptions extends Pick<IdentityInput, "startOf" | "psTable"> {
   env: Env
   cwd: string
   stdin: AsyncIterable<string | Uint8Array>
@@ -597,6 +608,7 @@ export function recordAgyConversation(payload: Json, env: Env): void {
 
 /** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
 export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
+  if (args.includes("--cowork-only") && options.env.CLAUDE_CODE_IS_COWORK !== "1") return
   const began = Date.now()
   const blockStop = args.includes(BLOCK_STOP)
   const takes = !args.includes(NO_INJECT)
@@ -606,7 +618,14 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   const wakeS = wakeAt < 0 ? 0 : Number(args[wakeAt + 1])
   const [harnessArg, eventArg] = args.filter(
     (arg, i) =>
-      arg !== BLOCK_STOP && arg !== NO_INJECT && arg !== SUBAGENT && arg !== PUSH_WAIT && args[i - 1] !== PUSH_WAIT && arg !== WAKE && args[i - 1] !== WAKE,
+      arg !== "--cowork-only" &&
+      arg !== BLOCK_STOP &&
+      arg !== NO_INJECT &&
+      arg !== SUBAGENT &&
+      arg !== PUSH_WAIT &&
+      args[i - 1] !== PUSH_WAIT &&
+      arg !== WAKE &&
+      args[i - 1] !== WAKE,
   )
   let payload: Json
   try {
@@ -625,7 +644,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   if (event.kind === "session_start") options.deadline?.(1500)
   const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
   const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
-  const started = psStart(pid)
+  const started = (options.startOf ?? psStart)(pid)
   const joined = membership(
     options.env,
     sessionKey(
@@ -645,6 +664,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     harnessPid: () => pid,
     ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
     startOf: () => started,
+    ...(options.psTable ? { psTable: options.psTable } : {}),
   })
   if (!validHandle(claim.handle)) return
   const format = hookFormat(claim.harness, harness)
@@ -751,7 +771,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
   if (options.env.SCP_TRANSPORT === "cloud" || field(payload, "agent_id", "agentId", "agent_type", "agentType", "subagentType")) return
   const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
   const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
-  const started = psStart(pid)
+  const started = (options.startOf ?? psStart)(pid)
   const joined = membership(
     options.env,
     sessionKey(
@@ -771,6 +791,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     harnessPid: () => pid,
     ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
     startOf: () => started,
+    ...(options.psTable ? { psTable: options.psTable } : {}),
   })
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
@@ -923,6 +944,7 @@ async function push(
 
 /** Hooks exit silently within 1500 ms (agy: 900 ms), unless a worker wait extends the deadline. */
 export async function relayHookCommand(args: string[], startDaemon: (dir: string) => void): Promise<number> {
+  if (args.includes("--cowork-only") && process.env.CLAUDE_CODE_IS_COWORK !== "1") return 0
   const started = Date.now()
   const agy = args[0] === "agy"
   let printed = false
@@ -994,8 +1016,11 @@ function stopArgs(options: { blockStop?: boolean; pushWait?: number }): { args: 
 }
 
 /** Prompt, stop, session end and Claude subagent context run in the foreground; activity runs in the background. */
-export function hookEntries(harness: "claude" | "codex", options: { blockStop?: boolean; pushWait?: number } = {}): Record<string, Group[]> {
-  const command = `${HOOK_COMMAND} ${harness}`
+export function hookEntries(
+  harness: "claude" | "codex",
+  options: { blockStop?: boolean; pushWait?: number; launcher?: string[]; cowork?: boolean } = {},
+): Record<string, Group[]> {
+  const command = `${options.launcher ? `${options.launcher.map(shellQuote).join(" ")} hook` : HOOK_COMMAND} ${harness}${options.cowork ? " --cowork-only" : ""}`
   const background: Handler = { type: "command", command, timeout: 5, async: true }
   const foreground: Handler = { type: "command", command, timeout: 5 }
   const subagent: Handler[] = harness === "claude" ? [{ type: "command", command: `${command} ${SUBAGENT}`, timeout: 5 }] : []
@@ -1014,7 +1039,13 @@ export function hookEntries(harness: "claude" | "codex", options: { blockStop?: 
   }
 }
 
-const OURS = new RegExp(`(^|[\\s/])${CLI_NAME} hook(\\s|$)`)
+/** a hook command of ours: `swarm hook`, by any path, or the CLI's own script run by an absolute node */
+const OURS = new RegExp(`(^|[\\s/])${CLI_NAME}'?\\s+hook(\\s|$)|/cli/dist/cli\\.js'?\\s+hook\\s+(claude|codex)(\\s|$)`)
+
+/** `word` as one POSIX shell word */
+export function shellQuote(word: string): string {
+  return /^[A-Za-z0-9._/=@:+-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`
+}
 const ours = (handler: unknown) => typeof handler === "object" && handler !== null && OURS.test(String((handler as Json).command ?? ""))
 
 /** whether a Claude Code or Codex settings file already runs our hooks; false when it is missing or unreadable */

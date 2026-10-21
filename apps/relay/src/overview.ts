@@ -110,6 +110,10 @@ export const ICON_PATHS: Record<string, string> = {
 
 const ICON_OF: Record<string, string> = {
   "claude-code": "claude",
+  "claude-desktop": "claude",
+  "claude-cowork": "claude",
+  "claude-desktop-chat": "claude",
+  "codex-desktop": "codex",
   claude: "claude",
   codex: "codex",
   opencode: "opencode",

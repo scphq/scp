@@ -10,7 +10,7 @@ import { membership } from "./session"
 /** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
 const ORPHAN_CHECK_MS = 5000
 
-type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean }
+type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean; "cowork-only"?: boolean }
 
 /** `swarm mcp`: the stdio MCP shim for this harness session, or `mcp install` */
 export async function relayMcpCommand(values: Values, positionals: string[]): Promise<number> {
@@ -20,6 +20,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
   }
   if (positionals.length) throw new RelayUsage(`${CLI_NAME} mcp takes no arguments (did you mean ${CLI_NAME} mcp install?)`)
   if (values.human) throw new RelayUsage("the relay MCP shim is always an agent: --human is not available to it")
+  if (await coworkMcpGuard(values, { env: process.env, input: process.stdin, output: (line) => void process.stdout.write(line) })) return 0
   const claim = relayIdentity({
     ...(values.as !== undefined ? { as: values.as } : {}),
     ...(values.harness !== undefined ? { harness: values.harness } : {}),
@@ -81,4 +82,56 @@ export function spawnWords(request: SpawnRequest): string[] {
 export function launchedWithChannels(env: NodeJS.ProcessEnv, harness = harnessPid, parentOf = psParent): boolean {
   const launcher = Number(env[CHANNELS_ENV])
   return Number.isInteger(launcher) && launcher > 1 && parentOf(harness())?.ppid === launcher
+}
+
+/** the synced plugin remains connected without claiming a terminal session */
+export async function coworkMcpGuard(
+  values: Values,
+  options: { env: Record<string, string | undefined>; input: AsyncIterable<string | Uint8Array>; output: (line: string) => void },
+): Promise<boolean> {
+  if (!values["cowork-only"] || options.env.CLAUDE_CODE_IS_COWORK === "1") return false
+  await inertMcp(options.input, options.output)
+  return true
+}
+
+/** a newline-delimited MCP server with no tools or relay connection */
+export async function inertMcp(input: AsyncIterable<string | Uint8Array>, output: (line: string) => void): Promise<void> {
+  const decoder = new TextDecoder()
+  let pending = ""
+  const respond = (line: string) => {
+    let request: { id?: string | number | null; method?: string; params?: { protocolVersion?: string } }
+    try {
+      request = JSON.parse(line)
+    } catch {
+      return
+    }
+    if (!request || request.id === undefined) return
+    const result =
+      request.method === "initialize"
+        ? {
+            protocolVersion: request.params?.protocolVersion,
+            capabilities: {},
+            serverInfo: { name: "scp", version: "0.0.0" },
+            instructions: "SCP is inactive outside Cowork.",
+          }
+        : request.method === "tools/list"
+          ? { tools: [] }
+          : request.method === "ping"
+            ? {}
+            : undefined
+    output(
+      `${JSON.stringify({ jsonrpc: "2.0", id: request.id, ...(result === undefined ? { error: { code: -32601, message: "Method not found" } } : { result }) })}\n`,
+    )
+  }
+  for await (const chunk of input) {
+    pending += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true })
+    for (;;) {
+      const end = pending.indexOf("\n")
+      if (end < 0) break
+      respond(pending.slice(0, end))
+      pending = pending.slice(end + 1)
+    }
+  }
+  pending += decoder.decode()
+  if (pending.trim()) respond(pending)
 }

@@ -406,7 +406,9 @@ describe("relay setup", () => {
     expect(text).toContain("approves its hooks: a headless muse exec runs no hook Muse holds for review")
     expect(text).toContain("muse hooks: in place in ~/.config/scp/muse-plugin/.muse-plugin/plugin.json")
     expect(text).toContain("muse hooks: installed (muse plugins list)")
-    expect(text).toContain("hooks run: swarm from each harness's PATH (~/bin/swarm here)")
+    expect(text).toContain(
+      "hooks run: ~/bin/swarm for claude and codex, whose desktop apps start them without your PATH; swarm from each harness's PATH for the others (~/bin/swarm here)",
+    )
     expect(readFileSync(claudeVersionFile(f.env), "utf8")).toBe("2.1.100\n")
   })
 
@@ -847,11 +849,11 @@ describe("relay setup installs hooks by default", () => {
     expect(readJson(f.files.claude).mcpServers[SERVER]).toBeDefined()
     const { code, text } = setup(f, { write: true })
     expect(code).toBe(0)
-    expect(readJson(userHooks(f).claude).hooks).toEqual(hookEntries("claude"))
-    expect(readJson(userHooks(f).codex).hooks).toEqual(hookEntries("codex"))
+    expect(readJson(userHooks(f).claude).hooks).toEqual(hookEntries("claude", { launcher: [f.swarm] }))
+    expect(readJson(userHooks(f).codex).hooks).toEqual(hookEntries("codex", { launcher: [f.swarm] }))
     expect(readFileSync(userHooks(f).opencode, "utf8")).toBe(opencodePlugin())
     expect(readJson(userHooks(f).muse)).toEqual(musePlugin())
-    expect(text).toContain("hooks run: swarm from each harness's PATH (~/bin/swarm here)")
+    expect(text).toContain("swarm from each harness's PATH for the others (~/bin/swarm here)")
     expect(setup(f, { blockStop: true, harness: "claude" }).text).toContain(`merge the swarm hooks into ~/.claude/settings.json, with ${BLOCK_STOP}`)
   })
 
@@ -870,22 +872,26 @@ describe("relay setup installs hooks by default", () => {
     const f = fixture()
     expect(setup(f, { write: true }).code).toBe(0)
     for (const harness of ["claude", "codex"] as const) {
-      const [stop] = hookEntries(harness).Stop![0]!.hooks
+      const [stop] = hookEntries(harness, { launcher: [f.swarm] }).Stop![0]!.hooks
       expect(stop!.statusMessage).toBe("waiting for worker messages (swarm)")
       const { statusMessage: _, ...earlier } = stop!
-      put(userHooks(f)[harness], `${JSON.stringify({ hooks: { ...hookEntries(harness), Stop: [{ hooks: [earlier] }] } }, null, 2)}\n`, 0o644)
+      put(
+        userHooks(f)[harness],
+        `${JSON.stringify({ hooks: { ...hookEntries(harness, { launcher: [f.swarm] }), Stop: [{ hooks: [earlier] }] } }, null, 2)}\n`,
+        0o644,
+      )
     }
     expect(setup(f).text).toContain("hooks: merge the swarm hooks into ~/.claude/settings.json")
     expect(setup(f, { write: true }).code).toBe(0)
-    expect(readJson(userHooks(f).claude).hooks.Stop).toEqual(hookEntries("claude").Stop)
-    expect(readJson(userHooks(f).codex).hooks.Stop).toEqual(hookEntries("codex").Stop)
+    expect(readJson(userHooks(f).claude).hooks.Stop).toEqual(hookEntries("claude", { launcher: [f.swarm] }).Stop)
+    expect(readJson(userHooks(f).codex).hooks.Stop).toEqual(hookEntries("codex", { launcher: [f.swarm] }).Stop)
   })
 
   test("hooks with a background stop from an earlier swarm are outdated and rewritten with a foreground one", () => {
     const f = fixture()
     expect(setup(f, { write: true }).code).toBe(0)
     const background = (harness: "claude" | "codex") => ({
-      ...hookEntries(harness),
+      ...hookEntries(harness, { launcher: [f.swarm] }),
       Stop: [{ hooks: [{ type: "command", command: `swarm hook ${harness}`, timeout: 5, async: true }] }],
     })
     put(userHooks(f).claude, `${JSON.stringify({ hooks: background("claude") }, null, 2)}\n`, 0o644)
@@ -899,8 +905,8 @@ describe("relay setup installs hooks by default", () => {
     expect(dry).toContain("hooks: write the swarm plugin ~/.config/scp/muse-plugin/.muse-plugin/plugin.json")
     const { code, text } = setup(f, { write: true })
     expect(code).toBe(0)
-    expect(readJson(userHooks(f).claude).hooks.Stop).toEqual(hookEntries("claude").Stop)
-    expect(readJson(userHooks(f).codex).hooks.Stop).toEqual(hookEntries("codex").Stop)
+    expect(readJson(userHooks(f).claude).hooks.Stop).toEqual(hookEntries("claude", { launcher: [f.swarm] }).Stop)
+    expect(readJson(userHooks(f).codex).hooks.Stop).toEqual(hookEntries("codex", { launcher: [f.swarm] }).Stop)
     expect(readJson(userHooks(f).muse)).toEqual(musePlugin())
     expect(text).toContain("claude hooks: in place in ~/.claude/settings.json")
     expect(text).toContain("muse hooks: installed (muse plugins list)")
@@ -1185,4 +1191,62 @@ describe("relay setup failures and leftovers", () => {
 
 function rmHarness(f: Fixture, rel: string) {
   Bun.spawnSync(["rm", join(f.home, rel)])
+}
+
+describe("relay setup for desktop apps", () => {
+  test("an nvm swarm mounts and hooks as absolute node plus its script, rewriting bare swarm entries and keeping every other entry", () => {
+    const f = fixture()
+    lived(f)
+    const bin = join(f.home, ".nvm/versions/node/v22.13.0/bin")
+    let script = join(f.home, ".nvm/versions/node/v22.13.0/lib/node_modules/@scp-dev/cli/dist/cli.js")
+    put(join(bin, "node"), "#!/bin/sh\n", 0o755)
+    put(script, "#!/usr/bin/env node\n", 0o755)
+    symlinkSync(script, join(bin, "swarm"))
+    script = realpathSync(script)
+    const other = { type: "command", command: "notify-tool --done", timeout: 3 }
+    const bare = (harness: string) => ({ ...hookEntries(harness as "codex"), Stop: [{ hooks: [other] }, ...hookEntries(harness as "codex").Stop!] })
+    put(userHooks(f).codex, `${JSON.stringify({ hooks: bare("codex") }, null, 2)}\n`, 0o644)
+    put(userHooks(f).claude, `${JSON.stringify({ model: "x", hooks: bare("claude") }, null, 2)}\n`, 0o644)
+    const which = (name: string) => (name === "swarm" ? join(bin, "swarm") : undefined)
+    const { code, text } = setup(f, { write: true, harness: "codex" }, fakeRun(f), which)
+    expect(code).toBe(0)
+    expect(text).toContain("mounts run: ~/.nvm/versions/node/v22.13.0/bin/node ")
+    expect(text).toContain("dist/cli.js (swarm on PATH, by its real path, run by ~/.nvm/versions/node/v22.13.0/bin/node")
+    const codex = Bun.TOML.parse(readFileSync(f.files.codex, "utf8")) as FixtureConfig
+    expect([codex.mcp_servers[SERVER].command, ...codex.mcp_servers[SERVER].args]).toEqual([join(bin, "node"), script, "mcp", "--harness", "codex"])
+    expect(codex.mcp_servers[SERVER].env).toEqual({ SCP_NAME: "cx-secret-name" })
+    expect(codex.mcp_servers.other).toEqual({ command: "foo" })
+    const hooks = readJson(userHooks(f).codex).hooks
+    expect(hooks).toEqual(mergeHooksFor("codex", [join(bin, "node"), script], other))
+    expect(JSON.stringify(hooks)).not.toContain('"swarm hook')
+    expect(readdirSync(dirname(userHooks(f).codex)).some((name) => name.startsWith("hooks.json.bak-"))).toBe(true)
+    const claude = setup(f, { write: true, harness: "claude" }, fakeRun(f), which)
+    expect(claude.code).toBe(0)
+    const settings = readJson(userHooks(f).claude)
+    expect(settings.model).toBe("x")
+    expect(settings.hooks).toEqual(mergeHooksFor("claude", [join(bin, "node"), script], other))
+    expect(readJson(f.files.claude).mcpServers.other).toEqual({ type: "stdio", command: "x", args: [] })
+    expect(setup(f, { write: true, harness: "codex" }, fakeRun(f), which).text).toContain("hooks: up to date in ~/.codex/hooks.json")
+  })
+
+  test("--undo removes the absolute hooks it wrote and keeps the others", () => {
+    const f = fixture()
+    const bin = join(f.home, "node-bin")
+    const script = join(f.home, "pkg/@scp-dev/cli/dist/cli.js")
+    put(join(bin, "node"), "#!/bin/sh\n", 0o755)
+    put(script, "#!/usr/bin/env node\n", 0o755)
+    symlinkSync(script, join(bin, "swarm"))
+    const other = { type: "command", command: "notify-tool --done", timeout: 3 }
+    put(userHooks(f).codex, `${JSON.stringify({ hooks: { Stop: [{ hooks: [other] }] } }, null, 2)}\n`, 0o644)
+    const which = (name: string) => (name === "swarm" ? join(bin, "swarm") : undefined)
+    expect(setup(f, { write: true, harness: "codex" }, fakeRun(f), which).code).toBe(0)
+    expect(JSON.stringify(readJson(userHooks(f).codex))).toContain(`${realpathSync(script)} hook codex`)
+    expect(setup(f, { write: true, undo: true, harness: "codex" }, fakeRun(f), which).code).toBe(0)
+    expect(readJson(userHooks(f).codex).hooks).toEqual({ Stop: [{ hooks: [other] }] })
+  })
+})
+
+function mergeHooksFor(harness: "claude" | "codex", launch: string[], other: Record<string, unknown>) {
+  const entries = hookEntries(harness, { launcher: launch })
+  return { ...entries, Stop: [{ hooks: [other] }, ...entries.Stop!] }
 }

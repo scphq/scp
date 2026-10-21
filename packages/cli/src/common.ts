@@ -31,6 +31,7 @@ export const OPTIONS = {
   "no-browser": { type: "boolean" },
   json: { type: "boolean" },
   channels: { type: "boolean" },
+  "cowork-only": { type: "boolean" },
   write: { type: "boolean" },
   print: { type: "boolean" },
   "block-stop-on-unread": { type: "boolean" },

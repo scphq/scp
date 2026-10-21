@@ -24,6 +24,7 @@ export function subagentSkip(argv: string[], payload: string): boolean {
 
 /** Reads subagent payloads before loading the CLI; matching payloads are handed to the runtime once. */
 export async function subagentFastPath(argv: string[]): Promise<boolean> {
+  if (argv[0] === "hook" && argv.includes("--cowork-only") && process.env.CLAUDE_CODE_IS_COWORK !== "1") return true
   if (!(argv[0] === "hook" && argv.includes(SUBAGENT))) return false
   const payload = await readCapped(process.stdin)
   if (subagentSkip(argv, payload)) return true

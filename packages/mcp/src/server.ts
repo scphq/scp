@@ -1050,7 +1050,13 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         const channel = capabilities?.experimental?.["claude/channel"]
         channelClient = (typeof channel === "object" && channel !== null) || options.launchedWithChannels === true
         const clientInfo = params.clientInfo as { name?: unknown } | undefined
-        inbox = options.channels && !channelClient && clientInfo?.name === "claude-code" ? options.sessionInbox : undefined
+        inbox =
+          options.channels &&
+          !channelClient &&
+          (clientInfo?.name === "claude-code" ||
+            (options.env?.CLAUDE_CODE_IS_COWORK === "1" && typeof clientInfo?.name === "string" && clientInfo.name.startsWith("claude")))
+            ? options.sessionInbox
+            : undefined
         wake = options.channels && channelClient ? (options.wake ?? (clientInfo?.name === "pi" ? "pi" : "channels")) : inbox ? "claude-inbox" : null
         advertise()
         return respond({

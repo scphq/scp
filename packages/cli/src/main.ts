@@ -257,7 +257,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   ${CLI_NAME} daemon stop|restart                stop the running broker, or replace it with a fresh one
 
 agent sessions:
-  ${CLI_NAME} mcp [--as NAME] [--harness H] [--channels]   the MCP shim a harness mounts: relay tools for one agent, never me/
+  ${CLI_NAME} mcp [--as NAME] [--harness H] [--channels] [--cowork-only]   the MCP shim a harness mounts: relay tools for one agent, never me/
   ${CLI_NAME} mcp install --harness claude|codex|opencode|grok|muse|agy [--as NAME]   prints the command that mounts it
   ${CLI_NAME} hooks install --harness claude|codex|opencode|agy|muse [--scope project|user|local] [--write]
         [--block-stop-on-unread] [--push-wait S] prints the hooks and their file; --write merges them in (with a backup); claude
@@ -270,9 +270,13 @@ agent sessions:
                                                  or handback and continues with it, at most 20 times a prompt; a prompt you type ends
                                                  the wait. On by default, since spawning is explicit; 0 turns it off, and
                                                  $SCP_PUSH_WAIT=S lowers it for one session (0 opts out)
-  ${CLI_NAME} setup [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH]
+  ${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH]
                                                  mounts the shim and installs the hooks (--no-hooks: the shim only) in every installed
                                                  harness at user scope; prints the plan, --write applies it, --undo removes what it added
+  ${CLI_NAME} setup --cowork [--bin PATH]            builds the local Cowork plugin zip in SCP state, ready to upload in Claude
+  ${CLI_NAME} setup claude-desktop [--out FILE] [--open] [--bin PATH]
+                                                 builds scp.mcpb, the Claude desktop chat extension (pull only: relay_inbox), and
+                                                 says how to install it; --open opens it
   ${CLI_NAME} hook <harness> [event]             what those hooks run: one event from the hook JSON on stdin; prints only the reply
   A session's shim and hooks share one endpoint, keyed by $SCP_SESSION, else the harness process's pid and start time.
   Without --as or $SCP_NAME the handle is <harness>-<worktree>; labels gain machine=<short hostname>.
@@ -458,7 +462,7 @@ const VERBS: Record<string, Option[]> = {
   "set-peek": IDENTITY,
   why: IDENTITY,
   daemon: ["idle", "policy"],
-  mcp: ["as", "harness", "human", "channels"],
+  mcp: ["as", "harness", "human", "channels", "cowork-only"],
   hooks: ["harness", "scope", "write", "print", "block-stop-on-unread", "push-wait"],
   relay: ["json"],
   login: ["json", "token", "label", "no-browser"],
@@ -637,7 +641,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     return 0
   }
   if (verb === "hook") return (await import("./hooks")).relayHookCommand(rest, startDaemon)
-  if (verb === "setup") return (await import("./setup")).relaySetupCommand(rest, cwd, out)
+  if (verb === "setup") return (await import("./setup")).relaySetupCommand(rest, cwd, out, cliVersion())
   if (verb === "claude") return (await import("./claude")).claudeCommand(rest)
   if (verb === "pi") return (await import("./pi")).piCommand(rest)
   if (verb === "codex") return (await import("./codex")).codexCommand(rest)
@@ -676,7 +680,10 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
     return daemon(values.idle as string | undefined, values.policy as string | undefined)
   }
   if (verb === "mcp")
-    return (await import("./mcp")).relayMcpCommand(values as { as?: string; harness?: string; human?: boolean; channels?: boolean }, positionals)
+    return (await import("./mcp")).relayMcpCommand(
+      values as { as?: string; harness?: string; human?: boolean; channels?: boolean; "cowork-only"?: boolean },
+      positionals,
+    )
   if (verb === "hooks") {
     if (positionals[0] !== "install" || positionals.length > 1) throw new RelayUsage(`${CLI_NAME} hooks takes install --harness claude|codex|opencode|agy|muse`)
     if (values.write && values.print) throw new RelayUsage("--print and --write: pick one")

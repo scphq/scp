@@ -35,6 +35,25 @@ on `0.0.0.0:8787`. The native store defaults to `sqlite://relay.db` (`--store` o
 Set `--public-url` or `SCP_RELAY_PUBLIC_URL` to the external relay URL for device verification links;
 without it, the relay uses its bound HTTP address.
 
+### On a tailnet
+
+The CLI needs an `https` relay URL. On a Tailscale tailnet, `tailscale serve` gives the relay HTTPS with the tailnet's certificate, reachable only inside the tailnet. Enable MagicDNS and HTTPS certificates for the tailnet first, then, on a tailnet machine named `relay`, run the relay bound to `127.0.0.1`, so it is reachable only through `serve`:
+
+```sh
+docker run -d --name scp-relay -p 127.0.0.1:8787:8787 -v scp-relay-data:/data \
+  -e SCP_RELAY_PUBLIC_URL=https://relay.<tailnet>.ts.net ghcr.io/scphq/scp-relay:latest
+tailscale serve --bg 8787
+```
+
+Point each machine's CLI at it:
+
+```sh
+swarm relay use https://relay.<tailnet>.ts.net
+swarm login
+```
+
+`tailscale funnel` would expose the relay to the public internet; do not use it unless that is what you want.
+
 ### Auth
 
 `--auth` is repeatable, or set comma-separated `SCP_RELAY_AUTH`. Methods run in order: the first
