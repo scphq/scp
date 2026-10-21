@@ -306,9 +306,7 @@ impl AccountHub {
         if !send.is_object() {
             return Err(invalid("params must be an object"));
         }
-        // A bridge strips local attachments before forwarding, as the broker does.
         if let Some(map) = send.as_object_mut() {
-            map.remove("attachments");
             map.remove("wait_s");
         }
         server_fields(&send)?;

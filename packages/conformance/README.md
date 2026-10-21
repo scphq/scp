@@ -38,14 +38,29 @@ Scenarios cover:
   hop and scope refusal, client claims and resumes, inbox wake and watched status.
 - Ordered HTTP batches, machine release, local event counts and live credential
   revocation with a per-test `revalidateMs=2000` limit.
+- Contact state transitions, contact envelopes and reply grants, root discovery,
+  ingress direction, allowlists and scopes, revocation, byte limits and pair quotas.
+- Socket, machine, endpoint and call limits, positive retry delays, and uncapped
+  limits advertised as null in hello.
+- Signed machine wake webhooks, metadata-only payloads, waking state, debounce,
+  decline holds, and cross-account wake opt-in.
+- Device login approval, denial and single redemption, live credential expiry,
+  malformed HTTP JSON and oversized HTTP requests.
 
 `SCP_CONFORMANCE_SLOW=1 bun test packages/conformance` also checks that an empty
 HTTP inbox requesting 60 seconds returns at the 25-second cap. This setting is
 captured by the preload like the target settings.
 
 All scenario assertions use CLI JSON, HTTP, WebSocket or local broker wire output.
-No scenario reads a relay database or hub object. There are currently no TS-only
-conformance skips.
+No scenario reads a relay database or hub object. There are no target-specific
+scenario skips. The Rust relay in this slice accepts machine-waker registration
+but does not call the webhook or support `serve --wake` yet. Its signed-webhook,
+decline-hold and cross-account opt-in scenarios intentionally fail until that
+implementation is merged. Default cross-account wake suppression passes.
+
+An oversized HTTP RPC request follows the existing hub behavior: HTTP 200 with
+JSON-RPC error `-32000`, `id: null` and `data.code: "too_large"`. It does not return
+HTTP 413. Both implementations use the same assertions.
 
 The reference server can also run independently:
 
@@ -54,11 +69,17 @@ SCP_CONFORMANCE_ADMIN=local-secret bun packages/conformance/src/reference-server
 ```
 
 It prints the contract's JSON `listening` line. Its private `POST /_admin` route
-requires the secret as a bearer credential and accepts `{action:"mint", account,
-member, device?, name?}` or `{action:"revoke", credentialId}`. Credentials are
-hashed in a file-backed table; each account has a separate file-backed hub database.
-`Target.start(limits?)` passes each override as `--limit name=value`, supported by
-the reference server and the Rust `serve` contract. Limits persist across restart;
-only the revocation scenario overrides a limit.
-Restart preserves both state and port. Rust targets use the contract's `serve`,
-`account create`, `token create` and `token revoke` commands with the same store URL.
+requires the secret as a bearer credential. It accepts:
+
+- `{action:"mint", account, member, device?, name?, expiresIn?}`.
+- `{action:"revoke", credentialId}`.
+- `{action:"contact", op, account, peer, allow?, dir?, limits?}`.
+- `{action:"approve", userCode, account, member}` or `{action:"deny", userCode}`.
+
+Credentials, contacts and device codes use `credentials.db`; each account has a
+separate file-backed hub database. Credentials and device codes are stored hashed.
+`Target.start(limits?, wake?)` passes overrides as `--limit name=value` and
+`--wake name=value`. Only scenarios setting wake options send `--wake` flags.
+Limits and wake options persist across restart, as do state and port. Rust targets
+use the contract's `serve`, `account create`, `token create`, `token revoke`,
+`contact` and `device approve|deny` commands with the same store URL.

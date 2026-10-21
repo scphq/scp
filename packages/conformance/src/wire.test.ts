@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { enabled, ProcessTarget, targetNames, waitFor } from "./targets";
 import { type Frame, rpc, Wire } from "./wire";
+import { scenario } from "./scenarios";
 
 type Delivery = { seq: number; endpoint: string; message: { id: string; from: { address: string }; body: { text: string } } };
 const hello = (params: object) => ({ jsonrpc: "2.0", id: 1, method: "hello", params: { protocol: "scp/1", ...params } });
@@ -188,4 +189,113 @@ describe.each(targetNames)("%s raw wire conformance", (name) => {
     expect(notice.message.body.text).toContain("policy_refused");
     expect(await replay.result("subscribe", { after: 0 })).toEqual({ replayed: 0, next: 0 });
   }, 20000);
+  test("device login issues a usable credential once after approval", async () => {
+    const post = (path: string, body: object) =>
+      fetch(`${target.url}/v1/device/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const response = await post("code", { label: "login-test" });
+    expect(response.status).toBe(200);
+    const code = (await response.json()) as {
+      device_code: string;
+      user_code: string;
+      verification_uri: string;
+      verification_uri_complete: string;
+      expires_in: number;
+      interval: number;
+    };
+    expect(code.device_code).toBeString();
+    expect(code.user_code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+    expect(new URL(code.verification_uri).pathname).toBe("/device");
+    expect(new URL(code.verification_uri_complete).searchParams.get("code")).toBe(code.user_code);
+    expect(code.expires_in).toBe(900);
+    expect(code.interval).toBe(5);
+    const pending = await post("token", { device_code: code.device_code });
+    expect(pending.status).toBe(400);
+    expect(await pending.json()).toMatchObject({ error: "authorization_pending", error_description: expect.any(String) });
+    await target.device("approve", code.user_code, "acme", "ada");
+    await Bun.sleep(code.interval * 1000);
+    const approved = await post("token", { device_code: code.device_code });
+    expect(approved.status).toBe(200);
+    const login = (await approved.json()) as { access_token: string; credential_id: string };
+    expect({ ...login }).toMatchObject({
+      access_token: expect.stringMatching(/^scp_d_/),
+      token_type: "Bearer",
+      credential_id: expect.any(String),
+      org: "acme",
+      email: null,
+      label: "login-test",
+      relay: expect.any(String),
+    });
+    const who = await fetch(`${target.url}/v1/whoami`, { headers: { authorization: `Bearer ${login.access_token}` } });
+    expect(who.status).toBe(200);
+    expect(await who.json()).toEqual({
+      kind: "device",
+      org: "acme",
+      email: null,
+      role: "owner",
+      label: "login-test",
+      ambient: false,
+      endpoint_labels: {},
+      expires_at: null,
+    });
+    const wire = await connect(login.access_token);
+    expect(await wire.hello({ observe: true })).toMatchObject({ account: "acme" });
+    const replay = await post("token", { device_code: code.device_code });
+    expect(replay.status).toBe(400);
+    expect(await replay.json()).toMatchObject({ error: "invalid_grant" });
+  }, 15000);
+  test("denied and unknown device codes end login", async () => {
+    const post = (path: string, body: object) =>
+      fetch(`${target.url}/v1/device/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const code = (await (await post("code", {})).json()) as { device_code: string; user_code: string };
+    await target.device("deny", code.user_code);
+    for (const [device_code, error] of [
+      [code.device_code, "access_denied"],
+      ["unknown", "invalid_grant"],
+    ]) {
+      const result = await post("token", { device_code });
+      expect(result.status).toBe(400);
+      expect(await result.json()).toMatchObject({ error, error_description: expect.any(String) });
+    }
+  });
+  test("an expired live credential closes with 4001 and cannot authenticate again", async () => {
+    await scenario(
+      name,
+      async ({ target }) => {
+        const credential = await target.mint("acme", "owner", { device: true, expiresIn: 2 });
+        const wire = await Wire.connect(target.url, credential.token);
+        try {
+          await wire.hello({ observe: true });
+          expect(await waitFor(() => wire.closeCode, "expired socket", 5000)).toBe(4001);
+          const response = await fetch(`${target.url}/v1/whoami`, { headers: { authorization: `Bearer ${credential.token}` } });
+          expect(response.status).toBe(401);
+          expect(await response.json()).toMatchObject({ error: "expired" });
+        } finally {
+          await wire.close();
+        }
+      },
+      { revalidateMs: 100 },
+    );
+  }, 10000);
+  test("malformed HTTP JSON returns a JSON-RPC parse error with null id", async () => {
+    const response = await fetch(`${target.url}/v1/relay/rpc`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: "{broken",
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+  });
+  test("HTTP requests above frameBytes return the hub too_large JSON-RPC shape", async () => {
+    const response = await fetch(`${target.url}/v1/relay/rpc`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: 42, method: "hello", params: { padding: "x".repeat(262145) } }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32000, message: "a request is at most 262144 bytes", data: { code: "too_large" } },
+    });
+  });
 });

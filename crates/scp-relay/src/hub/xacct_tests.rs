@@ -260,6 +260,11 @@ async fn cross_limits_and_deduplication() {
         r.send(false, json!({"data_class":"private"})).await["error"]["data"]["code"],
         "data_class_refused"
     );
+    assert_eq!(
+        r.send(false, json!({"attachments":[{"name":"file"}]}))
+            .await["error"]["data"]["code"],
+        "data_class_refused"
+    );
     let hop = r
         .hub
         .call(
