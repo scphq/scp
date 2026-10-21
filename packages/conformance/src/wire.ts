@@ -5,7 +5,7 @@ export type Frame = {
   method?: string;
   params?: Record<string, unknown>;
   result?: unknown;
-  error?: { code: number; message: string; data: { code: string } };
+  error?: { code: number; message: string; data: { code: string; retry_after?: number } };
 };
 export class Wire {
   readonly frames: Frame[] = [];

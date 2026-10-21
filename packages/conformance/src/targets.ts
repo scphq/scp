@@ -2,12 +2,20 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Subprocess } from "bun";
+import type { XAllow, XLimits } from "@scp-dev/core";
+import type { HubWakeOptions } from "@scp-dev/hub";
 import { postgresServer, relayBinary } from "./environment";
 
+export type ContactOp = "invite" | "accept" | "decline" | "revoke" | "block" | "update";
+export type ContactOptions = { allow?: XAllow[]; dir?: "in" | "out" | "both"; limits?: XLimits | null };
+export type MintOptions = { device?: boolean; name?: string; expiresIn?: number };
+
 export interface Target {
-  start(limits?: Record<string, number>): Promise<{ url: string }>;
-  mint(account: string, member: string, opts?: { device?: boolean; name?: string }): Promise<{ token: string; credentialId: string }>;
+  start(limits?: Record<string, number>, wake?: Partial<HubWakeOptions>): Promise<{ url: string }>;
+  mint(account: string, member: string, opts?: MintOptions): Promise<{ token: string; credentialId: string }>;
   revoke(credentialId: string): Promise<void>;
+  contact(op: ContactOp, account: string, peer: string, opts?: ContactOptions): Promise<{ account: string; peer: string; state: string | null }>;
+  device(op: "approve" | "deny", userCode: string, account?: string, member?: string): Promise<void>;
   restart(): Promise<void>;
   stop(): Promise<void>;
   readonly url: string;
@@ -55,9 +63,11 @@ export class ProcessTarget implements Target {
   private database?: string;
   private admin?: InstanceType<typeof Bun.SQL>;
   private limits: Record<string, number> = {};
+  private wake: Partial<HubWakeOptions> = {};
   constructor(readonly name: string) {}
-  async start(limits: Record<string, number> = {}) {
+  async start(limits: Record<string, number> = {}, wake: Partial<HubWakeOptions> = {}) {
     this.limits = limits;
+    this.wake = wake;
     if (this.name === "rust-pg" && !this.database) {
       this.database = `scp_conformance_${crypto.randomUUID().replaceAll("-", "")}`;
       this.admin = new Bun.SQL(postgresServer!);
@@ -76,6 +86,7 @@ export class ProcessTarget implements Target {
         ? [process.execPath, "--no-env-file", join(import.meta.dir, "reference-server.ts"), "--listen", listen, "--dir", this.root]
         : [resolve(relayBinary!), "serve", "--listen", listen, "--store", this.store];
     for (const [key, value] of Object.entries(this.limits)) args.push("--limit", `${key}=${value}`);
+    for (const [key, value] of Object.entries(this.wake)) args.push("--wake", `${key}=${value}`);
     const child = Bun.spawn(args, { env: { ...process.env, SCP_CONFORMANCE_ADMIN: this.secret }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     this.child = child;
     let listening = "";
@@ -116,7 +127,7 @@ export class ProcessTarget implements Target {
     if (!response.ok) throw new Error(`admin failed: ${response.status}`);
     return response.json();
   }
-  async mint(account: string, member: string, opts: { device?: boolean; name?: string } = {}) {
+  async mint(account: string, member: string, opts: MintOptions = {}) {
     if (this.name === "ts") return (await this.tsAdmin({ action: "mint", account, member, ...opts })) as { token: string; credentialId: string };
     await command([resolve(relayBinary!), "account", "create", account, "--store", this.store]);
     const output = JSON.parse(
@@ -132,6 +143,7 @@ export class ProcessTarget implements Target {
         member,
         ...(opts.device ? ["--device"] : []),
         ...(opts.name ? ["--name", opts.name] : []),
+        ...(opts.expiresIn !== undefined ? ["--expires-in", String(opts.expiresIn)] : []),
       ]),
     );
     return { token: output.token as string, credentialId: output.credential_id as string };
@@ -142,6 +154,30 @@ export class ProcessTarget implements Target {
       return;
     }
     await command([resolve(relayBinary!), "token", "revoke", "--store", this.store, credentialId]);
+  }
+  async contact(op: ContactOp, account: string, peer: string, opts: ContactOptions = {}) {
+    if (this.name === "ts")
+      return (await this.tsAdmin({ action: "contact", op, account, peer, ...opts })) as { account: string; peer: string; state: string | null };
+    const args = [resolve(relayBinary!), "contact", op, peer, "--store", this.store, "--account", account];
+    if (opts.allow !== undefined) args.push("--allow", JSON.stringify(opts.allow));
+    if (opts.dir !== undefined) args.push("--dir", opts.dir);
+    if (opts.limits !== undefined) args.push("--limits", JSON.stringify(opts.limits));
+    return JSON.parse(await command(args)) as { account: string; peer: string; state: string | null };
+  }
+  async device(op: "approve" | "deny", userCode: string, account?: string, member?: string) {
+    if (this.name === "ts") {
+      await this.tsAdmin({ action: op, userCode, account, member });
+      return;
+    }
+    await command([
+      resolve(relayBinary!),
+      "device",
+      op,
+      userCode,
+      "--store",
+      this.store,
+      ...(op === "approve" ? ["--account", account!, "--member", member!] : []),
+    ]);
   }
   async restart() {
     if (this.child) await terminate(this.child);
