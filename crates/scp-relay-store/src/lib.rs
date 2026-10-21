@@ -370,7 +370,8 @@ pub trait RelayStore: Send + Sync + 'static {
     /// Revoke once at now. Return false for missing or already revoked ids.
     async fn revoke_credential(&self, id: &str, now: i64) -> Result<bool>;
     // Host device login.
-    /// Delete expired, redeemed or denied device codes. Return the deleted count.
+    /// Delete expired or redeemed device codes; a denied code stays until it
+    /// expires so its poll answers access_denied. Return the deleted count.
     async fn purge_device_codes(&self, now: i64) -> Result<u64>;
     /// Insert a pending code, pruning at created_at. Duplicate digest/user code
     /// is Conflict; 1000 unexpired pending codes globally is Capacity.

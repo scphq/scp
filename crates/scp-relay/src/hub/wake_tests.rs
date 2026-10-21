@@ -500,7 +500,6 @@ fn options_and_url_validation() {
         "unknown=1",
         "crossAccount=1",
         "debounceS=Infinity",
-        "debounceS=0",
         "wakingTimeoutS=-1",
         "targetPerHour=NaN",
         "declineHoldS=-1",
@@ -513,6 +512,7 @@ fn options_and_url_validation() {
         "targetPerHour=0",
         "declineHoldS=Infinity",
         "declineHoldS=0",
+        "debounceS=0",
         "debounceS=0.01",
         "crossAccount=true",
     ] {

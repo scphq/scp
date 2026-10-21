@@ -648,7 +648,7 @@ async fn device_code_capacity_and_pruning() {
     )
     .await;
     assert!(response["device_code"].is_string());
-    assert!(s.store.device_code("CAPACITY0").await.unwrap().is_none());
+    assert!(s.store.device_code("CAPACITY0").await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -763,7 +763,7 @@ async fn oversized_frames_send_too_large_before_closing_1009() {
 async fn wake_cli_rejects_unknown_keys_and_invalid_values() {
     for (option, expected) in [
         ("unknown=1", "unknown wake option"),
-        ("debounceS=Infinity", "finite and positive"),
+        ("debounceS=Infinity", "finite and nonnegative"),
         ("crossAccount=yes", "true or false"),
     ] {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_scp-relay"))

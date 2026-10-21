@@ -332,11 +332,11 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
     s.redeem_device(&redeemed.device_code_hash, login, 0)
         .await
         .unwrap();
-    assert_eq!(s.purge_device_codes(1).await.unwrap(), 3);
-    for code in [&expired, &denied, &redeemed] {
+    assert_eq!(s.purge_device_codes(1).await.unwrap(), 2);
+    for code in [&expired, &redeemed] {
         assert!(s.device_code(&code.user_code).await.unwrap().is_none());
     }
-    for code in [&pending, &approved] {
+    for code in [&pending, &approved, &denied] {
         assert!(s.device_code(&code.user_code).await.unwrap().is_some());
     }
     for n in 0..998 {
@@ -361,7 +361,7 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
         }
     }
     assert_eq!(winners, 1);
-    assert_eq!(s.purge_device_codes(900000).await.unwrap(), 1001);
+    assert_eq!(s.purge_device_codes(900000).await.unwrap(), 1002);
     assert_eq!(s.purge_device_codes(900000).await.unwrap(), 0);
     s.create_device_code(device("after-capacity"))
         .await

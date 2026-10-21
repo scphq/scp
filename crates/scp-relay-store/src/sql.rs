@@ -302,7 +302,7 @@ impl Database {
 impl Transaction {
     async fn purge_device_codes(&mut self, now: i64) -> Result<u64> {
         self.execute(
-            "DELETE FROM device_codes WHERE expires_at<=$1 OR state IN ('redeemed','denied')",
+            "DELETE FROM device_codes WHERE expires_at<=$1 OR state='redeemed'",
             args![now],
         )
         .await

@@ -798,14 +798,19 @@ impl AccountHub {
                 pushed = true;
             }
         }
-        if !pushed && self.wake_options.cross_account {
-            self.machine_wake(
-                &target.machine,
-                &target.id,
-                &envelope,
-                Some((from_account, x.seq)),
-            )
-            .await?;
+        if !pushed
+            && self.wake_options.cross_account
+            && self
+                .machine_wake(
+                    &target.machine,
+                    &target.id,
+                    &envelope,
+                    Some((from_account, x.seq)),
+                )
+                .await
+                .is_err()
+        {
+            tracing::warn!("machine wake unavailable");
         }
         self.fleet(json!({"type":"message","machine":msg.from.machine,"id":msg.id,"thread":msg.thread,"kind":msg.kind,"from":msg.from.address,"to":[address],"hop":msg.hop}));
         Ok(json!({"id":msg.id,"state":if pushed{"delivered"}else{"queued"}}))

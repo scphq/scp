@@ -294,8 +294,12 @@ impl AccountHub {
                 if message["from"]["account"]
                     .as_str()
                     .is_none_or(|a| a == self.handle)
+                    && self
+                        .machine_wake(&e.machine, &e.id, &message, None)
+                        .await
+                        .is_err()
                 {
-                    self.machine_wake(&e.machine, &e.id, &message, None).await?;
+                    tracing::warn!("machine wake unavailable");
                 }
             }
         }

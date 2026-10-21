@@ -2,7 +2,9 @@ use super::*;
 impl AccountHub {
     pub(super) async fn sweep(&mut self) -> Result<()> {
         let now = crate::now_ms();
-        self.sweep_wakes(now).await?;
+        if self.sweep_wakes(now).await.is_err() {
+            tracing::warn!("machine wake sweep unavailable");
+        }
         self.store.xprune(&self.account_id).await?;
         self.xcounters
             .true_up(self.store.as_ref(), &self.account_id, now, None)

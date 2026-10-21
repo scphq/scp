@@ -54,10 +54,10 @@ impl WakeOptions {
         };
         if n.is_nan()
             || n < 0.0
-            || (!capped && (!n.is_finite() || n == 0.0))
+            || (!capped && !n.is_finite())
             || (n.is_infinite() && value != "Infinity")
         {
-            return Err("wake durations must be finite and positive; caps and declineHoldS may be nonnegative or Infinity".into());
+            return Err("wake durations must be finite and nonnegative; caps and declineHoldS may also be Infinity".into());
         }
         let slot = match key {
             "senderAccountPerHour" => &mut self.sender_account_per_hour,
@@ -654,7 +654,13 @@ impl AccountHub {
 async fn post_wake(waker: &Value, event: Value, now: i64) -> Outcome {
     let send = async {
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(20))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 || !wake_url(attempt.url().as_str()) {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .timeout(Duration::from_secs(10))
             .build()?;
         let body = event.to_string();
@@ -673,7 +679,14 @@ async fn post_wake(waker: &Value, event: Value, now: i64) -> Outcome {
             .await?;
         let status = response.status().as_u16();
         let declined = if status == 403 {
-            response.json::<Value>().await.ok().and_then(|v| {
+            let mut response = response;
+            let mut bytes = Vec::new();
+            while bytes.len() <= 4096
+                && let Some(chunk) = response.chunk().await?
+            {
+                bytes.extend_from_slice(&chunk);
+            }
+            serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
                 v["declined"]
                     .as_str()
                     .filter(|s| validation::pattern!(r"^[a-z][a-z0-9_-]{0,31}$", s))
