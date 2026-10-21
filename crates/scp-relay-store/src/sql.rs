@@ -59,6 +59,7 @@ impl From<&Option<String>> for Bind {
     }
 }
 macro_rules! args { ($($v:expr),* $(,)?) => { vec![$(Bind::from($v)),*] }; }
+mod contacts;
 fn err(e: sqlx::Error) -> StoreError {
     if let sqlx::Error::Database(d) = &e
         && (d.is_unique_violation() || d.is_foreign_key_violation() || d.is_check_violation())
@@ -215,6 +216,10 @@ impl Database {
                     "0003_open_deliveries",
                     include_str!("../migrations/sqlite/0003_open_deliveries.sql"),
                 ),
+                (
+                    "0004_contacts",
+                    include_str!("../migrations/sqlite/0004_contacts.sql"),
+                ),
             ],
             Self::Postgres(_) => [
                 (
@@ -228,6 +233,10 @@ impl Database {
                 (
                     "0003_open_deliveries",
                     include_str!("../migrations/postgres/0003_open_deliveries.sql"),
+                ),
+                (
+                    "0004_contacts",
+                    include_str!("../migrations/postgres/0004_contacts.sql"),
                 ),
             ],
         };
@@ -293,13 +302,14 @@ impl Database {
 impl Transaction {
     async fn purge_device_codes(&mut self, now: i64) -> Result<u64> {
         self.execute(
-            "DELETE FROM device_codes WHERE expires_at<=$1 OR state IN ('redeemed','denied')",
+            "DELETE FROM device_codes WHERE expires_at<=$1 OR state='redeemed'",
             args![now],
         )
         .await
     }
     async fn hub_write(&mut self, a: &str, changes: HubWrite) -> Result<()> {
         if let Some(now) = changes.sweep_at {
+            self.execute("DELETE FROM messages WHERE account_id=$1 AND id IN (SELECT x.id FROM xinbox x LEFT JOIN xcursor c ON c.account_id=x.account_id AND c.endpoint=x.endpoint WHERE x.account_id=$1 AND x.at<=$2 AND (x.expires_at<=$3 OR (c.at<=$2 AND x.seq<=c.acked_seq) OR (c.old_at<=$2 AND x.seq<=c.old_seq)))",args![a,now.saturating_sub(86400000),now]).await?;
             self.execute(
                 "DELETE FROM messages WHERE account_id=$1 AND expires_at<=$2",
                 args![a, now.saturating_sub(604800000)],
@@ -323,10 +333,15 @@ impl Transaction {
             )
             .await?;
             self.execute("DELETE FROM activity WHERE account_id=$1 AND id NOT IN (SELECT id FROM activity WHERE account_id=$1 ORDER BY id DESC LIMIT 5000)",args![a]).await?;
-            self.execute("DELETE FROM hub_state WHERE account_id=$1 AND CASE WHEN key LIKE 'pause:%' OR key LIKE 'denied:%' THEN CAST(payload AS BIGINT) END <= $2",args![a,now]).await?;
+            self.execute("DELETE FROM hub_state WHERE account_id=$1 AND CASE WHEN key LIKE 'pause:%' THEN CAST(payload AS BIGINT) END <= $2",args![a,now]).await?;
+        }
+        if let Some(before) = changes.denied_before {
+            self.execute("DELETE FROM hub_state WHERE account_id=$1 AND key LIKE 'denied:%' AND CAST(payload AS BIGINT)<=$2", args![a, before]).await?;
         }
         if changes.purge {
             for table in [
+                "xinbox",
+                "xcursor",
                 "deliveries",
                 "messages",
                 "idempotency",
@@ -363,6 +378,7 @@ impl Transaction {
             self.execute(&format!("INSERT INTO {}(account_id,at,kind,endpoint,reference,detail) VALUES($1,$2,$3,$4,$5,$6)",event_table(log)),args![a,e.at,&e.kind,&e.endpoint,&e.reference,&e.detail]).await?;
         }
         for endpoint in changes.clear_inboxes {
+            self.execute("DELETE FROM messages WHERE account_id=$1 AND id IN (SELECT x.id FROM xinbox x JOIN deliveries d ON d.seq=x.seq WHERE x.account_id=$1 AND d.endpoint=$2)",args![a,&endpoint]).await?;
             self.execute(
                 "DELETE FROM deliveries WHERE account_id=$1 AND endpoint=$2",
                 args![a, &endpoint],
@@ -370,6 +386,7 @@ impl Transaction {
             .await?;
         }
         for id in changes.remove_endpoints {
+            self.execute("DELETE FROM messages WHERE account_id=$1 AND id IN (SELECT x.id FROM xinbox x JOIN deliveries d ON d.seq=x.seq WHERE x.account_id=$1 AND d.endpoint=$2)",args![a,&id]).await?;
             self.execute(
                 "DELETE FROM deliveries WHERE account_id=$1 AND endpoint=$2",
                 args![a, &id],
@@ -397,6 +414,11 @@ impl Transaction {
                 args![a, &format!("wake:{name}")],
             )
             .await?;
+            self.execute(
+                "DELETE FROM hub_state WHERE account_id=$1 AND key=$2",
+                args![a, &format!("wake_state:{name}")],
+            )
+            .await?;
         }
         for m in changes.machines {
             self.execute("INSERT INTO machines(account_id,name,token_id,actor_id,user_id,kind,created_at,last_seen,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(account_id,name) DO UPDATE SET token_id=excluded.token_id,actor_id=excluded.actor_id,user_id=excluded.user_id,kind=excluded.kind,created_at=excluded.created_at,last_seen=excluded.last_seen,payload=excluded.payload",args![a,&m.name,&m.token_id,&m.actor_id,&m.user_id,&m.kind,m.created_at,m.last_seen,&json(&m)?]).await?;
@@ -409,6 +431,14 @@ impl Transaction {
         for v in changes.tombstones {
             self.execute("INSERT INTO machine_tombstones(account_id,name,at,payload,actor_id,user_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(account_id,name) DO UPDATE SET at=excluded.at,payload=excluded.payload,actor_id=excluded.actor_id,user_id=excluded.user_id",args![a,&v.name,v.at,&json(&v)?,&v.actor_id,&v.user_id]).await?;
         }
+        // Free names before upserts so a transaction can swap them.
+        for e in &changes.endpoints {
+            self.execute(
+                "UPDATE endpoints SET handle=$1 WHERE account_id=$2 AND id=$3",
+                args![&format!("\u{1}{}", e.id), a, &e.id],
+            )
+            .await?;
+        }
         for e in changes.endpoints {
             valid(&e.fields)?;
             self.execute("INSERT INTO endpoints(account_id,id,machine,handle,kind,token_hash,created_at,last_seen,payload,fields) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(account_id,id) DO UPDATE SET machine=excluded.machine,handle=excluded.handle,kind=excluded.kind,token_hash=excluded.token_hash,created_at=excluded.created_at,last_seen=excluded.last_seen,payload=excluded.payload,fields=excluded.fields",args![a,&e.id,&e.machine,&e.handle,&e.kind,&e.token_hash,e.created_at,e.last_seen,&json(&e)?,&e.fields]).await?;
@@ -418,7 +448,7 @@ impl Transaction {
             if self.execute("UPDATE deliveries SET acked_at=$1,rejected_at=$2,rejection=$3,state=$4 WHERE account_id=$5 AND seq=$6 AND message_id=$7 AND endpoint=$8 AND expires_at=$9",args![d.acked_at,d.rejected_at,&d.rejection,&d.state,a,d.seq,&d.message_id,&d.endpoint,d.expires_at]).await? == 0 { return Err(StoreError::NotFound); }
         }
         for (endpoint, now) in changes.renew_deliveries {
-            let rows = self.rows("SELECT seq,message_id,expires_at,state FROM deliveries WHERE account_id=$1 AND endpoint=$2 AND acked_at IS NULL AND rejected_at IS NULL AND expires_at>$3 ORDER BY seq",args![a,&endpoint,now]).await?;
+            let rows = self.rows("SELECT seq,message_id,expires_at,state FROM deliveries WHERE account_id=$1 AND endpoint=$2 AND acked_at IS NULL AND rejected_at IS NULL AND expires_at>$3 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=deliveries.account_id AND x.seq=deliveries.seq) ORDER BY seq",args![a,&endpoint,now]).await?;
             for row in rows {
                 self.execute(
                     "DELETE FROM deliveries WHERE account_id=$1 AND seq=$2",
@@ -598,6 +628,61 @@ impl<T: Backend> RelayStore for T {
                 args![handle],
             )
             .await
+    }
+    async fn wake_accounts(&self) -> Result<Vec<Account>> {
+        self.db().rows("SELECT a.payload FROM accounts a WHERE EXISTS (SELECT 1 FROM hub_state s WHERE s.account_id=a.id AND s.key LIKE 'wake_state:%')", args![])
+            .await?.iter().map(DataRow::payload).collect()
+    }
+    async fn contact(&self, a: &str, p: &str) -> Result<Option<Contact>> {
+        self.db().contact(a, p).await
+    }
+    async fn contacts(&self, a: &str) -> Result<Vec<Contact>> {
+        self.db().contacts(a).await
+    }
+    async fn contact_invite(&self, a: &str, p: &str, now: i64) -> Result<()> {
+        self.db().change_contact(a, p, "invite", None, now).await
+    }
+    async fn contact_accept(&self, a: &str, p: &str, now: i64) -> Result<()> {
+        self.db().change_contact(a, p, "accept", None, now).await
+    }
+    async fn contact_decline(&self, a: &str, p: &str, now: i64) -> Result<()> {
+        self.db().change_contact(a, p, "decline", None, now).await
+    }
+    async fn contact_revoke(&self, a: &str, p: &str, now: i64) -> Result<()> {
+        self.db().change_contact(a, p, "revoke", None, now).await
+    }
+    async fn contact_block(&self, a: &str, p: &str, now: i64) -> Result<()> {
+        self.db().change_contact(a, p, "block", None, now).await
+    }
+    async fn contact_update(&self, a: &str, p: &str, c: ContactConfig, now: i64) -> Result<()> {
+        self.db().change_contact(a, p, "update", Some(c), now).await
+    }
+    async fn xinbox(&self, a: &str) -> Result<Vec<XInbox>> {
+        self.db().xinbox(a).await
+    }
+    async fn xinsert(&self, a: &str, m: Message, x: XInbox) -> Result<(XInbox, bool)> {
+        self.db().xinsert(a, m, x).await
+    }
+    async fn xack(&self, a: &str, e: &[String], s: &[i64], now: i64) -> Result<usize> {
+        self.db().xack(a, e, s, now).await
+    }
+    async fn acknowledge(
+        &self,
+        a: &str,
+        changes: HubWrite,
+        endpoints: &[String],
+        seqs: &[i64],
+        now: i64,
+    ) -> Result<usize> {
+        let mut t = self.db().begin(a).await?;
+        let local = changes.deliveries.len();
+        t.hub_write(a, changes).await?;
+        let cross = t.xack(a, endpoints, seqs, now).await?;
+        t.commit().await?;
+        Ok(local + cross)
+    }
+    async fn xprune(&self, a: &str) -> Result<u64> {
+        self.db().xprune(a).await
     }
     async fn create_member(&self, m: Member) -> Result<()> {
         let mut t = self
@@ -1000,8 +1085,25 @@ impl<T: Backend> RelayStore for T {
             )
             .await
     }
+    async fn stored_bytes(&self, a: &str) -> Result<u64> {
+        let sql = match self.db() {
+            Database::Sqlite(_) => {
+                "SELECT (SELECT COALESCE(SUM(length(CAST(json_extract(envelope,'$.body.text') AS BLOB))),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(length(CAST(message AS BLOB))),0) FROM xinbox WHERE account_id=$1) AS n"
+            }
+            Database::Postgres(_) => {
+                "SELECT ((SELECT COALESCE(SUM(octet_length(replace(envelope, E'\\\\u0000', E'\\\\u0001')::jsonb #>> '{body,text}')),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(octet_length(message)),0) FROM xinbox WHERE account_id=$1))::bigint AS n"
+            }
+        };
+        Ok(self
+            .db()
+            .rows(sql, args![a])
+            .await?
+            .first()
+            .ok_or(StoreError::NotFound)?
+            .int("n")? as u64)
+    }
     async fn sent_count(&self, a: &str, since: i64) -> Result<i64> {
-        self.db().rows("SELECT COUNT(*) AS n FROM messages WHERE account_id=$1 AND created_at>=$2 AND from_ep!='system'",args![a,since]).await?.first().ok_or(StoreError::NotFound)?.int("n")
+        self.db().rows("SELECT COUNT(*) AS n FROM messages WHERE account_id=$1 AND created_at>=$2 AND from_ep!='system' AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=messages.account_id AND x.id=messages.id)",args![a,since]).await?.first().ok_or(StoreError::NotFound)?.int("n")
     }
     async fn messages(
         &self,
@@ -1011,7 +1113,7 @@ impl<T: Backend> RelayStore for T {
         limit: usize,
     ) -> Result<Vec<Message>> {
         let limit = limit.clamp(1, 2001) as i64;
-        self.db().all("SELECT payload FROM messages WHERE account_id=$1 AND created_at>=$2 AND ($3 IS NULL OR thread=$3) ORDER BY created_at,id LIMIT $4",args![a,since,&thread.map(str::to_owned),limit]).await
+        self.db().all("SELECT payload FROM messages WHERE account_id=$1 AND created_at>=$2 AND ($3 IS NULL OR thread=$3) AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=messages.account_id AND x.id=messages.id) ORDER BY created_at,id LIMIT $4",args![a,since,&thread.map(str::to_owned),limit]).await
     }
     async fn machine_busy(&self, a: &str, machine: &str, now: i64) -> Result<bool> {
         let queued = self.db().rows("SELECT 1 FROM deliveries d JOIN endpoints e ON e.account_id=d.account_id AND e.id=d.endpoint WHERE d.account_id=$1 AND e.machine=$2 AND d.acked_at IS NULL AND d.expires_at>$3 LIMIT 1",args![a,machine,now]).await?;
@@ -1023,12 +1125,23 @@ impl<T: Backend> RelayStore for T {
     async fn pending_machine(
         &self,
         a: &str,
-        machine: &str,
+        m: &str,
         after: i64,
         now: i64,
         limit: usize,
     ) -> Result<Vec<Delivery>> {
-        self.db().rows("SELECT d.seq,d.message_id,d.endpoint,d.expires_at,d.acked_at,d.rejected_at,d.rejection,d.state FROM deliveries d JOIN endpoints e ON e.account_id=d.account_id AND e.id=d.endpoint WHERE d.account_id=$1 AND e.machine=$2 AND e.token_hash IS NULL AND d.seq>$3 AND d.expires_at>$4 AND d.acked_at IS NULL AND d.rejected_at IS NULL ORDER BY d.seq LIMIT $5",args![a,machine,after,now,limit.clamp(1,200) as i64]).await?.iter().map(|r|Ok(Delivery{seq:r.int("seq")?,message_id:r.text("message_id")?,endpoint:r.text("endpoint")?,expires_at:r.int("expires_at")?,acked_at:r.optional_int("acked_at")?,rejected_at:r.optional_int("rejected_at")?,rejection:r.optional_text("rejection")?,state:r.text("state")?})).collect()
+        self.pending_machine_x(a, m, after, after, now, limit).await
+    }
+    async fn pending_machine_x(
+        &self,
+        a: &str,
+        machine: &str,
+        after: i64,
+        xafter: i64,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Delivery>> {
+        self.db().rows("SELECT d.seq,d.message_id,d.endpoint,d.expires_at,d.acked_at,d.rejected_at,d.rejection,d.state FROM deliveries d JOIN endpoints e ON e.account_id=d.account_id AND e.id=d.endpoint LEFT JOIN xinbox x ON x.account_id=d.account_id AND x.seq=d.seq WHERE d.account_id=$1 AND e.machine=$2 AND e.token_hash IS NULL AND ((x.seq IS NULL AND d.seq>$3) OR (x.seq>$6 AND x.endpoint=e.machine || '/' || e.handle AND EXISTS (SELECT 1 FROM contacts c WHERE c.account_id=x.account_id AND c.peer_id=x.from_account AND c.state='active' AND c.dir!='out'))) AND d.expires_at>$4 AND d.acked_at IS NULL AND d.rejected_at IS NULL ORDER BY d.seq LIMIT $5",args![a,machine,after,now,limit.clamp(1,200) as i64,xafter]).await?.iter().map(delivery).collect()
     }
     async fn thread_member(&self, a: &str, thread: &str, endpoint: &str) -> Result<bool> {
         Ok(!self.db().rows("SELECT 1 FROM messages m WHERE m.account_id=$1 AND m.thread=$2 AND (m.from_ep=$3 OR EXISTS (SELECT 1 FROM deliveries d WHERE d.account_id=m.account_id AND d.message_id=m.id AND d.endpoint=$3)) LIMIT 1",args![a,thread,endpoint]).await?.is_empty())
@@ -1060,10 +1173,10 @@ impl<T: Backend> RelayStore for T {
         now: i64,
         limit: usize,
     ) -> Result<Vec<Delivery>> {
-        self.db().rows("SELECT seq,message_id,endpoint,expires_at,acked_at,rejected_at,rejection,state FROM deliveries WHERE account_id=$1 AND endpoint=$2 AND seq>$3 AND acked_at IS NULL AND rejected_at IS NULL AND expires_at>$4 ORDER BY seq LIMIT $5", args![a,e,after,now,limit.clamp(1,200) as i64]).await?.iter().map(delivery).collect()
+        self.db().rows("SELECT seq,message_id,endpoint,expires_at,acked_at,rejected_at,rejection,state FROM deliveries WHERE account_id=$1 AND endpoint=$2 AND seq>$3 AND acked_at IS NULL AND rejected_at IS NULL AND expires_at>$4 AND (NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=deliveries.account_id AND x.seq=deliveries.seq) OR EXISTS (SELECT 1 FROM xinbox x JOIN contacts c ON c.account_id=x.account_id AND c.peer_id=x.from_account JOIN endpoints e ON e.account_id=x.account_id AND e.id=deliveries.endpoint WHERE x.account_id=deliveries.account_id AND x.seq=deliveries.seq AND c.state='active' AND c.dir!='out' AND e.token_hash IS NULL AND x.endpoint=e.machine || '/' || e.handle)) ORDER BY seq LIMIT $5", args![a,e,after,now,limit.clamp(1,200) as i64]).await?.iter().map(delivery).collect()
     }
     async fn open_delivery_count(&self, a: &str, e: &str, now: i64) -> Result<i64> {
-        self.db().rows("SELECT COUNT(*) AS n FROM deliveries WHERE account_id=$1 AND endpoint=$2 AND acked_at IS NULL AND rejected_at IS NULL AND expires_at>$3", args![a,e,now]).await?[0].int("n")
+        self.db().rows("SELECT COUNT(*) AS n FROM deliveries WHERE account_id=$1 AND endpoint=$2 AND acked_at IS NULL AND rejected_at IS NULL AND expires_at>$3 AND (NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=deliveries.account_id AND x.seq=deliveries.seq) OR EXISTS (SELECT 1 FROM xinbox x JOIN contacts c ON c.account_id=x.account_id AND c.peer_id=x.from_account JOIN endpoints e ON e.account_id=x.account_id AND e.id=deliveries.endpoint WHERE x.account_id=deliveries.account_id AND x.seq=deliveries.seq AND c.state='active' AND c.dir!='out' AND e.token_hash IS NULL AND x.endpoint=e.machine || '/' || e.handle))", args![a,e,now]).await?[0].int("n")
     }
     async fn reply_delivery(
         &self,
@@ -1072,7 +1185,7 @@ impl<T: Backend> RelayStore for T {
         request: &str,
         now: i64,
     ) -> Result<Option<Delivery>> {
-        self.db().rows("SELECT d.seq,d.message_id,d.endpoint,d.expires_at,d.acked_at,d.rejected_at,d.rejection,d.state FROM deliveries d JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id JOIN messages asked ON asked.account_id=m.account_id AND asked.id=m.reply_to WHERE d.account_id=$1 AND d.endpoint=$2 AND asked.id=$3 AND asked.from_ep=$2 AND m.kind='reply' AND d.expires_at>$4 AND (EXISTS (SELECT 1 FROM deliveries addressed WHERE addressed.account_id=m.account_id AND addressed.message_id=asked.id AND addressed.endpoint=m.from_ep) OR NOT EXISTS (SELECT 1 FROM deliveries addressed WHERE addressed.account_id=m.account_id AND addressed.message_id=asked.id)) ORDER BY d.seq LIMIT 1", args![a,e,request,now]).await?.first().map(delivery).transpose()
+        self.db().rows("SELECT d.seq,d.message_id,d.endpoint,d.expires_at,d.acked_at,d.rejected_at,d.rejection,d.state FROM deliveries d JOIN messages m ON m.account_id=d.account_id AND m.id=d.message_id JOIN messages asked ON asked.account_id=m.account_id AND asked.id=m.reply_to WHERE d.account_id=$1 AND d.endpoint=$2 AND asked.id=$3 AND asked.from_ep=$2 AND m.kind='reply' AND d.expires_at>$4 AND (EXISTS (SELECT 1 FROM deliveries addressed WHERE addressed.account_id=m.account_id AND addressed.message_id=asked.id AND addressed.endpoint=m.from_ep) OR NOT EXISTS (SELECT 1 FROM deliveries addressed WHERE addressed.account_id=m.account_id AND addressed.message_id=asked.id)) AND (NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=d.account_id AND x.seq=d.seq) OR EXISTS (SELECT 1 FROM xinbox x JOIN contacts c ON c.account_id=x.account_id AND c.peer_id=x.from_account WHERE x.account_id=d.account_id AND x.seq=d.seq AND c.state='active' AND c.dir!='out')) ORDER BY d.seq LIMIT 1", args![a,e,request,now]).await?.first().map(delivery).transpose()
     }
     async fn update_delivery(&self, a: &str, d: Delivery) -> Result<()> {
         valid(&d.state)?;

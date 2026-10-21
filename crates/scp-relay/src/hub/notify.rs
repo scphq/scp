@@ -38,6 +38,14 @@ impl AccountHub {
             view["wake"] = f["wake"].clone();
             view["scope"] = json!(scope::preset(e));
         }
+        if e.token_hash.is_none()
+            && f["presence"] == "hibernated"
+            && f["waking_until"]
+                .as_i64()
+                .is_some_and(|at| at > crate::now_ms())
+        {
+            view["waking"] = json!(true);
+        }
         view
     }
     pub(super) fn notification(socket: &SocketHandle, method: &str, params: &Value) {
@@ -167,6 +175,25 @@ impl AccountHub {
             }
         }
         self.connections.remove(id);
+        if let Some(g) = &c.grant
+            && !self.connections.values().any(|other| {
+                other.socket.is_some()
+                    && other
+                        .grant
+                        .as_ref()
+                        .is_some_and(|grant| grant.token_id == g.token_id)
+            })
+        {
+            self.revalidation_errors.remove(&g.token_id);
+            let _ = self
+                .store
+                .put_state(
+                    &self.account_id,
+                    &format!("revalidate_error:{}", g.token_id),
+                    None,
+                )
+                .await;
+        }
         if !self
             .connections
             .values()
@@ -191,15 +218,9 @@ impl AccountHub {
                 });
             }
         }
-        let until = now.saturating_add(
-            self.limits
-                .duration("deniedS", 3600)
-                .saturating_mul(1000)
-                .min(i64::MAX as u64) as i64,
-        );
         changes
             .states
-            .push((format!("denied:{token}"), Some(json!(until).to_string())));
+            .push((format!("denied:{token}"), Some(json!(now).to_string())));
         let _ = self.store.hub_write(&self.account_id, changes).await;
     }
     pub(super) async fn delivery_value(&self, d: &Delivery, inbox: bool) -> Result<Value> {
@@ -249,6 +270,7 @@ impl AccountHub {
             let Some(e) = endpoints.iter().find(|e| e.id == d.endpoint) else {
                 continue;
             };
+            let mut pushed = false;
             for c in self.connections.values().filter(|c| {
                 c.role == "bridge"
                     && c.subscribed
@@ -256,6 +278,7 @@ impl AccountHub {
                     && e.token_hash.is_none()
             }) {
                 if let Some(s) = &c.socket {
+                    pushed = true;
                     let frame = json!({"jsonrpc":"2.0","method":"deliver","params":{"seq":d.seq,"endpoint":format!("{}/{}",e.machine,e.handle),"message":self.delivery_value(d,false).await?}}).to_string();
                     if wait {
                         if !s.send_wait(frame).await {
@@ -264,6 +287,19 @@ impl AccountHub {
                     } else {
                         s.send(frame);
                     }
+                }
+            }
+            if !pushed && e.token_hash.is_none() {
+                let message = self.delivery_value(d, false).await?;
+                if message["from"]["account"]
+                    .as_str()
+                    .is_none_or(|a| a == self.handle)
+                    && self
+                        .machine_wake(&e.machine, &e.id, &message, None)
+                        .await
+                        .is_err()
+                {
+                    tracing::warn!("machine wake unavailable");
                 }
             }
         }

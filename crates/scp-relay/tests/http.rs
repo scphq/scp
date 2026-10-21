@@ -432,6 +432,9 @@ async fn websocket_frames_expiry_and_shutdown() {
         .unwrap()
         .unwrap()
         .unwrap();
+    let error: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(error["error"]["data"]["code"], "too_large");
+    let frame = ws.next().await.unwrap().unwrap();
     match frame {
         Message::Close(Some(c)) => assert_eq!(u16::from(c.code), 1009),
         other => panic!("unexpected frame {other:?}"),
@@ -456,6 +459,13 @@ async fn websocket_frames_expiry_and_shutdown() {
         .unwrap()
         .unwrap()
         .unwrap();
+    let notice: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(notice["method"], "revoked");
+    assert_eq!(
+        notice["params"]["reason"],
+        "the token grant expired, reconnect"
+    );
+    let frame = ws.next().await.unwrap().unwrap();
     match frame {
         Message::Close(Some(c)) => assert_eq!(u16::from(c.code), 4001),
         other => panic!("unexpected frame {other:?}"),
@@ -638,5 +648,138 @@ async fn device_code_capacity_and_pruning() {
     )
     .await;
     assert!(response["device_code"].is_string());
-    assert!(s.store.device_code("CAPACITY0").await.unwrap().is_none());
+    assert!(s.store.device_code("CAPACITY0").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn socket_cap_returns_http_429_and_rpc_does_not_consume_a_socket() {
+    let mut limits = Limits::default();
+    limits.apply("sockets=1").unwrap();
+    let s = start_with_limits(limits).await;
+    admin::account(s.store.as_ref(), "acme").await.unwrap();
+    let (secret, _) = mint(&s, true, None).await;
+    let mut first = socket(&s, &secret).await;
+    let mut request = format!("{}/v1/relay/ws", s.url.replace("http://", "ws://"))
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {secret}").parse().unwrap());
+    match connect_async(request).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status().as_u16(), 429);
+            assert_eq!(
+                serde_json::from_slice::<Value>(response.body().as_ref().unwrap()).unwrap(),
+                json!({"error":"too_many_sockets"})
+            );
+        }
+        other => panic!("unexpected upgrade result {other:?}"),
+    }
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/relay/rpc", s.url))
+        .bearer_auth(&secret)
+        .json(&json!({"id":1,"method":"hello","params":{"protocol":"scp/1","observe":true}}))
+        .send()
+        .await
+        .unwrap();
+    assert!(body(response, 200).await.get("error").is_none());
+    first.close(None).await.unwrap();
+    let _ = first.next().await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), s.state.hub.wait_closed())
+        .await
+        .unwrap();
+    let _second = socket(&s, &secret).await;
+}
+#[tokio::test]
+async fn authenticated_requests_throttle_credential_last_used_writes() {
+    let s = start().await;
+    admin::account(s.store.as_ref(), "acme").await.unwrap();
+    let (secret, c) = mint(&s, true, None).await;
+    let client = reqwest::Client::new();
+    let mut last = None;
+    for _ in 0..3 {
+        let response = client
+            .get(format!("{}/v1/whoami", s.url))
+            .bearer_auth(&secret)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let CredentialLookup::Active(identity) =
+            s.store.credential_by_id(&c.id, now_ms()).await.unwrap()
+        else {
+            panic!("inactive credential")
+        };
+        let at = identity.credential.last_used_at;
+        assert!(at.is_some());
+        if let Some(last) = last {
+            assert_eq!(at, Some(last));
+        }
+        last = at;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn oversized_frames_send_too_large_before_closing_1009() {
+    let mut limits = Limits::default();
+    limits.apply("frameBytes=128").unwrap();
+    let s = start_with_limits(limits).await;
+    admin::account(s.store.as_ref(), "acme").await.unwrap();
+    let (secret, _) = mint(&s, true, None).await;
+    let mut ws = socket(&s, &secret).await;
+    ws.send(Message::Text("x".repeat(129).into()))
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let response: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert_eq!(response["error"]["data"]["code"], "too_large");
+    assert_eq!(response["error"]["message"], "a frame is at most 128 bytes");
+    let frame = ws.next().await.unwrap().unwrap();
+    match frame {
+        Message::Close(Some(close)) => assert_eq!(u16::from(close.code), 1009),
+        other => panic!("unexpected frame {other:?}"),
+    }
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/relay/rpc", s.url))
+        .bearer_auth(&secret)
+        .json(&json!({"method":"hello","params":{"padding":"x".repeat(129)}}))
+        .send()
+        .await
+        .unwrap();
+    let response = body(response, 200).await;
+    assert_eq!(response["error"]["data"]["code"], "too_large");
+    assert_eq!(
+        response["error"]["message"],
+        "a request is at most 128 bytes"
+    );
+}
+
+#[tokio::test]
+async fn wake_cli_rejects_unknown_keys_and_invalid_values() {
+    for (option, expected) in [
+        ("unknown=1", "unknown wake option"),
+        ("debounceS=Infinity", "finite and nonnegative"),
+        ("crossAccount=yes", "true or false"),
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_scp-relay"))
+            .args([
+                "serve",
+                "--store",
+                "sqlite::memory:",
+                "--wake",
+                "senderAccountPerHour=Infinity",
+                "--wake",
+                option,
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
 }

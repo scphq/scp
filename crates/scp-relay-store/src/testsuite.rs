@@ -33,6 +33,8 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
     );
     assert_eq!(s.account("alpha").await.unwrap(), Some(a.clone()));
     assert!(s.account("absent").await.unwrap().is_none());
+    contacts_suite(s.clone()).await;
+    xinbox_suite(s.clone()).await;
     for account in [&a, &b] {
         let m = Member {
             id: format!("{}m", account.id),
@@ -330,11 +332,11 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
     s.redeem_device(&redeemed.device_code_hash, login, 0)
         .await
         .unwrap();
-    assert_eq!(s.purge_device_codes(1).await.unwrap(), 3);
-    for code in [&expired, &denied, &redeemed] {
+    assert_eq!(s.purge_device_codes(1).await.unwrap(), 2);
+    for code in [&expired, &redeemed] {
         assert!(s.device_code(&code.user_code).await.unwrap().is_none());
     }
-    for code in [&pending, &approved] {
+    for code in [&pending, &approved, &denied] {
         assert!(s.device_code(&code.user_code).await.unwrap().is_some());
     }
     for n in 0..998 {
@@ -359,7 +361,7 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
         }
     }
     assert_eq!(winners, 1);
-    assert_eq!(s.purge_device_codes(900000).await.unwrap(), 1001);
+    assert_eq!(s.purge_device_codes(900000).await.unwrap(), 1002);
     assert_eq!(s.purge_device_codes(900000).await.unwrap(), 0);
     s.create_device_code(device("after-capacity"))
         .await
@@ -649,6 +651,7 @@ pub async fn run_suite(s: Arc<dyn RelayStore>) {
     }
     reply_suite(s.clone()).await;
     hub_suite(s.clone()).await;
+    limits_suite(s.clone()).await;
 }
 async fn reply_suite(s: Arc<dyn RelayStore>) {
     let mut request = message("asked");
@@ -1097,6 +1100,16 @@ async fn hub_suite(s: Arc<dyn RelayStore>) {
         user_id: Some("hub".into()),
         at: 5,
     };
+    s.put_state("hub", "wake_state:host", Some("{}"))
+        .await
+        .unwrap();
+    assert!(
+        s.wake_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == "hub")
+    );
     s.hub_write(
         "hub",
         HubWrite {
@@ -1108,6 +1121,14 @@ async fn hub_suite(s: Arc<dyn RelayStore>) {
     )
     .await
     .unwrap();
+    assert!(s.state("hub", "wake_state:host").await.unwrap().is_none());
+    assert!(
+        !s.wake_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == "hub")
+    );
     assert_eq!(s.tombstones("hub").await.unwrap(), vec![tomb]);
     assert!(
         s.deliveries("hub", &endpoint.id, 0)
@@ -1208,6 +1229,445 @@ fn message(id: &str) -> Message {
     }
 }
 
+async fn contacts_suite(s: Arc<dyn RelayStore>) {
+    let now = 1_000_000;
+    assert!(s.contact("a", "b").await.unwrap().is_none());
+    assert!(matches!(
+        s.contact_invite("a", "a", now).await,
+        Err(StoreError::Conflict)
+    ));
+    assert!(matches!(
+        s.contact_invite("a", "missing", now).await,
+        Err(StoreError::NotFound)
+    ));
+    s.contact_invite("a", "b", now).await.unwrap();
+    assert_eq!(
+        s.contact("a", "b").await.unwrap().unwrap().state,
+        "pending_out"
+    );
+    assert_eq!(
+        s.contact("b", "a").await.unwrap().unwrap().state,
+        "pending_in"
+    );
+    s.contact_decline("b", "a", now).await.unwrap();
+    assert!(s.contact("b", "a").await.unwrap().is_none());
+    assert_eq!(
+        s.contact("a", "b").await.unwrap().unwrap().state,
+        "pending_out"
+    );
+    s.contact_invite("a", "b", now).await.unwrap();
+    s.contact_invite("b", "a", now).await.unwrap();
+    for (a, b) in [("a", "b"), ("b", "a")] {
+        let c = s.contact(a, b).await.unwrap().unwrap();
+        assert_eq!(c.state, "active");
+        assert_eq!(c.config, ContactConfig::default());
+    }
+    let before = s.contact("a", "b").await.unwrap().unwrap();
+    for config in [
+        ContactConfig {
+            allow: vec![
+                XAllow {
+                    machine: "*".into(),
+                    sel: "tree:root".into(),
+                    allow_worker: None
+                };
+                33
+            ],
+            ..ContactConfig::default()
+        },
+        ContactConfig {
+            limits: Some(XLimits {
+                per_day: Some(10001),
+                ..XLimits::default()
+            }),
+            ..ContactConfig::default()
+        },
+        ContactConfig {
+            limits: Some(XLimits {
+                per_hour: Some(0),
+                ..XLimits::default()
+            }),
+            ..ContactConfig::default()
+        },
+        ContactConfig {
+            dir: "sideways".into(),
+            ..ContactConfig::default()
+        },
+    ] {
+        assert!(matches!(
+            s.contact_update("a", "b", config, now + 1).await,
+            Err(StoreError::Conflict)
+        ));
+        assert_eq!(s.contact("a", "b").await.unwrap().unwrap(), before);
+    }
+    let config = ContactConfig {
+        dir: "in".into(),
+        limits: Some(XLimits {
+            per_minute: Some(1),
+            per_hour: Some(10000),
+            per_day: Some(2000),
+        }),
+        ..ContactConfig::default()
+    };
+    s.contact_update("a", "b", config.clone(), now + 1)
+        .await
+        .unwrap();
+    assert_eq!(s.contacts("a").await.unwrap()[0].config, config);
+    assert_eq!(
+        s.contact("b", "a").await.unwrap().unwrap().config,
+        ContactConfig::default()
+    );
+    s.contact_block("a", "b", now + 2).await.unwrap();
+    s.contact_invite("b", "a", now + 3).await.unwrap();
+    assert!(s.contact("b", "a").await.unwrap().is_none());
+    assert!(s.contacts("a").await.unwrap().is_empty());
+    s.contact_revoke("b", "a", now + 4).await.unwrap();
+    assert_eq!(s.contact("a", "b").await.unwrap().unwrap().state, "blocked");
+    assert!(
+        s.contact("a", "b")
+            .await
+            .unwrap()
+            .unwrap()
+            .config
+            .allow
+            .is_empty()
+    );
+    s.create_account(Account {
+        id: "cap".into(),
+        handle: "cap".into(),
+        created_at: 0,
+    })
+    .await
+    .unwrap();
+    for n in 0..51 {
+        let id = format!("cp{n:02}");
+        s.create_account(Account {
+            id: id.clone(),
+            handle: id.clone(),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+        let day = 86_400_000 * (n + 1);
+        s.contact_invite("cap", &id, day).await.unwrap();
+        let accepted = s.contact_accept(&id, "cap", day).await;
+        if n == 50 {
+            assert!(matches!(accepted, Err(StoreError::Capacity)));
+            assert_eq!(
+                s.contact("cap", &id).await.unwrap().unwrap().state,
+                "pending_out"
+            );
+            assert_eq!(
+                s.contact(&id, "cap").await.unwrap().unwrap().state,
+                "pending_in"
+            );
+        } else {
+            accepted.unwrap();
+        }
+    }
+    assert_eq!(s.contacts("cap").await.unwrap().len(), 50);
+}
+
+async fn xinbox_suite(s: Arc<dyn RelayStore>) {
+    for id in ["xa", "xb"] {
+        s.create_account(Account {
+            id: id.into(),
+            handle: id.into(),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+    }
+    s.contact_invite("xa", "xb", 0).await.unwrap();
+    s.contact_accept("xb", "xa", 0).await.unwrap();
+    let e = Endpoint {
+        id: "xe".into(),
+        machine: "desk".into(),
+        handle: "root".into(),
+        kind: "agent".into(),
+        token_hash: None,
+        last_seen: None,
+        created_at: 0,
+        fields: "{}".into(),
+    };
+    s.put_endpoint("xb", e.clone()).await.unwrap();
+    let mut inserted = Vec::new();
+    for n in 0..3 {
+        let mut m = message(&format!("msg_cross{n:04}"));
+        m.created_at = 1000;
+        m.expires_at = 2000;
+        let x = XInbox {
+            seq: 0,
+            id: m.id.clone(),
+            endpoint: "desk/root".into(),
+            from_account: "xa".into(),
+            sender: "xa/laptop/root".into(),
+            client_id: format!("c{n}"),
+            message: m.envelope.clone(),
+            thread: m.thread.clone(),
+            grant: Some("grant".into()),
+            expires_at: m.expires_at,
+            at: 1000,
+            acked: false,
+        };
+        let (stored, dup) = s.xinsert("xb", m.clone(), x.clone()).await.unwrap();
+        assert!(!dup);
+        let (again, dup) = s.xinsert("xb", m, x).await.unwrap();
+        assert!(dup);
+        assert_eq!(again, stored);
+        inserted.push(stored);
+    }
+    assert_eq!(
+        s.stored_bytes("xb").await.unwrap(),
+        3 * message("x").envelope.len() as u64
+    );
+    assert_eq!(
+        s.pending_machine_x("xb", "desk", 100000, 0, 1000, 200)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        s.xack("xb", std::slice::from_ref(&e.id), &[inserted[2].seq], 1000)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        s.xack("xb", std::slice::from_ref(&e.id), &[inserted[0].seq], 1000)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(s.open_delivery_count("xb", &e.id, 1000).await.unwrap(), 2);
+    assert!(s.xinbox("xa").await.unwrap().is_empty());
+    let changes = HubWrite {
+        deliveries: vec![Delivery {
+            seq: i64::MAX,
+            message_id: "missing".into(),
+            endpoint: e.id.clone(),
+            expires_at: 2000,
+            acked_at: Some(1000),
+            rejected_at: None,
+            rejection: None,
+            state: "{}".into(),
+        }],
+        ..HubWrite::default()
+    };
+    assert!(
+        s.acknowledge(
+            "xb",
+            changes,
+            std::slice::from_ref(&e.id),
+            &[inserted[1].seq],
+            1000
+        )
+        .await
+        .is_err()
+    );
+    assert!(!s.xinbox("xb").await.unwrap()[1].acked);
+    s.contact_revoke("xa", "xb", 1000).await.unwrap();
+    assert!(
+        s.pending_machine_x("xb", "desk", 0, 0, 1000, 200)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(s.xprune("xb").await.unwrap(), 3);
+    assert!(s.xinbox("xb").await.unwrap().is_empty());
+    s.contact_invite("xa", "xb", 1000).await.unwrap();
+    s.contact_accept("xb", "xa", 1000).await.unwrap();
+    let mut m = message("msg_retained");
+    m.created_at = 1000;
+    m.expires_at = 2000;
+    let (x, _) = s
+        .xinsert(
+            "xb",
+            m.clone(),
+            XInbox {
+                seq: 0,
+                id: m.id.clone(),
+                endpoint: "desk/root".into(),
+                from_account: "xa".into(),
+                sender: "xa/laptop/root".into(),
+                client_id: "last".into(),
+                message: m.envelope.clone(),
+                thread: m.thread.clone(),
+                grant: None,
+                expires_at: 2000,
+                at: 1000,
+                acked: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(x.seq > inserted[2].seq);
+    s.hub_write(
+        "xb",
+        HubWrite {
+            sweep_at: Some(86_400_999),
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.xinbox("xb").await.unwrap().len(), 1);
+    s.hub_write(
+        "xb",
+        HubWrite {
+            sweep_at: Some(86_401_000),
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(s.xinbox("xb").await.unwrap().is_empty());
+}
+
+async fn limits_suite(s: Arc<dyn RelayStore>) {
+    s.create_account(Account {
+        id: "limits".into(),
+        handle: "limits".into(),
+        created_at: 0,
+    })
+    .await
+    .unwrap();
+    let endpoint = |id: &str, handle: &str| Endpoint {
+        id: id.into(),
+        machine: "host".into(),
+        handle: handle.into(),
+        kind: "agent".into(),
+        token_hash: None,
+        last_seen: None,
+        created_at: 0,
+        fields: "{}".into(),
+    };
+    let one = endpoint("one", "a");
+    let two = endpoint("two", "b");
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![one.clone(), two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut swapped_one = one.clone();
+    swapped_one.handle = "b".into();
+    let mut swapped_two = two.clone();
+    swapped_two.handle = "a".into();
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![swapped_one.clone(), swapped_two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.endpoints("limits", None).await.unwrap(),
+        vec![swapped_two.clone(), swapped_one.clone()]
+    );
+    let mut invalid = swapped_one.clone();
+    invalid.handle = "a".into();
+    assert!(
+        s.hub_write(
+            "limits",
+            HubWrite {
+                endpoints: vec![invalid],
+                ..HubWrite::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        s.endpoints("limits", None).await.unwrap(),
+        vec![swapped_two, swapped_one]
+    );
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![one.clone(), two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut chain_one = one.clone();
+    chain_one.handle = "b".into();
+    let mut chain_two = two.clone();
+    chain_two.handle = "c".into();
+    s.hub_write(
+        "limits",
+        HubWrite {
+            endpoints: vec![chain_one.clone(), chain_two.clone()],
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.endpoints("limits", None).await.unwrap(),
+        vec![chain_one, chain_two]
+    );
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 0);
+    assert_eq!(s.stored_bytes("missing").await.unwrap(), 0);
+    let message = Message {
+        id: "size".into(),
+        thread: "thread".into(),
+        reply_to: None,
+        kind: "message".into(),
+        from_ep: one.id.clone(),
+        to_addr: "host/c".into(),
+        created_at: 1,
+        expires_at: 100,
+        envelope: serde_json::json!({"body":{"text":"ü\u{0}🙂"}}).to_string(),
+    };
+    let mut delivery = s
+        .store_message(
+            "limits",
+            message,
+            vec![NewDelivery {
+                endpoint: two.id,
+                expires_at: 100,
+                state: "{}".into(),
+            }],
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 7);
+    assert_eq!(s.stored_bytes("missing").await.unwrap(), 0);
+    delivery.acked_at = Some(2);
+    s.update_delivery("limits", delivery).await.unwrap();
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 7);
+    s.hub_write(
+        "limits",
+        HubWrite {
+            sweep_at: Some(101),
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 7);
+    s.hub_write(
+        "limits",
+        HubWrite {
+            sweep_at: Some(604800100),
+            ..HubWrite::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,7 +1728,7 @@ mod tests {
                     .fetch_one($pool)
                     .await
                     .unwrap(),
-                3
+                4
             );
             for table in ["device_codes", "credentials", "members", "accounts"] {
                 sqlx::query(&format!("DELETE FROM {table}"))

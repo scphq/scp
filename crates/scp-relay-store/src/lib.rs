@@ -6,8 +6,10 @@
 //! unless documented otherwise. Constraint violations return `Conflict`; all
 //! other failures return `Backend`. Failed writes leave no partial changes.
 
+mod contacts;
 mod sql;
 use async_trait::async_trait;
+pub use contacts::*;
 use serde::{Deserialize, Serialize};
 pub use sql::{PostgresStore, SqliteStore, connect};
 use std::{collections::BTreeMap, sync::Arc};
@@ -233,6 +235,8 @@ pub struct HubWrite {
     pub purge: bool,
     /// Prune expired hub data at this caller-supplied time.
     pub sweep_at: Option<i64>,
+    /// Remove denial timestamps at or before this boundary.
+    pub denied_before: Option<i64>,
     /// Endpoint rows to upsert after removals.
     pub endpoints: Vec<Endpoint>,
     /// Endpoint ids to delete together with all their deliveries.
@@ -292,6 +296,8 @@ pub trait RelayStore: Send + Sync + 'static {
     async fn create_account(&self, account: Account) -> Result<Account>;
     /// Read an account by handle, returning None when absent.
     async fn account(&self, handle: &str) -> Result<Option<Account>>;
+    /// Accounts with persisted machine wake state, for resuming maintenance.
+    async fn wake_accounts(&self) -> Result<Vec<Account>>;
     /// Insert a member. Duplicate id or account/name is Conflict.
     async fn create_member(&self, member: Member) -> Result<()>;
     /// Return an existing account/name or insert the supplied member atomically.
@@ -302,6 +308,56 @@ pub trait RelayStore: Send + Sync + 'static {
     async fn member(&self, account_id: &str, name: &str) -> Result<Option<Member>>;
     /// List members ordered by creation time, then id.
     async fn members(&self, account_id: &str) -> Result<Vec<Member>>;
+    /// Read this side of a contact, including non-active states.
+    async fn contact(&self, account_id: &str, peer_id: &str) -> Result<Option<Contact>>;
+    /// Active contacts ordered by peer handle, then id.
+    async fn contacts(&self, account_id: &str) -> Result<Vec<Contact>>;
+    /// Invite atomically on both accounts; crossed invites activate both.
+    async fn contact_invite(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Accept an incoming invitation, activating both with default permissions.
+    async fn contact_accept(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Delete only this side's incoming invitation.
+    async fn contact_decline(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Delete both sides except blocked rows.
+    async fn contact_revoke(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Block here and delete the peer's row atomically.
+    async fn contact_block(&self, account_id: &str, peer_id: &str, now: i64) -> Result<()>;
+    /// Replace this active contact's permissions, validating bounds.
+    async fn contact_update(
+        &self,
+        account_id: &str,
+        peer_id: &str,
+        config: ContactConfig,
+        now: i64,
+    ) -> Result<()>;
+    /// All retained cross-account inbox rows, ordered by sequence.
+    async fn xinbox(&self, account_id: &str) -> Result<Vec<XInbox>>;
+    /// Insert message, delivery and inbox metadata atomically, or return its duplicate.
+    async fn xinsert(
+        &self,
+        account_id: &str,
+        message: Message,
+        inbox: XInbox,
+    ) -> Result<(XInbox, bool)>;
+    /// Advance each endpoint's cross-account cursor over the leading requested run.
+    async fn xack(
+        &self,
+        account_id: &str,
+        endpoints: &[String],
+        seqs: &[i64],
+        now: i64,
+    ) -> Result<usize>;
+    /// Apply local receipts and advance cross-account cursors in one transaction.
+    async fn acknowledge(
+        &self,
+        account_id: &str,
+        changes: HubWrite,
+        endpoints: &[String],
+        seqs: &[i64],
+        now: i64,
+    ) -> Result<usize>;
+    /// Delete inbox messages from accounts that are no longer inbound contacts.
+    async fn xprune(&self, account_id: &str) -> Result<u64>;
     // Host credentials.
     /// Insert a credential. Duplicate hash/id or live token name is Conflict.
     async fn create_credential(&self, credential: Credential) -> Result<()>;
@@ -314,7 +370,8 @@ pub trait RelayStore: Send + Sync + 'static {
     /// Revoke once at now. Return false for missing or already revoked ids.
     async fn revoke_credential(&self, id: &str, now: i64) -> Result<bool>;
     // Host device login.
-    /// Delete expired, redeemed or denied device codes. Return the deleted count.
+    /// Delete expired or redeemed device codes; a denied code stays until it
+    /// expires so its poll answers access_denied. Return the deleted count.
     async fn purge_device_codes(&self, now: i64) -> Result<u64>;
     /// Insert a pending code, pruning at created_at. Duplicate digest/user code
     /// is Conflict; 1000 unexpired pending codes globally is Capacity.
@@ -417,6 +474,16 @@ pub trait RelayStore: Send + Sync + 'static {
         now: i64,
         limit: usize,
     ) -> Result<Vec<Delivery>>;
+    /// Pending deliveries with an independent cross-account replay cursor.
+    async fn pending_machine_x(
+        &self,
+        account_id: &str,
+        machine: &str,
+        after: i64,
+        xafter: i64,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<Delivery>>;
     /// Whether the endpoint sent or received any message in this thread.
     async fn thread_member(&self, account_id: &str, thread: &str, endpoint: &str) -> Result<bool>;
     /// Find at most two member messages whose id equals reference or ends in it.
@@ -478,6 +545,12 @@ pub trait RelayStore: Send + Sync + 'static {
         now: i64,
         idempotency_before: i64,
     ) -> Result<u64>;
+    // Hub limits.
+    /// UTF-8 bytes of all retained local message bodies plus the stored
+    /// cross-account inbox messages, including acknowledged and expired ones
+    /// until retention removes them. Missing accounts hold zero.
+    async fn stored_bytes(&self, account_id: &str) -> Result<u64>;
+
     // Hub key/value state and event logs.
     /// Read a JSON state value by key.
     async fn state(&self, account_id: &str, key: &str) -> Result<Option<String>>;

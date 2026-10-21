@@ -2,21 +2,34 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { sha256Hex, type Sql, type SqlValue } from "@scp-dev/core";
-import { type HubGrant, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub";
+import { type CrossAccountLink, PASS_GATE, sha256Hex, type Sql, type SqlValue, type XContact } from "@scp-dev/core";
+import { type HubGrant, type HubLimits, type HubSocket, type HubWakeOptions, RelayHub } from "@scp-dev/hub";
 import type { ServerWebSocket } from "bun";
+import type { ContactOp, ContactOptions, MintOptions } from "./targets";
 
 // Admin requests use a random per-target secret in SCP_CONFORMANCE_ADMIN.
 // Credentials are hashed in credentials.db; each account has its own hub database.
 const { values } = parseArgs({
-  options: { listen: { type: "string", default: "127.0.0.1:0" }, dir: { type: "string" }, limit: { type: "string", multiple: true } },
+  options: {
+    listen: { type: "string", default: "127.0.0.1:0" },
+    dir: { type: "string" },
+    limit: { type: "string", multiple: true },
+    wake: { type: "string", multiple: true },
+  },
 });
 const limits: Partial<HubLimits> = Object.fromEntries(
   (values.limit ?? []).map((entry) => {
     const [key, raw] = entry.split("=");
     const value = Number(raw);
-    if (!key || raw === undefined || !Number.isFinite(value) || value <= 0) throw new Error("--limit requires name=positive-number");
+    if (!key || raw === undefined || Number.isNaN(value) || value <= 0) throw new Error("--limit requires name=positive-number");
     return [key, value];
+  }),
+);
+const wake: Partial<HubWakeOptions> = Object.fromEntries(
+  (values.wake ?? []).map((entry) => {
+    const [key, raw] = entry.split("=");
+    if (!key || raw === undefined) throw new Error("--wake requires name=value");
+    return [key, key === "crossAccount" ? raw === "true" : Number(raw)];
   }),
 );
 if (!values.dir || !process.env.SCP_CONFORMANCE_ADMIN) throw new Error("--dir and SCP_CONFORMANCE_ADMIN are required");
@@ -24,9 +37,110 @@ const dir = values.dir;
 mkdirSync(dir, { recursive: true });
 const credentials = new Database(join(dir, "credentials.db"));
 credentials.exec(
-  `CREATE TABLE IF NOT EXISTS tokens (hash TEXT PRIMARY KEY, id TEXT, account TEXT, member TEXT, device INTEGER, name TEXT, role TEXT, revoked INTEGER DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS tokens (hash TEXT PRIMARY KEY, id TEXT, account TEXT, member TEXT, device INTEGER, name TEXT, role TEXT, revoked INTEGER DEFAULT 0, expires_at INTEGER)`,
 );
-type Token = { hash: string; id: string; account: string; member: string; device: number; name: string; role: "owner" | "member"; revoked: number };
+credentials.exec(`CREATE TABLE IF NOT EXISTS contacts (account TEXT, peer TEXT, state TEXT, config TEXT, PRIMARY KEY (account, peer));
+CREATE TABLE IF NOT EXISTS contact_invites (account TEXT, at INTEGER);
+CREATE TABLE IF NOT EXISTS devices (hash TEXT PRIMARY KEY, user_code TEXT UNIQUE, label TEXT, expires_at INTEGER, last_poll_at INTEGER, state TEXT, account TEXT, member TEXT)`);
+type Config = Pick<XContact, "allow" | "dir" | "limits">;
+const defaults = (): Config => ({ allow: [{ machine: "*", sel: "tree:root" }], dir: "both", limits: null });
+type ContactRow = { account: string; peer: string; state: string; config: string };
+const contactRow = (a: string, b: string) => credentials.query("SELECT * FROM contacts WHERE account = ? AND peer = ?").get(a, b) as ContactRow | null;
+const saveContact = (a: string, b: string, state: string, config: Config) =>
+  credentials.query("INSERT OR REPLACE INTO contacts VALUES (?, ?, ?, ?)").run(a, b, state, JSON.stringify(config));
+function changeContact(op: ContactOp, a: string, b: string, opts: ContactOptions) {
+  credentials.transaction(() => {
+    if (a === b || ![a, b].every((name) => credentials.query("SELECT 1 FROM tokens WHERE account = ?").get(name))) throw new Error("unknown account");
+    const here = contactRow(a, b);
+    const there = contactRow(b, a);
+    const activate = () => {
+      for (const name of [a, b]) {
+        const n = credentials.query("SELECT COUNT(*) AS n FROM contacts WHERE account = ? AND state = 'active'").get(name) as { n: number };
+        if (n.n >= 50) throw new Error("contact capacity");
+      }
+      saveContact(a, b, "active", defaults());
+      saveContact(b, a, "active", defaults());
+    };
+    switch (op) {
+      case "invite":
+        if (here?.state === "blocked") break;
+        if (here?.state === "pending_in" && there?.state === "pending_out") activate();
+        else if (!there) {
+          const day = Math.floor(Date.now() / 86400000) * 86400000;
+          const n = credentials.query("SELECT COUNT(*) AS n FROM contact_invites WHERE account = ? AND at >= ?").get(a, day) as { n: number };
+          if (n.n >= 20) throw new Error("invite capacity");
+          credentials.query("DELETE FROM contact_invites WHERE account = ? AND at < ?").run(a, day);
+          credentials.query("INSERT INTO contact_invites VALUES (?, ?)").run(a, Date.now());
+          saveContact(a, b, "pending_out", { ...defaults(), allow: [] });
+          saveContact(b, a, "pending_in", { ...defaults(), allow: [] });
+        }
+        break;
+      case "accept":
+        if (here?.state !== "pending_in" || there?.state === "blocked") throw new Error("contact conflict");
+        activate();
+        break;
+      case "decline":
+        credentials.query("DELETE FROM contacts WHERE account = ? AND peer = ? AND state = 'pending_in'").run(a, b);
+        break;
+      case "revoke":
+        credentials.query("DELETE FROM contacts WHERE ((account = ? AND peer = ?) OR (account = ? AND peer = ?)) AND state != 'blocked'").run(a, b, b, a);
+        break;
+      case "block":
+        saveContact(a, b, "blocked", { ...defaults(), allow: [] });
+        credentials.query("DELETE FROM contacts WHERE account = ? AND peer = ?").run(b, a);
+        break;
+      case "update": {
+        if (here?.state !== "active") throw new Error("contact conflict");
+        const config: Config = { ...JSON.parse(here.config), ...opts };
+        const machine = (s: string) => /^[a-z0-9][a-z0-9-]{0,31}$/.test(s);
+        if (
+          config.allow.length > 32 ||
+          !["in", "out", "both"].includes(config.dir) ||
+          config.allow.some(
+            (e) =>
+              (e.machine !== "*" && !machine(e.machine)) || (e.sel !== "tree:root" && !/^ep:[a-z0-9][a-z0-9-]{0,31}\/[a-z0-9][a-z0-9._-]{0,62}$/.test(e.sel)),
+          ) ||
+          Object.values(config.limits ?? {}).some((n) => !Number.isInteger(n) || n < 1 || n > 10000)
+        )
+          throw new Error("invalid contact config");
+        saveContact(a, b, "active", config);
+        break;
+      }
+      default:
+        throw new Error("unknown contact action");
+    }
+  })();
+  return { account: a, peer: b, state: contactRow(a, b)?.state ?? null };
+}
+function linkOf(name: string): CrossAccountLink {
+  const contact = (peer: string): XContact | null => {
+    const row = contactRow(name, peer);
+    return row?.state === "active" ? { peerId: peer, peerHandle: peer, ...JSON.parse(row.config) } : null;
+  };
+  return {
+    self: { id: name, handle: name },
+    contactByHandle: async (peer) => contact(peer),
+    contactById: async (peer) => contact(peer),
+    contacts: async () =>
+      (credentials.query("SELECT peer FROM contacts WHERE account = ? AND state = 'active' ORDER BY peer").all(name) as { peer: string }[]).map(
+        (row) => contact(row.peer)!,
+      ),
+    deliver: async (peer, message) => account(peer.peerHandle).hub.xreceive(name, JSON.parse(JSON.stringify(message))),
+    list: async (peer) => account(peer.peerHandle).hub.xlist(name),
+    gate: PASS_GATE,
+  };
+}
+type Token = {
+  hash: string;
+  id: string;
+  account: string;
+  member: string;
+  device: number;
+  name: string;
+  role: "owner" | "member";
+  revoked: number;
+  expires_at: number | null;
+};
 type Account = { db: Database; hub: RelayHub; sockets: Map<ServerWebSocket<Data>, HubSocket> };
 type Data = { account: string; grant: HubGrant; socket?: HubSocket };
 const accounts = new Map<string, Account>();
@@ -36,17 +150,31 @@ function account(name: string): Account {
   const db = new Database(join(dir, `${name}.db`));
   const sql: Sql = { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] };
   const sockets = new Map<ServerWebSocket<Data>, HubSocket>();
-  const hub = new RelayHub({ sql, hash: sha256Hex, transaction: (fn) => db.transaction(fn)(), sockets: () => [...sockets.values()], save: () => {}, limits });
+  const hub = new RelayHub({
+    sql,
+    hash: sha256Hex,
+    transaction: (fn) => db.transaction(fn)(),
+    sockets: () => [...sockets.values()],
+    save: () => {},
+    limits,
+    crossAccount: linkOf(name),
+    fetch: globalThis.fetch,
+    wake,
+  });
   hub.init({ user: name });
   const state = { db, hub, sockets };
   accounts.set(name, state);
-  const timer = setInterval(() => {
-    void hub.alarm(async (grant) => {
+  const alarm = () =>
+    hub.alarm(async (grant) => {
       const token = credentials.query("SELECT revoked FROM tokens WHERE id = ?").get(grant.tokenId) as { revoked: number } | null;
       return !!token && !token.revoked;
     });
-  }, limits.revalidateMs ?? 300000);
+  const timer = setInterval(() => void alarm(), limits.revalidateMs ?? 300000);
+  const expiry = setInterval(() => {
+    if ([...sockets.values()].some((socket) => socket.conn.grant.expiresAt <= Date.now())) void alarm();
+  }, 100);
   timer.unref();
+  expiry.unref();
   return state;
 }
 function authenticate(request: Request): Token | Response {
@@ -56,6 +184,7 @@ function authenticate(request: Request): Token | Response {
   const token = secret ? (credentials.query("SELECT * FROM tokens WHERE hash = ?").get(sha256Hex(secret)) as Token | null) : null;
   if (!token) return Response.json({ error: "invalid" }, { status: 401 });
   if (token.revoked) return Response.json({ error: "revoked" }, { status: 401 });
+  if (token.expires_at !== null && token.expires_at <= Date.now()) return Response.json({ error: "expired" }, { status: 401 });
   return token;
 }
 function grant(token: Token): HubGrant {
@@ -65,9 +194,28 @@ function grant(token: Token): HubGrant {
     actorId: token.member,
     scoped: !token.device,
     role: token.role,
-    expiresAt: Date.now() + 365 * 86400000,
+    expiresAt: token.expires_at ?? Date.now() + 365 * 86400000,
     ...(!token.device ? { labels: { token: token.name } } : {}),
   };
+}
+function mint(account: string, member: string, opts: MintOptions) {
+  const first = credentials.query("SELECT member FROM tokens WHERE account = ? ORDER BY rowid LIMIT 1").get(account) as { member: string } | null;
+  const role = !first || first.member === member ? "owner" : "member";
+  const id = crypto.randomUUID();
+  const token = `${opts.device ? "scp_d_" : "scp_t_"}${crypto.randomUUID().replaceAll("-", "")}`;
+  credentials
+    .query("INSERT INTO tokens (hash, id, account, member, device, name, role, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(
+      sha256Hex(token),
+      id,
+      account,
+      member,
+      Number(!!opts.device),
+      opts.name ?? "cli",
+      role,
+      opts.expiresIn === undefined ? null : Date.now() + opts.expiresIn * 1000,
+    );
+  return { token, credentialId: id };
 }
 const [hostname, port] = values.listen!.split(":");
 const server = Bun.serve<Data>({
@@ -80,20 +228,93 @@ const server = Bun.serve<Data>({
     if (path === "/_admin" && request.method === "POST") {
       if (request.headers.get("authorization") !== `Bearer ${process.env.SCP_CONFORMANCE_ADMIN}`)
         return Response.json({ error: "unauthorized" }, { status: 401 });
-      const body = (await request.json()) as { action: string; account: string; member: string; device?: boolean; name?: string; credentialId?: string };
+      const body = (await request.json()) as MintOptions &
+        ContactOptions & { action: string; op: ContactOp; account: string; peer: string; member: string; credentialId: string; userCode: string };
       if (body.action === "revoke") {
-        credentials.query("UPDATE tokens SET revoked = 1 WHERE id = ?").run(body.credentialId!);
+        credentials.query("UPDATE tokens SET revoked = 1 WHERE id = ?").run(body.credentialId);
         return Response.json({ revoked: true });
       }
+      if (body.action === "contact") {
+        try {
+          const opts: ContactOptions = {};
+          for (const key of ["allow", "dir", "limits"] as const) if (body[key] !== undefined) Object.assign(opts, { [key]: body[key] });
+          const result = changeContact(body.op, body.account, body.peer, opts);
+          for (const name of [body.account, body.peer]) await accounts.get(name)?.hub.xprune();
+          return Response.json(result);
+        } catch {
+          return Response.json({ error: "conflict" }, { status: 409 });
+        }
+      }
+      if (body.action === "approve" || body.action === "deny") {
+        credentials
+          .query("UPDATE devices SET state = ?, account = ?, member = ? WHERE user_code = ? AND state = 'pending' AND expires_at > ?")
+          .run(
+            body.action === "approve" ? "approved" : "denied",
+            body.account ?? null,
+            body.member ?? null,
+            body.userCode.toUpperCase().replaceAll("-", ""),
+            Date.now(),
+          );
+        return Response.json({ ok: true });
+      }
       if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(body.account)) return Response.json({ error: "invalid" }, { status: 400 });
-      const first = credentials.query("SELECT member FROM tokens WHERE account = ? ORDER BY rowid LIMIT 1").get(body.account) as { member: string } | null;
-      const role = !first || first.member === body.member ? "owner" : "member";
-      const id = crypto.randomUUID();
-      const token = `${body.device ? "scp_d_" : "scp_t_"}${crypto.randomUUID().replaceAll("-", "")}`;
-      credentials
-        .query("INSERT INTO tokens (hash, id, account, member, device, name, role) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(sha256Hex(token), id, body.account, body.member, Number(!!body.device), body.name ?? "cli", role);
-      return Response.json({ token, credentialId: id });
+      return Response.json(mint(body.account, body.member, body));
+    }
+    if (["/v1/device/code", "/v1/device/token"].includes(path) && request.method === "POST") {
+      const error = (code: string) => Response.json({ error: code, error_description: code }, { status: 400 });
+      let body: { label?: string; device_code?: string };
+      try {
+        const text = await request.text();
+        if (text && !request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return error("invalid_request");
+        body = text ? JSON.parse(text) : {};
+        if (!body || typeof body !== "object" || Array.isArray(body)) return error("invalid_request");
+      } catch {
+        return error("invalid_request");
+      }
+      if (path === "/v1/device/code") {
+        const label = body.label === undefined || body.label === "" ? "cli" : body.label;
+        if (typeof label !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(label)) return error("invalid_request");
+        const deviceCode = crypto.randomUUID();
+        const user = crypto.randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase();
+        credentials.query("INSERT INTO devices VALUES (?, ?, ?, ?, NULL, 'pending', NULL, NULL)").run(sha256Hex(deviceCode), user, label, Date.now() + 900000);
+        const shown = `${user.slice(0, 4)}-${user.slice(4)}`;
+        const uri = `${new URL(request.url).origin}/device`;
+        return Response.json({
+          device_code: deviceCode,
+          user_code: shown,
+          verification_uri: uri,
+          verification_uri_complete: `${uri}?code=${shown}`,
+          expires_in: 900,
+          interval: 5,
+        });
+      }
+      const hash = sha256Hex(typeof body.device_code === "string" ? body.device_code : "");
+      const code = credentials.query("SELECT * FROM devices WHERE hash = ?").get(hash) as {
+        state: string;
+        expires_at: number;
+        last_poll_at: number | null;
+        account: string;
+        member: string;
+        label: string;
+      } | null;
+      if (!code || code.state === "redeemed") return error("invalid_grant");
+      if (code.state === "denied") return error("access_denied");
+      if (code.expires_at <= Date.now()) return error("expired_token");
+      const slow = code.last_poll_at !== null && Date.now() - code.last_poll_at < 5000;
+      credentials.query("UPDATE devices SET last_poll_at = ? WHERE hash = ?").run(Date.now(), hash);
+      if (slow) return error("slow_down");
+      if (code.state === "pending") return error("authorization_pending");
+      const result = mint(code.account, code.member, { device: true, name: code.label });
+      credentials.query("UPDATE devices SET state = 'redeemed' WHERE hash = ?").run(hash);
+      return Response.json({
+        access_token: result.token,
+        token_type: "Bearer",
+        credential_id: result.credentialId,
+        org: code.account,
+        email: null,
+        label: code.label,
+        relay: new URL(request.url).origin,
+      });
     }
     if (!["/v1/whoami", "/v1/relay/ws", "/v1/relay/rpc"].includes(path)) return Response.json({ error: "not_found" }, { status: 404 });
     const token = authenticate(request);
@@ -107,7 +328,7 @@ const server = Bun.serve<Data>({
         label: token.name,
         ambient: !token.device,
         endpoint_labels: token.device ? {} : { token: token.name },
-        expires_at: null,
+        expires_at: token.expires_at === null ? null : new Date(token.expires_at).toISOString(),
       });
     const state = account(token.account);
     if (path === "/v1/relay/ws") {

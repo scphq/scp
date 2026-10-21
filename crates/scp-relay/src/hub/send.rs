@@ -11,6 +11,43 @@ impl AccountHub {
         floor: u64,
         notice: bool,
     ) -> Result<Value> {
+        if !notice && let Err(error) = self.room(&p["body"]).await {
+            let _ = self
+                .refusal(
+                    Some(from),
+                    None,
+                    json!({"code":error.code}),
+                    crate::now_ms(),
+                )
+                .await;
+            return Err(error);
+        }
+        let result = self.send_inner(c, from, p, floor, notice).await;
+        if let Err(error) = &result
+            && matches!(
+                error.code.as_str(),
+                "loop_guard" | "rate_limited" | "inbox_full" | "secret_refused"
+            )
+        {
+            let _ = self
+                .refusal(
+                    Some(from),
+                    None,
+                    json!({"code":error.code}),
+                    crate::now_ms(),
+                )
+                .await;
+        }
+        result
+    }
+    async fn send_inner(
+        &mut self,
+        c: &Connection,
+        from: &str,
+        p: &Value,
+        floor: u64,
+        notice: bool,
+    ) -> Result<Value> {
         if !notice {
             server_fields(p)?;
         }

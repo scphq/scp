@@ -43,6 +43,21 @@ impl From<RoleArg> for Role {
         }
     }
 }
+#[derive(Clone, Copy, ValueEnum)]
+enum ContactAction {
+    Invite,
+    Accept,
+    Decline,
+    Revoke,
+    Block,
+    Update,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum ContactDirection {
+    In,
+    Out,
+    Both,
+}
 #[derive(Subcommand)]
 enum Command {
     Serve {
@@ -52,6 +67,8 @@ enum Command {
         public_url: Option<String>,
         #[arg(long = "limit", env = "SCP_RELAY_LIMIT", value_delimiter = ',')]
         limits: Vec<String>,
+        #[arg(long = "wake")]
+        wake: Vec<String>,
     },
     Account {
         #[command(subcommand)]
@@ -60,6 +77,19 @@ enum Command {
     Token {
         #[command(subcommand)]
         command: TokenCommand,
+    },
+    Contact {
+        #[arg(value_enum)]
+        action: ContactAction,
+        peer: String,
+        #[arg(long, env = "SCP_RELAY_ACCOUNT")]
+        account: String,
+        #[arg(long)]
+        allow: Option<String>,
+        #[arg(long, value_enum)]
+        dir: Option<ContactDirection>,
+        #[arg(long)]
+        limits: Option<String>,
     },
     Device {
         #[command(subcommand)]
@@ -146,15 +176,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             listen,
             public_url,
             limits,
+            wake,
         } => {
             let mut configured = Limits::default();
             for limit in limits {
                 configured.apply(&limit).map_err(std::io::Error::other)?;
             }
+            let mut waking = scp_relay::hub::WakeOptions::default();
+            for option in wake {
+                waking.apply(&option).map_err(std::io::Error::other)?;
+            }
             let listener = tokio::net::TcpListener::bind(listen).await?;
             let addr = listener.local_addr()?;
             let url = format!("http://{addr}");
-            let state = AppState::new(store, public_url.unwrap_or_else(|| url.clone()), configured);
+            let state = AppState::new(store, public_url.unwrap_or_else(|| url.clone()), configured)
+                .with_wake(waking);
             let hub = state.hub.clone();
             let draining = hub.clone();
             let maintenance = tokio::spawn(hub.clone().maintain());
@@ -174,6 +210,58 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let a = admin::account(store.as_ref(), &handle).await?;
             println!("{}", json!({"id":a.id,"handle":a.handle}));
+        }
+        Command::Contact {
+            action,
+            peer,
+            account,
+            allow,
+            dir,
+            limits,
+        } => {
+            let a = store
+                .account(&account)
+                .await?
+                .ok_or_else(|| std::io::Error::other(format!("unknown account: {account}")))?;
+            let b = store
+                .account(&peer)
+                .await?
+                .ok_or_else(|| std::io::Error::other(format!("unknown peer: {peer}")))?;
+            let now = now_ms();
+            match action {
+                ContactAction::Invite => store.contact_invite(&a.id, &b.id, now).await?,
+                ContactAction::Accept => store.contact_accept(&a.id, &b.id, now).await?,
+                ContactAction::Decline => store.contact_decline(&a.id, &b.id, now).await?,
+                ContactAction::Revoke => store.contact_revoke(&a.id, &b.id, now).await?,
+                ContactAction::Block => store.contact_block(&a.id, &b.id, now).await?,
+                ContactAction::Update => {
+                    let mut config = store
+                        .contact(&a.id, &b.id)
+                        .await?
+                        .ok_or(StoreError::NotFound)?
+                        .config;
+                    if let Some(allow) = allow {
+                        config.allow = serde_json::from_str(&allow)?;
+                    }
+                    if let Some(dir) = dir {
+                        config.dir = match dir {
+                            ContactDirection::In => "in",
+                            ContactDirection::Out => "out",
+                            ContactDirection::Both => "both",
+                        }
+                        .into();
+                    }
+                    if let Some(limits) = limits {
+                        config.limits = serde_json::from_str(&limits)?;
+                    }
+                    store.contact_update(&a.id, &b.id, config, now).await?;
+                }
+            }
+            let state = store.contact(&a.id, &b.id).await?.map(|c| c.state);
+            println!(
+                "{}",
+                json!({"account":a.handle,"peer":b.handle,"state":state})
+            );
         }
         Command::Token {
             command:
