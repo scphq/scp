@@ -1100,6 +1100,16 @@ async fn hub_suite(s: Arc<dyn RelayStore>) {
         user_id: Some("hub".into()),
         at: 5,
     };
+    s.put_state("hub", "wake_state:host", Some("{}"))
+        .await
+        .unwrap();
+    assert!(
+        s.wake_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == "hub")
+    );
     s.hub_write(
         "hub",
         HubWrite {
@@ -1111,6 +1121,14 @@ async fn hub_suite(s: Arc<dyn RelayStore>) {
     )
     .await
     .unwrap();
+    assert!(s.state("hub", "wake_state:host").await.unwrap().is_none());
+    assert!(
+        !s.wake_accounts()
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a.id == "hub")
+    );
     assert_eq!(s.tombstones("hub").await.unwrap(), vec![tomb]);
     assert!(
         s.deliveries("hub", &endpoint.id, 0)

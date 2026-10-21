@@ -107,6 +107,8 @@ mod scope;
 mod send;
 mod sweep;
 mod validation;
+mod wake;
+pub use wake::WakeOptions;
 pub mod xacct;
 mod xcounters;
 use crate::iso;
@@ -147,6 +149,8 @@ pub struct AccountHub {
     refusals: HashMap<String, limits::Refusals>,
     sockets: Arc<AtomicUsize>,
     revalidation_errors: HashMap<String, i64>,
+    wake_options: WakeOptions,
+    owner: std::sync::Weak<Mutex<AccountHub>>,
 }
 impl AccountHub {
     async fn initialize(&mut self) -> Result<()> {
@@ -243,6 +247,7 @@ pub struct Hub {
     active: AtomicUsize,
     drained: Notify,
     gate: Arc<dyn xacct::Gate>,
+    wake_options: WakeOptions,
 }
 /// Tracks an accepted upgrade until its socket task has finished.
 pub struct SocketLease(Arc<Hub>, Arc<AtomicUsize>);
@@ -282,6 +287,7 @@ impl Hub {
             active: AtomicUsize::new(0),
             drained: Notify::new(),
             gate: Arc::new(xacct::PassGate),
+            wake_options: WakeOptions::default(),
         }
     }
     /// Construct a registry with host-supplied cross-account gates.
@@ -295,6 +301,30 @@ impl Hub {
             ..Self::new(store, limits)
         }
     }
+    /// Configure machine webhook calls for every account.
+    pub fn with_wake(mut self, options: WakeOptions) -> Self {
+        self.wake_options = options;
+        self
+    }
+    /// Clear machine wake holds and wake eligible queued mail. This is a host API.
+    pub async fn clear_wake_hold(
+        &self,
+        account: &scp_relay_store::Account,
+        machine: Option<&str>,
+    ) -> std::result::Result<usize, Value> {
+        let hub = self.account_by_id(&account.id, &account.handle).await;
+        let local = hub.lock().await;
+        let cleared = local
+            .forget_wake_hold(machine)
+            .await
+            .map_err(|e| e.wire())?;
+        for name in &cleared {
+            if local.wake_queued(name, true).await.is_err() {
+                tracing::warn!("queued machine wake unavailable");
+            }
+        }
+        Ok(cleared.len())
+    }
     async fn account(&self, grant: &Grant) -> Arc<Mutex<AccountHub>> {
         self.account_by_id(&grant.user_id, &grant.account).await
     }
@@ -303,23 +333,27 @@ impl Hub {
         accounts
             .entry(id.to_owned())
             .or_insert_with(|| {
-                Arc::new(Mutex::new(AccountHub {
-                    account_id: id.to_owned(),
-                    handle: handle.to_owned(),
-                    store: self.store.clone(),
-                    connections: HashMap::new(),
-                    syncs: HashMap::new(),
-                    broken_syncs: std::collections::VecDeque::new(),
-                    limits: self.limits.clone(),
-                    initialized: false,
-                    gate: self.gate.clone(),
-                    xcounters: xcounters::Counters::default(),
-                    xkey: None,
-                    buckets: HashMap::new(),
-                    refusals: HashMap::new(),
-                    sockets: Arc::new(AtomicUsize::new(0)),
-                    revalidation_errors: HashMap::new(),
-                }))
+                Arc::new_cyclic(|owner| {
+                    Mutex::new(AccountHub {
+                        account_id: id.to_owned(),
+                        handle: handle.to_owned(),
+                        store: self.store.clone(),
+                        connections: HashMap::new(),
+                        syncs: HashMap::new(),
+                        broken_syncs: std::collections::VecDeque::new(),
+                        limits: self.limits.clone(),
+                        initialized: false,
+                        gate: self.gate.clone(),
+                        xcounters: xcounters::Counters::default(),
+                        xkey: None,
+                        buckets: HashMap::new(),
+                        refusals: HashMap::new(),
+                        sockets: Arc::new(AtomicUsize::new(0)),
+                        revalidation_errors: HashMap::new(),
+                        wake_options: self.wake_options.clone(),
+                        owner: owner.clone(),
+                    })
+                })
             })
             .clone()
     }
@@ -334,8 +368,15 @@ impl Hub {
                     if self.store.purge_device_codes(crate::now_ms()).await.is_err() {
                         tracing::warn!("device code sweep unavailable");
                     }
+                    match self.store.wake_accounts().await {
+                        Ok(accounts) => for account in accounts { self.account_by_id(&account.id, &account.handle).await; },
+                        Err(_) => tracing::warn!("wake account recovery unavailable"),
+                    }
                     let accounts: Vec<_> = self.accounts.lock().await.values().cloned().collect();
-                    for account in accounts { if account.lock().await.sweep().await.is_err() { tracing::warn!("hub sweep unavailable"); } }
+                    for account in accounts {
+                        let mut hub = account.lock().await;
+                        if hub.initialize().await.is_err() || hub.sweep().await.is_err() { tracing::warn!("hub sweep unavailable"); }
+                    }
                 }
             }
         }

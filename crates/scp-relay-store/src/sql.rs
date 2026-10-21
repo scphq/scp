@@ -414,6 +414,11 @@ impl Transaction {
                 args![a, &format!("wake:{name}")],
             )
             .await?;
+            self.execute(
+                "DELETE FROM hub_state WHERE account_id=$1 AND key=$2",
+                args![a, &format!("wake_state:{name}")],
+            )
+            .await?;
         }
         for m in changes.machines {
             self.execute("INSERT INTO machines(account_id,name,token_id,actor_id,user_id,kind,created_at,last_seen,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(account_id,name) DO UPDATE SET token_id=excluded.token_id,actor_id=excluded.actor_id,user_id=excluded.user_id,kind=excluded.kind,created_at=excluded.created_at,last_seen=excluded.last_seen,payload=excluded.payload",args![a,&m.name,&m.token_id,&m.actor_id,&m.user_id,&m.kind,m.created_at,m.last_seen,&json(&m)?]).await?;
@@ -623,6 +628,10 @@ impl<T: Backend> RelayStore for T {
                 args![handle],
             )
             .await
+    }
+    async fn wake_accounts(&self) -> Result<Vec<Account>> {
+        self.db().rows("SELECT a.payload FROM accounts a WHERE EXISTS (SELECT 1 FROM hub_state s WHERE s.account_id=a.id AND s.key LIKE 'wake_state:%')", args![])
+            .await?.iter().map(DataRow::payload).collect()
     }
     async fn contact(&self, a: &str, p: &str) -> Result<Option<Contact>> {
         self.db().contact(a, p).await

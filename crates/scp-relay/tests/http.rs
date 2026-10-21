@@ -758,3 +758,28 @@ async fn oversized_frames_send_too_large_before_closing_1009() {
         "a request is at most 128 bytes"
     );
 }
+
+#[tokio::test]
+async fn wake_cli_rejects_unknown_keys_and_invalid_values() {
+    for (option, expected) in [
+        ("unknown=1", "unknown wake option"),
+        ("debounceS=Infinity", "finite and positive"),
+        ("crossAccount=yes", "true or false"),
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_scp-relay"))
+            .args([
+                "serve",
+                "--store",
+                "sqlite::memory:",
+                "--wake",
+                "senderAccountPerHour=Infinity",
+                "--wake",
+                option,
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}

@@ -67,6 +67,8 @@ enum Command {
         public_url: Option<String>,
         #[arg(long = "limit", env = "SCP_RELAY_LIMIT", value_delimiter = ',')]
         limits: Vec<String>,
+        #[arg(long = "wake")]
+        wake: Vec<String>,
     },
     Account {
         #[command(subcommand)]
@@ -174,15 +176,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             listen,
             public_url,
             limits,
+            wake,
         } => {
             let mut configured = Limits::default();
             for limit in limits {
                 configured.apply(&limit).map_err(std::io::Error::other)?;
             }
+            let mut waking = scp_relay::hub::WakeOptions::default();
+            for option in wake {
+                waking.apply(&option).map_err(std::io::Error::other)?;
+            }
             let listener = tokio::net::TcpListener::bind(listen).await?;
             let addr = listener.local_addr()?;
             let url = format!("http://{addr}");
-            let state = AppState::new(store, public_url.unwrap_or_else(|| url.clone()), configured);
+            let state = AppState::new(store, public_url.unwrap_or_else(|| url.clone()), configured)
+                .with_wake(waking);
             let hub = state.hub.clone();
             let draining = hub.clone();
             let maintenance = tokio::spawn(hub.clone().maintain());

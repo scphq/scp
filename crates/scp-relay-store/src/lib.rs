@@ -296,6 +296,8 @@ pub trait RelayStore: Send + Sync + 'static {
     async fn create_account(&self, account: Account) -> Result<Account>;
     /// Read an account by handle, returning None when absent.
     async fn account(&self, handle: &str) -> Result<Option<Account>>;
+    /// Accounts with persisted machine wake state, for resuming maintenance.
+    async fn wake_accounts(&self) -> Result<Vec<Account>>;
     /// Insert a member. Duplicate id or account/name is Conflict.
     async fn create_member(&self, member: Member) -> Result<()>;
     /// Return an existing account/name or insert the supplied member atomically.

@@ -88,40 +88,7 @@ impl AccountHub {
             }
             "local_events" => self.local_events(c, p).await,
             "list" | "watch" => self.client_method(id, c, method, p).await,
-            "machine_wake" => {
-                let url = p.get("url").filter(|v| !v.is_null());
-                let key = format!("wake:{}", c.machine);
-                if let Some(url) = url {
-                    let url = url
-                        .as_str()
-                        .ok_or_else(|| invalid("url must be a string"))?;
-                    let parsed =
-                        axum::http::Uri::try_from(url).map_err(|_| invalid("invalid wake URL"))?;
-                    let host = parsed.host().unwrap_or("");
-                    if url.len() > 2048
-                        || url.contains('@')
-                        || !(parsed.scheme_str() == Some("https")
-                            || (parsed.scheme_str() == Some("http")
-                                && matches!(host, "localhost" | "127.0.0.1" | "[::1]")))
-                    {
-                        return Err(invalid("url must be https or loopback http"));
-                    }
-                    let secret = p["secret"]
-                        .as_str()
-                        .filter(|s| (16..=256).contains(&s.chars().count()))
-                        .ok_or_else(|| invalid("secret is 16 to 256 characters"))?;
-                    self.store
-                        .put_state(
-                            &self.account_id,
-                            &key,
-                            Some(&json!({"url":url,"secret":secret}).to_string()),
-                        )
-                        .await?;
-                } else {
-                    self.store.put_state(&self.account_id, &key, None).await?;
-                }
-                Ok(json!({"set":url.is_some()}))
-            }
+            "machine_wake" => self.set_machine_wake(&c.machine, p).await,
             _ => Err(Error::new("method_not_found", "no method on a bridge")),
         }
     }

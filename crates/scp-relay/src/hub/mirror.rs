@@ -136,6 +136,9 @@ impl AccountHub {
                         };
                     }
                 }
+                if f["presence"] == "hibernated" {
+                    f["waking_until"] = before["waking_until"].clone();
+                }
                 for key in ["received_at", "received_hop"] {
                     if let Some(value) = before.get(key) {
                         f[key] = value.clone();
@@ -279,6 +282,15 @@ impl AccountHub {
             changes.endpoints.push(e);
         }
         self.store.hub_write(&self.account_id, changes).await?;
+        if notifications.iter().any(|v| {
+            v["presence"] == "hibernated"
+                && original
+                    .iter()
+                    .find(|e| e.id == v["id"])
+                    .is_none_or(|e| fields(e)["presence"] != "hibernated")
+        }) {
+            self.forget_wake_hold(Some(&c.machine)).await?;
+        }
         if let Some(mut state) = sync {
             state.seen = seen;
             self.syncs.insert(c.machine.clone(), state);

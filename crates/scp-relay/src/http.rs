@@ -99,6 +99,11 @@ pub struct AppState {
     touches: Arc<tokio::sync::Mutex<std::collections::HashMap<String, i64>>>,
 }
 impl AppState {
+    /// Configure machine webhook calls before serving requests.
+    pub fn with_wake(mut self, options: crate::hub::WakeOptions) -> Self {
+        self.hub = Arc::new(Hub::new(self.store.clone(), self.limits.clone()).with_wake(options));
+        self
+    }
     /// Build shared state for a listener and its HTTP and WebSocket routes.
     pub fn new(store: Arc<dyn RelayStore>, public_url: String, limits: Limits) -> Self {
         Self {

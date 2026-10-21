@@ -28,7 +28,7 @@ async fn fixture_limits(overrides: &[&str]) -> (Arc<Hub>, Grant) {
         crate::http::grant(&identity),
     )
 }
-fn request(id: i64, method: &str, params: Value) -> Value {
+pub(in crate::hub) fn request(id: i64, method: &str, params: Value) -> Value {
     json!({"id":id,"method":method,"params":params})
 }
 async fn observer(hub: &Hub, grant: &Grant, method: &str, params: Value) -> Value {
@@ -43,7 +43,7 @@ async fn observer(hub: &Hub, grant: &Grant, method: &str, params: Value) -> Valu
         .await;
     responses[1].clone()
 }
-async fn bridge(
+pub(in crate::hub) async fn bridge(
     hub: &Hub,
     g: &Grant,
     machine: &str,
@@ -75,7 +75,7 @@ async fn bridge(
     assert!(result.get("error").is_none(), "{result}");
     (account, id, rx)
 }
-fn view(name: &str) -> Value {
+pub(in crate::hub) fn view(name: &str) -> Value {
     json!({"address":format!("me/{name}"),"kind":"agent","presence":"online","harness":"cli","tree":name,"parent_ep":null,"depth":0})
 }
 #[tokio::test]
