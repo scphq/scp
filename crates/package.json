@@ -1,0 +1,7 @@
+{
+  "name": "scp-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Release version of the Rust relay, its npm packages, images and the dashboard",
+  "license": "Apache-2.0"
+}

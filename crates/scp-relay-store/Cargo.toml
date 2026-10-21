@@ -3,8 +3,13 @@ name = "scp-relay-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
 repository.workspace = true
+
+description = "SQLite and PostgreSQL persistence for the SCP relay"
+homepage = "https://scp.dev"
+readme = "README.md"
+keywords = ["scp", "relay", "sqlite", "postgres"]
+categories = ["database", "network-programming"]
 
 [features]
 testsuite = []

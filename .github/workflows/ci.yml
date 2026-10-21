@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # Reads the packageManager field, so CI runs the Bun the repo pins.
       - uses: oven-sh/setup-bun@v2
@@ -45,6 +47,9 @@ jobs:
 
       - name: Lint and format check
         run: bunx biome ci .
+
+      - name: Check relay versions
+        run: bun scripts/relay-version.ts --check
 
       - name: Type check
         run: bun run typecheck
@@ -98,12 +103,14 @@ jobs:
       SCP_RELAY_TEST_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates
 
@@ -115,6 +122,24 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      - name: Package publish dry run
+        run: cargo publish --workspace --dry-run --locked
+
+  windows:
+    name: Windows relay
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates
+      - working-directory: crates
+        run: cargo build --locked --bin scp-relay
 
   conformance:
     name: Relay conformance
@@ -134,14 +159,16 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates
 

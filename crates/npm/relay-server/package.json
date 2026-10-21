@@ -1,0 +1,33 @@
+{
+  "name": "@scp-dev/relay-server",
+  "version": "0.1.0",
+  "description": "Self-hosted SCP relay server",
+  "bin": {
+    "scp-relay": "bin/scp-relay.js"
+  },
+  "optionalDependencies": {
+    "@scp-dev/relay-server-darwin-arm64": "0.1.0",
+    "@scp-dev/relay-server-darwin-x64": "0.1.0",
+    "@scp-dev/relay-server-linux-x64-gnu": "0.1.0",
+    "@scp-dev/relay-server-linux-arm64-gnu": "0.1.0",
+    "@scp-dev/relay-server-linux-x64-musl": "0.1.0",
+    "@scp-dev/relay-server-win32-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scphq/scp.git",
+    "directory": "crates/npm/relay-server"
+  },
+  "homepage": "https://scp.dev",
+  "publishConfig": {
+    "access": "public"
+  }
+}
