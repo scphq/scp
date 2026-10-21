@@ -5,3 +5,5 @@ dist
 .wrangler
 .DS_Store
 *.log
+crates/target
+.cargo-target*
