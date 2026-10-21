@@ -723,6 +723,58 @@ async fn authenticated_requests_throttle_credential_last_used_writes() {
 }
 
 #[tokio::test]
+async fn shutdown_waits_for_peer_close() {
+    let s = start().await;
+    admin::account(s.store.as_ref(), "acme").await.unwrap();
+    let (secret, _) = mint(&s, true, None).await;
+    let mut ws = socket(&s, &secret).await;
+    s.state.hub.shutdown();
+    match ws.next().await.unwrap().unwrap() {
+        Message::Close(Some(close)) => assert_eq!(u16::from(close.code), 1001),
+        other => panic!("unexpected frame {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            s.state.hub.wait_closed()
+        )
+        .await
+        .is_err()
+    );
+    ws.flush().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), s.state.hub.wait_closed())
+        .await
+        .unwrap();
+    assert!(ws.next().await.is_none());
+}
+
+#[tokio::test]
+async fn frames_above_transport_limit_close_gracefully() {
+    let mut limits = Limits::default();
+    limits.apply("frameBytes=262144").unwrap();
+    let s = start_with_limits(limits).await;
+    admin::account(s.store.as_ref(), "acme").await.unwrap();
+    let (secret, _) = mint(&s, true, None).await;
+    let mut ws = socket(&s, &secret).await;
+    ws.send(Message::Text("x".repeat(4 * 262144).into()))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let frame = ws.next().await.unwrap().unwrap();
+        let response: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_eq!(response["error"]["data"]["code"], "too_large");
+        match ws.next().await.unwrap().unwrap() {
+            Message::Close(Some(close)) => assert_eq!(u16::from(close.code), 1009),
+            other => panic!("unexpected frame {other:?}"),
+        }
+        ws.flush().await.unwrap();
+        assert!(ws.next().await.is_none());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn oversized_frames_send_too_large_before_closing_1009() {
     let mut limits = Limits::default();
     limits.apply("frameBytes=128").unwrap();

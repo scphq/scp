@@ -1,6 +1,5 @@
 //! Per-account hub boundary. The transport owns socket I/O; account logic receives
 //! grants and bounded socket handles. AccountHub serializes RPC and socket calls.
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use scp_relay_store::{CredentialLookup, RelayStore, Role};
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,14 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::{Mutex, Notify, mpsc, watch},
+};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{Error as WebSocketError, Message, protocol::CloseFrame},
+};
 
 /// Trusted authentication context passed to account logic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,15 +605,17 @@ impl Hub {
         self.shutdown.send_replace(true);
     }
     /// Attach an authenticated WebSocket. Output has a fixed 32-frame bound.
-    pub async fn websocket(
+    pub async fn websocket<S>(
         self: Arc<Self>,
         grant: Grant,
-        socket: WebSocket,
+        socket: WebSocketStream<S>,
         frame_bytes: usize,
         revalidate_ms: u64,
         auth: crate::AuthChain,
         request: crate::AuthRequest,
-    ) {
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let account = self.account(&grant).await;
         let (mut sink, mut stream) = socket.split();
         let (texts, mut rx) = mpsc::channel::<String>(32);
@@ -631,14 +639,14 @@ impl Hub {
                 let output = tokio::select! { biased;
                     _ = shutdown.wait_for(|v| *v) => Some(Output::Close(Closure { code: 1001, reason: "server shutdown".into(), notification: None })),
                     changed = closing.changed() => {
-                        if changed.is_err() { return; }
+                        if changed.is_err() { break; }
                         let value = closing.borrow().clone();
                         value.map(Output::Close)
                     },
                     text = rx.recv() => text.map(Output::Text),
                 };
                 let Some(output) = output else {
-                    return;
+                    break;
                 };
                 let (message, terminal) = match output {
                     Output::Text(text) => (Message::Text(text.into()), false),
@@ -653,11 +661,11 @@ impl Hub {
                                 Ok(Ok(()))
                             )
                         {
-                            return;
+                            break;
                         }
                         (
                             Message::Close(Some(CloseFrame {
-                                code: closure.code,
+                                code: closure.code.into(),
                                 reason: closure.reason.into(),
                             })),
                             true,
@@ -668,12 +676,13 @@ impl Hub {
                     tokio::time::timeout(Duration::from_secs(2), sink.send(message)).await,
                     Ok(Ok(()))
                 ) {
-                    return;
+                    break;
                 }
                 if terminal {
-                    return;
+                    break;
                 }
             }
+            sink
         });
         let expires = Duration::from_millis(
             u64::try_from(grant.expires_at.saturating_sub(crate::now_ms())).unwrap_or(0),
@@ -682,11 +691,13 @@ impl Hub {
         tokio::pin!(expiry);
         let revalidate = tokio::time::sleep(Duration::from_millis(revalidate_ms.max(1)));
         tokio::pin!(revalidate);
-        let mut writer_finished = false;
+        let mut writer_result = None;
+        let mut read_failed = false;
+        let mut peer_closed = false;
         let mut polls = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
-                _=&mut writer=>{writer_finished=true;break;},
+                result=&mut writer=>{writer_result=Some(result);break;},
                 _=&mut expiry=>{account.lock().await.kick(&socket_id, "the token grant expired, reconnect", 4001).await;break;},
                 _=&mut revalidate=>{
                     let now = crate::now_ms();
@@ -725,15 +736,55 @@ impl Hub {
                         }
                     },
                     Some(Ok(Message::Binary(_)))=>{handle.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"text frames required","data":{"code":"invalid_params"}}}).to_string());},
-                    Some(Ok(Message::Close(_)))|None=>{handle.close(1000,"closed");break;},
-                    Some(Err(_))=>{handle.frame_too_large(frame_bytes);break;},
+                    Some(Ok(Message::Close(_)))|None=>{peer_closed=true;handle.close(1000,"closed");break;},
+                    Some(Err(error))=>{
+                        read_failed=true;
+                        if matches!(error, WebSocketError::Capacity(_)) {
+                            handle.frame_too_large(frame_bytes);
+                        } else {
+                            handle.close(1002,"invalid frame");
+                        }
+                        break;
+                    },
                     _=>{},
                 }
             }
         }
         polls.abort_all();
-        if !writer_finished {
-            let _ = writer.await;
+        let result = match writer_result {
+            Some(result) => result,
+            None => writer.await,
+        };
+        if let Ok(sink) = result
+            && let Ok(mut socket) = sink.reunite(stream)
+        {
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                if !read_failed && !peer_closed {
+                    while let Some(incoming) = socket.next().await {
+                        match incoming {
+                            Ok(Message::Close(_)) => break,
+                            Err(_) => {
+                                read_failed = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let _ = socket.flush().await;
+                // A capacity error fuses the WebSocket stream with unread payload bytes.
+                let transport = socket.get_mut();
+                let _ = transport.shutdown().await;
+                if read_failed {
+                    let mut buffer = [0; 8192];
+                    while let Ok(n) = transport.read(&mut buffer).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await;
         }
         account.lock().await.closed(&socket_id, false).await;
     }
