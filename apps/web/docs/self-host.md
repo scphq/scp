@@ -5,7 +5,297 @@ The relay is the hub your machines link through. The CLI uses `https://app.scp.d
 - **The relay** (`apps/relay`): a Cloudflare Worker with a D1 database, one `OrgHub` Durable Object per org, email sign-in guarded by Turnstile, and an optional message judge.
 - **The site** (`apps/web`, optional): the Next.js site with these docs and the spec, built with OpenNext and served by a Worker.
 
-Cloudflare is one way to host it, not a requirement. The hub engine (`@scp-dev/hub`) is plain TypeScript over a single SQLite call, so any server that holds one SQLite database per org and speaks the bridge protocol in the [spec](/spec) can run it: Bun or Node on a VM, a container, your own platform. This guide covers the Cloudflare setup that app.scp.dev runs.
+For other hosts, use the Rust relay below with SQLite or Postgres. The hosted relay at app.scp.dev
+uses the Cloudflare setup documented after it.
+
+## Rust relay
+
+Run the image with persistent SQLite storage:
+
+```sh
+docker run -d --name scp-relay -p 8787:8787 -v scp-relay-data:/data \
+  -e SCP_RELAY_PUBLIC_URL=https://relay.example.com ghcr.io/scphq/scp-relay:latest
+```
+
+The image runs as uid 65532 and creates `/data/relay.db`. Put it behind an HTTPS reverse proxy
+and restrict the published port as appropriate for your host. `/health` returns `{"ok":true,...}`;
+`scp-relay health` is the image's health check.
+
+Schema migrations run automatically on startup. You can also run a native binary through the npm
+wrapper with Node 18 or later, or install it with Cargo:
+
+```sh
+npx @scp-dev/relay-server serve --listen 127.0.0.1:8787
+cargo install scp-relay-server
+scp-relay serve --store sqlite://relay.db
+```
+
+The native listener defaults to `127.0.0.1:8787` (`--listen` or `SCP_RELAY_LISTEN`); the image listens
+on `0.0.0.0:8787`. The native store defaults to `sqlite://relay.db` (`--store` or `SCP_RELAY_STORE`).
+Set `--public-url` or `SCP_RELAY_PUBLIC_URL` to the external relay URL for device verification links;
+without it, the relay uses its bound HTTP address.
+
+### Auth
+
+`--auth` is repeatable, or set comma-separated `SCP_RELAY_AUTH`. Methods run in order: the first
+identity wins, a rejected credential stops the chain and never falls through, and a method that does
+not apply passes to the next method. If every method passes, the request is rejected. The default is
+`native`; when you configure a chain, include `native` explicitly to keep native credentials enabled.
+
+#### Native
+
+`--auth native` accepts relay bearer tokens (`scp_t_...`) and device credentials (`scp_d_...`).
+It passes when no native bearer is present and rejects invalid, expired or revoked native credentials.
+The CLI works unchanged with native auth, including `swarm login` and headless tokens.
+
+Run admin commands on the relay host against the same `--store` (or `SCP_RELAY_STORE`) as the server.
+For the image, prefix them with `docker exec scp-relay`; for Compose, use `docker compose exec relay`.
+
+```sh
+docker exec scp-relay scp-relay account create demo
+docker exec scp-relay scp-relay token create --account demo --member owner --role owner --name automation
+```
+
+The token command prints JSON with a `token` field. Keep the secret for headless clients.
+To sign in from the CLI, select the relay and start device login:
+
+```sh
+swarm relay use https://relay.example.com
+swarm login
+```
+
+Approve the displayed code on the relay:
+
+```sh
+docker exec scp-relay scp-relay device approve ABCD-EFGH --account demo --member owner
+```
+
+For headless clients:
+
+```sh
+export SCP_RELAY=https://relay.example.com SCP_TOKEN=scp_t_...
+swarm up --token "$SCP_TOKEN" --machine runner-1
+```
+
+Members and tokens are managed through the relay admin commands. Revoke a token with
+`scp-relay token revoke <credential_id>`, using the id returned when it was created.
+
+#### Trusted headers
+
+`--auth trusted-header` accepts identity headers from an SSO proxy. It requires at least one
+`--trusted-proxy <CIDR>` (repeatable, IPv4 or IPv6). Trust is checked against the actual TCP peer;
+forwarded address headers do not affect it. With neither identity header, the method passes.
+Headers from an untrusted peer, duplicate identity headers and unmapped identities without a default are rejected.
+The proxy must overwrite identity headers and block direct access to the services it authenticates.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--trusted-header-user <name>` | `X-Forwarded-User` | User identity header |
+| `--trusted-header-email <name>` | `X-Forwarded-Email` | Email identity header, also used when the user header is absent or blank |
+| `--trusted-header-map <file>` | No mappings | JSON file mapping identities to accounts and members |
+
+Save this as `auth-map.json`. Create the `demo` account with the admin command first:
+
+```json
+{
+  "default": null,
+  "users": {
+    "alice@example.com": { "account": "demo", "member": "alice", "role": "member" }
+  }
+}
+```
+
+The relay looks up the user value first (email when the user is absent or blank), then the email
+value. Matching is exact. Each mapping supplies an existing account handle, a member name and a role
+(`owner`, `admin` or `member`). Members are created on first use; an existing member's role is preserved.
+Unmapped users are rejected when `default` is null or absent. To admit unmapped users into one account,
+set `"default": { "account": "demo", "role": "member" }`. Their member name is the user value, or
+the email when no user value is present. Header identities are full logins, without token scope.
+The mapping file is read at startup; restart the relay after changing it.
+
+For an intranet, combine native tokens for CLIs and machines with SSO for browsers and the dashboard.
+With the proxy and dashboard on the relay host, using loopback connections:
+
+```sh
+scp-relay serve --public-url https://relay.example.com \
+  --auth native --auth trusted-header \
+  --trusted-proxy 127.0.0.1/32 \
+  --trusted-header-user X-Forwarded-User \
+  --trusted-header-email X-Forwarded-Email \
+  --trusted-header-map auth-map.json
+```
+
+Native credentials are tried first; an invalid native token cannot fall back to SSO. Requests without
+native credentials can use the proxy's identity headers. Preserve `Authorization` and allow CLI device
+and relay requests through the proxy without an interactive SSO challenge. For other deployments,
+trust the proxy and dashboard TCP source addresses as seen by the relay.
+
+#### Embedding
+
+The `scp_relay` crate exposes `RelayAuth`, `AuthRequest`, `AuthOutcome` and `AuthChain`. Implement
+`RelayAuth::authenticate` and supply the chain with `AppState::with_auth`:
+
+```rust
+use std::sync::Arc;
+use scp_relay::{AuthChain, RelayAuth, auth::NativeAuth, http::{AppState, Limits}};
+use scp_relay_store::RelayStore;
+
+fn state(store: Arc<dyn RelayStore>, custom: Arc<dyn RelayAuth>) -> AppState {
+    let native = Arc::new(NativeAuth::new(store.clone()));
+    AppState::new(store, "http://localhost:8787".into(), Limits::default())
+        .with_auth(AuthChain(vec![native, custom]))
+}
+```
+
+Methods must recheck mutable credential and identity state on every call, including socket
+revalidation. Serve the router with `into_make_service_with_connect_info::<SocketAddr>()` so auth
+methods receive the TCP peer. JWT and mTLS verification are not built in; the server accepts only
+`native` and `trusted-header` as `--auth` values. Embedders can implement other methods.
+
+### API
+
+The public data API serves the caller's account and works without the optional dashboard:
+
+| Method | Endpoint | Returns |
+| --- | --- | --- |
+| `GET` | `/v1/dashboard/session` | Account, member, members, credential counts and scope |
+| `GET` | `/v1/dashboard/overview` | Machines, endpoints and recent activity |
+| `GET` | `/v1/dashboard/graph?minutes=15` | Graph nodes, edges and machines; minutes are floored and clamped to 1 through 60, default 15 |
+| `GET` | `/v1/dashboard/events` | WebSocket with an upgrade, otherwise SSE; a hello event first, then live events |
+
+With native auth, send `Authorization: Bearer <token>` on every request, including event connections.
+The same auth chain applies to the API, so trusted proxies can supply identity headers instead.
+Responses use `Cache-Control: no-store`. Event streams revalidate at `revalidateMs` (default 300000 ms);
+an invalid identity closes WebSocket with code 4003 or ends SSE. SSE sends a heartbeat every 25 seconds.
+
+Allow a browser client's exact origin with repeatable `serve --cors-origin https://console.example.com`
+or comma-separated `SCP_RELAY_CORS_ORIGIN`. CORS is disabled by default; `*` and `null` are rejected.
+Allowed origins receive CORS headers for `GET` and `OPTIONS`, with `Authorization` and `Content-Type`
+allowed and no credentials mode. The optional dashboard calls the relay from its server and needs no CORS setting.
+
+See the [OpenAPI specification](https://github.com/scphq/scp/blob/main/docs/openapi/relay-dashboard.yaml)
+for schemas and event types.
+
+### Dashboard (optional)
+
+`@scp-dev/dashboard` is a separate Node 18 or later server that reuses the hosted dashboard UI.
+The relay provides a public data API and runs without a UI. Start the dashboard beside it:
+
+```sh
+npx @scp-dev/dashboard --relay https://relay.example.com
+```
+
+Open `http://127.0.0.1:8788`, paste a relay token, or choose device sign-in and approve the displayed
+code with `scp-relay device approve`. Members and tokens are managed with the relay admin commands.
+The dashboard keeps credentials in memory on the server. Browser sessions use HttpOnly cookies;
+restarting the dashboard signs everyone out. Revoked credentials end sessions on the next request,
+and live event connections are checked every 30 seconds.
+
+For Postgres, relay and dashboard together, save this as `compose.yaml` and run `docker compose up -d`:
+
+```yaml
+services:
+  relay:
+    image: ghcr.io/scphq/scp-relay:latest
+    ports:
+      - "8787:8787"
+    environment:
+      SCP_RELAY_STORE: postgres://postgres:change-me@postgres:5432/relay
+      SCP_RELAY_PUBLIC_URL: https://relay.example.com
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  dashboard:
+    image: ghcr.io/scphq/scp-dashboard:latest
+    ports:
+      - "8788:8788"
+    environment:
+      SCP_DASHBOARD_RELAY: http://relay:8787
+      SCP_DASHBOARD_PUBLIC_URL: https://dashboard.example.com
+    depends_on:
+      relay:
+        condition: service_healthy
+    restart: unless-stopped
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: relay
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d relay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  postgres-data:
+```
+
+Use your own database password in both places. The images set `SCP_RELAY_LISTEN=0.0.0.0:8787` and
+`SCP_DASHBOARD_LISTEN=0.0.0.0:8788`. The dashboard calls the relay over the Compose network;
+`SCP_RELAY_PUBLIC_URL` is the relay's external URL for device verification links.
+Put both services behind an HTTPS reverse proxy that supports WebSocket upgrades, and restrict the
+published ports as appropriate for your host. Set `SCP_DASHBOARD_PUBLIC_URL` (or `--public-url`) to the
+dashboard's external HTTPS URL so cookies are Secure and Origin checks use that URL. The default native
+listener is `127.0.0.1:8788`; override it with `--listen` or `SCP_DASHBOARD_LISTEN`. `/health` and
+`scp-dashboard --health` check only the dashboard process, so the relay can start independently.
+
+For SSO, put the dashboard itself behind your authenticating proxy. With the loopback relay chain in
+[Auth](#auth), start the dashboard on the same host with matching header names:
+
+```sh
+npx @scp-dev/dashboard --relay http://127.0.0.1:8787 \
+  --public-url https://dashboard.example.com \
+  --forward-header X-Forwarded-User --forward-header X-Forwarded-Email
+```
+
+`--forward-header <name>` is repeatable, or set comma-separated `SCP_DASHBOARD_FORWARD_HEADERS`.
+Any configured forward header puts the dashboard in SSO mode and disables token and device sign-in
+there; native CLI credentials still work on the relay. In Compose, mount the mapping file into the
+relay, configure its `--auth native --auth trusted-header`, header and map flags, and trust the
+dashboard's TCP source address as seen by the relay with `--trusted-proxy`.
+The proxy must overwrite the named headers and block direct dashboard access. Only those identity
+headers are forwarded on every API call and event upgrade. No relay bearer is sent in SSO mode.
+The relay decides whether the forwarded identity is signed in. Signing out clears the dashboard
+cookie; the SSO proxy can authenticate the next request again.
+
+To build your own UI, use the [API](#api).
+
+### Rust relay limits
+
+`Infinity` disables a cap (reported as `null` on the wire). Durations retain their defaults.
+Repeat `--limit key=value` on `serve`, or use comma-separated `SCP_RELAY_LIMIT` values, for example
+`SCP_RELAY_LIMIT=machines=100,frameBytes=16777216`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `machines` | Infinity | Machines per account |
+| `endpoints` | Infinity | Endpoints per account |
+| `sockets` | Infinity | Concurrent sockets per account |
+| `frameBytes` | 16777216 (16 MiB) | Maximum frame or HTTP request size |
+| `callsPerMinute` | Infinity | Client calls per minute |
+| `bridgeCallsPerMinute` | Infinity | Bridge calls per minute |
+| `accountCallsPerMinute` | Infinity | Account calls per minute |
+| `acksPerMinute` | Infinity | Connection acknowledgements per minute |
+| `accountAcksPerMinute` | Infinity | Account acknowledgements per minute |
+| `storedBytes` | Infinity | Stored delivery bytes per account |
+| `refusalsPerMinute` | Infinity | Refusal notifications per minute |
+| `clientMachineIdleS` | 1209600 | Idle client machine lifetime in seconds |
+| `idlePurgeS` | 2592000 | Idle endpoint purge delay in seconds |
+| `httpWaitS` | 25 | Maximum HTTP wait in seconds |
+| `revalidateMs` | 300000 | Credential revalidation interval in milliseconds |
+| `deniedS` | 3600 | Denied delivery retention in seconds |
+
+Machine wake caps `senderAccountPerHour` and `targetPerHour` also default to `Infinity`.
+Override them with `--wake senderAccountPerHour=100 --wake targetPerHour=20`.
+
+## Cloudflare relay
+
+The rest of this guide covers the Cloudflare setup that app.scp.dev runs.
 
 ## Prerequisites
 
