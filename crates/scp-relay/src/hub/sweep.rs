@@ -11,6 +11,14 @@ impl AccountHub {
                 &self.account_id,
                 HubWrite {
                     sweep_at: Some(now),
+                    denied_before: Some(
+                        now.saturating_sub(
+                            self.limits
+                                .duration("deniedS", 3600)
+                                .saturating_mul(1000)
+                                .min(i64::MAX as u64) as i64,
+                        ),
+                    ),
                     ..HubWrite::default()
                 },
             )
@@ -44,6 +52,18 @@ impl AccountHub {
                 .hub_write(
                     &self.account_id,
                     HubWrite {
+                        events: vec![(
+                            scp_relay_store::EventLog::Audit,
+                            scp_relay_store::Event {
+                                id: 0,
+                                at: now,
+                                kind: "machine_expire".into(),
+                                endpoint: None,
+                                reference: Some(m.name.clone()),
+                                detail: json!({"machine":m.name,"endpoints":rows.len()})
+                                    .to_string(),
+                            },
+                        )],
                         remove_machines: vec![m.name.clone()],
                         remove_endpoints: rows.into_iter().map(|e| e.id).collect(),
                         ..HubWrite::default()
@@ -77,7 +97,8 @@ impl AccountHub {
                 .await?;
             self.announce(&tomb.name, vec![], true, true).await?;
         }
-        let mut idle = self.connections.is_empty()
+        self.buckets.retain(|_, b| !b.full(now));
+        let mut idle = !self.connections.values().any(|c| c.socket.is_some())
             && self.store.machines(&self.account_id).await?.is_empty()
             && self.store.tombstones(&self.account_id).await?.is_empty();
         if idle {
@@ -114,6 +135,9 @@ impl AccountHub {
                         },
                     )
                     .await?;
+                self.initialized = false;
+                self.buckets.clear();
+                self.refusals.clear();
             }
         } else {
             self.store

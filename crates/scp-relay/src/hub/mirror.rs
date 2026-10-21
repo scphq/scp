@@ -7,8 +7,10 @@ impl AccountHub {
         let list = p["endpoints"]
             .as_array()
             .ok_or_else(|| invalid("endpoints must be a list"))?;
-        if list.len() > 4096 {
-            return Err(Error::new("too_large", "too many endpoints"));
+        if let Some(cap) = self.limits.cap("endpoints")
+            && list.len() as u64 > cap
+        {
+            return Err(Error::new("too_large", &format!("at most {cap} endpoints")));
         }
         let mut parsed = BTreeMap::new();
         for v in list {
@@ -84,19 +86,26 @@ impl AccountHub {
                 ));
             }
             let was = string(&raw, "was");
-            let existing = endpoints
+            let old = original
                 .iter()
-                .position(|e| e.machine == c.machine && e.handle == name)
+                .find(|e| {
+                    e.machine == c.machine
+                        && handle(was)
+                        && e.handle == was
+                        && e.token_hash.is_none()
+                })
                 .or_else(|| {
-                    if handle(was) {
-                        endpoints.iter().position(|e| {
-                            e.machine == c.machine && e.handle == was && e.token_hash.is_none()
-                        })
-                    } else {
-                        None
-                    }
-                });
-            let old = existing.and_then(|i| endpoints.get(i)).cloned();
+                    original
+                        .iter()
+                        .find(|e| e.machine == c.machine && e.handle == name)
+                })
+                .cloned();
+            let existing = old
+                .as_ref()
+                .and_then(|old| endpoints.iter().position(|e| e.id == old.id));
+            if old.is_none() {
+                self.endpoint_room(&endpoints)?;
+            }
             if old.as_ref().is_some_and(|e| e.token_hash.is_some()) {
                 continue;
             }
@@ -188,12 +197,23 @@ impl AccountHub {
             .filter(|e| e.machine == c.machine && e.kind == "agent" && e.token_hash.is_none())
             .map(|e| (e.handle.as_str(), e))
             .collect();
+        let renaming: BTreeMap<_, _> = renames
+            .iter()
+            .filter_map(|(id, was)| {
+                placed
+                    .iter()
+                    .find(|row| &row.id == id)
+                    .map(|row| (was.clone(), row.handle.clone()))
+            })
+            .collect();
         for e in &mut endpoints {
             let mut f = fields(e);
+            let mut placed_scope = false;
             if e.machine == c.machine && e.kind == "agent" && raw_views.contains_key(&e.handle) {
                 if let Some((tree, parent, depth)) =
                     placement(&e.handle, &agents, &raw_views, &mut HashSet::new())
                 {
+                    placed_scope = true;
                     f["tree"] = tree;
                     f["parent_ep"] = parent;
                     f["depth"] = depth;
@@ -214,18 +234,21 @@ impl AccountHub {
                     f["parent_addr"] = Value::Null;
                 }
             }
-            for (id, was) in &renames {
-                if let Some(renamed) = placed.iter().find(|row| &row.id == id) {
-                    if f["parent_addr"] == format!("{}/{was}", c.machine) {
-                        f["parent_addr"] = json!(format!("{}/{}", c.machine, renamed.handle));
+            if let Some(parent) = f["parent_addr"]
+                .as_str()
+                .and_then(|addr| addr.strip_prefix(&format!("{}/", c.machine)))
+                .and_then(|name| renaming.get(name))
+            {
+                f["parent_addr"] = json!(format!("{}/{}", c.machine, parent));
+            }
+            if e.machine == c.machine {
+                rename_refs(&mut f["caps"], &renaming);
+                for key in ["tree", "parent_ep"] {
+                    if placed_scope {
+                        continue;
                     }
-                    if e.machine == c.machine {
-                        rename_refs(&mut f["caps"], was, &renamed.handle);
-                        for key in ["tree", "parent_ep"] {
-                            if f[key] == *was {
-                                f[key] = json!(renamed.handle);
-                            }
-                        }
+                    if let Some(name) = f[key].as_str().and_then(|name| renaming.get(name)) {
+                        f[key] = json!(name);
                     }
                 }
             }
@@ -457,22 +480,25 @@ fn linked_loop(e: &Endpoint, fields: &Value, rows: &HashMap<String, &Endpoint>) 
     true
 }
 
-fn rename_refs(value: &mut Value, old: &str, new: &str) {
+fn rename_refs(value: &mut Value, renames: &BTreeMap<String, String>) {
     match value {
         Value::Object(map) => {
             for (key, value) in map {
                 if matches!(key.as_str(), "by" | "via")
-                    && value.as_str() == Some(format!("ep:{old}").as_str())
+                    && let Some(name) = value
+                        .as_str()
+                        .and_then(|s| s.strip_prefix("ep:"))
+                        .and_then(|s| renames.get(s))
                 {
-                    *value = json!(format!("ep:{new}"));
-                } else {
-                    rename_refs(value, old, new);
+                    *value = json!(format!("ep:{name}"));
+                    continue;
                 }
+                rename_refs(value, renames);
             }
         }
         Value::Array(values) => {
             for value in values {
-                rename_refs(value, old, new);
+                rename_refs(value, renames);
             }
         }
         _ => {}

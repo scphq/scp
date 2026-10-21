@@ -235,6 +235,8 @@ pub struct HubWrite {
     pub purge: bool,
     /// Prune expired hub data at this caller-supplied time.
     pub sweep_at: Option<i64>,
+    /// Remove denial timestamps at or before this boundary.
+    pub denied_before: Option<i64>,
     /// Endpoint rows to upsert after removals.
     pub endpoints: Vec<Endpoint>,
     /// Endpoint ids to delete together with all their deliveries.
@@ -354,8 +356,6 @@ pub trait RelayStore: Send + Sync + 'static {
     ) -> Result<usize>;
     /// Delete inbox messages from accounts that are no longer inbound contacts.
     async fn xprune(&self, account_id: &str) -> Result<u64>;
-    /// Total retained envelope bytes, including cross-account inbox messages.
-    async fn stored_bytes(&self, account_id: &str) -> Result<i64>;
     // Host credentials.
     /// Insert a credential. Duplicate hash/id or live token name is Conflict.
     async fn create_credential(&self, credential: Credential) -> Result<()>;
@@ -542,6 +542,12 @@ pub trait RelayStore: Send + Sync + 'static {
         now: i64,
         idempotency_before: i64,
     ) -> Result<u64>;
+    // Hub limits.
+    /// UTF-8 bytes of all retained local message bodies plus the stored
+    /// cross-account inbox messages, including acknowledged and expired ones
+    /// until retention removes them. Missing accounts hold zero.
+    async fn stored_bytes(&self, account_id: &str) -> Result<u64>;
+
     // Hub key/value state and event logs.
     /// Read a JSON state value by key.
     async fn state(&self, account_id: &str, key: &str) -> Result<Option<String>>;

@@ -76,9 +76,18 @@ impl AccountHub {
         changes.states.push(("idle_since".into(), None));
         if !human {
             if bound.is_some_and(|m| m.token_id != g.token_id) {
+                self.refusal(
+                    None,
+                    Some(machine),
+                    json!({"code":"unauthorized","machine":machine}),
+                    crate::now_ms(),
+                )
+                .await?;
                 return Err(Error::new(
                     "unauthorized",
-                    "machine is bound to another token",
+                    &format!(
+                        "machine {machine} is bound to another token; release it with swarm machines rm {machine}"
+                    ),
                 ));
             }
             if bound.is_none() {
@@ -93,11 +102,31 @@ impl AccountHub {
                         && (t.actor_id.as_ref() == Some(&g.actor_id)
                             || matches!(g.role, Role::Owner | Role::Admin)))
                 }) {
+                    self.refusal(
+                        None,
+                        Some(machine),
+                        json!({"code":"unauthorized","machine":machine}),
+                        crate::now_ms(),
+                    )
+                    .await?;
                     return Err(Error::new(
                         "unauthorized",
-                        "machine was unbound when its token was revoked",
+                        &format!(
+                            "machine {machine} was unbound when its token was revoked; a full login of the same member (or an org owner or admin) can take it back, or swarm machines rm {machine} drops its queued messages"
+                        ),
                     ));
                 }
+            }
+            if bound.is_none()
+                && let Some(cap) = self.limits.cap("machines")
+                && machines.len() as u64 >= cap
+            {
+                return Err(Error::new(
+                    "too_large",
+                    &format!(
+                        "at most {cap} machines per account; release one with swarm machines rm"
+                    ),
+                ));
             }
             let now = crate::now_ms();
             changes.machines.push(Machine {
@@ -236,6 +265,9 @@ impl AccountHub {
                     wanted.chars().take(58).collect::<String>(),
                     suffix + 1
                 );
+            }
+            if !human && selected.is_none() {
+                self.endpoint_room(&endpoints)?;
             }
             let mut f = selected.as_ref().map(fields).unwrap_or_else(|| json!({"tree":name,"parent_ep":null,"parent_addr":null,"depth":0,"rules":null,"caps":null,"title":null,"wake":null,"incarnation":null}));
             f["harness"] = if human { Value::Null } else { json!(harness) };

@@ -1,6 +1,13 @@
 use super::*;
 
 async fn fixture() -> (Arc<Hub>, Grant) {
+    fixture_limits(&[]).await
+}
+async fn fixture_limits(overrides: &[&str]) -> (Arc<Hub>, Grant) {
+    let mut limits = crate::http::Limits::default();
+    for raw in overrides {
+        limits.apply(raw).unwrap();
+    }
     let store = scp_relay_store::connect("sqlite::memory:").await.unwrap();
     crate::admin::account(store.as_ref(), "acme").await.unwrap();
     let (a, m) = crate::admin::member(store.as_ref(), "acme", "member", None, None)
@@ -17,7 +24,7 @@ async fn fixture() -> (Arc<Hub>, Grant) {
         _ => panic!("credential must be active"),
     };
     (
-        Arc::new(Hub::new(store, crate::http::Limits::default())),
+        Arc::new(Hub::new(store, limits)),
         crate::http::grant(&identity),
     )
 }
@@ -772,5 +779,7 @@ async fn bridge_close_announces_only_presence_changes() {
     );
 }
 
+#[path = "limit_tests.rs"]
+mod limit_tests;
 #[path = "xacct_tests.rs"]
 mod xacct_tests;

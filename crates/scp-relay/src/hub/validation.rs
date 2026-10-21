@@ -34,7 +34,11 @@ impl Error {
         };
         let mut data = json!({"code":self.code});
         if let Some(retry) = self.retry {
-            data["retry_after"] = json!(retry);
+            data["retry_after"] = if retry == i64::MAX {
+                Value::Null
+            } else {
+                json!(retry)
+            };
         }
         if let Some(details) = &self.details
             && let Some(map) = details.as_object()
@@ -214,9 +218,12 @@ pub(super) fn no_secret(s: &str) -> Result<()> {
 pub(super) fn seqs(p: &Value) -> Result<Vec<i64>> {
     let list = p["seqs"]
         .as_array()
-        .ok_or_else(|| invalid("seqs must be a list"))?;
-    if list.len() > 100 || list.iter().any(|v| v.as_i64().is_none_or(|n| n < 0)) {
-        return Err(invalid("seqs must be a list of at most 100 sequences"));
+        .ok_or_else(|| invalid("seqs must be a list of integers"))?;
+    if list.iter().any(|v| v.as_i64().is_none()) {
+        return Err(invalid("seqs must be a list of integers"));
+    }
+    if list.len() > 100 {
+        return Err(invalid("at most 100 seqs per ack"));
     }
     let mut out: Vec<i64> = list.iter().filter_map(Value::as_i64).collect();
     out.sort_unstable();

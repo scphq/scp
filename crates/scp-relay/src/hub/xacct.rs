@@ -857,14 +857,14 @@ impl AccountHub {
                 &format!("thread {} reached 50 messages across accounts", msg.thread),
             ));
         }
-        let cap = self
-            .limits
-            .0
-            .get("storedBytes")
-            .copied()
-            .flatten()
-            .unwrap_or(u64::MAX);
-        if self.store.stored_bytes(&self.account_id).await? as u64 + bytes as u64 > cap {
+        let cap = self.limits.cap("storedBytes").unwrap_or(u64::MAX);
+        if self
+            .store
+            .stored_bytes(&self.account_id)
+            .await?
+            .saturating_add(bytes as u64)
+            > cap
+        {
             return Err(Error::new(
                 "inbox_full",
                 &format!("the receiving account's relay holds its cap of {cap} bytes of messages"),
@@ -1020,6 +1020,16 @@ impl Hub {
         p: &Value,
     ) -> Result<Value> {
         let step = account.lock().await.dispatch(connection, method, p).await?;
+        self.complete(account, step).await
+    }
+    pub(super) async fn poll(
+        &self,
+        account: &Arc<Mutex<AccountHub>>,
+        connection: &str,
+        method: &str,
+        p: &Value,
+    ) -> Result<Value> {
+        let step = account.lock().await.poll(connection, method, p).await?;
         self.complete(account, step).await
     }
     async fn complete(&self, account: &Arc<Mutex<AccountHub>>, step: Dispatch) -> Result<Value> {

@@ -79,6 +79,9 @@ impl SocketHandle {
             notification: None,
         });
     }
+    fn frame_too_large(&self, cap: usize) {
+        self.finish(Closure { code: 1009, reason: "frame too large".into(), notification: Some(json!({"jsonrpc":"2.0","id":null,"error":Error::new("too_large", &format!("a frame is at most {cap} bytes")).wire()}).to_string()) });
+    }
     fn finish(&self, closure: Closure) {
         self.close.send_if_modified(|current| {
             if current.is_some() {
@@ -95,6 +98,7 @@ mod bridge;
 mod client;
 mod guards;
 mod hello;
+mod limits;
 mod machines;
 mod mirror;
 mod notify;
@@ -139,6 +143,10 @@ pub struct AccountHub {
     gate: Arc<dyn xacct::Gate>,
     xcounters: xcounters::Counters,
     xkey: Option<String>,
+    buckets: HashMap<String, limits::Bucket>,
+    refusals: HashMap<String, limits::Refusals>,
+    sockets: Arc<AtomicUsize>,
+    revalidation_errors: HashMap<String, i64>,
 }
 impl AccountHub {
     async fn initialize(&mut self) -> Result<()> {
@@ -165,21 +173,38 @@ impl AccountHub {
             .get(id)
             .cloned()
             .ok_or_else(|| Error::new("unauthorized", "connection closed"))?;
-        if let Some(grant) = &conn.grant
-            && self
-                .store
-                .state(&self.account_id, &format!("denied:{}", grant.token_id))
-                .await?
-                .and_then(|v| serde_json::from_str::<i64>(&v).ok())
-                .is_some_and(|until| until > crate::now_ms())
-        {
-            return Err(Error::new("unauthorized", "credential was revoked"));
+        self.refuse_denied(id, &conn).await?;
+        self.spend(id, &conn, method, p, crate::now_ms()).await?;
+        if !p.is_object() {
+            return Err(invalid("params must be an object"));
         }
+        self.dispatch_inner(id, &conn, method, p).await
+    }
+    async fn dispatch_inner(
+        &mut self,
+        id: &str,
+        conn: &Connection,
+        method: &str,
+        p: &Value,
+    ) -> Result<xacct::Dispatch> {
         if method == "hello" {
-            return self.hello(id, &conn, p).await.map(xacct::Dispatch::Done);
+            return self.hello(id, conn, p).await.map(xacct::Dispatch::Done);
         }
         if conn.role.is_empty() {
             return Err(Error::new("unauthorized", "call hello first"));
+        }
+        if !conn.endpoint.is_empty()
+            && let Some(mut endpoint) = self
+                .endpoints()
+                .await?
+                .into_iter()
+                .find(|e| e.id == conn.endpoint)
+            && endpoint
+                .last_seen
+                .is_none_or(|at| at <= crate::now_ms() - 10_000)
+        {
+            endpoint.last_seen = Some(crate::now_ms());
+            self.store.put_endpoint(&self.account_id, endpoint).await?;
         }
         if method == "list" && p["contacts"] == true {
             return Ok(xacct::Dispatch::List(
@@ -193,12 +218,12 @@ impl AccountHub {
             ));
         }
         if conn.role == "bridge" && method == "forward" && self.has_foreign(&p["params"]["to"]) {
-            return self.xforward(&conn, p).await;
+            return self.xforward(conn, p).await;
         }
         let result = if conn.role == "bridge" {
-            self.bridge_method(id, &conn, method, p).await
+            self.bridge_method(id, conn, method, p).await
         } else {
-            self.client_method(id, &conn, method, p).await
+            self.client_method(id, conn, method, p).await
         };
         result.map(xacct::Dispatch::Done)
     }
@@ -220,9 +245,10 @@ pub struct Hub {
     gate: Arc<dyn xacct::Gate>,
 }
 /// Tracks an accepted upgrade until its socket task has finished.
-pub struct SocketLease(Arc<Hub>);
+pub struct SocketLease(Arc<Hub>, Arc<AtomicUsize>);
 impl Drop for SocketLease {
     fn drop(&mut self) {
+        self.1.fetch_sub(1, Ordering::AcqRel);
         if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.0.drained.notify_one();
         }
@@ -289,6 +315,10 @@ impl Hub {
                     gate: self.gate.clone(),
                     xcounters: xcounters::Counters::default(),
                     xkey: None,
+                    buckets: HashMap::new(),
+                    refusals: HashMap::new(),
+                    sockets: Arc::new(AtomicUsize::new(0)),
+                    revalidation_errors: HashMap::new(),
                 }))
             })
             .clone()
@@ -312,6 +342,11 @@ impl Hub {
     }
     /// Process an authenticated HTTP request, including batches in input order.
     pub async fn rpc(&self, grant: Grant, body: Value) -> Value {
+        if let Some(cap) = self.limits.cap("frameBytes")
+            && body.to_string().encode_utf16().count() as u64 > cap
+        {
+            return json!({"jsonrpc":"2.0","id":null,"error":Error::new("too_large", &format!("a request is at most {cap} bytes")).wire()});
+        }
         if body.as_array().is_some_and(Vec::is_empty) {
             return json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"an empty batch"}});
         }
@@ -319,9 +354,6 @@ impl Hub {
         let id = crate::random("http_");
         {
             let mut hub = account.lock().await;
-            if hub.connections.len() >= 4096 {
-                return json!({"jsonrpc":"2.0","id":null,"error":Error::new("unavailable","too many connections").wire()});
-            }
             hub.connections.insert(
                 id.clone(),
                 Connection {
@@ -347,6 +379,9 @@ impl Hub {
                 replies.push(reply);
             }
         }
+        for reply in &replies {
+            self.ack_response(&account, &id, reply).await;
+        }
         account.lock().await.closed(&id, false).await;
         cleanup.active = false;
         if batch {
@@ -365,40 +400,42 @@ impl Hub {
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let method = string(&request, "method");
         let p = request.get("params").cloned().unwrap_or_else(|| json!({}));
-        if !request.is_object()
-            || !p.is_object()
-            || !request["method"].is_string()
-            || !(id.is_null() || id.is_number() || id.is_string())
-        {
-            let mut error = invalid("invalid request shape").wire();
+        if !request.is_object() {
+            let mut error = invalid(if http {
+                "a request is an object"
+            } else {
+                "one JSON-RPC request per frame"
+            })
+            .wire();
             error["code"] = json!(-32600);
             return json!({"jsonrpc":"2.0","id":if id.is_number()||id.is_string(){id}else{Value::Null},"error":error});
         }
         let notification = request.get("id").is_none();
-        let bad_wait = matches!(method, "inbox" | "ask" | "ask_wait")
-            && p.get("wait_s")
-                .is_some_and(|v| v.as_f64().is_none_or(|n| !n.is_finite() || n < 0.0));
         let result = if *self.shutdown.borrow() {
             Err(Error::new("unauthorized", "relay is stopping"))
-        } else if bad_wait {
-            Err(invalid("wait_s must be a number of seconds"))
         } else {
             self.execute(account, connection, method, &p).await
         };
         let result = match result {
             Ok(mut value) if matches!(method, "inbox" | "ask" | "ask_wait") => {
                 let limit = if http {
-                    self.limits.duration("httpWaitS", 25).min(3600)
+                    self.limits.duration("httpWaitS", 25)
                 } else {
                     50
                 };
-                let wait = p.get("wait_s").and_then(Value::as_f64).unwrap_or(0.0);
+                let wait = p
+                    .get("wait_s")
+                    .map_or(Some(0.0), Value::as_f64)
+                    .unwrap_or(f64::NAN);
                 if !wait.is_finite() || wait < 0.0 {
                     Err(invalid("wait_s must be a number of seconds"))
                 } else {
                     let now = tokio::time::Instant::now();
                     let deadline = now
-                        .checked_add(Duration::from_secs_f64(wait.min(limit as f64)))
+                        .checked_add(
+                            Duration::try_from_secs_f64(wait.min(limit as f64))
+                                .unwrap_or(Duration::from_secs(u32::MAX as u64)),
+                        )
                         .unwrap_or(now);
                     let sent = if method == "ask" {
                         Some(value.clone())
@@ -412,10 +449,7 @@ impl Hub {
                     };
                     let query_method = if method == "ask" { "ask_wait" } else { method };
                     if method == "ask" {
-                        value = match self
-                            .execute(account, connection, query_method, &query)
-                            .await
-                        {
+                        value = match self.poll(account, connection, query_method, &query).await {
                             Ok(value) => value,
                             Err(e) => return json!({"jsonrpc":"2.0","id":id,"error":e.wire()}),
                         };
@@ -444,10 +478,7 @@ impl Hub {
                             break Ok(value);
                         }
                         tokio::time::sleep(Duration::from_millis(50)).await;
-                        match self
-                            .execute(account, connection, query_method, &query)
-                            .await
-                        {
+                        match self.poll(account, connection, query_method, &query).await {
                             Ok(v) => value = v,
                             Err(e) => break Err(e),
                         }
@@ -464,10 +495,42 @@ impl Hub {
             Err(e) => json!({"jsonrpc":"2.0","id":id,"error":e.wire()}),
         }
     }
+    async fn ack_response(&self, account: &Arc<Mutex<AccountHub>>, id: &str, response: &Value) {
+        let Some(seq) = response["result"]["reply"]["seq"].as_i64() else {
+            return;
+        };
+        for attempt in 0..3 {
+            let result = {
+                let hub = account.lock().await;
+                let Some(c) = hub.connections.get(id) else {
+                    return;
+                };
+                hub.ack(c, &json!({"seqs":[seq]})).await
+            };
+            if result.is_ok() {
+                return;
+            }
+            if attempt < 2 {
+                tokio::time::sleep(Duration::from_millis(25 << attempt)).await;
+            }
+        }
+        tracing::warn!("reply acknowledgement unavailable");
+    }
     /// Register an upgrade before returning HTTP 101, including pending upgrades.
-    pub fn track(self: &Arc<Self>) -> SocketLease {
+    pub async fn track(self: &Arc<Self>, grant: &Grant) -> Option<SocketLease> {
+        let account = self.account(grant).await;
+        let hub = account.lock().await;
+        let count = hub.sockets.load(Ordering::Acquire);
+        if hub
+            .limits
+            .cap("sockets")
+            .is_some_and(|cap| count as u64 >= cap)
+        {
+            return None;
+        }
+        hub.sockets.fetch_add(1, Ordering::AcqRel);
         self.active.fetch_add(1, Ordering::AcqRel);
-        SocketLease(self.clone())
+        Some(SocketLease(self.clone(), hub.sockets.clone()))
     }
     /// Wait for accepted socket tasks to finish after shutdown is signaled.
     pub async fn wait_closed(&self) {
@@ -499,15 +562,6 @@ impl Hub {
         let socket_id = crate::random("socket_");
         {
             let mut hub = account.lock().await;
-            if hub.connections.len() >= 4096 {
-                let _ = sink
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1013,
-                        reason: "too many connections".into(),
-                    })))
-                    .await;
-                return;
-            }
             hub.connections.insert(
                 socket_id.clone(),
                 Connection {
@@ -572,37 +626,26 @@ impl Hub {
         );
         let expiry = tokio::time::sleep(expires);
         tokio::pin!(expiry);
-        let mut revalidate = tokio::time::interval(Duration::from_millis(revalidate_ms.max(1)));
-        revalidate.tick().await;
+        let revalidate = tokio::time::sleep(Duration::from_millis(revalidate_ms.max(1)));
+        tokio::pin!(revalidate);
         let mut writer_finished = false;
         let mut polls = tokio::task::JoinSet::new();
-        let mut revalidation_error = None;
         loop {
             tokio::select! {
                 _=&mut writer=>{writer_finished=true;break;},
-                _=&mut expiry=>{handle.close(4001,"expired");break;},
-                _=revalidate.tick()=>{
-                    match self.store.credential_by_id(&grant.token_id,crate::now_ms()).await {
-                        Ok(CredentialLookup::Active(identity))=>{
-                            revalidation_error = None;
-                            let fresh = crate::http::grant(&identity);
-                            if fresh.user_id != grant.user_id || fresh.actor_id != grant.actor_id || fresh.scoped != grant.scoped || fresh.role != grant.role || fresh.labels != grant.labels {
-                                account.lock().await.revoke(&grant.token_id).await;
-                                handle.finish(Closure { code: 1008, reason: "revoked".into(), notification: Some(json!({"jsonrpc":"2.0","method":"revoked","params":{"reason":"grant changed"}}).to_string()) }); break;
-                            }
-                        },
-                        Ok(CredentialLookup::Expired)=>{handle.close(4001,"expired");break;},
-                        Ok(_)=>{account.lock().await.revoke(&grant.token_id).await; handle.finish(Closure { code: 1008, reason: "revoked".into(), notification: Some(json!({"jsonrpc":"2.0","method":"revoked","params":{"reason":"revoked"}}).to_string()) });break;},
-                        Err(_)=>{
-                            let since = revalidation_error.get_or_insert_with(tokio::time::Instant::now);
-                            if since.elapsed() >= Duration::from_millis(revalidate_ms.max(1)) {handle.close(1013,"credential revalidation unavailable");break;}
-                        },
-                    }
+                _=&mut expiry=>{account.lock().await.kick(&socket_id, "the token grant expired, reconnect", 4001).await;break;},
+                _=&mut revalidate=>{
+                    let now = crate::now_ms();
+                    let result = self.store.credential_by_id(&grant.token_id, now).await;
+                    let retry = account.lock().await.revalidated(&socket_id, result, now).await;
+                    if handle.close.borrow().is_some() { break; }
+                    let delay = limits::revalidate_delay(revalidate_ms, retry);
+                    revalidate.as_mut().reset(tokio::time::Instant::now() + delay);
                 },
                 _=polls.join_next(), if !polls.is_empty()=>{},
                 incoming=stream.next()=>match incoming {
                     Some(Ok(Message::Text(text)))=>{
-                        if text.len()>frame_bytes {handle.close(1009,"frame too large");break;}
+                        if text.len()>frame_bytes {handle.frame_too_large(frame_bytes);break;}
                         let body = match serde_json::from_str::<Value>(&text) {
                             Ok(body) => body,
                             Err(_) => {handle.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse_error"}}).to_string());continue;}
@@ -610,7 +653,7 @@ impl Hub {
                         if matches!(string(&body,"method"),"inbox"|"ask"|"ask_wait") && body["params"]["wait_s"].as_f64().is_some_and(|s|s>0.0) {
                             if polls.len() >= 32 {handle.close(1013,"too many pending requests");break;}
                             let hub = self.clone();let account = account.clone();let id = socket_id.clone();let output = handle.clone();
-                            polls.spawn(async move {let response=hub.call(&account,&id,body,false).await;if !response.is_null(){output.send(response.to_string());}});
+                            polls.spawn(async move {let response=hub.call(&account,&id,body,false).await;if !response.is_null() && output.send(response.to_string()) {hub.ack_response(&account,&id,&response).await;}});
                             continue;
                         }
                         let replay = string(&body, "method") == "subscribe";
@@ -618,11 +661,12 @@ impl Hub {
                         if !response.is_null() {
                             let sent = if replay { handle.send_wait(response.to_string()).await } else { handle.send(response.to_string()) };
                             if !sent { break; }
+                            self.ack_response(&account, &socket_id, &response).await;
                         }
                     },
                     Some(Ok(Message::Binary(_)))=>{handle.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"text frames required","data":{"code":"invalid_params"}}}).to_string());},
                     Some(Ok(Message::Close(_)))|None=>{handle.close(1000,"closed");break;},
-                    Some(Err(_))=>{handle.close(1009,"invalid or oversized frame");break;},
+                    Some(Err(_))=>{handle.frame_too_large(frame_bytes);break;},
                     _=>{},
                 }
             }

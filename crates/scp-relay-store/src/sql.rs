@@ -333,7 +333,10 @@ impl Transaction {
             )
             .await?;
             self.execute("DELETE FROM activity WHERE account_id=$1 AND id NOT IN (SELECT id FROM activity WHERE account_id=$1 ORDER BY id DESC LIMIT 5000)",args![a]).await?;
-            self.execute("DELETE FROM hub_state WHERE account_id=$1 AND CASE WHEN key LIKE 'pause:%' OR key LIKE 'denied:%' THEN CAST(payload AS BIGINT) END <= $2",args![a,now]).await?;
+            self.execute("DELETE FROM hub_state WHERE account_id=$1 AND CASE WHEN key LIKE 'pause:%' THEN CAST(payload AS BIGINT) END <= $2",args![a,now]).await?;
+        }
+        if let Some(before) = changes.denied_before {
+            self.execute("DELETE FROM hub_state WHERE account_id=$1 AND key LIKE 'denied:%' AND CAST(payload AS BIGINT)<=$2", args![a, before]).await?;
         }
         if changes.purge {
             for table in [
@@ -422,6 +425,14 @@ impl Transaction {
         }
         for v in changes.tombstones {
             self.execute("INSERT INTO machine_tombstones(account_id,name,at,payload,actor_id,user_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(account_id,name) DO UPDATE SET at=excluded.at,payload=excluded.payload,actor_id=excluded.actor_id,user_id=excluded.user_id",args![a,&v.name,v.at,&json(&v)?,&v.actor_id,&v.user_id]).await?;
+        }
+        // Free names before upserts so a transaction can swap them.
+        for e in &changes.endpoints {
+            self.execute(
+                "UPDATE endpoints SET handle=$1 WHERE account_id=$2 AND id=$3",
+                args![&format!("\u{1}{}", e.id), a, &e.id],
+            )
+            .await?;
         }
         for e in changes.endpoints {
             valid(&e.fields)?;
@@ -663,9 +674,6 @@ impl<T: Backend> RelayStore for T {
     }
     async fn xprune(&self, a: &str) -> Result<u64> {
         self.db().xprune(a).await
-    }
-    async fn stored_bytes(&self, a: &str) -> Result<i64> {
-        self.db().rows(match self.db() { Database::Sqlite(_)=>"SELECT COALESCE(SUM(length(CAST(envelope AS BLOB))),0) AS n FROM messages WHERE account_id=$1", Database::Postgres(_)=>"SELECT COALESCE(SUM(octet_length(envelope)),0)::bigint AS n FROM messages WHERE account_id=$1" },args![a]).await?[0].int("n")
     }
     async fn create_member(&self, m: Member) -> Result<()> {
         let mut t = self
@@ -1067,6 +1075,23 @@ impl<T: Backend> RelayStore for T {
                 args![a, id],
             )
             .await
+    }
+    async fn stored_bytes(&self, a: &str) -> Result<u64> {
+        let sql = match self.db() {
+            Database::Sqlite(_) => {
+                "SELECT (SELECT COALESCE(SUM(length(CAST(json_extract(envelope,'$.body.text') AS BLOB))),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(length(CAST(message AS BLOB))),0) FROM xinbox WHERE account_id=$1) AS n"
+            }
+            Database::Postgres(_) => {
+                "SELECT ((SELECT COALESCE(SUM(octet_length(envelope::jsonb #>> '{body,text}')),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(octet_length(message)),0) FROM xinbox WHERE account_id=$1))::bigint AS n"
+            }
+        };
+        Ok(self
+            .db()
+            .rows(sql, args![a])
+            .await?
+            .first()
+            .ok_or(StoreError::NotFound)?
+            .int("n")? as u64)
     }
     async fn sent_count(&self, a: &str, since: i64) -> Result<i64> {
         self.db().rows("SELECT COUNT(*) AS n FROM messages WHERE account_id=$1 AND created_at>=$2 AND from_ep!='system' AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=messages.account_id AND x.id=messages.id)",args![a,since]).await?.first().ok_or(StoreError::NotFound)?.int("n")

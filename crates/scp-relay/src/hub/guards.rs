@@ -47,7 +47,7 @@ impl AccountHub {
             .await?
             >= 2000
         {
-            return Err(Error::rate("daily message limit", 3600));
+            return Err(Error::rate("2000 messages in the last day", 3600));
         }
         let received_parent = if let Some(parent) = parent {
             self.store

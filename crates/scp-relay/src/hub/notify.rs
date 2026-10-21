@@ -167,6 +167,25 @@ impl AccountHub {
             }
         }
         self.connections.remove(id);
+        if let Some(g) = &c.grant
+            && !self.connections.values().any(|other| {
+                other.socket.is_some()
+                    && other
+                        .grant
+                        .as_ref()
+                        .is_some_and(|grant| grant.token_id == g.token_id)
+            })
+        {
+            self.revalidation_errors.remove(&g.token_id);
+            let _ = self
+                .store
+                .put_state(
+                    &self.account_id,
+                    &format!("revalidate_error:{}", g.token_id),
+                    None,
+                )
+                .await;
+        }
         if !self
             .connections
             .values()
@@ -191,15 +210,9 @@ impl AccountHub {
                 });
             }
         }
-        let until = now.saturating_add(
-            self.limits
-                .duration("deniedS", 3600)
-                .saturating_mul(1000)
-                .min(i64::MAX as u64) as i64,
-        );
         changes
             .states
-            .push((format!("denied:{token}"), Some(json!(until).to_string())));
+            .push((format!("denied:{token}"), Some(json!(now).to_string())));
         let _ = self.store.hub_write(&self.account_id, changes).await;
     }
     pub(super) async fn delivery_value(&self, d: &Delivery, inbox: bool) -> Result<Value> {
