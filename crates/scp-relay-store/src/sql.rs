@@ -1091,7 +1091,7 @@ impl<T: Backend> RelayStore for T {
                 "SELECT (SELECT COALESCE(SUM(length(CAST(json_extract(envelope,'$.body.text') AS BLOB))),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(length(CAST(message AS BLOB))),0) FROM xinbox WHERE account_id=$1) AS n"
             }
             Database::Postgres(_) => {
-                "SELECT ((SELECT COALESCE(SUM(octet_length(envelope::jsonb #>> '{body,text}')),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(octet_length(message)),0) FROM xinbox WHERE account_id=$1))::bigint AS n"
+                "SELECT ((SELECT COALESCE(SUM(octet_length(replace(envelope, E'\\\\u0000', E'\\\\u0001')::jsonb #>> '{body,text}')),0) FROM messages m WHERE account_id=$1 AND NOT EXISTS (SELECT 1 FROM xinbox x WHERE x.account_id=m.account_id AND x.id=m.id))+(SELECT COALESCE(SUM(octet_length(message)),0) FROM xinbox WHERE account_id=$1))::bigint AS n"
             }
         };
         Ok(self

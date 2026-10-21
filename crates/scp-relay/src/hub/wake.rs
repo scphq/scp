@@ -684,7 +684,8 @@ async fn post_wake(waker: &Value, event: Value, now: i64) -> Outcome {
             while bytes.len() <= 4096
                 && let Some(chunk) = response.chunk().await?
             {
-                bytes.extend_from_slice(&chunk);
+                let room = 4097 - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(room)]);
             }
             serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
                 v["declined"]

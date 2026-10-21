@@ -1625,7 +1625,7 @@ async fn limits_suite(s: Arc<dyn RelayStore>) {
         to_addr: "host/c".into(),
         created_at: 1,
         expires_at: 100,
-        envelope: serde_json::json!({"body":{"text":"ü🙂"}}).to_string(),
+        envelope: serde_json::json!({"body":{"text":"ü\u{0}🙂"}}).to_string(),
     };
     let mut delivery = s
         .store_message(
@@ -1641,11 +1641,11 @@ async fn limits_suite(s: Arc<dyn RelayStore>) {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(s.stored_bytes("limits").await.unwrap(), 6);
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 7);
     assert_eq!(s.stored_bytes("missing").await.unwrap(), 0);
     delivery.acked_at = Some(2);
     s.update_delivery("limits", delivery).await.unwrap();
-    assert_eq!(s.stored_bytes("limits").await.unwrap(), 6);
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 7);
     s.hub_write(
         "limits",
         HubWrite {
@@ -1655,7 +1655,7 @@ async fn limits_suite(s: Arc<dyn RelayStore>) {
     )
     .await
     .unwrap();
-    assert_eq!(s.stored_bytes("limits").await.unwrap(), 6);
+    assert_eq!(s.stored_bytes("limits").await.unwrap(), 7);
     s.hub_write(
         "limits",
         HubWrite {
