@@ -74,3 +74,87 @@ jobs:
       # Runs `next build`, then bundles the Cloudflare worker; nothing is deployed.
       - name: Build the site
         run: bun run --filter @scp-dev/web build:worker
+
+  rust:
+    name: Rust relay
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: crates
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SCP_RELAY_TEST_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+  conformance:
+    name: Relay conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the relay
+        working-directory: crates
+        run: cargo build --locked --bin scp-relay
+
+      # ts always runs; the two variables add rust-sqlite and rust-pg.
+      - name: Conformance against ts, rust-sqlite and rust-pg
+        env:
+          SCP_RELAY_BIN: ${{ github.workspace }}/crates/target/debug/scp-relay
+          SCP_CONFORMANCE_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
+        run: bun test packages/conformance
