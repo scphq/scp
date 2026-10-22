@@ -5,11 +5,12 @@ import sys
 import tarfile
 import zipfile
 
-command, target, root = sys.argv[1:]
+command, target, root = sys.argv[1:4]
+base = sys.argv[4] if len(sys.argv) > 4 else "scp-relay"
 root = pathlib.Path(root)
-name = f"scp-relay-{target}"
+name = f"{base}-{target}"
 windows = "windows" in target
-binary = "scp-relay.exe" if windows else "scp-relay"
+binary = base + (".exe" if windows else "")
 archive = root / (name + (".zip" if windows else ".tar.gz"))
 if command == "pack":
     root.mkdir(parents=True, exist_ok=True)

@@ -3,24 +3,27 @@
 // leaves dependents live on npm that point at a name that 404s.
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { nativeNames } from "./native-version";
 import { relayAnchor } from "./relay-version";
 
 type Manifest = { name: string; private?: boolean };
 const manifest = (path: string) => JSON.parse(readFileSync(path, "utf8")) as Manifest;
 
-// The workspace packages `changeset publish` would upload: every non-private member.
+// Native packages publish before the non-private workspace members.
 export function publishTargets(root = resolve(import.meta.dir, "..")): string[] {
   const anchor = manifest(join(root, relayAnchor));
   if (anchor.private !== true) throw new Error(`${relayAnchor} must stay private: the relay publishes from release-relay.yml`);
   const workspaces: string[] = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).workspaces;
-  return workspaces
-    .flatMap((pattern) => [...new Bun.Glob(pattern).scanSync({ cwd: root, onlyFiles: false })])
-    .map((dir) => join(root, dir, "package.json"))
-    .filter((path) => existsSync(path))
-    .map(manifest)
-    .filter((entry) => entry.private !== true)
-    .map((entry) => entry.name)
-    .sort();
+  return [
+    ...nativeNames,
+    ...workspaces
+      .flatMap((pattern) => [...new Bun.Glob(pattern).scanSync({ cwd: root, onlyFiles: false })])
+      .map((dir) => join(root, dir, "package.json"))
+      .filter((path) => existsSync(path))
+      .map(manifest)
+      .filter((entry) => entry.private !== true)
+      .map((entry) => entry.name),
+  ].sort();
 }
 
 if (import.meta.main) {

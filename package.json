@@ -11,7 +11,7 @@
     "build:packages": "bun run --filter './packages/*' build",
     "build": "bun run build:packages && bun run --filter @scp-dev/web build",
     "changeset": "changeset",
-    "version-packages": "changeset version && bun scripts/relay-version.ts sync && bun install --lockfile-only",
+    "version-packages": "changeset version && bun scripts/relay-version.ts sync && bun scripts/native-version.ts sync && bun install --lockfile-only",
     "release": "bun run build:packages && bun scripts/pin-workspace-deps.ts && changeset publish"
   },
   "devDependencies": {
