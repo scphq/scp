@@ -1191,7 +1191,7 @@ const WORD = String.raw`[^\s'";|&<>\x60$\\]*`
 const QUOTED = String.raw`(?:[^']|'\\'')*`
 const wordEnding = (ending: string) => `(?:${WORD}/${ending}|${ending}|'${QUOTED}/${ending}'|'${ending}')`
 const OURS = new RegExp(
-  `^(?:${wordEnding(CLI_NAME)}\\s+hook(?:\\s|$)|${wordEnding("node")}\\s+(?:${WORD}/(?:@scp-dev|packages)/cli/dist/cli\\.js|'${QUOTED}/(?:@scp-dev|packages)/cli/dist/cli\\.js')\\s+hook\\s+[a-z][a-z0-9-]*(?:\\s|$))`,
+  `^(?:${wordEnding("scp-hook")}\\s+)?(?:${wordEnding(CLI_NAME)}\\s+hook(?:\\s|$)|${wordEnding("node")}\\s+(?:${WORD}/(?:@scp-dev|packages)/cli/dist/cli\\.js|'${QUOTED}/(?:@scp-dev|packages)/cli/dist/cli\\.js')\\s+hook\\s+[a-z][a-z0-9-]*(?:\\s|$))`,
 )
 
 /** `word` as one POSIX shell word */
@@ -1248,7 +1248,7 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>, 
 }
 
 /** Root sessions receive context and wake while idle, and a message to a server with no session yet opens one; failed or aborted sessions do not hold the stop. */
-export function opencodePlugin(options: { blockStop?: boolean } = {}): string {
+export function opencodePlugin(options: { blockStop?: boolean; launcher?: string[] } = {}): string {
   return `// scp: reports this session to the local SCP broker and hands it new messages
 import { spawn } from "node:child_process"
 import { text as readAll } from "node:stream/consumers"
@@ -1260,7 +1260,7 @@ type Reply = { hookSpecificOutput?: { additionalContext?: unknown }; decision?: 
 
 const hook = async (payload: Record<string, unknown>, wait: boolean, inject = true, hold = BLOCK_STOP): Promise<Reply> => {
   try {
-    const args = ["${CLI_NAME}", "hook", "opencode", ...(hold ? ["${BLOCK_STOP}"] : []), ...(inject ? [] : ["${NO_INJECT}"])]
+    const args = [${(options.launcher ?? [CLI_NAME]).map((word) => JSON.stringify(word)).join(", ")}, "hook", "opencode", ...(hold ? ["${BLOCK_STOP}"] : []), ...(inject ? [] : ["${NO_INJECT}"])]
     const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", wait ? "pipe" : "ignore", "ignore"] })
     const ended = new Promise<void>((resolve, reject) => {
       child.once("error", reject)
@@ -1316,7 +1316,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
         const began = Date.now()
         let text: string | undefined
         try {
-          const args = ["${CLI_NAME}", "hook", "opencode", "${WAKE}", "50"]
+          const args = [${(options.launcher ?? [CLI_NAME]).map((word) => JSON.stringify(word)).join(", ")}, "hook", "opencode", "${WAKE}", "50"]
           const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", "pipe", "ignore"] })
           waiter = child
           const ended = new Promise<void>((resolve, reject) => {
@@ -1440,8 +1440,12 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
 type AgyHandler = { type: "command"; command: string; timeout: number }
 
 /** agy names events in argv and receives context before model calls, never after tools. */
-export function agyHookSet(options: { blockStop?: boolean } = {}): Record<string, unknown> {
-  const handler = (event: string, timeout = 1): AgyHandler => ({ type: "command", command: `${HOOK_COMMAND} agy ${event}`, timeout })
+export function agyHookSet(options: { blockStop?: boolean; launcher?: string[] } = {}): Record<string, unknown> {
+  const handler = (event: string, timeout = 1): AgyHandler => ({
+    type: "command",
+    command: `${options.launcher ? `${options.launcher.map(shellQuote).join(" ")} hook` : HOOK_COMMAND} agy ${event}`,
+    timeout,
+  })
   return {
     enabled: true,
     SessionStart: [handler("SessionStart", 2)],
@@ -1452,12 +1456,12 @@ export function agyHookSet(options: { blockStop?: boolean } = {}): Record<string
 }
 
 /** the Muse plugin manifest: Muse loads hooks only from plugins, and applies no background hook's output; the stop's timeout covers its push wait */
-export function musePlugin(options: { blockStop?: boolean; pushWait?: number } = {}): Record<string, unknown> {
+export function musePlugin(options: { blockStop?: boolean; pushWait?: number; launcher?: string[] } = {}): Record<string, unknown> {
   const stop = stopArgs(options)
   const hook = (id: string, event: string, extra: Record<string, unknown> = {}) => ({
     id,
     event,
-    command: [CLI_NAME, "hook", "muse", event],
+    command: [...(options.launcher ?? [CLI_NAME]), "hook", "muse", event],
     timeoutMs: 5000,
     ...extra,
   })
@@ -1473,7 +1477,7 @@ export function musePlugin(options: { blockStop?: boolean; pushWait?: number } =
         hook("session-start", "SessionStart", { async: true }),
         hook("prompt", "UserPromptSubmit"),
         hook("post-tool", "PostToolUse"),
-        { ...hook("stop", "Stop"), command: [CLI_NAME, "hook", "muse", "Stop", ...stop.args], timeoutMs: stop.timeout * 1000 },
+        { ...hook("stop", "Stop"), command: [...(options.launcher ?? [CLI_NAME]), "hook", "muse", "Stop", ...stop.args], timeoutMs: stop.timeout * 1000 },
         hook("session-end", "SessionEnd", { timeoutMs: 2000 }),
       ],
     },

@@ -28,6 +28,7 @@ import { RelayUsage } from "./common"
 import { AGY_HOOK_SET, agyHookSet, BLOCK_STOP, claudeVersionFile, hasOurHooks, hookEntries, mergeHooks, musePlugin, opencodePlugin, shellQuote } from "./hooks"
 import { hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
+import { nativeHook } from "./native"
 import { launcher } from "./launcher"
 import { coworkSetup } from "./cowork"
 import { CLAUDE_DESKTOP_HELP, claudeDesktopSetup, parseClaudeDesktopArgs } from "./mcpb"
@@ -44,7 +45,7 @@ const SERVER = "scp"
 const HOOKED = new Set<SetupHarness>(["claude", "codex", "opencode", "agy", "muse"])
 const VERIFY_TIMEOUT_MS = 60_000
 
-export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--join auto|manual] [--undo] [--bin PATH] [--harness H]
+export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--join auto|manual] [--undo] [--bin PATH] [--harness H] [--engine auto|ts|native]
   mounts the relay MCP shim in every installed harness (claude, codex, opencode, grok, muse, agy) at user scope, running
   the ${CLI_NAME} PATH finds (by that path) or --bin, and installs the relay hooks at user scope (Muse's as a plugin). Prints
   the plan; --write applies it (each file backed up next to itself as <file>.bak-<time>, its mode kept), then checks
@@ -56,6 +57,8 @@ export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [
   install --push-wait), so results arrive by themselves. --no-hooks mounts the MCP shim only.
   --join auto (the default) puts every hooked session on the relay when it starts; --join manual keeps a session off it
   until it runs ${CLI_NAME} join <name> (or calls relay_join); saved in ~/.config/scp/config.json with --write.
+  --engine auto uses a matching native hook client when installed; ts forces Node, native requires it.
+  SCP_ENGINE sets the default engine; SCP_HOOK_BIN overrides the native binary path.
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
   The Claude Code and codex hooks and every mount run ${CLI_NAME} by absolute paths (a node script as absolute node plus its
   real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or ${CLI_NAME}.
@@ -82,6 +85,7 @@ export type Runner = (argv: string[], cwd?: string) => RunResult
 
 export interface SetupOptions {
   cowork?: boolean
+  engine?: "auto" | "ts" | "native"
   write?: boolean
   undo?: boolean
   /** false: the MCP shim only (--no-hooks); the hooks are installed, or with `undo` removed, otherwise */
@@ -478,6 +482,7 @@ interface Ctx {
   added: Added[]
   wanted: SetupHarness[]
   blockStop: boolean
+  native?: string
   /** the argv prefix the Claude Code and codex hooks run, which desktop apps start without the login shell's PATH */
   hookLaunch?: string[]
 }
@@ -737,7 +742,7 @@ function planAgyRules(plan: Plan, ctx: Ctx, remove: boolean) {
 const launcherPrefixes = (launch?: string[]): string[] => (launch ? [launch.map(shellQuote).join(" ")] : [])
 
 function hookContent(kind: Hooked, existing: string | undefined, blockStop: boolean, launch?: string[]): string {
-  const options = { blockStop }
+  const options = { blockStop, ...(launch ? { launcher: launch } : {}) }
   if (kind === "opencode") return opencodePlugin(options)
   if (kind === "muse") return `${JSON.stringify(musePlugin(options), null, 2)}\n`
   const settings = existing === undefined ? {} : (JSON.parse(existing) as unknown)
@@ -745,7 +750,7 @@ function hookContent(kind: Hooked, existing: string | undefined, blockStop: bool
     if (!isObject(settings)) throw new Error("not a JSON object")
     return `${JSON.stringify({ ...settings, [AGY_HOOK_SET]: agyHookSet(options) }, null, 2)}\n`
   }
-  return `${JSON.stringify(mergeHooks(settings, hookEntries(kind, { ...options, ...(launch ? { launcher: launch } : {}) }), launcherPrefixes(launch)), null, 2)}\n`
+  return `${JSON.stringify(mergeHooks(settings, hookEntries(kind, options), launcherPrefixes(launch)), null, 2)}\n`
 }
 
 /** what `hooks install --scope user --write` would write, or undefined when the file already has it */
@@ -843,7 +848,7 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
   const file = hooksTarget(kind, "user", env, cwd)
   const had = holdsStops(kind, file)
   const blockStop = ctx.blockStop || had
-  const launch = kind === "claude" || kind === "codex" ? ctx.hookLaunch : undefined
+  const launch = kind === "claude" || kind === "codex" ? ctx.hookLaunch : ctx.native ? [ctx.native, CLI_NAME] : undefined
   plan.hooks.set(harness, { kind, file, blockStop, ...(launch ? { launch } : {}) })
   if (kind === "claude" || kind === "codex") {
     const others =
@@ -895,7 +900,7 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
       file,
       plan: [head, ...commands.map(shown), ...(review ? ["approves its hooks: a headless muse exec runs no hook Muse holds for review"] : [])],
       apply: () => {
-        const next = install ? desiredHooks(kind, file, blockStop) : undefined
+        const next = install ? desiredHooks(kind, file, blockStop, launch) : undefined
         const saved = next === undefined ? undefined : writeFile(file, next, now, { mode: 0o644 })
         for (const argv of commands) {
           const result = run(argv)
@@ -1206,6 +1211,11 @@ export function verifyMusePlugin(cli: string, dir: string, run: (argv: string[])
 /** `swarm setup`: the plan, and with `write` its application and a check per harness */
 export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
   const env = deps.env
+  const engine = options.engine ?? env.SCP_ENGINE ?? "auto"
+  if (!["auto", "ts", "native"].includes(engine)) throw new RelayUsage("--engine and SCP_ENGINE take auto, ts or native")
+  const native = engine === "ts" || options.undo || options.hooks === false || options.cowork ? undefined : nativeHook(env, deps.version ?? "0.0.0")
+  if (engine === "native" && !native && !options.undo && options.hooks !== false && !options.cowork)
+    throw new RelayUsage("Native hook client missing, not executable, or version differs from CLI; install the matching native package or set SCP_HOOK_BIN")
   if (options.cowork) {
     if (options.undo || options.harness !== undefined || options.hooks !== undefined || options.blockStop || options.join !== undefined)
       throw new RelayUsage("--cowork takes only --bin and optionally --write")
@@ -1281,9 +1291,10 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
       hooks = false
       unresolved++
     } else if (hooks) {
-      hookLaunch = launcher(onPath!, env, which).argv
+      hookLaunch = [...(native ? [native] : []), ...launcher(onPath!, env, which).argv]
+      if (native) out(`native hooks: ${native} (version ${deps.version ?? "0.0.0"}); prefixes each harness hook command`)
       out(
-        `hooks run: ${hookLaunch.map(shellWord).join(" ")} for claude and codex, whose desktop apps start them without your PATH; ${CLI_NAME} from each harness's PATH for the others (${onPath} here${options.bin !== undefined ? ", not --bin" : ""})`,
+        `hooks run: ${hookLaunch.map(shellWord).join(" ")} for claude and codex, whose desktop apps start them without your PATH; ${native ? `${shellWord(native)} ${CLI_NAME}` : CLI_NAME} from each harness's PATH for the others (${onPath} here${options.bin !== undefined ? ", not --bin" : ""})`,
       )
     }
   }
@@ -1296,7 +1307,18 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
     )
 
   const plan: Plan = { steps: [], lines: [], problems: 0, hooks: new Map() }
-  const ctx: Ctx = { env, cwd: deps.cwd, now, run, found, added, wanted, blockStop: options.blockStop === true, ...(hookLaunch ? { hookLaunch } : {}) }
+  const ctx: Ctx = {
+    env,
+    cwd: deps.cwd,
+    now,
+    run,
+    found,
+    added,
+    wanted,
+    blockStop: options.blockStop === true,
+    ...(native ? { native } : {}),
+    ...(hookLaunch ? { hookLaunch } : {}),
+  }
   for (const harness of options.undo ? wanted : selected) {
     if (options.undo) planUnmount(plan, harness, ctx)
     else planMount(plan, harness, mounts.argv, ctx)
@@ -1424,6 +1446,7 @@ export function parseSetupArgs(args: string[]): SetupOptions | "help" {
     "no-hooks": { type: "boolean" },
     "block-stop-on-unread": { type: "boolean" },
     bin: { type: "string" },
+    engine: { type: "string" },
     harness: { type: "string" },
     join: { type: "string" },
     help: { type: "boolean", short: "h" },
@@ -1439,11 +1462,18 @@ export function parseSetupArgs(args: string[]): SetupOptions | "help" {
   } catch (error) {
     throw new RelayUsage(message(error))
   }
-  const { help, hooks, "no-hooks": noHooks, "block-stop-on-unread": blockStop, join: joins, ...rest } = parsed.values
+  const { help, hooks, "no-hooks": noHooks, "block-stop-on-unread": blockStop, join: joins, engine, ...rest } = parsed.values
   if (help) return "help"
+  if (engine !== undefined && engine !== "auto" && engine !== "ts" && engine !== "native") throw new RelayUsage("--engine takes auto, ts or native")
   if (joins !== undefined && joins !== "auto" && joins !== "manual") throw new RelayUsage("--join takes auto or manual")
   if (hooks && noHooks) throw new RelayUsage("--hooks and --no-hooks contradict each other; the hooks are installed unless --no-hooks")
-  return { ...rest, ...(noHooks ? { hooks: false } : {}), ...(blockStop ? { blockStop } : {}), ...(joins !== undefined ? { join: joins as JoinMode } : {}) }
+  return {
+    ...rest,
+    ...(engine ? { engine } : {}),
+    ...(noHooks ? { hooks: false } : {}),
+    ...(blockStop ? { blockStop } : {}),
+    ...(joins !== undefined ? { join: joins as JoinMode } : {}),
+  }
 }
 
 /** parses setup flags before the shared command parser */
