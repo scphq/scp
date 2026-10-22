@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { readOwnedFile } from "./owned-file"
 import { join } from "node:path"
 
 /**
@@ -18,7 +19,7 @@ function markerPath(dir: string, session: string): string {
 
 export function readSessionMarker(dir: string, session: string): SessionMarker | undefined {
   try {
-    const value = JSON.parse(readFileSync(markerPath(dir, session), "utf8")) as Partial<SessionMarker>
+    const value = JSON.parse(readOwnedFile(markerPath(dir, session))) as Partial<SessionMarker>
     if (typeof value?.joined !== "boolean") return undefined
     return { joined: value.joined, ...(typeof value.handle === "string" ? { handle: value.handle } : {}) }
   } catch {
