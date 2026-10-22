@@ -10,6 +10,7 @@ import { deriveHandle } from "./identity"
 import { joinMode } from "./relay"
 import { entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF } from "./term"
+import { safeCwd } from "./cwd"
 
 export const CHANNEL_FLAGS = ["--dangerously-load-development-channels", "server:scp"]
 
@@ -119,7 +120,7 @@ export function namePrompt(name: string | undefined, args: string[], env: Env, c
 }
 
 /** why Claude Code's scp mount cannot wake this session, with the fix, else undefined; user, local and project scopes count */
-export function mountHint(env: Env, cwd: string = process.cwd()): string | undefined {
+export function mountHint(env: Env, cwd: string = safeCwd()): string | undefined {
   const file = mcpFile("claude", env)
   const entries: Record<string, unknown>[] = []
   try {
@@ -307,7 +308,7 @@ export async function claudeCommand(
   argv: string[],
   env: Env = process.env,
   err: (line: string) => void = (line) => void process.stderr.write(`${line}\n`),
-  cwd: string = process.cwd(),
+  cwd: string = safeCwd(),
   deps: ClaudeDeps = {},
 ): Promise<number> {
   if (argv[0] === "--help" || argv[0] === "-h") {

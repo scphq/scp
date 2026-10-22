@@ -19,6 +19,7 @@ import {
   writeShimBinding,
 } from "./identity"
 import { membership } from "./session"
+import { safeCwd } from "./cwd"
 
 /** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
 const ORPHAN_CHECK_MS = 5000
@@ -40,7 +41,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     ...(values.as !== undefined ? { as: values.as } : {}),
     ...(values.harness !== undefined ? { harness: values.harness } : {}),
     fallbackHarness: "mcp",
-    cwd: process.cwd(),
+    cwd: safeCwd(),
     env: process.env,
     harnessPid: () => {
       pid ??= launcherPid(process.env) ?? harnessPid()

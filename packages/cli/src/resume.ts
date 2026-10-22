@@ -14,6 +14,7 @@ import { relayIdentity } from "./identity"
 import { hooksTarget } from "./install"
 import { whichOnPath } from "./setup"
 import { agyNote, messagingAllow } from "./spawn"
+import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -185,7 +186,7 @@ export async function resumeCommand(
   harness: ResumeHarness,
   args: string[],
   env: Env = process.env,
-  cwd: string = process.cwd(),
+  cwd: string = safeCwd(),
   err: (line: string) => void = (line) => void process.stderr.write(`${line}\n`),
 ): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {

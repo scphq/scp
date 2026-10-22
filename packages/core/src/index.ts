@@ -7,6 +7,7 @@ export {
   newId,
   randomHex,
   RelayCore,
+  type Shown,
   seqList,
   SYSTEM_HANDLE,
   TITLE_CHARS,
