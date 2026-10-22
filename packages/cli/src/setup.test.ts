@@ -1300,3 +1300,67 @@ test("hook ownership matches only a launcher at the start of the command", () =>
   expect(mergeHooks(settings, {}, [prefix])).toEqual({ hooks: {} })
   expect(mergeHooks(settings, {}, [`${prefix}-other`])).toEqual(settings)
 })
+
+describe("native setup hooks", () => {
+  function native(f: Fixture, version = "0.0.0", path = join(f.home, "native", "scp-hook")) {
+    put(path, `#!/bin/sh\nprintf 'scp-hook ${version}\\n'\n`, 0o755)
+    f.env.SCP_HOOK_BIN = path
+    return path
+  }
+
+  test("matching binary prefixes every harness command", () => {
+    const f = fixture()
+    const bin = native(f)
+    setup(f, { write: true })
+    const claude = readFileSync(join(f.home, ".claude/settings.json"), "utf8")
+    expect(claude).toContain(`${bin} ${f.swarm} hook claude`)
+    expect(readFileSync(join(f.home, ".codex/hooks.json"), "utf8")).toContain(`${bin} ${f.swarm} hook codex`)
+    expect(readFileSync(join(f.home, ".gemini/config/hooks.json"), "utf8")).toContain(`${bin} swarm hook agy`)
+    expect(readFileSync(join(f.home, ".config/scp/muse-plugin/.muse-plugin/plugin.json"), "utf8")).toContain(bin)
+    expect(readFileSync(join(f.home, ".config/opencode/plugin/scp.ts"), "utf8")).toContain(bin)
+  })
+
+  test("wrong version and missing binaries fall back or fail when required", () => {
+    const f = fixture()
+    native(f, "9.9.9")
+    expect(setup(f).text).not.toContain(`${f.env.SCP_HOOK_BIN} ${f.swarm} hook`)
+    expect(() => setup(f, { engine: "native" })).toThrow("Native hook client")
+    f.env.SCP_HOOK_BIN = join(f.home, "missing")
+    expect(() => setup(f, { engine: "native" })).toThrow("Native hook client")
+    expect(setup(f).code).toBe(0)
+  })
+
+  test("ts flag and environment bypass matching native binary", () => {
+    for (const env of [false, true]) {
+      const f = fixture()
+      native(f)
+      if (env) f.env.SCP_ENGINE = "ts"
+      setup(f, { write: true, ...(env ? {} : { engine: "ts" as const }) })
+      expect(readFileSync(join(f.home, ".claude/settings.json"), "utf8")).not.toContain(f.env.SCP_HOOK_BIN!)
+    }
+    expect(parseSetupArgs(["--engine", "native"])).toEqual({ engine: "native" })
+    expect(() => parseSetupArgs(["--engine", "bad"])).toThrow("--engine")
+  })
+
+  test("upgrade replaces stale native paths and preserves unrelated commands", () => {
+    const f = fixture()
+    native(f)
+    setup(f, { write: true })
+    const file = join(f.home, ".claude/settings.json")
+    const previous = readFileSync(file, "utf8")
+    const bin = native(f, "0.0.0", join(f.home, "upgraded", "scp-hook"))
+    setup(f, { write: true })
+    const current = readFileSync(file, "utf8")
+    expect(current).not.toBe(previous)
+    expect(current).toContain(bin)
+    expect(current).not.toContain(join(f.home, "native", "scp-hook"))
+    const commands = ["swarm hook claude", "/old/swarm hook codex", "'/old space/swarm' hook claude", "/old/node /old/@scp-dev/cli/dist/cli.js hook claude"]
+    for (const launch of commands) {
+      for (const prefix of ["", "/old/scp-hook ", "'/old space/scp-hook' "]) {
+        const config = { hooks: { Stop: [{ hooks: [{ command: prefix + launch }] }] } }
+        expect(mergeHooks(config, {})).toEqual({ hooks: {} })
+      }
+    }
+    expect(mergeHooks({ hooks: { Stop: [{ hooks: [{ command: "echo /old/scp-hook swarm hook claude" }] }] } }, {})).toHaveProperty("hooks.Stop")
+  })
+})

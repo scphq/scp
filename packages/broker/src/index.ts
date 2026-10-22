@@ -17,3 +17,6 @@ export { accountHome, localHostName, policyPath, privateDir, relayDir, shortHost
 export type { Deliver } from "./judge-gate"
 export { startBroker, type Broker, type BrokerOptions, type LinkContext, type LinkFactory } from "./server"
 export { readSessionMarker, type SessionMarker, writeSessionMarker } from "./sessions"
+
+export type { HookParams, HookProc, HookResult, HookContext, HookHandler } from "./hook"
+export { openOwnedFile, readOwnedFile } from "./owned-file"

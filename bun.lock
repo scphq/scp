@@ -81,6 +81,13 @@
         "opencode-ai": "1.18.34",
         "tsup": "^8.5.1",
       },
+      "optionalDependencies": {
+        "@scp-dev/native-darwin-arm64": "0.12.3",
+        "@scp-dev/native-darwin-x64": "0.12.3",
+        "@scp-dev/native-linux-arm64-gnu": "0.12.3",
+        "@scp-dev/native-linux-x64-gnu": "0.12.3",
+        "@scp-dev/native-linux-x64-musl": "0.12.3",
+      },
     },
     "packages/conformance": {
       "name": "@scp-dev/conformance",
