@@ -13,6 +13,7 @@ import { RelayUsage, startDaemon } from "./common"
 import { relayIdentity } from "./identity"
 import { whichOnPath } from "./setup"
 import { WebSocketLink } from "./websocket"
+import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -362,7 +363,7 @@ export class T3Waker {
 export async function t3codeCommand(
   args: string[],
   env: Env = process.env,
-  cwd: string = process.cwd(),
+  cwd: string = safeCwd(),
   err: (line: string) => void = (line) => void process.stderr.write(`${line}\n`),
 ): Promise<number> {
   if (args[0] === "--help" || args[0] === "-h") {

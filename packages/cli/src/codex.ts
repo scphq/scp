@@ -17,6 +17,7 @@ import { CODEX_VALUED, readPsTable, relayIdentity } from "./identity"
 import { codexMount, codexOverrides, toml } from "./spawn"
 import { SELF } from "./term"
 import { WebSocketLink } from "./websocket"
+import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -375,7 +376,7 @@ export async function codexCommand(args: string[]): Promise<number> {
     process.stdout.write(`${CODEX_HELP}\n`)
     return 0
   }
-  const cwd = process.cwd()
+  const cwd = safeCwd()
   const parsed = codexLaunch(args, process.env, SELF)
   const resume = parsed.resume !== undefined || optionsBefore(parsed.codexArgs).includes("resume")
   const attribution = await attribute("codex", { ...parsed, resume }, process.env, cwd, (line) => void process.stderr.write(`${line}\n`))

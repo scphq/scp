@@ -307,8 +307,10 @@ export class BrokerUnavailable extends Error {
 
 /** how long a connect keeps trying by default: a busy or restarting broker, or one it started */
 export const CONNECT_BUDGET_MS = 12_000
+/** the first pause between two tries, doubling after each */
+export const RETRY_MIN_MS = 50
 /** the longest pause between two tries */
-const RETRY_MAX_MS = 500
+export const RETRY_MAX_MS = 400
 /** what a full listen backlog or a broker restarting between unlink and listen answers */
 const TRANSIENT = new Set(["ECONNREFUSED", "EAGAIN", "ENOENT"])
 /** environment markers of a sandbox that may refuse unix sockets */
@@ -321,6 +323,12 @@ export interface ConnectRetry {
   retrying?: () => void
   /** the environment checked for sandbox markers (default process.env) */
   env?: Record<string, string | undefined>
+}
+
+/** the pause before try `attempt + 1`: {@link RETRY_MIN_MS} doubling, up to half again in jitter, never above {@link RETRY_MAX_MS} or `left` */
+export function retryDelay(attempt: number, left: number, random: () => number = Math.random): number {
+  const base = Math.min(RETRY_MAX_MS, RETRY_MIN_MS * 2 ** attempt)
+  return Math.max(0, Math.min(left, RETRY_MAX_MS, base * (1 + random() / 2)))
 }
 
 /** whether the broker for `dir` is running: its lock is held, or, when the lock cannot be probed, its pid is alive */
@@ -391,6 +399,6 @@ export async function connectBroker(dir: string, start?: () => void, retry: numb
       )
     }
     if (attempt === 0) options.retrying?.()
-    await sleep(Math.min(left, Math.min(RETRY_MAX_MS, 25 * 2 ** attempt) * (0.5 + Math.random() / 2)))
+    await sleep(retryDelay(attempt, left))
   }
 }

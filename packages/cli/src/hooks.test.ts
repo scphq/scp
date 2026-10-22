@@ -9,6 +9,7 @@ import {
   BLOCK_STOP,
   claudeVersionFile,
   HOOK_CONNECT_MS,
+  HOOK_DEADLINE_MS,
   hookReply,
   hookRetry,
   mapHookPayload,
@@ -867,7 +868,7 @@ describe("swarm hook", () => {
       expect(
         await run(
           (text) => printed.push(text) > 0,
-          () => (asked++ === 0 ? 1500 : 50),
+          () => (asked++ < 2 ? 1500 : 50),
         ),
       ).toBeUndefined()
       expect(printed).toHaveLength(1)
@@ -1211,26 +1212,18 @@ describe("swarm hook", () => {
     writeFileSync(join(busy, "broker.lock"), `${process.pid}:${Math.floor(Date.now() / 1000)}`, { mode: 0o600 })
     const result = await hook(["claude"], { hook_event_name: "PostToolUse", tool_name: "Read", tool_input: {} }, { SCP_DIR: busy, CLAUDECODE: "1" })
     expect(result).toMatchObject({ stdout: "", code: 0 })
-    expect(result.stderr).toStartWith(
-      "swarm hook: relay broker unreachable, hook skipped: the relay broker is running but did not accept a connection within 3000 ms",
-    )
+    expect(result.stderr).toStartWith("swarm hook: relay broker unreachable, hook skipped: the relay broker is running but did not accept a connection within")
     expect(result.stderr.trim().split("\n")).toHaveLength(1)
-    expect(result.ms).toBeGreaterThanOrEqual(HOOK_CONNECT_MS)
-    expect(result.ms).toBeLessThan(5000)
+    expect(result.ms).toBeLessThan(HOOK_DEADLINE_MS + 500)
   })
 })
 
-test("a hook's connect budget is capped, extending its deadline only where the harness's timeout leaves room", () => {
-  const set: number[] = []
-  const options = (remaining: number) => ({ remaining: () => remaining, deadline: (ms: number) => void set.push(ms) })
-  const extended = hookRetry(options(1400), Date.now() - 100, true)
-  expect(extended.budgetMs).toBe(HOOK_CONNECT_MS)
-  extended.retrying?.()
-  expect(set[0]).toBeGreaterThanOrEqual(4100)
-  expect(set[0]).toBeLessThan(4300)
-  expect(hookRetry(options(900), Date.now(), false)).toEqual({ budgetMs: 0 })
-  expect(hookRetry(options(2500), Date.now(), false)).toEqual({ budgetMs: 1500 })
-  expect(hookRetry(options(60_000), Date.now(), false)).toEqual({ budgetMs: HOOK_CONNECT_MS })
+test("a hook's connect budget is what its deadline leaves past the round trip, at most HOOK_CONNECT_MS", () => {
+  const options = (remaining: number) => ({ remaining: () => remaining })
+  expect(hookRetry(options(900))).toEqual({ budgetMs: 0 })
+  expect(hookRetry(options(2500))).toEqual({ budgetMs: 1500 })
+  expect(hookRetry(options(60_000))).toEqual({ budgetMs: HOOK_CONNECT_MS })
+  expect(hookRetry({})).toEqual({ budgetMs: HOOK_CONNECT_MS })
 })
 
 describe("a stop's nudges", () => {

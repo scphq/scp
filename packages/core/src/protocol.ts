@@ -54,6 +54,10 @@ export const LIMITS = {
   deferredSettleMs: 2000,
   listOfflineWithinS: 86_400,
   handleBoundS: 30 * 86_400,
+  /** how long an offline child endpoint (a subagent's, a worker's) or a `_gone_` row that nothing references stays before the sweep retires it */
+  endpointRetireS: 86_400,
+  /** the most endpoint rows one sweep retires */
+  endpointRetireMax: 1000,
   idempotencyS: 86_400,
   auditKeepS: 30 * 86_400,
   noteChars: 280,

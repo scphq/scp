@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { capture } from "./term"
+import { safeCwd } from "./cwd"
 import { tmpdir } from "node:os"
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path"
 import type { Claim } from "@scp-dev/core"
@@ -243,7 +244,7 @@ export function sessionKey(env: Env, harnessProcess: string): string {
 /** when `pid` started, as ps prints it in the C locale, with spaces as `-` */
 export function psStart(pid: number): string | undefined {
   try {
-    const started = (capture(["ps", "-o", "lstart=", "-p", String(pid)], { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" }) ?? "")
+    const started = (capture(["ps", "-o", "lstart=", "-p", String(pid)], { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" }, PS_TIMEOUT_MS) ?? "")
       .trim()
       .replace(/\s+/g, "-")
     return /^[A-Za-z0-9:-]{1,64}$/.test(started) ? started : undefined
@@ -278,10 +279,13 @@ export function parsePsCommTable(text: string): PsCommTable {
   return table
 }
 
-/** one ps call for the whole process table, in the C locale; undefined when ps cannot run */
+/** how long the process table read may take: a loaded machine's ps otherwise eats a hook's whole budget */
+export const PS_TIMEOUT_MS = 1500
+
+/** one ps call for the whole process table, in the C locale; undefined when ps cannot run or takes over {@link PS_TIMEOUT_MS} */
 export function readPsTable(): PsCommTable | undefined {
   try {
-    const table = capture(["ps", "-ww", "-axo", "pid=,ppid=,lstart=,args="], { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" })
+    const table = capture(["ps", "-ww", "-axo", "pid=,ppid=,lstart=,args="], { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" }, PS_TIMEOUT_MS)
     return table === undefined ? undefined : parsePsCommTable(table)
   } catch {
     return undefined
@@ -399,9 +403,9 @@ function workspaceRoots(): string[] {
       return path
     }
   }
-  const found = [process.cwd(), tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
+  const found = [safeCwd(), tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
   try {
-    const top = capture(["git", "rev-parse", "--show-toplevel"])
+    const top = capture(["git", "rev-parse", "--show-toplevel"], undefined, PS_TIMEOUT_MS)
     if (top !== undefined) found.push(top.trim())
   } catch {}
   roots = [...new Set(found.filter(Boolean).map(real))]
@@ -705,7 +709,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const harnessProcess = launched?.launcher ?? own
   const claimed = launched?.launcher ? Number(BINDING_PROCESS.exec(launched.launcher)![1]) : pid
   const env = launched?.session ? { ...input.env, SCP_SESSION: launched.session } : input.env
-  const keys = input.lineageOf ? input.lineageOf(claimed) : lineage(claimed, ps())
+  const keys = input.lineageOf ? input.lineageOf(claimed) : lineage(claimed, ps() ?? new Map())
   const harnessSession =
     provider === "claude-code"
       ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id))

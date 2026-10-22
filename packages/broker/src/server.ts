@@ -900,7 +900,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (join !== undefined && (typeof join !== "object" || join === null || Array.isArray(join)))
           throw new RelayError("invalid_params", "join is {handle?, under?}")
         const under = (join as { under?: unknown } | undefined)?.under
-        const before = new Map(core.list({ all: true }).map((view) => [view.id, view]))
+        const before = join === undefined ? core.claimViews(params.claim) : new Map(core.list({ all: true }).map((view) => [view.id, view]))
         const { endpoint, subagent, created } =
           join === undefined
             ? core.claim((params.claim ?? {}) as Claim, { transient: true })
@@ -917,7 +917,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (join !== undefined) membership(endpoint, core.sessionOf(endpoint.id), true, was?.slice(was.lastIndexOf("/") + 1))
         const tookOver = join !== undefined && [...before.values()].some((view) => view.id !== endpoint.id && view.address === endpoint.address)
         if (tookOver || (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent)) bridge?.resync()
-        else if ((before.get(endpoint.id)?.presence ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
+        else if ((before.get(endpoint.id)?.presence ?? known.get(endpoint.id) ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
         return {
           endpoint,
           ...(subagent ? { subagent, ...(created ? { created } : {}) } : {}),
@@ -967,7 +967,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       let token: string | undefined
       let endpoint: EndpointView
-      const before = new Map(core.list({ all: true }).map((view) => [view.id, view]))
+      const before =
+        params.resume === undefined ? core.claimViews(params.human === true ? undefined : params.claim, params.human === true) : new Map<string, EndpointView>()
       if (typeof params.resume === "string") endpoint = core.resume(params.resume)
       else if (params.human === true) {
         s.data.tty = params.tty === true
@@ -983,9 +984,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       s.data.human = endpoint.kind === "human"
       s.data.brief = params.brief === true
       s.data.cwd = typeof params.cwd === "string" ? params.cwd : (endpoint.cwd ?? undefined)
-      known.set(endpoint.id, endpoint.presence)
       const was = before.get(endpoint.id)
-      const moved = (was?.presence ?? "offline") !== endpoint.presence || (was !== undefined && was.address !== endpoint.address)
+      const moved = (was?.presence ?? known.get(endpoint.id) ?? "offline") !== endpoint.presence || (was !== undefined && was.address !== endpoint.address)
+      known.set(endpoint.id, endpoint.presence)
       if (!s.data.brief && moved) {
         notifyFleet({ type: "presence", endpoint: endpoint.address, presence: endpoint.presence, harness: endpoint.harness, labels: endpoint.labels })
       }

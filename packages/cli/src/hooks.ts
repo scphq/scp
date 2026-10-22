@@ -40,6 +40,7 @@ import {
   relayIdentity,
   sessionKey,
 } from "./identity"
+import { safeCwd } from "./cwd"
 import { membership } from "./session"
 
 export { SUBAGENT }
@@ -232,7 +233,9 @@ export interface HookOptions extends Pick<IdentityInput, "startOf" | "psTable"> 
   stdin: AsyncIterable<string | Uint8Array>
   /** a broker connection, started when `start` and none runs, retried as `retry` says */
   connect: (start: boolean, retry?: ConnectRetry) => Promise<RelayClient>
-  /** sets the process deadline, in ms from the hook's start */
+  /** when the hook process started, epoch ms (default when runHook is called); `deadline` counts from it */
+  began?: number
+  /** sets the process deadline, in ms from {@link began} */
   deadline?: (ms: number) => void
   /** ms left before the process deadline */
   remaining?: () => number
@@ -613,27 +616,33 @@ export function recordAgyConversation(payload: Json, env: Env): void {
   } catch {}
 }
 
-/** the most a hook waits for a busy or restarting broker: with the round trip after it, inside the harnesses' 5 s hook timeouts */
-export const HOOK_CONNECT_MS = 3000
+/** a hook's deadline, from process start: the harnesses kill a hook 5 s after spawning it, the runtime's cold start included */
+export const HOOK_DEADLINE_MS = 3500
+/** a session end's deadline, from process start: its handler times out after 2 s */
+export const SESSION_END_DEADLINE_MS = 1800
+/** agy's deadline once the CLI has loaded (its handlers time out after 1 s), within {@link HOOK_DEADLINE_MS} */
+export const AGY_DEADLINE_MS = 900
 /** what a hook keeps for its round trip, printing and confirming once connected */
 const HOOK_AFTER_CONNECT_MS = 1000
+/** the most a hook waits for a busy or restarting broker */
+export const HOOK_CONNECT_MS = HOOK_DEADLINE_MS - HOOK_AFTER_CONNECT_MS
 
-/** a hook's connect retry: at most {@link HOOK_CONNECT_MS}, its deadline extended to cover a retry where `extend`, else within what is left */
-export function hookRetry(options: Pick<HookOptions, "remaining" | "deadline">, began: number, extend: boolean): ConnectRetry {
-  if (!extend) {
-    const left = options.remaining?.() ?? HOOK_CONNECT_MS + HOOK_AFTER_CONNECT_MS
-    return { budgetMs: Math.max(0, Math.min(HOOK_CONNECT_MS, left - HOOK_AFTER_CONNECT_MS)) }
-  }
-  return {
-    budgetMs: HOOK_CONNECT_MS,
-    retrying: () => options.deadline?.(Date.now() - began + Math.max(options.remaining?.() ?? 0, HOOK_CONNECT_MS + HOOK_AFTER_CONNECT_MS)),
-  }
+/** a hook's connect retry: what is left of its deadline past {@link HOOK_AFTER_CONNECT_MS}, at most {@link HOOK_CONNECT_MS} */
+export function hookRetry(options: Pick<HookOptions, "remaining">): ConnectRetry {
+  const left = options.remaining?.() ?? HOOK_DEADLINE_MS
+  return { budgetMs: Math.max(0, Math.floor(Math.min(HOOK_CONNECT_MS, left - HOOK_AFTER_CONNECT_MS))) }
+}
+
+/** when a hook process must be done, epoch ms: {@link HOOK_DEADLINE_MS} after `origin` (process start), agy's sooner once `loaded` */
+export function hookEnds(agy: boolean, origin: number, loaded: number): number {
+  const ceiling = origin + HOOK_DEADLINE_MS
+  return agy ? Math.min(ceiling, loaded + AGY_DEADLINE_MS) : ceiling
 }
 
 /** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
 export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
   if (args.includes("--cowork-only") && options.env.CLAUDE_CODE_IS_COWORK !== "1") return
-  const began = Date.now()
+  const began = options.began ?? Date.now()
   const blockStop = args.includes(BLOCK_STOP)
   const takes = !args.includes(NO_INJECT)
   const subagents = args.includes(SUBAGENT)
@@ -670,8 +679,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       ? subagentOf(payload)
       : undefined
   if ((subagents || child) && !sub) return
-  if (event.kind === "session_end") options.deadline?.(1000)
-  if (event.kind === "session_start") options.deadline?.(1500)
+  if (event.kind === "session_end") options.deadline?.(SESSION_END_DEADLINE_MS)
   const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
   const started = (options.startOf ?? psStart)(pid)
   const keyed = membership(
@@ -713,7 +721,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   const stop = event.kind === "stop" && named === "stop" && ended
   const counts = stop || (format === "opencode" && event.kind === "prompt")
   if (sub && !SUBAGENT_HARNESSES.has(format)) return
-  const client = await options.connect(event.kind === "session_start", hookRetry(options, began, format !== "agy" && event.kind !== "session_end"))
+  const client = await options.connect(event.kind === "session_start", hookRetry(options))
   if (sub) {
     try {
       return await subagentHook(client, claim, format, sub, event, takes, options)
@@ -857,8 +865,8 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
   })
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
-  options.deadline?.(waitMs + PUSH_PRINT_MS + 1000)
-  const client = await options.connect(false, hookRetry(options, Date.now(), false))
+  options.deadline?.(Date.now() - (options.began ?? Date.now()) + waitMs + PUSH_PRINT_MS + HOOK_AFTER_CONNECT_MS)
+  const client = await options.connect(false, hookRetry(options))
   try {
     await client.hello({ transient: true, claim })
     await client.request("wake", { via: OPENCODE_WAKE }).catch(() => {})
@@ -1005,10 +1013,9 @@ async function push(
   return reply
 }
 
-/** Hooks exit silently within 1500 ms (agy: 900 ms), unless a worker wait extends the deadline. */
-export async function relayHookCommand(args: string[], startDaemon: (dir: string) => void): Promise<number> {
+/** Hooks exit silently {@link HOOK_DEADLINE_MS} after process start (agy: sooner), unless a worker wait extends the deadline. */
+export async function relayHookCommand(args: string[], startDaemon: (dir: string) => void, origin: number = performance.timeOrigin): Promise<number> {
   if (args.includes("--cowork-only") && process.env.CLAUDE_CODE_IS_COWORK !== "1") return 0
-  const started = Date.now()
   const agy = args[0] === "agy"
   let printed = false
   let stopping = false
@@ -1032,11 +1039,11 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
     if (!printed) quit()
   }
   if (args.includes(WAKE)) process.on("SIGTERM", terminate)
-  let ends = started + (agy ? 900 : 1500)
-  let timer = setTimeout(quit, ends - Date.now())
+  let ends = hookEnds(agy, origin, Date.now())
+  let timer = setTimeout(quit, Math.max(0, ends - Date.now()))
   const deadline = (ms: number) => {
     clearTimeout(timer)
-    ends = started + ms
+    ends = origin + ms
     timer = setTimeout(quit, Math.max(0, ends - Date.now()))
   }
   const preread = prereadStdin()
@@ -1045,8 +1052,9 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
     print(
       await runHook(args, {
         env: process.env,
-        cwd: process.cwd(),
+        cwd: safeCwd(),
         stdin: preread === undefined ? process.stdin : Readable.from([preread]),
+        began: origin,
         deadline,
         remaining: () => ends - Date.now(),
         print,

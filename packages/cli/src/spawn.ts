@@ -73,6 +73,7 @@ import { SELF, note } from "./term"
 
 export { SPAWN_HELP } from "./help-spawn"
 export { SPAWN_RUNNER, spawnEnvironment } from "./common"
+import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -463,7 +464,7 @@ export function harnessArgv(
   env: Env,
   self: string[] = SELF,
   mount: (env: Env) => Json | undefined = codexMount,
-  cwd: string = process.cwd(),
+  cwd: string = safeCwd(),
   probe: (program: string, env: Env) => boolean = codexSkipsGitCheck,
 ): string[] {
   const at = programAt(command)

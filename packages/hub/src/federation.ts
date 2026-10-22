@@ -8,6 +8,7 @@ import {
   type CoreOptions,
   effectiveSelector,
   type EndpointKind,
+  type Shown,
   type EndpointRow,
   type EndpointView,
   type Envelope,
@@ -507,7 +508,7 @@ export class FederatedCore extends RelayCore {
     return (a.parent_addr !== null && a.parent_addr === kb) || (b.parent_addr !== null && b.parent_addr === ka)
   }
 
-  protected override linkedParent(row: EndpointRow, shown?: Set<string>): string | null {
+  protected override linkedParent(row: EndpointRow, shown?: Shown): string | null {
     const key = row.parent_addr
     if (!key) return null
     const parent = this.byKey(key)
@@ -519,7 +520,7 @@ export class FederatedCore extends RelayCore {
    * a live mirrored row shows the presence its machine mirrored, not one its last_seen decays to here; a hibernated one stays hibernated with
    * its hook wake after its bridge closed, and `waking` while a wake its machine waker accepted has not timed out
    */
-  protected override view(row: EndpointRow, shown?: Set<string>): EndpointView {
+  protected override view(row: EndpointRow, shown?: Shown): EndpointView {
     const view = super.view(row, shown)
     const { remote, mirrored_presence: mirrored, waking_until: waking } = row as FederatedRow
     if (remote && mirrored === "hibernated")
@@ -530,6 +531,10 @@ export class FederatedCore extends RelayCore {
         ...(waking !== null && waking !== undefined && waking > this.now() ? { waking: true as const } : {}),
       }
     return remote && row.connections > 0 && (mirrored === "online" || mirrored === "idle") ? { ...view, presence: mirrored } : view
+  }
+
+  protected override recentAlso(): string {
+    return "(remote IS NOT NULL AND mirrored_presence = 'hibernated')"
   }
 
   protected override hibernated(row: EndpointRow): boolean {

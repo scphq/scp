@@ -11,6 +11,7 @@ import { RelayUsage, startDaemon } from "./common"
 import { processKey, relayIdentity, writeMuseLaunch } from "./identity"
 import { mcpFile, mountedEntry } from "./setup"
 import { MUSE_MODE, MUSE_MODES_ALLOWED, museModes } from "./spawn"
+import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -269,7 +270,7 @@ export async function museCommand(args: string[]): Promise<number> {
     process.stdout.write(`${MUSE_HELP}\n`)
     return 0
   }
-  const cwd = process.cwd()
+  const cwd = safeCwd()
   const log = (line: string) => void process.stderr.write(`${line}\n`)
   const parsed = museLaunch(args, process.env)
   try {
