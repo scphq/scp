@@ -183,7 +183,7 @@ export async function relayHookRpc(
     }
   })
   const result = await client.request<HookResult>("hook", shrinkHook(params))
-  if (result.stderr) stderr(result.stderr.replace(/[\r\n]+/g, " "))
+  if (result.stderr) stderr(result.stderr.split(/\r?\n/)[0]!)
   if (result.stdout && (await print(result.stdout)) && result.commit && Date.now() < params.ends) await client.request("hook_commit", { commit: result.commit })
   return result
 }
