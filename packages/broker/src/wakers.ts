@@ -48,7 +48,7 @@ export function parseWakers(value: unknown): WakerConfigs {
 export interface Wakers {
   /** whether a waker is configured for `provider` */
   known(provider: string): boolean
-  /** runs the endpoint's wake hook when one is due; never throws, never waits */
+  /** runs the endpoint's wake hook when one is due, or once the one running ends; never throws, never waits */
   kick(endpoint: string): void
   /** kills the hooks still running */
   stop(): void
@@ -74,6 +74,8 @@ export function startWakers(options: {
   changed: (endpoint: string) => void
 }): Wakers {
   const busy = new Set<string>()
+  /** endpoints kicked while their hook ran: kicked again once it ends */
+  const missed = new Set<string>()
   const children = new Set<ChildProcess>()
   let stopped = false
   let fixed: WakerConfigs | null = null
@@ -125,6 +127,7 @@ export function startWakers(options: {
     } catch (error) {
       options.log(`relay broker: a wake result was not recorded: ${message(error)}`)
     }
+    if (missed.delete(job.endpoint)) kick(job.endpoint)
   }
 
   /** runs the waker with stdin `input`, keeping the head of its stdout for a decline */
@@ -204,28 +207,34 @@ export function startWakers(options: {
     finish(job, started, { ok: result.ok, code: result.code ?? null, ...(declined ? { declined } : { error: result.error ?? null }) })
   }
 
+  function kick(endpoint: string) {
+    try {
+      if (stopped) return
+      if (busy.has(endpoint)) {
+        missed.add(endpoint)
+        return
+      }
+      const job = options.core.wakeDue(endpoint, options.now())
+      if (!job) return
+      busy.add(endpoint)
+      const config = configs()[job.provider]
+      if (!config) {
+        finish(job, options.now(), { ok: false, error: `no waker ${job.provider} is configured` })
+        return
+      }
+      run(job, config).catch((error: unknown) => {
+        busy.delete(endpoint)
+        options.log(`relay broker: a wake hook failed: ${message(error)}`)
+      })
+    } catch (error) {
+      busy.delete(endpoint)
+      options.log(`relay broker: a wake hook did not start: ${message(error)}`)
+    }
+  }
+
   return {
     known: (provider) => Object.hasOwn(configs(), provider),
-    kick(endpoint) {
-      try {
-        if (stopped || busy.has(endpoint)) return
-        const job = options.core.wakeDue(endpoint, options.now())
-        if (!job) return
-        busy.add(endpoint)
-        const config = configs()[job.provider]
-        if (!config) {
-          finish(job, options.now(), { ok: false, error: `no waker ${job.provider} is configured` })
-          return
-        }
-        run(job, config).catch((error: unknown) => {
-          busy.delete(endpoint)
-          options.log(`relay broker: a wake hook failed: ${message(error)}`)
-        })
-      } catch (error) {
-        busy.delete(endpoint)
-        options.log(`relay broker: a wake hook did not start: ${message(error)}`)
-      }
-    },
+    kick,
     stop() {
       stopped = true
       for (const child of children) kill(child)

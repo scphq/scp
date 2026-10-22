@@ -62,6 +62,7 @@ import { exitFlushed, FAILED, note, parseSeconds, printTable, SELF } from "./ter
 
 /** how long the built-in spawn waker may take to have its runner hold the worker's endpoint */
 const SPAWN_WAKE_TIMEOUT_S = 60
+const CODEX_WAKE_TIMEOUT_S = 120
 
 /** Brief help; {@link RELAY_HELP} is the full reference. */
 export const RELAY_BRIEF = `${CLI_NAME}: messages between the agent sessions on this machine. Start worker agents, steer them and get their
@@ -660,6 +661,7 @@ export async function relayMain(argv: string[], cwd = process.cwd()): Promise<nu
   }
   if (verb === "mesh") return (await import("./mesh")).meshCommand(rest)
   if (verb === "spawn-wake") return (await import("./hold")).spawnWakeCommand(rest)
+  if (verb === "codex-wake") return (await import("./codex-queue")).codexWakeCommand()
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
@@ -1691,7 +1693,10 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
       bridgeConfig: () => daemonBridge(),
       ...(idleMs !== undefined ? { idleMs } : {}),
       ...(policyFile ? { policyPath: resolve(policyFile) } : {}),
-      builtinWakers: { [SPAWN_PROVIDER]: { command: [...SELF, "spawn-wake"], timeout_s: SPAWN_WAKE_TIMEOUT_S } },
+      builtinWakers: {
+        [SPAWN_PROVIDER]: { command: [...SELF, "spawn-wake"], timeout_s: SPAWN_WAKE_TIMEOUT_S },
+        "codex-queue": { command: [...SELF, "codex-wake"], timeout_s: CODEX_WAKE_TIMEOUT_S },
+      },
     })
   } catch (error) {
     if (error instanceof BrokerRunning) {

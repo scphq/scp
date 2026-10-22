@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
 import { type BrokerInfo, BrokerUnavailable, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
 import {
+  CODEX_THREAD,
   codexShell,
   detectHarness,
   harnessAt,
@@ -157,6 +158,11 @@ const DAEMON_ENV = [
   "SCP_TOKEN",
   "SCP_RELAY",
   "SCP_MACHINE",
+  "CODEX_HOME",
+  "SCP_CODEX_BIN",
+  "SCP_OPEN_BIN",
+  "SCP_LSOF_BIN",
+  "SCP_FUSER_BIN",
 ]
 const LOG_MAX_BYTES = 1024 * 1024
 
@@ -312,7 +318,8 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
   const joined = !values.as && named && self.length ? membership(process.env, sessionKey(process.env, self.at(-1)!)) : {}
   const handle = "handle" in joined && joined.handle ? joined.handle : named ? localHandle(named) : undefined
   const harnessPid = self.length ? Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]) : undefined
-  const lineageClaim = keys.length ? { lineage: keys } : {}
+  const thread = codexShell(process.env) ? process.env.CODEX_THREAD_ID : undefined
+  const lineageClaim = keys.length ? { lineage: keys, ...(thread && CODEX_THREAD.test(thread) ? { harness_session: thread } : {}) } : {}
   const dir = relayDir()
   const client = await connectShell(dir, "the scp MCP tools (relay_*)")
   try {

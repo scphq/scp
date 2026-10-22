@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type EndpointView, LIMITS, RelayError, type SendResult } from "@scp-dev/core"
@@ -78,5 +78,74 @@ describe("broker, wake", () => {
     await Bun.sleep(100)
     expect(events).toContainEqual(expect.objectContaining({ type: "presence", endpoint: "me/lane", presence: "offline" }))
     expect(await lane()).toBe("offline")
+  })
+
+  test("a broker wake outlasts its hook and harness: each delivery runs its waker, which binds with the run's ticket and confirms the messages", async () => {
+    const root = mkdtempSync(join(tmpdir(), "relay-broker-wake-"))
+    const log = join(root, "woke.log")
+    const waker = join(root, "waker.ts")
+    writeFileSync(
+      waker,
+      `import { appendFileSync } from "node:fs"
+import { RelayClient } from ${JSON.stringify(join(import.meta.dir, "client.ts"))}
+import { socketPath } from ${JSON.stringify(join(import.meta.dir, "paths.ts"))}
+let input = ""
+for await (const chunk of process.stdin) input += String(chunk)
+const client = await RelayClient.connect(socketPath(process.env.SCP_DIR!))
+await client.hello({ observe: true, ticket: process.env.SCP_WAKE_TICKET! })
+const { messages, hold } = await client.request("inbox", { offer: true })
+const seqs = messages.map((m) => m.seq)
+await client.request("injected", { seqs, hold, read: seqs })
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ event: JSON.parse(input), bodies: messages.map((m) => m.body.text) }) + "\\n")
+client.close()
+`,
+    )
+    const broker = await startBroker({
+      dir: join(root, "state"),
+      policyPath: join(root, "policy.json"),
+      idleMs: 0,
+      builtinWakers: { "codex-queue": { command: [process.execPath, waker], timeout_s: 30 } },
+    })
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    cleanups.push(() => broker.stop())
+    const thread = "01a1602d-b655-70a1-b717-0af8f5083d80"
+    const dead = "pid:999999:Fri-Oct-17-09:00:00-2026"
+    const hook = await connect(broker, { transient: true, claim: { handle: "lane", harness: "codex", session: "s1", process: dead, harness_session: thread } })
+    await hook.request("event", { kind: "stop", session_id: thread })
+    expect(await hook.request<object>("wake", { via: "codex-queue" })).toEqual({ changed: true })
+    hook.close()
+    const peer = await connect(broker, { claim: { handle: "peer", harness: "claude-code" } })
+    const lane = () => broker.core.list({ all: true }).find((e) => e.address === "me/lane")!
+    expect(lane().wake).toBe("codex-queue")
+    const woke = () =>
+      existsSync(log)
+        ? readFileSync(log, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line))
+        : []
+    const sent = await peer.request<SendResult>("send", { to: "lane", body: "first" })
+    expect(sent.deliveries[0]).toMatchObject({ wake: "codex-queue" })
+    for (const deadline = Date.now() + 10_000; woke().length < 1 && Date.now() < deadline; ) await Bun.sleep(25)
+    expect(woke()[0]).toMatchObject({ event: { provider: "codex-queue", ref: thread, endpoint: "me/lane" }, bodies: ["first"] })
+    await peer.request("send", { to: "lane", body: "second" })
+    for (const deadline = Date.now() + 10_000; woke().length < 2 && Date.now() < deadline; ) await Bun.sleep(25)
+    expect(woke()[1].bodies).toEqual(["second"])
+    expect(broker.core.hasUnread(lane().id)).toBe(false)
+    const desktop = broker.core.claim(
+      { handle: "codex-desktop", harness: "codex-desktop", session: `codex:${thread}`, process: "pid:999998:x", harness_session: thread },
+      { transient: true },
+    )
+    expect(desktop.endpoint).toMatchObject({ id: lane().id, harness: "codex-desktop", wake: "codex-queue" })
+    const turn = await connect(broker, {
+      transient: true,
+      claim: { harness: "codex-desktop", session: `codex:${thread}`, process: "pid:999998:x", harness_session: thread },
+    })
+    await turn.request("prompted", {})
+    expect(lane().wake).toBeNull()
+    await peer.request("send", { to: "lane", body: "during the turn" })
+    expect(await turn.request<object>("wake", { via: "codex-queue" })).toEqual({ changed: true })
+    for (const deadline = Date.now() + 10_000; woke().length < 3 && Date.now() < deadline; ) await Bun.sleep(25)
+    expect(woke()[2].bodies).toEqual(["during the turn"])
   })
 })

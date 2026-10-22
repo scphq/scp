@@ -622,7 +622,7 @@ export interface IdentityInput {
   startOf?: (pid: number) => string | undefined
   /** process keys of the harness and its ancestors (default {@link lineage}) */
   lineageOf?: (pid: number) => string[]
-  /** a Claude Code hook's payload session id, over $CLAUDE_CODE_SESSION_ID */
+  /** a Claude Code hook's payload session id, over $CLAUDE_CODE_SESSION_ID; a codex hook's thread id, over $CODEX_THREAD_ID and $SCP_CODEX_THREAD */
   harnessSession?: string
   /** whether T3 Code runs the harness process (default {@link t3Hosted}) */
   t3Hosted?: (pid: number) => boolean
@@ -631,8 +631,16 @@ export interface IdentityInput {
 }
 
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+/** a Codex thread id: a UUID of any version */
+export const CODEX_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const APP_SERVER = /(^|\s)app-server(\s|$)/
+/** the session key prefix of a codex thread claimed by its id */
+export const CODEX_THREAD_KEY = "codex:"
 
-/** the claim a shim or hook makes for this harness session; a muse process a launcher left a session and launcher for claims as $SCP_SESSION and $SCP_HARNESS_PID would */
+/**
+ * the claim a shim or hook makes for this harness session; a muse process a launcher left a session and launcher for claims as $SCP_SESSION
+ * and $SCP_HARNESS_PID would. A codex thread an app server hosts beside others (the desktop app, an IDE's) claims by its thread, `codex:<id>`
+ */
 export function relayIdentity(input: IdentityInput): Claim & { handle: string; harness: string; session: string; process: string; cwd: string } {
   const resolved = resolveHarness(input.harness, input.env, input.fallbackHarness)
   const pid = input.harnessPid(resolved)
@@ -654,17 +662,28 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const env = launched?.session ? { ...input.env, SCP_SESSION: launched.session } : input.env
   const keys = input.lineageOf ? input.lineageOf(claimed) : lineage(claimed, ps())
   const harnessSession =
-    provider === "claude-code" ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id)) : undefined
+    provider === "claude-code"
+      ? [input.harnessSession, input.env.CLAUDE_CODE_SESSION_ID].find((id) => id !== undefined && HARNESS_SESSION.test(id))
+      : provider === "codex"
+        ? [input.harnessSession, input.env.CODEX_THREAD_ID, input.env.SCP_CODEX_THREAD].find((id) => id !== undefined && CODEX_THREAD.test(id))
+        : undefined
+  const threaded =
+    harnessSession !== undefined &&
+    (harness === "codex" || harness === "codex-desktop") &&
+    !launched &&
+    !input.env.SCP_SESSION &&
+    !input.env.SCP_SHIM_BINDING &&
+    (harness === "codex-desktop" || APP_SERVER.test(ps()?.get(pid)?.args ?? ""))
   return {
     handle,
     harness,
     cwd,
-    session: sessionKey(env, harnessProcess),
+    session: threaded ? `${CODEX_THREAD_KEY}${harnessSession}` : sessionKey(env, harnessProcess),
     process: harnessProcess,
     labels: labelsFor(input.env),
     ...(input.env.SCP_PARENT ? { parent: input.env.SCP_PARENT } : {}),
     ...(input.env.SCP_UNDER ? { under: input.env.SCP_UNDER } : {}),
-    ...(keys.length ? { lineage: keys } : {}),
+    ...(threaded ? { lineage: keys.filter((key) => key !== own && key !== `pid:${pid}`) } : keys.length ? { lineage: keys } : {}),
     ...(grant ? { grant } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),
   }

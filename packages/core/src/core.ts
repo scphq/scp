@@ -40,6 +40,7 @@ import {
   type StopNudge,
   type StopWaitResult,
   type ThreadMessage,
+  BROKER_WAKES,
   GENERIC_HARNESSES,
   harnessFits,
   keptHarness,
@@ -310,7 +311,10 @@ export interface WakeJob {
   ref: string | null
   message: { id: string; from: string | null; kind: MessageKind; thread: string; created_at: string }
   unread: number
-  /** for provider {@link SPAWN_PROVIDER}: a one-time ticket with which the run's claim takes the endpoint back as its resumed session */
+  /**
+   * for provider {@link SPAWN_PROVIDER}: a one-time ticket with which the run's claim takes the endpoint back as its resumed session; for a
+   * broker wake ({@link BROKER_WAKES}): one that binds the run's connection to the endpoint until the run ends
+   */
   ticket?: string
 }
 
@@ -1024,6 +1028,7 @@ export class RelayCore {
         held.kind === "agent" &&
         ((held.connections === 0 && presenceOf(held, now) === "offline") || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
+        !otherSession(held, fields.harness_session, fields.process) &&
         held.id !== scope.subagent?.root &&
         !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
       ) {
@@ -1134,7 +1139,7 @@ export class RelayCore {
       (row) =>
         (spender === null || spender === row.id) &&
         this.localRow(row) &&
-        harnessFits(row.harness, harness) &&
+        (harnessFits(row.harness, harness) || sameProvider(row.harness, harness)) &&
         presenceOf(row, now) === "offline" &&
         (this.restarts(row, parent, fields.process) || this.redeems(row, scope, { harness, ...fields })),
     )
@@ -1322,6 +1327,13 @@ export class RelayCore {
     return row
   }
 
+  /** the local agent, not hibernated, whose broker wake's waker run in flight got `ticket`: that run binds to it as the agent itself; else null */
+  wakeTicketHolder(ticket: unknown): string | null {
+    if (typeof ticket !== "string" || !WAKE_TICKET.test(ticket)) return null
+    const row = one<EndpointRow>(this.sql, `SELECT * FROM endpoints WHERE kind = 'agent' AND wake_ticket = ?`, this.hash(ticket))
+    return row && row.hibernate === null && this.localRow(row) ? row.id : null
+  }
+
   /**
    * whether the claim re-claims `row` with the grant `row` spent: from `row`'s own process or one of its ancestors, or with no lineage from
    * `row`'s harness and the cwd its claims connect from
@@ -1478,10 +1490,15 @@ export class RelayCore {
     this.sql.all(`UPDATE grants SET used_by = ?, spent_cwd = ?, prompt = NULL WHERE token_hash = ? AND used_by IS NULL`, endpoint, cwd, grant.token_hash)
   }
 
-  /** the endpoint a plain shell's lineage lands on, or null; with `handle`, the one holding it among the endpoints on that lineage key */
-  placeLineage(lineage: unknown, handle?: string): string | null {
+  /**
+   * the endpoint a plain shell's lineage lands on, or null; with `handle`, the one holding it among the endpoints on that lineage key; with
+   * `harnessSession` (threads of one shared harness instance), the one of that session, else the first that reported none; else the first
+   */
+  placeLineage(lineage: unknown, handle?: string, harnessSession?: unknown): string | null {
     const rows = this.lineageRows(lineageKeys(lineage))
-    return (handle === undefined ? rows[0] : rows.find((row) => row.handle === handle))?.id ?? null
+    if (handle !== undefined) return rows.find((row) => row.handle === handle)?.id ?? null
+    if (typeof harnessSession !== "string") return rows[0]?.id ?? null
+    return (rows.find((row) => row.harness_session === harnessSession) ?? rows.find((row) => row.harness_session === null))?.id ?? null
   }
 
   /** whether a shell carrying the spawn-env grant `token` may act as `endpoint`: the endpoint that spent the grant, or one below it */
@@ -1685,7 +1702,7 @@ export class RelayCore {
 
   /**
    * how the session holding an agent endpoint wakes it when idle, one of {@link WAKES}; `none` clears it. Only the process holding the
-   * endpoint sets it through a hook; whether it changed
+   * endpoint sets it through a hook. Setting a broker wake again clears its failure or decline; whether it changed
    */
   setWake(endpoint: string, value: unknown, options: { transient?: boolean; process?: string; ref?: unknown } = {}): boolean {
     if (typeof value !== "string" || !WAKES.includes(value as Wake)) throw new RelayError("invalid_params", `via must be one of ${WAKES.join(", ")}`)
@@ -1697,9 +1714,15 @@ export class RelayCore {
     if (!this.holds(row, options)) return false
     const wake = value === "none" ? null : value
     const hold = options.transient ? row.hold_ref : ref
-    if (row.wake === wake && row.hold_ref === hold) return false
+    const retry = row.wake === wake && brokerWake(row) && (row.wake_note !== null || row.wake_declined !== null)
+    if (row.wake === wake && row.hold_ref === hold && !retry) return false
     this.sql.all(`UPDATE endpoints SET wake = ?, hold_ref = ? WHERE id = ?`, wake, hold, endpoint)
-    return row.wake !== wake
+    if (!row.hibernate && (row.wake !== wake || retry))
+      this.sql.all(
+        `UPDATE endpoints SET wake_tried = NULL, wake_fails = 0, wake_note = NULL, wake_declined = NULL, declined_message = NULL, declined_from = NULL WHERE id = ?`,
+        endpoint,
+      )
+    return row.wake !== wake || retry
   }
 
   /**
@@ -1722,7 +1745,11 @@ export class RelayCore {
 
   /** clears a wake no waker holds once a hook waker's grace ran out too: nothing is left to wake the endpoint */
   private lapseWake(endpoint: string, now: number): void {
-    this.sql.all(`UPDATE endpoints SET wake = NULL WHERE id = ? AND wakers = 0 AND COALESCE(waker_left, 0) < ?`, endpoint, now - LIMITS.restartGraceS * 1000)
+    this.sql.all(
+      `UPDATE endpoints SET wake = NULL WHERE id = ? AND wakers = 0 AND COALESCE(waker_left, 0) < ? AND NOT ${BROKER_WAKE_SQL}`,
+      endpoint,
+      now - LIMITS.restartGraceS * 1000,
+    )
   }
 
   /**
@@ -2264,13 +2291,14 @@ export class RelayCore {
   }
 
   /**
-   * the wake hook run a delivery to a hibernated local agent is due, recorded as tried: none while it is not hibernated, has no unread
+   * the wake hook run a delivery to a hibernated local agent is due, recorded as tried; for a broker wake, its waker's run, with the harness
+   * session as the ref. None while it is neither hibernated nor has a broker wake and a harness session, has no unread
    * message, ran within LIMITS.wakeDebounceS (after failures, a doubling backoff up to LIMITS.wakeBackoffMaxS), or the provider declined a
    * wake for the newest unread message or for another from its sender. The newest unread message's metadata only, never its body
    */
   wakeDue(endpoint: string, now = this.now()): WakeJob | null {
     const row = this.byId(endpoint)
-    if (!row?.hibernate || row.kind !== "agent" || !this.localRow(row)) return null
+    if (!row || (!row.hibernate && !(brokerWake(row) && row.harness_session)) || row.kind !== "agent" || !this.localRow(row)) return null
     if (row.wake_tried !== null) {
       const waitS = row.wake_fails > 0 ? Math.min(LIMITS.wakeDebounceS * 2 ** row.wake_fails, LIMITS.wakeBackoffMaxS) : LIMITS.wakeDebounceS
       if (now - row.wake_tried < waitS * 1000) return null
@@ -2290,15 +2318,15 @@ export class RelayCore {
       endpoint,
       now,
     )!.n
-    const ticket = row.hibernate === SPAWN_PROVIDER ? `kwt_${randomHex(32)}` : undefined
+    const ticket = row.hibernate === SPAWN_PROVIDER || brokerWake(row) ? `kwt_${randomHex(32)}` : undefined
     this.sql.all(`UPDATE endpoints SET wake_tried = ?, wake_ticket = ? WHERE id = ?`, now, ticket ? this.hash(ticket) : null, endpoint)
     const sender = this.byId(newest.from_ep)
     return {
       endpoint,
       address: this.address(row),
       handle: row.handle,
-      provider: row.hibernate,
-      ref: row.wake_ref,
+      provider: row.hibernate ?? row.wake!,
+      ref: row.hibernate ? row.wake_ref : row.harness_session,
       message: { id: newest.id, from: sender ? this.address(sender) : null, kind: newest.kind, thread: newest.thread, created_at: iso(newest.created_at)! },
       unread,
       ...(ticket ? { ticket } : {}),
@@ -2309,7 +2337,8 @@ export class RelayCore {
    * how a wake hook run ended, audited without the ref: a failure counts toward the backoff and shows `wake_failed` while the message stays
    * queued; a decline (`declined`, for the message `message`) shows `wake_declined`, counts toward nothing and holds further runs for that
    * message and its sender until a newer message of another sender or a new hibernate; a success resets both (the hibernation clears once the
-   * session claims its endpoint again). Whether the shown note changed
+   * session claims its endpoint again). A broker wake's run spends its ticket, and a success lets the next delivery run it at once. Whether
+   * the shown note changed
    */
   wakeResult(
     endpoint: string,
@@ -2321,13 +2350,14 @@ export class RelayCore {
     const declined = result.ok ? null : wakeDeclineOf(result.declined)
     this.audit("wake", endpoint, null, {
       target: this.address(row),
-      provider: row.hibernate,
+      provider: row.hibernate ?? row.wake,
       ok: result.ok,
       ...(result.code !== undefined && result.code !== null ? { code: result.code } : {}),
       ms: Math.max(0, Math.round(result.ms)),
       ...(declined ? { declined } : error ? { error } : {}),
     })
-    if (!row.hibernate) return false
+    if (!row.hibernate) this.sql.all(`UPDATE endpoints SET wake_ticket = NULL${result.ok ? ", wake_tried = NULL" : ""} WHERE id = ?`, endpoint)
+    if (!row.hibernate && !brokerWake(row)) return false
     if (declined) {
       const message = result.message ? one<{ from_ep: string }>(this.sql, `SELECT from_ep FROM messages WHERE id = ?`, result.message) : undefined
       this.sql.all(
@@ -2811,7 +2841,7 @@ export class RelayCore {
    * to its idle in-process subagents, tagged `for` the subagent and without a relation: confirming marks them injected, never read, so they stay
    * in the subagent's inbox while no hook of it shows them again
    */
-  offer(endpoint: string, options: { limit?: number; subagents?: boolean } = {}): { messages: Envelope[]; hold: string | null } {
+  offer(endpoint: string, options: { limit?: number; subagents?: boolean; holdS?: number } = {}): { messages: Envelope[]; hold: string | null } {
     const now = this.now()
     const limit = Math.min(Math.max(1, Math.floor(options.limit ?? LIMITS.inboxPage)), LIMITS.inboxPage)
     const subagents = options.subagents ? this.idleSubagents(endpoint, now) : new Map<string, NonNullable<Envelope["for"]>>()
@@ -2829,6 +2859,7 @@ export class RelayCore {
     const hold = this.hold(
       rows.map((row) => row.seq),
       now,
+      options.holdS,
     )
     this.received(endpoint, rows, now)
     for (const id of subagents.keys())
@@ -3159,8 +3190,14 @@ export class RelayCore {
   prompted(endpoint: string, options: { transient?: boolean; process?: string } = {}): boolean {
     if (!this.holds(this.mustEndpoint(endpoint), options)) return false
     this.sql.all(`UPDATE endpoints SET prompts = COALESCE(prompts, 0) + 1, pushes = 0 WHERE id = ?`, endpoint)
+    this.turnRuns(endpoint)
     this.settle(endpoint)
     return true
+  }
+
+  /** a turn of the session runs, so its hooks deliver: a broker wake clears until its stop sets it again */
+  private turnRuns(endpoint: string): void {
+    this.sql.all(`UPDATE endpoints SET wake = NULL WHERE id = ? AND hibernate IS NULL AND ${BROKER_WAKE_SQL}`, endpoint)
   }
 
   /** whether a prompt should remind the agent to refresh its status note: `every` prompts passed since the note or the last reminder; counts the reminder */
@@ -3381,10 +3418,10 @@ export class RelayCore {
   }
 
   /** holds deliveries from the hooks for a while under a new hold id; null when there are none */
-  private hold(seqs: number[], now: number): string | null {
+  private hold(seqs: number[], now: number, holdS: number = LIMITS.injectHoldS): string | null {
     if (!seqs.length) return null
     const hold = newId("hld", now)
-    for (const seq of seqs) this.sql.all(`UPDATE deliveries SET offered_until = ?, offered_hold = ? WHERE seq = ?`, now + LIMITS.injectHoldS * 1000, hold, seq)
+    for (const seq of seqs) this.sql.all(`UPDATE deliveries SET offered_until = ?, offered_hold = ? WHERE seq = ?`, now + holdS * 1000, hold, seq)
     return hold
   }
 
@@ -3734,7 +3771,7 @@ export class RelayCore {
       const pid = Number(/^pid:(\d+)/.exec(row.process!)?.[1])
       if (!pid || !this.localRow(row) || this.alive(pid)) continue
       this.sql.all(
-        `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL, wake = CASE WHEN wakers = 0 THEN NULL ELSE wake END WHERE id = ? AND connections = 0`,
+        `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL, wake = CASE WHEN wakers = 0 AND NOT ${BROKER_WAKE_SQL} THEN NULL ELSE wake END WHERE id = ? AND connections = 0`,
         now,
         row.id,
       )
@@ -3788,7 +3825,10 @@ export class RelayCore {
     )!
     this.sql.all(`DELETE FROM activity WHERE id <= ?`, row.id - LIMITS.activityKeep)
     const own = this.holds(this.mustEndpoint(endpoint), options)
-    if (own && !agent && params.kind === "tool") this.settle(endpoint)
+    if (own && !agent && params.kind === "tool") {
+      this.settle(endpoint)
+      this.turnRuns(endpoint)
+    }
     if (own && !agent && typeof params.session_id === "string" && HARNESS_SESSION.test(params.session_id)) {
       this.sql.all(
         `UPDATE endpoints SET harness_session = ?, harness_transcript = ? WHERE id = ?`,
@@ -3801,12 +3841,13 @@ export class RelayCore {
       if (own)
         this.sql.all(
           `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END,
-           wake = CASE WHEN wakers = 0 THEN NULL ELSE wake END WHERE id = ?`,
+           wake = CASE WHEN wakers = 0 AND NOT ${BROKER_WAKE_SQL} THEN NULL ELSE wake END WHERE id = ?`,
           now,
           endpoint,
         )
     } else if (params.kind === "session_start") {
       this.wakeDone(endpoint, "session_start")
+      if (own) this.turnRuns(endpoint)
       const fresh = own && summary !== "compact" && summary !== "resume"
       this.sql.all(
         `UPDATE endpoints SET hook_seen = COALESCE(?, hook_seen), hook_ended = NULL, stop_blocks = CASE WHEN ? THEN 0 ELSE stop_blocks END, pushes = CASE WHEN ? THEN 0 ELSE pushes END,
@@ -4529,7 +4570,7 @@ export class RelayCore {
       const note = [`exited ${p.code}`, spender.status_note].filter(Boolean).join("; ").slice(0, LIMITS.noteChars)
       this.sql.all(
         `UPDATE endpoints SET status_state = 'done', status_note = ?, hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END,
-         wake = CASE WHEN wakers = 0 THEN NULL ELSE wake END WHERE id = ?`,
+         wake = CASE WHEN wakers = 0 AND NOT ${BROKER_WAKE_SQL} THEN NULL ELSE wake END WHERE id = ?`,
         note,
         now,
         spender.id,
@@ -5940,8 +5981,8 @@ export class RelayCore {
       ...(row.kind === "agent"
         ? { ...this.placeView(row, shown), wake: row.hibernate ? (`hook:${row.hibernate}` as const) : (wakeOf(row) ?? this.rootWake(row, now)?.wake ?? null) }
         : {}),
-      ...(row.hibernate && row.wake_note ? { wake_failed: row.wake_note.replace(/^wake_failed: /, "") } : {}),
-      ...(row.hibernate && row.wake_declined ? { wake_declined: row.wake_declined } : {}),
+      ...((row.hibernate || brokerWake(row)) && row.wake_note ? { wake_failed: row.wake_note.replace(/^wake_failed: /, "") } : {}),
+      ...((row.hibernate || brokerWake(row)) && row.wake_declined ? { wake_declined: row.wake_declined } : {}),
     }
   }
 
@@ -6192,6 +6233,8 @@ export function unreachable(address: unknown): RelayError {
 const PROCESS_KEY = /^pid:\d+:[A-Za-z0-9:-]{1,64}$/
 /** a derived key without the start time, from a hook whose harness already exited */
 const BARE_PID_KEY = /^pid:\d+$/
+/** whether a row's stored wake is a broker wake ({@link BROKER_WAKES}), as SQL */
+const BROKER_WAKE_SQL = `COALESCE(wake IN (${BROKER_WAKES.map((wake) => `'${wake}'`).join(", ")}), 0)`
 const ANY_PROCESS_KEY = /^pid:\d+(:[A-Za-z0-9:-]{1,64})?$/
 
 /**
@@ -6284,6 +6327,25 @@ function wakes(row: EndpointRow): boolean {
 /** a wake with a live waker, or a hook waker that left within LIMITS.restartGraceS */
 function waking(row: EndpointRow, now: number): boolean {
   return wakeOf(row) !== null && (row.wakers > 0 || (row.waker_left ?? 0) >= now - LIMITS.restartGraceS * 1000)
+}
+
+/** whether the broker itself wakes the row, which is not hibernated, through its waker named after the row's wake */
+function brokerWake(row: EndpointRow): boolean {
+  return row.hibernate === null && row.wake !== null && BROKER_WAKES.includes(row.wake as Wake)
+}
+
+/**
+ * a row kept for another harness session than `harnessSession`, by its broker wake or because the claim's harness instance `process` holds
+ * it (another thread of a shared app server): a claim never takes it by its handle
+ */
+function otherSession(row: EndpointRow, harnessSession: string | null | undefined, process: string | null): boolean {
+  if (row.harness_session === null || !harnessSession || row.harness_session === harnessSession) return false
+  return brokerWake(row) || (process !== null && row.process !== null && sameHarness(row.process, process))
+}
+
+/** two harness names of one provider: equal, or the same name before a `-` (`codex` and `codex-desktop`) */
+function sameProvider(a: string | null, b: string): boolean {
+  return a !== null && a.split("-")[0] === b.split("-")[0]
 }
 
 /**
