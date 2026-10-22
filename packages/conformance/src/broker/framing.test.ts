@@ -24,7 +24,9 @@ brokerSuite("broker framing and hello", (start) => {
   test("hello advertises every local capability, the clock, limits and the preamble", async () => {
     const broker = await start();
     const { hello } = await broker.agent("a");
-    expect([...new Set(hello.capabilities)].sort()).toEqual(["inbox.wait", "ask", "scopes", "groups", "peek", "judge", "holds"].sort());
+    expect([...new Set(hello.capabilities.filter((capability) => capability !== "hook"))].sort()).toEqual(
+      ["inbox.wait", "ask", "scopes", "groups", "peek", "judge", "holds"].sort(),
+    );
     expect(Math.abs(Date.parse(hello.server_time) - Date.now())).toBeLessThan(60_000);
     expect(hello.limits).toMatchObject({
       bodyBytes: 65536,

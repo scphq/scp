@@ -75,6 +75,16 @@
       "additionalProperties": false
     },
     "Notification": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FleetNotification"
+        },
+        {
+          "$ref": "#/$defs/HookDeadlineNotification"
+        }
+      ]
+    },
+    "FleetNotification": {
       "type": "object",
       "properties": {
         "jsonrpc": {
@@ -270,6 +280,35 @@
               "additionalProperties": false
             }
           ]
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "HookDeadlineNotification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "hook_deadline"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "ends": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ends"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

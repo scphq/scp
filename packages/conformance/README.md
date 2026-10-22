@@ -120,7 +120,7 @@ system temporary directory; no test reads the caller's broker, policy or harness
 
 Every frame either way is validated against the JSON Schemas in
 `packages/spec/schema/broker`: requests against the method's `Params`, results against its
-`Result`, errors and `fleet` notifications against `frames.schema.json`. A violation fails
+`Result`, errors and notifications against `frames.schema.json`. A violation fails
 the test. `schemas.test.ts` keeps the schemas inside a portable keyword subset, checks that
 every Appendix A method has one, and checks that the shared types agree with the TS
 protocol types on field names and optionality.

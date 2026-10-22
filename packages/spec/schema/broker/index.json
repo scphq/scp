@@ -16,6 +16,8 @@
     "hold_release",
     "hold_show",
     "holds",
+    "hook",
+    "hook_commit",
     "inbox",
     "inject",
     "injected",

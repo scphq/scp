@@ -130,6 +130,14 @@ describe("broker wire schemas", () => {
     expect(validate("frames.schema.json#/$defs/ErrorObject", { code: -32000, message: "refused", data: { code: "not_found", extra: true } })).toEqual([]);
   });
 
+  test("notifications are fleet events or a hook's revised deadline", () => {
+    const notification = "frames.schema.json#/$defs/Notification";
+    expect(validate(notification, { jsonrpc: "2.0", method: "hook_deadline", params: { ends: 1_790_000_000_000 } })).toEqual([]);
+    expect(validate(notification, { jsonrpc: "2.0", method: "hook_deadline", params: { ends: "soon" } }).length).toBeGreaterThan(0);
+    expect(validate(notification, { jsonrpc: "2.0", method: "hook_deadline", params: {} }).length).toBeGreaterThan(0);
+    expect(validate(notification, { jsonrpc: "2.0", method: "other", params: {} }).length).toBeGreaterThan(0);
+  });
+
   test("wake clearing is an input and views represent it as null", () => {
     expect(validate("methods/wake.schema.json#/$defs/Params", { via: "none" })).toEqual([]);
     for (const wake of ["channels", "spawn-resume", "hook:vm"]) {

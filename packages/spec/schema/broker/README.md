@@ -1,12 +1,12 @@
 # Local broker JSON Schemas
 
 These schemas describe the local broker socket protocol in SPEC.md sections 5
-through 9 and Appendices A, B and C, including fleet notifications from section
+through 9 and Appendices A, B and C, including the notifications of section
 5.4. The schemas follow SPEC.md, the protocol source of truth. Where the reference
 broker's observed wire form differs, the schema accepts it and NOTES.txt records
 the gap for resolution, along with validation limits.
 
-frames.schema.json defines requests, success and error responses, fleet
+frames.schema.json defines requests, success and error responses, fleet and hook_deadline
 notifications and error codes. types.schema.json defines shared wire shapes.
 Each file in methods defines Params and Result for the method named by its
 file. index.json lists all methods in sorted order.
