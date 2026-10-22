@@ -141,6 +141,46 @@ jobs:
       - working-directory: crates
         run: cargo build --locked --bin scp-relay
 
+  hook:
+    name: Native hook (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    defaults:
+      run:
+        working-directory: crates
+    env:
+      # the start time, args and comm cross-check against ps must run, not skip
+      SCP_HOOK_REQUIRE_PS: "1"
+      CC_x86_64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates
+          key: hook-${{ matrix.target }}
+      - name: musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Test scp-hook
+        run: cargo test --locked -p scp-hook --target ${{ matrix.target }}
+
   conformance:
     name: Relay conformance
     runs-on: ubuntu-latest

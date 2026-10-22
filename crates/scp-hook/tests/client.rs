@@ -374,7 +374,13 @@ fn ps(pid: i32, field: &str, tz: &str) -> Option<String> {
         .output()
     {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            assert!(
+                std::env::var_os("SCP_HOOK_REQUIRE_PS").is_none(),
+                "ps is missing"
+            );
+            return None;
+        }
         Err(error) => panic!("ps failed: {error}"),
     };
     assert!(
