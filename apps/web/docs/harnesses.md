@@ -27,14 +27,14 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 | Harness | Hooks | Injection | Stop push | Subagents | Wakes when idle |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | Settings hooks | After tools and on prompts | Yes | Yes | Under `swarm claude`, and in background sessions |
-| Codex | `hooks.json` | After tools and on prompts | Yes | No | Under `swarm codex` |
+| Codex | `hooks.json` | After tools and on prompts | Yes | No | Under `swarm codex`; else queued into the thread once a turn ended |
 | Grok | Claude Code's hooks | After tools only | Yes | No | Headless, under `swarm grok` |
 | Muse | A plugin | After tools and on prompts | Yes | No | No |
 | T3 Code | Its provider's (codex, Claude Code) | As the provider | As the provider | As the provider | Under `swarm t3code` |
 | Claude desktop app, Code tab | Claude Code's | As Claude Code | Yes | Yes | Yes, through `claude-inbox` |
 | Claude Cowork (local) | A plugin | As Claude Code | Yes | Yes | Yes, through `claude-inbox` |
 | Claude desktop app, chat | None (an extension mounts MCP) | No, pull only | No | No | No |
-| Codex desktop app | Codex's `hooks.json` | As Codex | Yes | No | Not yet |
+| Codex desktop app | Codex's `hooks.json` | As Codex | Yes | No | Yes, queued into the thread |
 | Gemini / Antigravity (agy) | `hooks.json` | Before each model call | No | No | Headless, under `swarm agy` |
 | OpenCode | A plugin | Appended to tool output | Emulated | Child sessions as activity | Yes, by the plugin |
 | Pi | An extension, no hooks | Each message as it arrives | No | No | Yes, under `swarm pi` |
@@ -53,7 +53,7 @@ Stop push: while workers you started with `swarm spawn` run, a stop waits up to 
 
 **Claude Cowork (local).** `swarm setup --cowork` builds the plugin zip in SCP's state directory. Upload it in Claude: Customize, Plugins, Add, Upload plugin. Its sessions are labelled `claude-cowork` and wake through `claude-inbox`. Local sessions only; scheduled tasks do not wake; cloud sessions are unsupported. Plugins sync to your account and into terminal Claude Code, where the plugin stays inert: a connected `scp` server with no tools and hooks that do nothing, since the terminal has its own setup mount. Rebuild the plugin after moving or upgrading node or `swarm`.
 
-**Codex desktop app.** The app runs its own `codex app-server` with the same `~/.codex`, so the `scp` mount in `config.toml` and the hooks in `hooks.json` work after `swarm setup --write`; review the hooks once in the app as in the CLI. Its threads are labelled `codex-desktop` (the app sets `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop`, and its app-server runs from the app bundle). Messages arrive at turn boundaries; wake for idle desktop threads is coming.
+**Codex desktop app.** The app runs its own `codex app-server` with the same `~/.codex`, so the `scp` mount in `config.toml` and the hooks in `hooks.json` work after `swarm setup --write`; review the hooks once in the app as in the CLI. Its threads are labelled `codex-desktop` (the app sets `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex Desktop`, and its app-server runs from the app bundle). Messages arrive at turn boundaries. Once a thread ended a turn, a message to it is queued into the thread with `codex queue`, and the app is asked to open it in the background (`open -g codex://threads/wake/<id>`) when it or nobody holds the thread; the app runs it as a follow-up turn, never a steer. `swarm codex --resume` refuses a thread the app holds and suggests `codex fork`.
 
 Desktop apps start the mount and the hooks without your shell's `PATH`, so `swarm setup` writes them by absolute paths: a `swarm` installed as a node script (npm, nvm, fnm, Homebrew) runs as the absolute `node` plus the script's real path, and anything else (a native build, a Volta shim) by its own absolute path. Entries an earlier setup wrote with a bare `swarm` are rewritten in place, each file backed up first; other entries are left as they are. Rerun `swarm setup --write` after moving or upgrading node or `swarm`.
 

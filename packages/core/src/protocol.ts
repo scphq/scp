@@ -123,7 +123,8 @@ export const PRESENCES: readonly Presence[] = ["online", "idle", "offline", "hib
 export type StatusState = "working" | "waiting" | "blocked" | "done"
 /**
  * how an idle agent is woken by a message: a channel push, the pi extension, the OpenCode plugin's waiter, codex app-server, the session inbox,
- * a headless resume, muse serve, a T3 Code thread or a held spawn resuming its worker's session; `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
+ * a headless resume, muse serve, a T3 Code thread, a held spawn resuming its worker's session or the broker queueing it into a Codex thread;
+ * `none` reads at its next turn; `hook:<provider>` (shown only, never set this way) a hibernated agent's provider wake hook
  */
 export type Wake =
   | "channels"
@@ -136,6 +137,7 @@ export type Wake =
   | "muse-serve"
   | "t3code"
   | "spawn-resume"
+  | "codex-queue"
   | "none"
   | `hook:${string}`
 export const WAKES: readonly Wake[] = [
@@ -149,8 +151,11 @@ export const WAKES: readonly Wake[] = [
   "muse-serve",
   "t3code",
   "spawn-resume",
+  "codex-queue",
   "none",
 ]
+/** wakes the broker delivers itself, by its waker of the same name: set by a hook, they need no live waker and outlast the harness process */
+export const BROKER_WAKES: readonly Wake[] = ["codex-queue"]
 /** the built-in wake provider of a durable spawn: its waker resumes the worker's harness session from the hibernation's ref */
 export const SPAWN_PROVIDER = "spawn"
 /** why a provider declined to wake a hibernated agent, a short token it picks (e.g. `policy`, `budget`): not a failure, and not retried for the same message */

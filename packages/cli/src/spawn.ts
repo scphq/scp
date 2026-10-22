@@ -80,7 +80,18 @@ type Json = Record<string, unknown>
 const SERVER = "scp"
 
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
-const SHIM_ENV = ["SCP_GRANT", "SCP_NAME", "SCP_UNDER", "SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME", "SCP_SHIM_BINDING", "SCP_SESSION", "SCP_HARNESS_PID"]
+const SHIM_ENV = [
+  "SCP_GRANT",
+  "SCP_NAME",
+  "SCP_UNDER",
+  "SCP_LABELS",
+  "SCP_DIR",
+  "XDG_STATE_HOME",
+  "SCP_SHIM_BINDING",
+  "SCP_SESSION",
+  "SCP_HARNESS_PID",
+  "SCP_CODEX_THREAD",
+]
 
 /** codex's scp entry in its user config, if it has one */
 export function codexMount(env: Env): Json | undefined {

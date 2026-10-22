@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import {
   type Attachment,
   BROKER_CAPABILITIES,
+  BROKER_WAKES,
   type Claim,
   CLI_NAME,
   type EndpointView,
@@ -26,6 +27,7 @@ import {
   type Sql,
   type StopWaitResult,
   stripControl,
+  type Wake,
 } from "@scp-dev/core"
 import { FederatedCore } from "@scp-dev/hub"
 import { type Bridge, type BridgeConfig, type BridgeHooks, remoteSend, startBridge } from "./bridge"
@@ -123,6 +125,8 @@ interface Connection {
   own?: boolean
   /** the connection claimed with a grant or a wake ticket, as a spawn holding its worker does: it may give a durable ref */
   holder?: boolean
+  /** a broker wake's waker run bound by its wake ticket: the connection acts only while the ticket is current */
+  ticket?: string
   /** a hook's connection: it posts activity and status, and never counts as connected */
   transient?: boolean
   /** a hook connection's harness process key, from its claim */
@@ -143,6 +147,8 @@ interface Connection {
 
 const SWEEP_MS = 10 * 60_000
 const PRESENCE_MS = 60_000
+/** how long a broker wake's run holds what it was offered: past the time its harness takes to queue it */
+const TICKET_HOLD_S = 180
 const OWNERSHIP_MS = 2_000
 /** how long a hibernate waits for the hub to take its mirror */
 const HIBERNATE_BARRIER_MS = 10_000
@@ -235,6 +241,11 @@ function startedAt(pid: number, expected: string): string | undefined {
 }
 
 /** who a connection acts for, for the calls only the harness process holding an endpoint may make through its hooks */
+/** a view whose waker the broker runs on its periodic check: hibernated, or with a broker wake */
+function wakeable(view: EndpointView): boolean {
+  return view.presence === "hibernated" || BROKER_WAKES.includes(view.wake as Wake)
+}
+
 function hookOf(s: Conn<Connection>): { transient: boolean; process?: string } {
   return { transient: s.data.transient === true, ...(s.data.process ? { process: s.data.process } : {}) }
 }
@@ -351,7 +362,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       if ((known.get(view.id) ?? "offline") !== view.presence) presenceChanged(view)
       else if (wakes.has(view.id) && wakes.get(view.id) !== view.wake) bridge?.changed(view.id)
       wakes.set(view.id, view.wake)
-      if (view.presence === "hibernated") wakers?.kick(view.id)
+      if (wakeable(view)) wakers?.kick(view.id)
     }
     for (const id of known.keys()) if (!live.has(id)) known.delete(id)
     for (const id of wakes.keys()) if (!live.has(id)) wakes.delete(id)
@@ -398,7 +409,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     log,
     changed: (endpoint) => presenceChanged(core.whoami(endpoint)),
   })
-  for (const view of localViews()) if (view.presence === "hibernated") wakers.kick(view.id)
+  for (const view of localViews()) if (wakeable(view)) wakers.kick(view.id)
 
   /** links the bridge again with the credential on disk; a configuration this broker cannot take without a restart stops it */
   async function relink(): Promise<object> {
@@ -915,14 +926,20 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         }
       }
       if (params.observe === true) {
-        const self = params.self === undefined ? null : core.placeLineage(params.self)
+        if (params.ticket !== undefined) {
+          const holder = core.wakeTicketHolder(params.ticket)
+          if (!holder) throw new RelayError("unauthorized", "the wake ticket is unknown or spent")
+          s.data.ticket = params.ticket as string
+          return bindLineage(s, holder, params, true)
+        }
+        const self = params.self === undefined ? null : core.placeLineage(params.self, undefined, params.harness_session)
         if (params.grant !== undefined) {
           if (!core.grantBinds(params.grant, self)) throw new RelayError("unauthorized", GRANT_UNBOUND)
           return { ...bindLineage(s, self!, params, true), grant_bound: true }
         }
         if (self) return bindLineage(s, self, params, true)
         s.data.observer = true
-        if (params.lineage !== undefined) s.data.lineage = core.placeLineage(params.lineage) ?? undefined
+        if (params.lineage !== undefined) s.data.lineage = core.placeLineage(params.lineage, undefined, params.harness_session) ?? undefined
         return {
           endpoint: null,
           capabilities: BROKER_CAPABILITIES,
@@ -934,7 +951,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       const claim = params.claim as Claim | undefined
       if (params.human === true && params.resume === undefined && params.lineage !== undefined) {
-        const placed = core.placeLineage(params.lineage)
+        const placed = core.placeLineage(params.lineage, undefined, params.harness_session)
         if (placed) {
           s.data.terminal = params.tty === true
           return bindLineage(s, placed, params)
@@ -981,6 +998,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
     }
     if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
+    if (s.data.ticket !== undefined && core.wakeTicketHolder(s.data.ticket) !== s.data.endpoint)
+      throw new RelayError("unauthorized", "the wake ticket is spent: its run ended")
     if (s.data.observer && OBSERVER_METHODS.has(method)) return observe(s, method, params)
     if (s.data.observer && SCOPE_METHODS.has(method) && (s.data.lineage || method === "why")) return scope(s, method, params)
     if (s.data.transient && SCOPE_METHODS.has(method)) throw new RelayError("scope_refused", "a hook connection cannot read or change scopes, groups or grants")
@@ -1029,7 +1048,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       case "inbox": {
         const query = compact({ after: params.after as number | undefined, limit: params.limit as number | undefined })
-        const read = () => (params.offer === true ? core.offer(me, { ...query, subagents: s.data.waker === me }) : { messages: core.inbox(me, query) })
+        const read = () =>
+          params.offer === true
+            ? core.offer(me, { ...query, subagents: s.data.waker === me, ...(s.data.ticket !== undefined ? { holdS: TICKET_HOLD_S } : {}) })
+            : { messages: core.inbox(me, query) }
         const deadline = Date.now() + waitSeconds(params.wait_s)
         let page = read()
         while (!page.messages.length && !s.data.closed && Date.now() < deadline) {
@@ -1065,6 +1087,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           throw new RelayError("invalid_params", `no waker ${SPAWN_PROVIDER} is configured: this broker cannot hold a spawn durably`)
         const changed = core.setWake(me, params.via, { ...hookOf(s), ref: params.ref })
         setWaker(s, params.via !== "none" && core.whoami(me).wake === params.via ? me : undefined)
+        if (changed) wakers?.kick(me)
         if (!presenceMoved(me) && changed) bridge?.changed(me)
         if (changed) {
           subagentsMoved(me)

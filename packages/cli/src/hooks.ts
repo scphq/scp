@@ -5,6 +5,8 @@ import { basename, join } from "node:path"
 import {
   CLI_NAME,
   type ActivityKind,
+  type Claim,
+  type EndpointView,
   type Envelope,
   LIMITS,
   PEEK,
@@ -23,6 +25,7 @@ import {
 import { connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
 import { prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
 import {
+  CODEX_THREAD_KEY,
   type IdentityInput,
   harnessAt,
   hookFormat,
@@ -31,6 +34,8 @@ import {
   normalizeHarness,
   processKey,
   psStart,
+  type PsCommTable,
+  readPsTable,
   relayIdentity,
   sessionKey,
 } from "./identity"
@@ -645,27 +650,36 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
   const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
   const started = (options.startOf ?? psStart)(pid)
-  const joined = membership(
+  const keyed = membership(
     options.env,
     sessionKey(
       options.env,
       processKey(pid, () => started),
     ),
   )
-  if ("dark" in joined) return
   const harnessSession = event.agent ? undefined : asString(field(payload, "session_id", "sessionId"))
-  const claim = relayIdentity({
-    ...(joined.handle ? { as: joined.handle } : {}),
-    ...(harnessSession ? { harnessSession } : {}),
-    harness,
-    fallbackHarness: "hook",
-    cwd: event.cwd ?? options.cwd,
-    env: options.env,
-    harnessPid: () => pid,
-    ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
-    startOf: () => started,
-    ...(options.psTable ? { psTable: options.psTable } : {}),
-  })
+  const table: { value?: PsCommTable | undefined } = {}
+  const psTable = () => {
+    if (!("value" in table)) table.value = readPsTable()
+    return table.value
+  }
+  const identify = (as: string | undefined) =>
+    relayIdentity({
+      ...(as ? { as } : {}),
+      ...(harnessSession ? { harnessSession } : {}),
+      harness,
+      fallbackHarness: "hook",
+      cwd: event.cwd ?? options.cwd,
+      env: options.env,
+      harnessPid: () => pid,
+      ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
+      startOf: () => started,
+      psTable: options.psTable ?? psTable,
+    })
+  let claim = identify("dark" in keyed ? undefined : keyed.handle)
+  const joined = claim.session.startsWith(CODEX_THREAD_KEY) ? membership(options.env, claim.session) : keyed
+  if ("dark" in joined) return
+  if (joined !== keyed) claim = identify(joined.handle)
   if (!validHandle(claim.handle)) return
   const format = hookFormat(claim.harness, harness)
   const named = eventName(asString(field(payload, "hook_event_name", "hookEventName")) ?? eventArg)
@@ -716,16 +730,27 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
         )
       : undefined
     const [result, hello] = await Promise.allSettled([injected, ...posted])
+    const ended = async () => {
+      if (stop && hello?.status === "fulfilled") await queueWake(client, claim, format, (hello.value as HelloResult).endpoint, options.env)
+    }
     if (event.kind === "session_start") {
       const untitled = hello?.status === "fulfilled" && (hello.value as HelloResult).endpoint?.title === null
       return untitled && (format === "claude-code" || format === "codex") ? hookReply(format, event.kind, NUDGE) : undefined
     }
     const tldr = (await prompted?.catch(() => undefined))?.tldr === true ? TLDR : undefined
-    if (result.status !== "fulfilled" || !result.value) return tldr ? hookReply(format, event.kind, tldr) : undefined
+    if (result.status !== "fulfilled" || !result.value) {
+      await ended()
+      return tldr ? hookReply(format, event.kind, tldr) : undefined
+    }
     const continues = !stop || format !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
     if (stop && !result.value.block) {
-      if (waits === undefined || !PUSHES.has(format) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) return
-      return await push(client, format, waits * 1000, began, result.value.prompts, options, continues, result.value.wakeable === true)
+      if (waits === undefined || !PUSHES.has(format) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) {
+        await ended()
+        return
+      }
+      const pushed = await push(client, format, waits * 1000, began, result.value.prompts, options, continues, result.value.wakeable === true)
+      if (pushed === undefined) await ended()
+      return pushed
     }
     const directive = stop ? directiveText(format, result.value) : undefined
     const forced = stop && (result.value.forced ?? true)
@@ -736,7 +761,10 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     const text = stop
       ? [directive?.text, [pointer, nudgeText(nudged, result.value.nudge_more)].filter(Boolean).join("\n")].filter(Boolean).join("\n\n")
       : [intro, counts ? unreadPointer(result.value.unread, result.value.awaiting) : shown, tldr].filter(Boolean).join("\n\n")
-    if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return
+    if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) {
+      await ended()
+      return
+    }
     const reply = hookReply(format, event.kind, text, result.value.unread, continues)
     const offered = result.value.offered ?? []
     if ((stop || offered.length || intro) && (options.print?.(reply) ?? true)) {
@@ -764,6 +792,14 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   } finally {
     client.close()
   }
+}
+
+/** at a turn's end (a stop that continues nothing), a codex thread no launcher runs and no other wake wakes takes `codex-queue` */
+async function queueWake(client: RelayClient, claim: Claim, format: string, endpoint: EndpointView | null, env: Env): Promise<void> {
+  if (format !== "codex" || (claim.harness !== "codex" && claim.harness !== "codex-desktop") || !claim.harness_session || !endpoint) return
+  if (env.SCP_SESSION || env.SCP_SHIM_BINDING || env.SCP_GRANT) return
+  if (endpoint.wake !== null && !(endpoint.wake === "codex-queue" && (endpoint.wake_failed || endpoint.wake_declined))) return
+  await client.request("wake", { via: "codex-queue" }).catch(() => {})
 }
 
 /** Waits for context to start the harness's next turn and confirms only printed output. */

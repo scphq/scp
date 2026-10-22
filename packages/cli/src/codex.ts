@@ -11,6 +11,7 @@ import { type Claim, CLI_NAME, RelayError, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { parse } from "smol-toml"
 import { attribute, attributed, optionsBefore, ROOT_HELP } from "./attribute"
+import { codexOwner, codexThread, heldThreadText } from "./codex-queue"
 import { RelayUsage, startDaemon } from "./common"
 import { readPsTable, relayIdentity } from "./identity"
 import { CODEX_VALUED, codexMount, codexOverrides, toml } from "./spawn"
@@ -59,14 +60,21 @@ export function codexLaunch(
   }
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
-  const { SCP_SESSION: _session, SCP_PARENT: _parent, ...clean } = env
+  const { SCP_SESSION: _session, SCP_PARENT: _parent, SCP_CODEX_THREAD: _thread, ...clean } = env
+  const thread = codexThread(resume)
   return {
     ...(name !== undefined ? { name } : {}),
     headless,
     ...(root ? { root: true as const } : {}),
     ...(resume !== undefined ? { resume } : {}),
     codexArgs: resume !== undefined && !headless ? ["resume", resume, ...codexArgs] : codexArgs,
-    env: { ...clean, SCP_HARNESS: "codex", SCP_SHIM_BINDING: randomBytes(16).toString("hex"), ...(name !== undefined ? { SCP_NAME: name } : {}) },
+    env: {
+      ...clean,
+      SCP_HARNESS: "codex",
+      SCP_SHIM_BINDING: randomBytes(16).toString("hex"),
+      ...(name !== undefined ? { SCP_NAME: name } : {}),
+      ...(thread ? { SCP_CODEX_THREAD: thread } : {}),
+    },
   }
 }
 
@@ -373,6 +381,12 @@ export async function codexCommand(args: string[]): Promise<number> {
   const attribution = await attribute("codex", { ...parsed, resume }, process.env, cwd, (line) => void process.stderr.write(`${line}\n`))
   const launch = attribution ? codexLaunch(args, attributed(process.env, attribution), SELF) : parsed
   const bin = launch.env.SCP_CODEX_BIN || "codex"
+  const thread = codexThread(launch.resume)
+  const owner = thread ? await codexOwner(thread, launch.env) : "none"
+  if (thread && owner !== "none" && owner !== "unknown") {
+    process.stderr.write(`${heldThreadText(thread, owner)}\n`)
+    return 1
+  }
   const overrides = [...codexOverrides(launch.env, codexMount(launch.env), SELF), ...serverOptions(launch.codexArgs, launch.env)]
   const dir = mkdtempSync(join(tmpdir(), "scp-codex-"))
   const path = join(dir, "app.sock")
@@ -462,12 +476,19 @@ export async function codexCommand(args: string[]): Promise<number> {
       const resume = launch.resume
       const model = option(launch.codexArgs, "-m", "--model")
       const sandbox = option(launch.codexArgs, "-s", "--sandbox")
-      const result = await socket.request(resume ? "thread/resume" : "thread/start", {
-        ...(resume ? { threadId: resume } : { cwd }),
-        approvalPolicy: "never",
-        ...(model !== undefined ? { model } : {}),
-        ...(sandbox !== undefined ? { sandbox } : {}),
-      })
+      let result: Json
+      try {
+        result = await socket.request(resume ? "thread/resume" : "thread/start", {
+          ...(resume ? { threadId: resume } : { cwd }),
+          approvalPolicy: "never",
+          ...(model !== undefined ? { model } : {}),
+          ...(sandbox !== undefined ? { sandbox } : {}),
+        })
+      } catch (error) {
+        if (!resume || !/active writer/.test(String(error))) throw error
+        process.stderr.write(`${heldThreadText(resume, thread ? await codexOwner(thread, launch.env) : "unknown")}\n`)
+        return 1
+      }
       threadId = (result.thread as Json).id as string
     }
     if (stopping) return 0
