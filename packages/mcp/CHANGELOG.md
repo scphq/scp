@@ -1,5 +1,14 @@
 # @scp-dev/mcp
 
+## 0.3.5
+
+### Patch Changes
+
+- 12259a0: Build a local Claude Cowork plugin with guarded hooks and MCP, a dedicated harness label and attached-folder handles.
+- Updated dependencies [6e8e028]
+  - @scp-dev/core@0.9.0
+  - @scp-dev/broker@0.7.0
+
 ## 0.3.4
 
 ### Patch Changes

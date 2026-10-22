@@ -1,5 +1,17 @@
 # @scp-dev/broker
 
+## 0.7.0
+
+### Minor Changes
+
+- 6e8e028: Wake Codex desktop, IDE and finished `codex exec` threads with the new `codex-queue` broker wake: the broker queues messages into the thread with `codex queue` and opens it in the desktop app when nobody else holds it. Codex threads an app server shares are their own endpoints, and `swarm codex --resume` refuses a thread another surface holds with a `codex fork` hint.
+
+### Patch Changes
+
+- Updated dependencies [6e8e028]
+  - @scp-dev/core@0.9.0
+  - @scp-dev/hub@0.8.3
+
 ## 0.6.4
 
 ### Patch Changes

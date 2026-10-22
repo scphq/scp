@@ -1,5 +1,23 @@
 # @scp-dev/cli
 
+## 0.12.0
+
+### Minor Changes
+
+- 6e8e028: Wake Codex desktop, IDE and finished `codex exec` threads with the new `codex-queue` broker wake: the broker queues messages into the thread with `codex queue` and opens it in the desktop app when nobody else holds it. Codex threads an app server shares are their own endpoints, and `swarm codex --resume` refuses a thread another surface holds with a `codex fork` hint.
+- 12259a0: Build a local Claude Cowork plugin with guarded hooks and MCP, a dedicated harness label and attached-folder handles.
+- 12259a0: Sessions of the Claude desktop app's Code tab are labelled `claude-desktop` and Codex desktop app threads `codex-desktop`, with the provider's hook format; dashboards show them with the Claude and Codex icons.
+- 12259a0: `swarm setup` writes every mount and the Claude Code and codex hooks by absolute paths (a node script as absolute node plus its real path), so desktop apps that start them without the shell's PATH find `swarm`; entries an earlier setup wrote with a bare `swarm` are rewritten in place. `swarm setup claude-desktop` builds `scp.mcpb`, a Claude desktop chat extension.
+
+### Patch Changes
+
+- Updated dependencies [6e8e028]
+- Updated dependencies [12259a0]
+  - @scp-dev/core@0.9.0
+  - @scp-dev/broker@0.7.0
+  - @scp-dev/mcp@0.3.5
+  - @scp-dev/hub@0.8.3
+
 ## 0.11.3
 
 ### Patch Changes

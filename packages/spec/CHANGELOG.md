@@ -1,5 +1,11 @@
 # @scp-dev/spec
 
+## 0.4.5
+
+### Patch Changes
+
+- 12259a0: Sessions of the Claude desktop app's Code tab are labelled `claude-desktop` and Codex desktop app threads `codex-desktop`, with the provider's hook format; dashboards show them with the Claude and Codex icons.
+
 ## 0.4.4
 
 ### Patch Changes
