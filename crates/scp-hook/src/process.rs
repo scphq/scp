@@ -11,6 +11,17 @@ pub struct Proc {
     pub comm: String,
 }
 
+/// Start keys come from `ps` run without TZ, so they use the system zone; call before any thread starts.
+pub fn system_zone() {
+    unsafe extern "C" {
+        fn tzset();
+    }
+    unsafe {
+        std::env::remove_var("TZ");
+        tzset();
+    }
+}
+
 pub fn start_string(seconds: i64) -> Option<String> {
     let seconds = seconds as libc::time_t;
     let mut time = unsafe { std::mem::zeroed::<libc::tm>() };
@@ -76,9 +87,7 @@ pub fn read(pid: i32) -> Option<Proc> {
         .parse()
         .ok()?;
     let args = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let args = String::from_utf8_lossy(&args)
-        .trim_end_matches('\0')
-        .replace('\0', " ");
+    let args = visible(args.strip_suffix(b"\0").unwrap_or(&args)).replace('\0', " ");
     let args = if args.is_empty() {
         format!("[{name}]")
     } else {
@@ -197,13 +206,26 @@ fn parse_args(bytes: &[u8]) -> Option<(String, String)> {
     let mut args = Vec::new();
     for _ in 0..argc {
         let end = rest.iter().position(|b| *b == 0)?;
-        args.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+        args.push(visible(&rest[..end]));
         rest = &rest[end + 1..];
     }
     Some((
         args.join(" ").trim().to_owned(),
         args.first().cloned().unwrap_or_default(),
     ))
+}
+
+/// what `ps -o args=` prints for these bytes in the C locale
+fn visible(bytes: &[u8]) -> String {
+    let mut text = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        match byte {
+            0 | 0x20..=0x7e => text.push(byte as char),
+            _ if cfg!(target_os = "macos") => text.push_str(&format!("\\{byte:03o}")),
+            _ => text.push('?'),
+        }
+    }
+    text
 }
 
 pub fn home() -> Option<String> {

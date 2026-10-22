@@ -366,11 +366,12 @@ fn version() {
     );
 }
 
-fn ps(pid: i32, field: &str, tz: &str) -> Option<String> {
+fn ps(pid: i32, field: &str) -> Option<String> {
     let output = match Command::new("ps")
         .args(["-ww", "-o", field, "-p", &pid.to_string()])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("LC_ALL", "C")
-        .env("TZ", tz)
         .output()
     {
         Ok(output) => output,
@@ -417,10 +418,11 @@ fn native_process_matches_ps() {
             std::env::set_var("TZ", tz);
             tzset();
         }
+        process::system_zone();
         let procs = process::collect(std::process::id() as i32, &HashMap::new());
         assert!(!procs.is_empty());
         for proc in procs {
-            let Some(start) = ps(proc.pid, "lstart=", tz) else {
+            let Some(start) = ps(proc.pid, "lstart=") else {
                 return;
             };
             assert_eq!(
@@ -437,19 +439,19 @@ fn native_process_matches_ps() {
             );
             assert_eq!(
                 proc.args,
-                ps(proc.pid, "args=", tz).unwrap(),
+                ps(proc.pid, "args=").unwrap(),
                 "args pid {}",
                 proc.pid
             );
             assert_eq!(
                 proc.comm,
-                ps(proc.pid, "comm=", tz).unwrap(),
+                ps(proc.pid, "comm=").unwrap(),
                 "comm pid {}",
                 proc.pid
             );
             assert_eq!(
                 proc.ppid.to_string(),
-                ps(proc.pid, "ppid=", tz).unwrap(),
+                ps(proc.pid, "ppid=").unwrap(),
                 "ppid pid {}",
                 proc.pid
             );

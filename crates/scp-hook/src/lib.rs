@@ -580,12 +580,17 @@ fn fallback(
     launcher: &[String],
     args: &[String],
     raw: Vec<u8>,
+    env: &HashMap<String, String>,
     deadline: &Deadline,
 ) -> io::Result<()> {
     let Some(program) = launcher.first() else {
         return Ok(());
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    if let Some(tz) = env.get("TZ") {
+        command.env("TZ", tz);
+    }
+    let mut child = command
         .args(&launcher[1..])
         .arg("hook")
         .args(args)
@@ -658,6 +663,7 @@ pub fn run(origin: u64, argv: &[String]) -> io::Result<()> {
             )
         })
         .collect();
+    process::system_zone();
     if args.iter().any(|a| a == "--cowork-only") && !cowork_live(&env) {
         return Ok(());
     }
@@ -673,7 +679,7 @@ pub fn run(origin: u64, argv: &[String]) -> io::Result<()> {
         return Ok(());
     }
     if env.get("SCP_ENGINE").is_some_and(|s| s == "ts") {
-        let result = fallback(launcher, args, raw, &deadline);
+        let result = fallback(launcher, args, raw, &env, &deadline);
         deadline.print(None);
         return result;
     }
@@ -764,7 +770,7 @@ fn run_rpc(
         .is_some_and(|a| a.iter().any(|c| c == "hook"))
     {
         drop(rpc);
-        return fallback(launcher, args, raw, deadline);
+        return fallback(launcher, args, raw, env, deadline);
     }
     let names: Vec<String> = serde_json::from_str(include_str!(
         "../../../packages/spec/schema/broker/hook-env.json"
