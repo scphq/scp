@@ -1,5 +1,13 @@
 # @scp-dev/hub
 
+## 0.9.1
+
+### Patch Changes
+
+- 14ea99a: The broker's hot paths no longer scale with every endpoint it ever saw. A hello reads only the claimed row instead of every endpoint's view, `list` and `snapshot` read only rows they could show, and calls that visit every row derive each row's scope once per request. Ended subagent and lineage child rows offline for a day with no unread mail are retired by the sweep (`endpointRetireS`, `Infinity` keeps them). A hook's process table read gives up after 1.5 s.
+- Updated dependencies [14ea99a]
+  - @scp-dev/core@0.10.1
+
 ## 0.9.0
 
 ### Minor Changes
