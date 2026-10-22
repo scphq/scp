@@ -1,5 +1,15 @@
 # @scp-dev/relay
 
+## 0.3.13
+
+### Patch Changes
+
+- 12259a0: Build a local Claude Cowork plugin with guarded hooks and MCP, a dedicated harness label and attached-folder handles.
+- 12259a0: Sessions of the Claude desktop app's Code tab are labelled `claude-desktop` and Codex desktop app threads `codex-desktop`, with the provider's hook format; dashboards show them with the Claude and Codex icons.
+- Updated dependencies [6e8e028]
+  - @scp-dev/core@0.9.0
+  - @scp-dev/hub@0.8.3
+
 ## 0.3.12
 
 ### Patch Changes
