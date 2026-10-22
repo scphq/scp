@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "unlink",
+  "title": "unlink",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "../types.schema.json#/$defs/EndpointView"
+        },
+        "parent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint",
+        "parent"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

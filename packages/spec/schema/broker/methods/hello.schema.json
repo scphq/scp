@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hello",
+  "title": "hello",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "scp/1"
+        },
+        "claim": {
+          "$ref": "../types.schema.json#/$defs/Claim"
+        },
+        "resume": {
+          "type": "string"
+        },
+        "human": {
+          "type": "boolean"
+        },
+        "tty": {
+          "type": "boolean"
+        },
+        "transient": {
+          "type": "boolean"
+        },
+        "join": {
+          "type": "object",
+          "properties": {
+            "handle": {
+              "type": "string"
+            },
+            "under": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "brief": {
+          "type": "boolean"
+        },
+        "observe": {
+          "type": "boolean"
+        },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "self": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grant": {
+          "type": "string"
+        },
+        "ticket": {
+          "type": "string"
+        },
+        "harness_session": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/EndpointView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "server_time": {
+          "$ref": "../types.schema.json#/$defs/Timestamp"
+        },
+        "limits": {
+          "$ref": "../types.schema.json#/$defs/Limits"
+        },
+        "preamble": {
+          "type": "string"
+        },
+        "broker": {
+          "type": "object"
+        },
+        "token": {
+          "type": "string"
+        },
+        "subagent": {
+          "const": true
+        },
+        "created": {
+          "const": true
+        },
+        "grant_bound": {
+          "const": true
+        }
+      },
+      "required": [
+        "endpoint",
+        "capabilities",
+        "server_time",
+        "limits",
+        "preamble",
+        "broker"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

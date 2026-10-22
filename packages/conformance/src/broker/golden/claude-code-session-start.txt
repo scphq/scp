@@ -1,0 +1,1 @@
+{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"swarm (optional): a title and a one-line now (relay_set_title / relay_set_now) help peers find you; skip it when you only run workers."}}

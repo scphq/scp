@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spawn_steers",
+  "title": "spawn_steers",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "grant": {
+          "type": "string"
+        },
+        "take": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "grant"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steers": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/Envelope"
+          }
+        },
+        "transcript": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "joined": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session",
+        "steers",
+        "transcript",
+        "joined"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

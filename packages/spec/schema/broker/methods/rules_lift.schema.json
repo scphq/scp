@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rules_lift",
+  "title": "rules_lift",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "cap": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint",
+        "cap"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/ScopeView"
+    }
+  }
+}

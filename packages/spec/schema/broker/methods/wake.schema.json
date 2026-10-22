@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wake",
+  "title": "wake",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "via": {
+          "enum": [
+            "channels",
+            "pi",
+            "opencode-plugin",
+            "codex-app-server",
+            "claude-inbox",
+            "agy-resume",
+            "grok-resume",
+            "muse-serve",
+            "t3code",
+            "spawn-resume",
+            "codex-queue",
+            "none"
+          ]
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "via"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "changed"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

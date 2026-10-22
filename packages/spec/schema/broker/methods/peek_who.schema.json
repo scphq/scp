@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peek_who",
+  "title": "peek_who",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "peeked_by": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/PeekSeen"
+          }
+        }
+      },
+      "required": [
+        "peeked_by"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

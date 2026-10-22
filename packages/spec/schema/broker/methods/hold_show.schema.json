@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hold_show",
+  "title": "hold_show",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "held",
+            "releasing",
+            "released",
+            "refused",
+            "expired"
+          ]
+        },
+        "created_at": {
+          "$ref": "../types.schema.json#/$defs/Timestamp"
+        },
+        "expires_at": {
+          "$ref": "../types.schema.json#/$defs/Timestamp"
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "boundary": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "prefilter",
+            "model",
+            "cache",
+            "error"
+          ]
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolved_at": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "type": "string"
+        },
+        "redactions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "quote": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to",
+        "state",
+        "created_at",
+        "expires_at",
+        "categories",
+        "reason",
+        "boundary",
+        "source",
+        "bytes",
+        "by",
+        "resolved_at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

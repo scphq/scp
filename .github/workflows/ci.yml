@@ -141,6 +141,35 @@ jobs:
       - working-directory: crates
         run: cargo build --locked --bin scp-relay
 
+  broker-conformance:
+    name: Broker conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build packages
+        run: bun run build:packages
+
+      # ts and ts-node run here; a later job can set SCP_BROKER_BIN to add a native engine.
+      - name: Broker conformance against ts and ts-node
+        env:
+          SCP_BROKER_NODE: node
+        run: bun test packages/conformance/src/broker
+
   hook:
     name: Native hook (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
@@ -226,4 +255,4 @@ jobs:
         env:
           SCP_RELAY_BIN: ${{ github.workspace }}/crates/target/debug/scp-relay
           SCP_CONFORMANCE_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
-        run: bun test packages/conformance
+        run: bun test packages/conformance/src/*.test.ts

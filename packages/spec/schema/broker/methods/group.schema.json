@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "group",
+  "title": "group",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "create",
+            "add",
+            "remove",
+            "rules",
+            "ls",
+            "show",
+            "drop",
+            "pin",
+            "unpin"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "anyOf": [
+        {
+          "$ref": "../types.schema.json#/$defs/GroupView"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/GroupListing"
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "endpoint": {
+              "type": "string"
+            },
+            "member": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "endpoint",
+            "member"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "dropped": {
+              "const": true
+            }
+          },
+          "required": [
+            "name",
+            "dropped"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

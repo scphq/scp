@@ -1,0 +1,2522 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "types.schema.json",
+  "title": "Local broker shared types",
+  "$defs": {
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Envelope": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^msg_[0-9a-z]{9}[0-9a-f]{16}$"
+        },
+        "thread": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "reply_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "from": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "endpoint": {
+              "type": "string"
+            },
+            "user": {
+              "type": "string"
+            },
+            "auth": {
+              "enum": [
+                "local-uid",
+                "account",
+                "account+bridge",
+                "contact"
+              ]
+            },
+            "machine": {
+              "type": "string"
+            },
+            "account": {
+              "type": "string"
+            },
+            "claims": {
+              "type": "object",
+              "properties": {
+                "harness": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tty": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "harness",
+                "model"
+              ],
+              "additionalProperties": false
+            },
+            "rel": {
+              "type": "string"
+            },
+            "human": {
+              "const": true
+            }
+          },
+          "required": [
+            "address",
+            "endpoint",
+            "user",
+            "auth",
+            "claims"
+          ],
+          "additionalProperties": false
+        },
+        "to": {
+          "type": "string"
+        },
+        "body": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "maxLength": 65536,
+              "description": "The broker limits UTF-8 bytes to 65536; maxLength is only a character bound."
+            },
+            "mime": {
+              "type": "string",
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "text",
+            "mime"
+          ],
+          "additionalProperties": false
+        },
+        "data_class": {
+          "$ref": "#/$defs/DataClass"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "maxItems": 16
+        },
+        "hop": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "require_reply": {
+          "const": true
+        },
+        "link": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "parent"
+          ],
+          "additionalProperties": false
+        },
+        "shown_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "relation": {
+          "enum": [
+            "parent",
+            "ancestor",
+            "child"
+          ]
+        },
+        "parent_key": {
+          "type": "string",
+          "pattern": "^[0-9a-z]{6}$"
+        },
+        "for": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "subagent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "subagent"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "thread",
+        "reply_to",
+        "kind",
+        "from",
+        "to",
+        "body",
+        "data_class",
+        "attachments",
+        "hop",
+        "created_at",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "ThreadMessage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "from": {
+          "type": "object",
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "endpoint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "address",
+            "endpoint"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "thread",
+        "kind",
+        "created_at",
+        "from"
+      ],
+      "additionalProperties": false
+    },
+    "EndpointView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EndpointKind"
+        },
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presence": {
+          "$ref": "#/$defs/Presence"
+        },
+        "status": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/StatusState"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "note"
+          ],
+          "additionalProperties": false
+        },
+        "last_seen": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depth": {
+          "type": "integer"
+        },
+        "scope": {
+          "enum": [
+            "none",
+            "open",
+            "tree",
+            "parent",
+            "custom"
+          ]
+        },
+        "peekable": {
+          "enum": [
+            "local"
+          ]
+        },
+        "wake": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "const": "channels"
+            },
+            {
+              "const": "pi"
+            },
+            {
+              "const": "opencode-plugin"
+            },
+            {
+              "const": "codex-app-server"
+            },
+            {
+              "const": "claude-inbox"
+            },
+            {
+              "const": "agy-resume"
+            },
+            {
+              "const": "grok-resume"
+            },
+            {
+              "const": "muse-serve"
+            },
+            {
+              "const": "t3code"
+            },
+            {
+              "const": "spawn-resume"
+            },
+            {
+              "const": "codex-queue"
+            },
+            {
+              "type": "string",
+              "pattern": "^hook:"
+            }
+          ]
+        },
+        "wake_failed": {
+          "type": "string"
+        },
+        "wake_declined": {
+          "type": "string"
+        },
+        "waking": {
+          "const": true
+        }
+      },
+      "required": [
+        "id",
+        "address",
+        "kind",
+        "harness",
+        "model",
+        "cwd",
+        "labels",
+        "title",
+        "presence",
+        "status",
+        "last_seen"
+      ],
+      "additionalProperties": false
+    },
+    "ActivityRow": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ActivityKind"
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "at",
+        "endpoint",
+        "kind",
+        "tool",
+        "summary",
+        "agent"
+      ],
+      "additionalProperties": false
+    },
+    "ScopeView": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "tree": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depth": {
+          "type": "integer"
+        },
+        "rules": {
+          "type": "object",
+          "properties": {
+            "in": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "out": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "caps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScopeCap"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "preset": {
+          "enum": [
+            "none",
+            "open",
+            "tree",
+            "parent",
+            "custom"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "tree",
+        "parent",
+        "depth",
+        "rules",
+        "caps",
+        "groups",
+        "preset"
+      ],
+      "additionalProperties": false
+    },
+    "ScopeEntry": {
+      "type": "object",
+      "properties": {
+        "sel": {
+          "type": "string"
+        },
+        "via": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "base": {
+          "const": true
+        },
+        "member": {
+          "const": true
+        }
+      },
+      "required": [
+        "sel"
+      ],
+      "additionalProperties": false
+    },
+    "ScopeCap": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "dir": {
+          "$ref": "#/$defs/ScopeDirection"
+        },
+        "by": {
+          "type": "string"
+        },
+        "sels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScopeEntry"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "dir",
+        "by",
+        "sels"
+      ],
+      "additionalProperties": false
+    },
+    "ScopeChange": {
+      "type": "object",
+      "properties": {
+        "added": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "clipped": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mirrored": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "dir": {
+                "$ref": "#/$defs/ScopeDirection"
+              },
+              "added": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "endpoint",
+              "dir",
+              "added"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "refused": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "dir": {
+                "$ref": "#/$defs/ScopeDirection"
+              },
+              "fix": {
+                "type": "string"
+              },
+              "unseen": {
+                "const": true
+              }
+            },
+            "required": [
+              "endpoint",
+              "dir",
+              "fix"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "added",
+        "clipped"
+      ],
+      "additionalProperties": false
+    },
+    "PeerView": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EndpointKind"
+        },
+        "presence": {
+          "$ref": "#/$defs/Presence"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/StatusState"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "note"
+          ],
+          "additionalProperties": false
+        },
+        "reason": {
+          "type": "string"
+        },
+        "peekable": {
+          "enum": [
+            "local"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "kind",
+        "presence",
+        "title",
+        "status",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "WhyResult": {
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pair": {
+          "type": "object",
+          "properties": {
+            "paused_until": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "burst": {
+              "type": "object",
+              "properties": {
+                "n": {
+                  "type": "integer"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "window_s": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "n",
+                "limit",
+                "window_s"
+              ],
+              "additionalProperties": false
+            },
+            "refused": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "#/$defs/Timestamp"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "at",
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "allowed",
+        "reasons"
+      ],
+      "additionalProperties": false
+    },
+    "PeekResult": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PeekLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "enum": [
+            "status",
+            "digest"
+          ]
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PeekTurn"
+          }
+        },
+        "recent_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/StatusState"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "note"
+          ],
+          "additionalProperties": false
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unread": {
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "endpoint",
+        "at",
+        "level",
+        "source",
+        "turns",
+        "recent_tools",
+        "status",
+        "title",
+        "unread",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "PeekTurn": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "text": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "role",
+        "at",
+        "text",
+        "tools"
+      ],
+      "additionalProperties": false
+    },
+    "StopWaitResult": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Envelope"
+          }
+        },
+        "offered": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "hold": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "more": {
+          "type": "integer"
+        },
+        "workers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "starting": {
+          "type": "integer"
+        },
+        "background": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "others": {
+          "type": "integer"
+        },
+        "others_shown": {
+          "type": "integer"
+        },
+        "pushes_left": {
+          "type": "integer"
+        },
+        "prompted": {
+          "const": true
+        },
+        "wakeable": {
+          "const": true
+        },
+        "brief": {
+          "const": true
+        }
+      },
+      "required": [
+        "messages",
+        "offered",
+        "hold",
+        "more",
+        "workers",
+        "starting",
+        "others",
+        "pushes_left"
+      ],
+      "additionalProperties": false
+    },
+    "StopNudge": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer"
+        },
+        "from": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "unread": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "seq",
+        "from",
+        "id",
+        "unread"
+      ],
+      "additionalProperties": false
+    },
+    "SendParams": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 16
+            }
+          ]
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "The broker limits UTF-8 bytes to 65536; maxLength is only a character bound."
+        },
+        "kind": {
+          "enum": [
+            "message",
+            "request",
+            "reply",
+            "status"
+          ]
+        },
+        "thread": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "reply_to": {
+          "type": "string"
+        },
+        "data_class": {
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          },
+          "maxItems": 16
+        },
+        "client_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ttl_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2592000
+        },
+        "mime": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "require_reply": {
+          "type": "boolean"
+        },
+        "live": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "to",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "SendResult": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        },
+        "hop": {
+          "type": "integer"
+        },
+        "deliveries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer"
+              },
+              "offline": {
+                "type": "boolean"
+              },
+              "queued": {
+                "type": "boolean"
+              },
+              "last_seen": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "enum": [
+                  "offline",
+                  "running",
+                  "ended",
+                  "starting"
+                ]
+              },
+              "wake": {
+                "anyOf": [
+                  {
+                    "const": "channels"
+                  },
+                  {
+                    "const": "pi"
+                  },
+                  {
+                    "const": "opencode-plugin"
+                  },
+                  {
+                    "const": "codex-app-server"
+                  },
+                  {
+                    "const": "claude-inbox"
+                  },
+                  {
+                    "const": "agy-resume"
+                  },
+                  {
+                    "const": "grok-resume"
+                  },
+                  {
+                    "const": "muse-serve"
+                  },
+                  {
+                    "const": "t3code"
+                  },
+                  {
+                    "const": "spawn-resume"
+                  },
+                  {
+                    "const": "codex-queue"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^hook:"
+                  },
+                  {
+                    "const": "declined"
+                  }
+                ]
+              },
+              "idle": {
+                "const": true
+              },
+              "hibernated": {
+                "const": true
+              },
+              "wake_eta_s": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "endpoint",
+              "address",
+              "seq",
+              "offline",
+              "last_seen"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "held": {
+          "$ref": "#/$defs/JudgeHeld"
+        },
+        "redacted": {
+          "$ref": "#/$defs/JudgeRedacted"
+        }
+      },
+      "required": [
+        "id",
+        "thread",
+        "hop",
+        "deliveries"
+      ],
+      "additionalProperties": false
+    },
+    "AskResult": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "deliveries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer"
+              },
+              "offline": {
+                "type": "boolean"
+              },
+              "queued": {
+                "type": "boolean"
+              },
+              "last_seen": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "enum": [
+                  "offline",
+                  "running",
+                  "ended",
+                  "starting"
+                ]
+              },
+              "wake": {
+                "anyOf": [
+                  {
+                    "const": "channels"
+                  },
+                  {
+                    "const": "pi"
+                  },
+                  {
+                    "const": "opencode-plugin"
+                  },
+                  {
+                    "const": "codex-app-server"
+                  },
+                  {
+                    "const": "claude-inbox"
+                  },
+                  {
+                    "const": "agy-resume"
+                  },
+                  {
+                    "const": "grok-resume"
+                  },
+                  {
+                    "const": "muse-serve"
+                  },
+                  {
+                    "const": "t3code"
+                  },
+                  {
+                    "const": "spawn-resume"
+                  },
+                  {
+                    "const": "codex-queue"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^hook:"
+                  },
+                  {
+                    "const": "declined"
+                  }
+                ]
+              },
+              "idle": {
+                "const": true
+              },
+              "hibernated": {
+                "const": true
+              },
+              "wake_eta_s": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "endpoint",
+              "address",
+              "seq",
+              "offline",
+              "last_seen"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reply": {
+          "$ref": "#/$defs/Envelope"
+        },
+        "pending": {
+          "type": "boolean"
+        },
+        "expired": {
+          "type": "boolean"
+        },
+        "ended": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "state": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "const": "working"
+                  },
+                  {
+                    "const": "waiting"
+                  },
+                  {
+                    "const": "blocked"
+                  },
+                  {
+                    "const": "done"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "address",
+              "state"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "held": {
+          "$ref": "#/$defs/JudgeHeld"
+        },
+        "redacted": {
+          "$ref": "#/$defs/JudgeRedacted"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "AdoptResult": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "#/$defs/EndpointView"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "requested": {
+          "type": "string"
+        },
+        "held": {
+          "$ref": "#/$defs/JudgeHeld"
+        }
+      },
+      "required": [
+        "endpoint",
+        "parent"
+      ],
+      "additionalProperties": false
+    },
+    "MessageReceipts": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        },
+        "recipients": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "read_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "delivered_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "shown_at": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "address",
+              "read_at",
+              "shown_at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "id",
+        "thread",
+        "recipients"
+      ],
+      "additionalProperties": false
+    },
+    "AuditRow": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "event": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "id",
+        "at",
+        "event",
+        "endpoint",
+        "ref",
+        "detail"
+      ],
+      "additionalProperties": false
+    },
+    "JudgeHeld": {
+      "type": "object",
+      "properties": {
+        "hold_id": {
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "local",
+            "egress",
+            "ingress"
+          ]
+        }
+      },
+      "required": [
+        "hold_id",
+        "side"
+      ],
+      "additionalProperties": false
+    },
+    "JudgeRedacted": {
+      "type": "object",
+      "properties": {
+        "n": {
+          "type": "integer"
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "n",
+        "kinds"
+      ],
+      "additionalProperties": false
+    },
+    "Wake": {
+      "anyOf": [
+        {
+          "const": "channels"
+        },
+        {
+          "const": "pi"
+        },
+        {
+          "const": "opencode-plugin"
+        },
+        {
+          "const": "codex-app-server"
+        },
+        {
+          "const": "claude-inbox"
+        },
+        {
+          "const": "agy-resume"
+        },
+        {
+          "const": "grok-resume"
+        },
+        {
+          "const": "muse-serve"
+        },
+        {
+          "const": "t3code"
+        },
+        {
+          "const": "spawn-resume"
+        },
+        {
+          "const": "codex-queue"
+        },
+        {
+          "type": "string",
+          "pattern": "^hook:"
+        }
+      ]
+    },
+    "Presence": {
+      "enum": [
+        "online",
+        "idle",
+        "offline",
+        "hibernated"
+      ]
+    },
+    "StatusState": {
+      "enum": [
+        "working",
+        "waiting",
+        "blocked",
+        "done"
+      ]
+    },
+    "Attachment": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "path"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "Claim": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "type": "string"
+        },
+        "process": {
+          "type": "string"
+        },
+        "harness_session": {
+          "type": "string"
+        },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "grant": {
+          "type": "string"
+        },
+        "exact": {
+          "type": "boolean"
+        },
+        "subagent": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            },
+            "stop": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "scope": {
+          "enum": [
+            "none",
+            "open",
+            "tree",
+            "parent"
+          ]
+        },
+        "in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "under": {
+          "type": "string"
+        },
+        "ticket": {
+          "type": "string"
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EndpointKind": {
+      "enum": [
+        "agent",
+        "human",
+        "system"
+      ]
+    },
+    "MessageKind": {
+      "enum": [
+        "message",
+        "request",
+        "reply",
+        "status"
+      ]
+    },
+    "DataClass": {
+      "enum": [
+        "public",
+        "private"
+      ]
+    },
+    "ActivityKind": {
+      "enum": [
+        "session_start",
+        "tool",
+        "stop",
+        "note",
+        "session_end"
+      ]
+    },
+    "ScopeDirection": {
+      "enum": [
+        "in",
+        "out"
+      ]
+    },
+    "ScopePreset": {
+      "enum": [
+        "none",
+        "open",
+        "tree",
+        "parent"
+      ]
+    },
+    "PeekLevel": {
+      "const": "local"
+    },
+    "PeekSeen": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "by": {
+          "type": "string"
+        },
+        "auth": {
+          "type": "string"
+        },
+        "turns": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "at",
+        "by",
+        "auth",
+        "turns"
+      ],
+      "additionalProperties": false
+    },
+    "PeekState": {
+      "type": "object",
+      "properties": {
+        "peek": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PeekLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peeked_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PeekSeen"
+          }
+        }
+      },
+      "required": [
+        "peek",
+        "peeked_by"
+      ],
+      "additionalProperties": false
+    },
+    "Reach": {
+      "enum": [
+        "offline",
+        "running",
+        "ended",
+        "starting"
+      ]
+    },
+    "Status": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/StatusState"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "note"
+      ],
+      "additionalProperties": false
+    },
+    "InjectResult": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Envelope"
+          }
+        },
+        "offered": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "hold": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "more": {
+          "type": "integer"
+        },
+        "unread": {
+          "type": "integer"
+        },
+        "waiting": {
+          "type": "integer"
+        },
+        "block": {
+          "type": "boolean"
+        },
+        "forced": {
+          "type": "boolean"
+        },
+        "awaiting": {
+          "type": "integer"
+        },
+        "nudge": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StopNudge"
+          }
+        },
+        "nudge_more": {
+          "type": "integer"
+        },
+        "workers": {
+          "type": "integer"
+        },
+        "worker_unread": {
+          "type": "integer"
+        },
+        "pushes_left": {
+          "type": "integer"
+        },
+        "prompts": {
+          "type": "integer"
+        },
+        "wakeable": {
+          "const": true
+        },
+        "brief": {
+          "const": true
+        },
+        "intro": {
+          "type": "string"
+        },
+        "intro_key": {
+          "type": "string"
+        },
+        "directives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Envelope"
+          }
+        },
+        "directive_seqs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        }
+      },
+      "required": [
+        "messages",
+        "offered",
+        "hold",
+        "more",
+        "unread",
+        "block"
+      ],
+      "additionalProperties": false
+    },
+    "HoldView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "held",
+            "releasing",
+            "released",
+            "refused",
+            "expired"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "boundary": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "prefilter",
+            "model",
+            "cache",
+            "error"
+          ]
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolved_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to",
+        "state",
+        "created_at",
+        "expires_at",
+        "categories",
+        "reason",
+        "boundary",
+        "source",
+        "bytes",
+        "by",
+        "resolved_at"
+      ],
+      "additionalProperties": false
+    },
+    "Contact": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "address",
+        "harness",
+        "presence"
+      ],
+      "additionalProperties": false
+    },
+    "GroupView": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tree": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "boolean"
+        },
+        "rules": {
+          "type": "object",
+          "properties": {
+            "in": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ScopeEntry"
+              }
+            },
+            "out": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ScopeEntry"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "owner",
+        "tree",
+        "pinned",
+        "policy",
+        "rules",
+        "members"
+      ],
+      "additionalProperties": false
+    },
+    "GroupListing": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "members": {
+          "type": "integer"
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "boolean"
+        },
+        "ignored": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "owner",
+        "members",
+        "pinned",
+        "policy"
+      ],
+      "additionalProperties": false
+    },
+    "AdminView": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string"
+        },
+        "tree": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "granted_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "stale": {
+          "const": true
+        }
+      },
+      "required": [
+        "subject",
+        "granted_at"
+      ],
+      "additionalProperties": false
+    },
+    "Limits": {
+      "type": "object",
+      "properties": {
+        "bodyBytes": {
+          "type": "integer",
+          "const": 65536
+        },
+        "recipients": {
+          "type": "integer",
+          "const": 16
+        },
+        "attachments": {
+          "type": "integer",
+          "const": 16
+        },
+        "ttlDefaultS": {
+          "type": "integer",
+          "const": 604800
+        },
+        "ttlMaxS": {
+          "type": "integer",
+          "const": 2592000
+        },
+        "purgeAfterS": {
+          "type": "integer",
+          "const": 604800
+        },
+        "inboxMax": {
+          "type": "integer",
+          "const": 1000
+        },
+        "inboxPage": {
+          "type": "integer",
+          "const": 100
+        },
+        "waitMaxS": {
+          "type": "integer",
+          "const": 50
+        },
+        "hopMax": {
+          "type": "integer",
+          "const": 64
+        },
+        "threadMax": {
+          "type": "integer",
+          "const": 200
+        },
+        "causalWindowS": {
+          "type": "integer",
+          "const": 120
+        },
+        "pairBurst": {
+          "type": "integer",
+          "const": 20
+        },
+        "pairBurstWindowS": {
+          "type": "integer",
+          "const": 10
+        },
+        "pairPerMinute": {
+          "type": "integer",
+          "const": 30
+        },
+        "pairPerHour": {
+          "type": "integer",
+          "const": 300
+        },
+        "userPerDay": {
+          "type": "integer",
+          "const": 2000
+        },
+        "pingPongAlternations": {
+          "type": "integer",
+          "const": 100
+        },
+        "pingPongWindowS": {
+          "type": "integer",
+          "const": 600
+        },
+        "pingPongBlockS": {
+          "type": "integer",
+          "const": 600
+        },
+        "onlineWithinS": {
+          "type": "integer",
+          "const": 60
+        },
+        "hookOnlineS": {
+          "type": "integer",
+          "const": 300
+        },
+        "hookIdleS": {
+          "type": "integer",
+          "const": 1800
+        },
+        "hookEndedGraceS": {
+          "type": "integer",
+          "const": 30
+        },
+        "restartGraceS": {
+          "type": "integer",
+          "const": 60
+        },
+        "injectMessages": {
+          "type": "integer",
+          "const": 5
+        },
+        "injectBytes": {
+          "type": "integer",
+          "const": 7168
+        },
+        "pushBytes": {
+          "type": "integer",
+          "const": 20480
+        },
+        "pushes": {
+          "type": "integer",
+          "const": 20
+        },
+        "pushGapS": {
+          "type": "integer",
+          "const": 30
+        },
+        "pushQuietS": {
+          "type": "integer",
+          "const": 3
+        },
+        "pushGraceS": {
+          "type": "integer",
+          "const": 6
+        },
+        "stopBlocks": {
+          "type": "integer",
+          "const": 3
+        },
+        "directiveHolds": {
+          "type": "integer",
+          "const": 5
+        },
+        "injectHoldS": {
+          "type": "integer",
+          "const": 10
+        },
+        "deferredShowS": {
+          "type": "integer",
+          "const": 600
+        },
+        "deferredSettleMs": {
+          "type": "integer",
+          "const": 2000
+        },
+        "listOfflineWithinS": {
+          "type": "integer",
+          "const": 86400
+        },
+        "handleBoundS": {
+          "type": "integer",
+          "const": 2592000
+        },
+        "endpointRetireS": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "endpointRetireMax": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "idempotencyS": {
+          "type": "integer",
+          "const": 86400
+        },
+        "auditKeepS": {
+          "type": "integer",
+          "const": 2592000
+        },
+        "noteChars": {
+          "type": "integer",
+          "const": 280
+        },
+        "handbackBytes": {
+          "type": "integer",
+          "const": 16384
+        },
+        "activityKeep": {
+          "type": "integer",
+          "const": 5000
+        },
+        "activitySummaryChars": {
+          "type": "integer",
+          "const": 200
+        },
+        "textField": {
+          "type": "integer",
+          "const": 512
+        },
+        "lineageMax": {
+          "type": "integer",
+          "const": 16
+        },
+        "depthMax": {
+          "type": "integer",
+          "const": 32
+        },
+        "fanOutMax": {
+          "type": "integer",
+          "const": 32
+        },
+        "fanOutTotal": {
+          "type": "integer",
+          "const": 64
+        },
+        "treePerMinute": {
+          "type": "integer",
+          "const": 120
+        },
+        "treePerHour": {
+          "type": "integer",
+          "const": 1200
+        },
+        "treePauseS": {
+          "type": "integer",
+          "const": 600
+        },
+        "groupPerMinute": {
+          "type": "integer",
+          "const": 60
+        },
+        "grantTtlS": {
+          "type": "integer",
+          "const": 604800
+        },
+        "groupIdleS": {
+          "type": "integer",
+          "const": 86400
+        },
+        "policyLoadsKept": {
+          "type": "integer",
+          "const": 8
+        },
+        "titleRefreshTurns": {
+          "type": "integer",
+          "const": 5
+        },
+        "stderrBytes": {
+          "type": "integer",
+          "const": 1024
+        },
+        "wakeDebounceS": {
+          "type": "integer",
+          "const": 60
+        },
+        "wakeBackoffMaxS": {
+          "type": "integer",
+          "const": 900
+        },
+        "wakeRefChars": {
+          "type": "integer",
+          "const": 512
+        },
+        "wakeEtaMaxS": {
+          "type": "integer",
+          "const": 3600
+        }
+      },
+      "required": [
+        "bodyBytes",
+        "recipients",
+        "attachments",
+        "ttlDefaultS",
+        "ttlMaxS",
+        "purgeAfterS",
+        "inboxMax",
+        "inboxPage",
+        "waitMaxS",
+        "hopMax",
+        "threadMax",
+        "causalWindowS",
+        "pairBurst",
+        "pairBurstWindowS",
+        "pairPerMinute",
+        "pairPerHour",
+        "userPerDay",
+        "pingPongAlternations",
+        "pingPongWindowS",
+        "pingPongBlockS",
+        "onlineWithinS",
+        "hookOnlineS",
+        "hookIdleS",
+        "hookEndedGraceS",
+        "restartGraceS",
+        "injectMessages",
+        "injectBytes",
+        "pushBytes",
+        "pushes",
+        "pushGapS",
+        "pushQuietS",
+        "pushGraceS",
+        "stopBlocks",
+        "directiveHolds",
+        "injectHoldS",
+        "deferredShowS",
+        "deferredSettleMs",
+        "listOfflineWithinS",
+        "handleBoundS",
+        "endpointRetireS",
+        "endpointRetireMax",
+        "idempotencyS",
+        "auditKeepS",
+        "noteChars",
+        "handbackBytes",
+        "stderrBytes",
+        "activityKeep",
+        "activitySummaryChars",
+        "textField",
+        "lineageMax",
+        "depthMax",
+        "fanOutMax",
+        "fanOutTotal",
+        "treePerMinute",
+        "treePerHour",
+        "treePauseS",
+        "groupPerMinute",
+        "grantTtlS",
+        "groupIdleS",
+        "policyLoadsKept",
+        "titleRefreshTurns",
+        "wakeDebounceS",
+        "wakeBackoffMaxS",
+        "wakeRefChars",
+        "wakeEtaMaxS"
+      ],
+      "additionalProperties": true
+    },
+    "Snapshot": {
+      "type": "object",
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EndpointView"
+          }
+        },
+        "activity": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActivityRow"
+          }
+        },
+        "unread": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "broker": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "endpoints",
+        "activity",
+        "unread",
+        "broker"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

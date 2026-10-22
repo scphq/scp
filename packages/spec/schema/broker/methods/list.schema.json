@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "list",
+  "title": "list",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": "boolean"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "../types.schema.json#/$defs/EndpointKind"
+        },
+        "presence": {
+          "$ref": "../types.schema.json#/$defs/Presence"
+        },
+        "contacts": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "endpoints": {
+              "type": "array",
+              "items": {
+                "$ref": "../types.schema.json#/$defs/EndpointView"
+              }
+            }
+          },
+          "required": [
+            "endpoints"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "contacts": {
+              "type": "array",
+              "items": {
+                "$ref": "../types.schema.json#/$defs/Contact"
+              }
+            }
+          },
+          "required": [
+            "contacts"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

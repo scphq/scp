@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy",
+  "title": "policy",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "file": {},
+        "state": {
+          "enum": [
+            "open",
+            "loaded",
+            "error"
+          ]
+        },
+        "error": {
+          "type": "string"
+        },
+        "policy": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "policy"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

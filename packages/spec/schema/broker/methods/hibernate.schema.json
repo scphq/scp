@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hibernate",
+  "title": "hibernate",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "all": {
+          "const": true
+        },
+        "wake": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 512
+        },
+        "eta_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 3600
+        }
+      },
+      "required": [
+        "wake"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "$ref": "../types.schema.json#/$defs/EndpointView"
+            },
+            "mirrored": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "endpoint",
+            "mirrored"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "endpoints": {
+              "type": "array",
+              "items": {
+                "$ref": "../types.schema.json#/$defs/EndpointView"
+              }
+            },
+            "mirrored": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "endpoints",
+            "mirrored"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}
