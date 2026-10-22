@@ -22,9 +22,10 @@ import {
   validHandle,
   wrapMessage,
 } from "@scp-dev/core"
-import { connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
+import { BrokerUnavailable, type ConnectRetry, connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
 import { coworkBrokerStart, coworkLive, prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
 import {
+  appServer,
   CODEX_THREAD_KEY,
   type IdentityInput,
   harnessAt,
@@ -229,7 +230,8 @@ export interface HookOptions extends Pick<IdentityInput, "startOf" | "psTable"> 
   env: Env
   cwd: string
   stdin: AsyncIterable<string | Uint8Array>
-  connect: (start: boolean) => Promise<RelayClient>
+  /** a broker connection, started when `start` and none runs, retried as `retry` says */
+  connect: (start: boolean, retry?: ConnectRetry) => Promise<RelayClient>
   /** sets the process deadline, in ms from the hook's start */
   deadline?: (ms: number) => void
   /** ms left before the process deadline */
@@ -611,6 +613,23 @@ export function recordAgyConversation(payload: Json, env: Env): void {
   } catch {}
 }
 
+/** the most a hook waits for a busy or restarting broker: with the round trip after it, inside the harnesses' 5 s hook timeouts */
+export const HOOK_CONNECT_MS = 3000
+/** what a hook keeps for its round trip, printing and confirming once connected */
+const HOOK_AFTER_CONNECT_MS = 1000
+
+/** a hook's connect retry: at most {@link HOOK_CONNECT_MS}, its deadline extended to cover a retry where `extend`, else within what is left */
+export function hookRetry(options: Pick<HookOptions, "remaining" | "deadline">, began: number, extend: boolean): ConnectRetry {
+  if (!extend) {
+    const left = options.remaining?.() ?? HOOK_CONNECT_MS + HOOK_AFTER_CONNECT_MS
+    return { budgetMs: Math.max(0, Math.min(HOOK_CONNECT_MS, left - HOOK_AFTER_CONNECT_MS)) }
+  }
+  return {
+    budgetMs: HOOK_CONNECT_MS,
+    retrying: () => options.deadline?.(Date.now() - began + Math.max(options.remaining?.() ?? 0, HOOK_CONNECT_MS + HOOK_AFTER_CONNECT_MS)),
+  }
+}
+
 /** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
 export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
   if (args.includes("--cowork-only") && !coworkLive(options.env)) return
@@ -643,11 +662,16 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   if (Number.isFinite(wakeS) && wakeS > 0) return wakeHook(harnessArg, payload, wakeS, options)
   const event = mapHookPayload(payload, eventArg)
   if (!event || options.env.SCP_TRANSPORT === "cloud") return
-  const sub = subagents && (event.kind === "tool" || event.kind === "stop") ? subagentOf(payload) : undefined
-  if (subagents && !sub) return
+  const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
+  const child = hookFormat(harness, harness) === "codex" && event.agent !== undefined
+  const sub =
+    (subagents && (event.kind === "tool" || event.kind === "stop")) ||
+    (child && (event.kind === "prompt" || event.kind === "tool" || event.kind === "stop" || event.kind === "session_end"))
+      ? subagentOf(payload)
+      : undefined
+  if ((subagents || child) && !sub) return
   if (event.kind === "session_end") options.deadline?.(1000)
   if (event.kind === "session_start") options.deadline?.(1500)
-  const harness = normalizeHarness(hookHarness(harnessArg, options.env), "hook")
   const pid = (options.harnessPid ?? ((h: string) => hookHarnessPid(options.env, h)))(harness)
   const started = (options.startOf ?? psStart)(pid)
   const keyed = membership(
@@ -657,7 +681,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       processKey(pid, () => started),
     ),
   )
-  const harnessSession = event.agent ? undefined : asString(field(payload, "session_id", "sessionId"))
+  const harnessSession = event.agent && !child ? undefined : asString(field(payload, "session_id", "sessionId"))
   const table: { value?: PsCommTable | undefined } = {}
   const psTable = () => {
     if (!("value" in table)) table.value = readPsTable()
@@ -682,12 +706,14 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   if (joined !== keyed) claim = identify(joined.handle)
   if (!validHandle(claim.handle)) return
   const format = hookFormat(claim.harness, harness)
+  const transcript = "transcript_path" in payload ? payload.transcript_path : payload.transcriptPath
+  if (transcript === null && format === "codex" && appServer((options.psTable ?? psTable)()?.get(pid)?.args)) return
   const named = eventName(asString(field(payload, "hook_event_name", "hookEventName")) ?? eventArg)
   const ended = format !== "agy" || payload.terminationReason === "NO_TOOL_CALL"
   const stop = event.kind === "stop" && named === "stop" && ended
   const counts = stop || (format === "opencode" && event.kind === "prompt")
   if (sub && !SUBAGENT_HARNESSES.has(format)) return
-  const client = await options.connect(event.kind === "session_start")
+  const client = await options.connect(event.kind === "session_start", hookRetry(options, began, format !== "agy" && event.kind !== "session_end"))
   if (sub) {
     try {
       return await subagentHook(client, claim, format, sub, event, takes, options)
@@ -832,7 +858,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
   options.deadline?.(waitMs + PUSH_PRINT_MS + 1000)
-  const client = await options.connect(false)
+  const client = await options.connect(false, hookRetry(options, Date.now(), false))
   try {
     await client.hello({ transient: true, claim })
     await client.request("wake", { via: OPENCODE_WAKE }).catch(() => {})
@@ -861,8 +887,8 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
   }
 }
 
-/** Harnesses whose named subagents receive foreground PostToolUse context. */
-const SUBAGENT_HARNESSES = new Set(["claude-code"])
+/** Harnesses whose subagents claim their own endpoints: Claude Code's from its foreground --subagent hooks, a Codex child thread's from its hooks */
+const SUBAGENT_HARNESSES = new Set(["claude-code", "codex"])
 
 function subagentOf(payload: Json): { id: string; type?: string } | undefined {
   const id = asString(field(payload, "agent_id", "agentId"))
@@ -877,7 +903,7 @@ export function subagentIntro(address: string): string {
   return `${CLI_NAME}: you are a subagent with your own relay address ${address}; messages to it reach you after your tool calls. Your shell is your parent session's: pass --as ${handle} to every ${CLI_NAME} command (${CLI_NAME} --as ${handle} inbox), or it acts as your parent.`
 }
 
-/** Claims a child endpoint for tool events and resumes it when needed; a stop only marks an existing child done. */
+/** Claims a child endpoint for tool (and Codex prompt) events and resumes it when needed; a stop or session end only marks an existing child done. */
 async function subagentHook(
   client: RelayClient,
   claim: ReturnType<typeof relayIdentity>,
@@ -887,7 +913,7 @@ async function subagentHook(
   takes: boolean,
   options: HookOptions,
 ): Promise<string | undefined> {
-  const stop = event.kind === "stop"
+  const stop = event.kind === "stop" || event.kind === "session_end"
   const hello = await client.hello({ transient: true, claim: { ...claim, subagent: { ...sub, ...(stop ? { stop: true } : {}) } } }).catch((error: unknown) => {
     if (stop && error instanceof RelayError && error.code === "not_found") return undefined
     throw error
@@ -902,7 +928,7 @@ async function subagentHook(
   const intro = hello.created && hello.endpoint ? subagentIntro(hello.endpoint.address) : undefined
   const text = [intro, injected ? injectionText({ ...injected, more: await moreNow(client, injected) }) : undefined].filter(Boolean).join("\n\n")
   if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return undefined
-  const reply = hookReply(format, "tool", text)
+  const reply = hookReply(format, event.kind === "prompt" ? "prompt" : "tool", text)
   if (injected?.offered.length && (options.print?.(reply) ?? true)) {
     const read = injected.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
     await client
@@ -911,6 +937,7 @@ async function subagentHook(
         hold: injected.hold,
         ...(read.length ? { read } : {}),
         ...(injected.brief || !injected.messages.length ? {} : { preamble: true }),
+        ...(format === "codex" && event.kind === "tool" ? { deferred: true } : {}),
       })
       .catch(() => {})
   }
@@ -1025,10 +1052,16 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
         remaining: () => ends - Date.now(),
         print,
         stopping: () => stopping,
-        connect: (start) => (start ? connectBroker(dir, launch, 1000) : connectBroker(dir)),
+        connect: (start, retry) => connectBroker(dir, start ? launch : undefined, retry),
       }),
     )
-  } catch {}
+  } catch (error) {
+    if (error instanceof BrokerUnavailable && (error.busy || error.sandboxed)) {
+      try {
+        writeSync(2, `${HOOK_COMMAND}: relay broker unreachable, hook skipped: ${error.message}\n`)
+      } catch {}
+    }
+  }
   print(undefined)
   clearTimeout(timer)
   if (args.includes(WAKE)) process.off("SIGTERM", terminate)

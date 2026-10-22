@@ -1,11 +1,23 @@
-import { CLI_NAME, validHandle } from "@scp-dev/core"
+import { type Claim, CLI_NAME, validHandle } from "@scp-dev/core"
 import { connectBroker, relayDir } from "@scp-dev/broker"
 import { runRelayMcp, sessionInboxOf, type SpawnRequest } from "@scp-dev/mcp"
 import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
 import { cloudWithoutBroker, coworkLive } from "./hook-fast"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
-import { harnessAt, harnessPid, launcherPid, psParent, relayIdentity, writeShimBinding } from "./identity"
+import {
+  appServer,
+  CODEX_THREAD,
+  harnessAt,
+  harnessPid,
+  type IdentityInput,
+  launcherPid,
+  type PsCommTable,
+  psParent,
+  readPsTable,
+  relayIdentity,
+  writeShimBinding,
+} from "./identity"
 import { membership } from "./session"
 
 /** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
@@ -22,19 +34,35 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
   if (positionals.length) throw new RelayUsage(`${CLI_NAME} mcp takes no arguments (did you mean ${CLI_NAME} mcp install?)`)
   if (values.human) throw new RelayUsage("the relay MCP shim is always an agent: --human is not available to it")
   if (await coworkMcpGuard(values, { env: process.env, input: process.stdin, output: (line) => void process.stdout.write(line) })) return 0
-  const claim = relayIdentity({
+  let table: { value: PsCommTable | undefined } | undefined
+  let pid: number | undefined
+  const input: IdentityInput = {
     ...(values.as !== undefined ? { as: values.as } : {}),
     ...(values.harness !== undefined ? { harness: values.harness } : {}),
     fallbackHarness: "mcp",
     cwd: process.cwd(),
     env: process.env,
-    harnessPid: () => launcherPid(process.env) ?? harnessPid(),
-    inferHarness: (pid) => harnessAt(pid),
-  })
+    harnessPid: () => {
+      pid ??= launcherPid(process.env) ?? harnessPid()
+      return pid
+    },
+    inferHarness: (at) => harnessAt(at, input.psTable!()),
+    psTable: () => {
+      table ??= { value: readPsTable() }
+      return table.value
+    },
+  }
+  const claim = relayIdentity(input)
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)
   const dir = relayDir(process.env)
-  const unbind = writeShimBinding(claim, process.env)
-  process.on("exit", unbind)
+  const threadClaim = threadClaims(input, claim)
+  let unbind = threadClaim ? () => {} : writeShimBinding(claim, process.env)
+  const bound = (next: Claim) => {
+    unbind()
+    unbind = writeShimBinding({ process: next.process ?? "", handle: next.handle ?? "", harness: next.harness ?? "" }, process.env)
+  }
+  const clear = () => unbind()
+  process.on("exit", clear)
   const parent = process.ppid
   const orphaned = setInterval(() => {
     if (process.ppid !== parent) process.exit(0)
@@ -45,7 +73,8 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     await runRelayMcp({
       connect: () => connectBroker(dir, () => startDaemon(dir)),
       claim,
-      membership: () => membership(process.env, claim.session),
+      membership: (session) => membership(process.env, session),
+      ...(threadClaim ? { threadClaim, deferClaim: true, bound } : {}),
       input: process.stdin,
       output: (line) => void process.stdout.write(line),
       env: process.env,
@@ -57,10 +86,42 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     })
   } finally {
     clearInterval(orphaned)
-    process.off("exit", unbind)
+    process.off("exit", clear)
     unbind()
   }
   return 0
+}
+
+/** what in a shim's environment or flags names its session or thread: a shim with any of it is never thread-hosted */
+const NAMED = ["CODEX_THREAD_ID", "SCP_CODEX_THREAD", "SCP_SESSION", "SCP_NAME", "SCP_SHIM_BINDING", "SCP_HARNESS_PID"]
+
+const thread = (value: unknown): string | undefined => (typeof value === "string" && CODEX_THREAD.test(value) ? value : undefined)
+
+/** the thread a codex tool call's `_meta` names; a subagent child's call names its root thread, as a child's tools act as its root */
+export function callThread(meta: Record<string, unknown>): string | undefined {
+  const own = thread(meta.threadId)
+  if (!own) return undefined
+  const turn = meta["x-codex-turn-metadata"]
+  const parent = typeof turn === "object" && turn !== null ? thread((turn as Record<string, unknown>).parent_thread_id) : undefined
+  const session = thread(meta.sessionId)
+  return (session !== own ? session : undefined) ?? parent ?? own
+}
+
+/**
+ * for a codex shim an app server starts per thread (no thread or launcher identity in its environment, no --as): the claim for the thread
+ * a tool call names, as that thread's hooks make it; undefined for any other shim
+ */
+export function threadClaims(input: IdentityInput, claim: { harness: string }): ((meta: Record<string, unknown>) => Claim | undefined) | undefined {
+  if (input.as !== undefined || (claim.harness !== "codex" && claim.harness !== "codex-desktop") || NAMED.some((key) => input.env[key])) return undefined
+  if (!appServer((input.psTable ?? readPsTable)()?.get(input.harnessPid(claim.harness))?.args)) return undefined
+  const claims = new Map<string, Claim>()
+  return (meta) => {
+    const id = callThread(meta)
+    if (!id) return undefined
+    const found = claims.get(id) ?? relayIdentity({ ...input, harnessSession: id })
+    claims.set(id, found)
+    return found
+  }
 }
 
 /** relay_spawn's request as `swarm spawn --bg` words, acting as the shim's own agent */

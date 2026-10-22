@@ -150,6 +150,8 @@ const PRESENCE_MS = 60_000
 /** how long a broker wake's run holds what it was offered: past the time its harness takes to queue it */
 const TICKET_HOLD_S = 180
 const OWNERSHIP_MS = 2_000
+/** pending connects the socket queues before refusing more: hooks of many sessions arrive in bursts */
+const LISTEN_BACKLOG = 1024
 /** how long a hibernate waits for the hub to take its mirror */
 const HIBERNATE_BARRIER_MS = 10_000
 const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "policy", "policy_check", "cloud_status", "bridge_relink"])
@@ -328,7 +330,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     })
     await new Promise<void>((resolve, reject) => {
       listener.once("error", reject)
-      listener.listen(socket, () => {
+      // the kernel caps the backlog (macOS: kern.ipc.somaxconn, 128 by default)
+      listener.listen({ path: socket, backlog: LISTEN_BACKLOG }, () => {
         listener.off("error", reject)
         resolve()
       })

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { type Claim, LIMITS, PREAMBLE, type Wake } from "@scp-dev/core"
 import { type Broker, readSessionMarker, RelayClient, startBroker } from "@scp-dev/broker"
 import { createServer } from "node:net"
-import { MCP_PROTOCOLS, runRelayMcp, type SessionInbox, type SpawnRequest, TOOLS } from "./server"
+import { MCP_PROTOCOLS, type RelayMcpOptions, runRelayMcp, type SessionInbox, type SpawnRequest, TOOLS } from "./server"
 
 setDefaultTimeout(20_000)
 
@@ -33,6 +33,7 @@ function shim(
     membership?: () => { dark: string } | { handle?: string }
     env?: Record<string, string>
     sessionInbox?: SessionInbox
+    extra?: Partial<RelayMcpOptions>
   },
 ) {
   const lines: string[] = []
@@ -69,6 +70,7 @@ function shim(
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     ...(options.membership === undefined ? {} : { membership: options.membership }),
     ...(options.sessionInbox === undefined ? {} : { sessionInbox: options.sessionInbox }),
+    ...options.extra,
   })
   let nextId = 1
   if (options.initialize !== false) push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
@@ -221,6 +223,46 @@ describe("relay MCP shim, in process", () => {
     expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "no", live: true }))).toBe(
       "not_live: no live session holds me/mcp-lead: nothing was queued",
     )
+    for (const x of [s, t]) {
+      x.close()
+      await x.done
+    }
+  })
+
+  test("a deferred shim claims nothing before a tools/call, then the thread its _meta names for good; a call naming another or none keeps it", async () => {
+    let connects = 0
+    const connect = () => {
+      connects++
+      return RelayClient.connect(broker.socket)
+    }
+    const threadClaim = (meta: Record<string, unknown>): Claim | undefined =>
+      typeof meta.threadId === "string"
+        ? { handle: `thread-${meta.threadId}`, harness: "codex", cwd: "/work/proj", session: `codex:${meta.threadId}` }
+        : undefined
+    const bound: (string | undefined)[] = []
+    const logged: string[] = []
+    const s = shim(broker, {
+      handle: "deferred-shim",
+      claim: { harness: "codex" },
+      connect,
+      extra: { deferClaim: true, threadClaim, bound: (claim) => bound.push(claim.session), log: (line) => logged.push(line), heartbeatMs: 20 },
+    })
+    await Bun.sleep(150)
+    expect(connects).toBe(0)
+    const call = async (meta?: Record<string, unknown>) =>
+      textOf((await s.request("tools/call", { name: "relay_whoami", arguments: {}, ...(meta ? { _meta: meta } : {}) })).result!)
+    expect(await call({ threadId: "aaa" })).toContain("address: me/thread-aaa")
+    expect(await call()).toContain("address: me/thread-aaa")
+    expect(await call({ threadId: "bbb" })).toContain("address: me/thread-aaa")
+    expect(await call({ threadId: "ccc" })).toContain("address: me/thread-aaa")
+    const view = (address: string) => broker.core.list({ all: true }).find((e) => e.address === address)!
+    expect(broker.core.sessionOf(view("me/thread-aaa").id)).toBe("codex:aaa")
+    expect(bound).toEqual(["codex:aaa"])
+    expect(logged.filter((line) => line.includes("stays bound to codex:aaa"))).toHaveLength(1)
+    expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/thread-bbb")
+    expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/deferred-shim")
+    const t = shim(broker, { handle: "deferred-fallback", claim: { harness: "codex" }, extra: { deferClaim: true, threadClaim } })
+    expect(textOf(await t.call("relay_whoami"))).toContain("address: me/deferred-fallback")
     for (const x of [s, t]) {
       x.close()
       await x.done

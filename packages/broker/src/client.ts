@@ -2,6 +2,7 @@ import {
   type Claim,
   type EndpointView,
   type Envelope,
+  CLI_NAME,
   type ErrorCode,
   type PeerView,
   PROTOCOL,
@@ -12,7 +13,7 @@ import {
   type StopWaitResult,
   type WhyResult,
 } from "@scp-dev/core"
-import { existsSync, readFileSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { createConnection } from "node:net"
 import { dirname, join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
@@ -293,13 +294,33 @@ export class RelayClient {
 }
 
 export class BrokerUnavailable extends Error {
-  /** `sandboxed`: a sandbox around this process refused the connection to a running broker */
   constructor(
     message: string,
+    /** a sandbox around this process refused the connection to a running broker */
     readonly sandboxed = false,
+    /** a running broker kept refusing connections for the whole retry budget */
+    readonly busy = false,
   ) {
     super(message)
   }
+}
+
+/** how long a connect keeps trying by default: a busy or restarting broker, or one it started */
+export const CONNECT_BUDGET_MS = 12_000
+/** the longest pause between two tries */
+const RETRY_MAX_MS = 500
+/** what a full listen backlog or a broker restarting between unlink and listen answers */
+const TRANSIENT = new Set(["ECONNREFUSED", "EAGAIN", "ENOENT"])
+/** environment markers of a sandbox that may refuse unix sockets */
+const SANDBOX_MARKERS = ["CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED"]
+
+export interface ConnectRetry {
+  /** how long to keep trying, ms (default {@link CONNECT_BUDGET_MS}) */
+  budgetMs?: number
+  /** called once, before the first retry */
+  retrying?: () => void
+  /** the environment checked for sandbox markers (default process.env) */
+  env?: Record<string, string | undefined>
 }
 
 /** whether the broker for `dir` is running: its lock is held, or, when the lock cannot be probed, its pid is alive */
@@ -323,11 +344,16 @@ function brokerLive(dir: string): boolean {
 }
 
 /**
- * A connection to the broker for `dir`. With `start`, a missing broker is started (detached)
- * and the connection retried for up to `timeoutMs`. A socket whose directory is a link, someone
- * else's, or writable by others is refused before anything is sent: in /tmp anyone could make it first.
+ * A connection to the broker for `dir`. A refused or missing socket of a running broker (a full listen backlog, a restart) is retried with
+ * jittered exponential backoff within the budget (`retry`, or a number of ms); with `start`, a broker that is not running is started
+ * (detached) and waited for within the same budget. A refusal is a sandbox's only on EPERM or EACCES, or for a running broker under a
+ * sandbox marker; a running broker that refuses for the whole budget is busy. A socket whose directory is a link, someone else's, or
+ * writable by others is refused before anything is sent: in /tmp anyone could make it first.
  */
-export async function connectBroker(dir: string, start?: () => void, timeoutMs = 5000): Promise<RelayClient> {
+export async function connectBroker(dir: string, start?: () => void, retry: number | ConnectRetry = {}): Promise<RelayClient> {
+  const options = typeof retry === "number" ? { budgetMs: retry } : retry
+  const budget = options.budgetMs ?? CONNECT_BUDGET_MS
+  const env = options.env ?? process.env
   const path = socketPath(dir)
   const refuse = (code: unknown) => new BrokerUnavailable(`the sandbox blocks the relay socket (${code}); allow ${path} or run outside the sandbox`, true)
   const owned = (client: RelayClient) => {
@@ -335,28 +361,36 @@ export async function connectBroker(dir: string, start?: () => void, timeoutMs =
     client.close()
     throw new BrokerUnavailable(`${dirname(path)} is a link, not this user's, or writable by others; refusing the relay socket in it`)
   }
-  const sandboxed = (error: unknown) => {
-    if (error instanceof BrokerUnavailable) throw error
-    const code = (error as { code?: unknown } | null)?.code
-    if (code === "EPERM" || code === "EACCES") throw refuse(code)
-  }
-  try {
-    return owned(await RelayClient.connect(path))
-  } catch (error) {
-    sandboxed(error)
-    if (existsSync(path) && brokerLive(dir)) throw refuse((error as { code?: unknown } | null)?.code ?? "refused")
-    if (!start) throw new BrokerUnavailable(`no relay broker at ${path} (${error instanceof Error ? error.message : String(error)})`)
-  }
-  start()
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    await sleep(50)
+  const deadline = Date.now() + budget
+  let started = false
+  for (let attempt = 0; ; attempt++) {
+    let failure: unknown
     try {
       return owned(await RelayClient.connect(path))
     } catch (error) {
-      sandboxed(error)
-      if (Date.now() >= deadline)
-        throw new BrokerUnavailable(`the relay broker did not start within ${timeoutMs} ms (${error instanceof Error ? error.message : String(error)})`)
+      if (error instanceof BrokerUnavailable) throw error
+      failure = error
     }
+    const code = (failure as { code?: unknown } | null)?.code
+    const reason = failure instanceof Error ? failure.message : String(failure)
+    if (code === "EPERM" || code === "EACCES") throw refuse(code)
+    const live = brokerLive(dir)
+    if (live && SANDBOX_MARKERS.some((key) => env[key]) && code !== "ENOENT") throw refuse(code ?? "refused")
+    if (!live && !started) {
+      if (!start) throw new BrokerUnavailable(`no relay broker at ${path} (${reason})`)
+      start()
+      started = true
+    }
+    const left = deadline - Date.now()
+    if (left <= 0 || (live && !TRANSIENT.has(String(code)))) {
+      if (!live) throw new BrokerUnavailable(`the relay broker did not start within ${budget} ms (${reason})`)
+      throw new BrokerUnavailable(
+        `the relay broker is running but did not accept a connection within ${budget} ms (${code ?? reason}): it is busy; ${CLI_NAME} status shows it`,
+        false,
+        true,
+      )
+    }
+    if (attempt === 0) options.retrying?.()
+    await sleep(Math.min(left, Math.min(RETRY_MAX_MS, 25 * 2 ** attempt) * (0.5 + Math.random() / 2)))
   }
 }

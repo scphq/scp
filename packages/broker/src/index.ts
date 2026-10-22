@@ -1,4 +1,15 @@
-export { type BrokerInfo, BrokerUnavailable, connectBroker, type GrantParams, type GroupParams, RelayClient, type Hello, type HelloResult } from "./client"
+export {
+  type BrokerInfo,
+  BrokerUnavailable,
+  CONNECT_BUDGET_MS,
+  type ConnectRetry,
+  connectBroker,
+  type GrantParams,
+  type GroupParams,
+  RelayClient,
+  type Hello,
+  type HelloResult,
+} from "./client"
 export { relaySocketUrl, type Bridge, type BridgeConfig, type BridgeHooks, type BridgeStatus } from "./bridge"
 export { BrokerRunning } from "./lock"
 export { MAX_LINE } from "./ndjson"

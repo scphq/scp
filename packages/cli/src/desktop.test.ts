@@ -3,7 +3,20 @@ import { expect, test } from "bun:test"
 import type { RelayClient } from "@scp-dev/broker"
 import { claimHarness, spawnEnvironment, walkNow } from "./common"
 import { runHook } from "./hooks"
-import { detectHarness, harnessVariant, codexShell, hookFormat, hookHarnessPid, parsePsCommTable, relayIdentity } from "./identity"
+import {
+  appServer,
+  codexDesktop,
+  detectHarness,
+  deriveHandle,
+  harnessVariant,
+  codexShell,
+  hookFormat,
+  hookHarnessPid,
+  type IdentityInput,
+  parsePsCommTable,
+  relayIdentity,
+} from "./identity"
+import { threadClaims } from "./mcp"
 
 const bundle = "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server --listen stdio://"
 const ps = (args: string, parent = "launchd") => parsePsCommTable(`77 10 Wed Oct 21 09:00:00 2026 ${args}\n10 1 Wed Oct 21 08:00:00 2026 ${parent}`)
@@ -42,6 +55,59 @@ test("the desktop bundle's codex process labels MCP shims without the originator
   expect(claim("codex", {}, "/Applications/Codex.app/Contents/MacOS/codex app-server").harness).toBe("codex")
   expect(claim("codex", {}, "/usr/bin/node /Applications/Codex.app/Contents/Resources/codex-cli/codex").harness).toBe("codex")
   expect(claim("claude-code", {}, bundle).harness).toBe("claude-code")
+})
+
+test("the desktop bundle runs app-server past codex global options", () => {
+  const cli = bundle.slice(0, bundle.indexOf(" app-server"))
+  const at = (args: string) => codexDesktop({}, 77, () => ps(args))
+  expect(at(`${cli} -c features.code_mode_host=true app-server --analytics-default-enabled -c a=b`)).toBe(true)
+  expect(at(`${cli} --verbose --profile work app-server`)).toBe(true)
+  expect(at(`${cli} app-server`)).toBe(true)
+  expect(at(`${cli} -c a=b exec app-server`)).toBe(false)
+  expect(at(`${cli} -c a=b app-server-other`)).toBe(false)
+  expect(at(`/usr/bin/node ${cli} -c a=b app-server`)).toBe(false)
+  expect(at(`${cli} -c shell_environment_policy.exclude=["A B", "C"] app-server`)).toBe(true)
+  expect(at(`${cli} exec fix the app-server crash`)).toBe(false)
+  expect(appServer(`${cli} -c a=b app-server`)).toBe(true)
+  expect(appServer("/opt/codex exec restart app-server now")).toBe(false)
+  expect(appServer("/opt/codex resume --last app-server")).toBe(false)
+})
+
+test("a codex shim an app server starts per thread binds the thread a tool call names; a child's call binds its root thread", () => {
+  const root = "01a1602d-b655-70a1-b717-0af8f5083d80"
+  const child = "01a16032-a1c8-7512-b648-be089f3cebf6"
+  const desktop = `${bundle.slice(0, bundle.indexOf(" app-server"))} -c features.code_mode_host=true app-server`
+  const input = (env: Record<string, string> = {}, args = desktop, as?: string): IdentityInput => ({
+    ...(as ? { as } : {}),
+    harness: "codex",
+    fallbackHarness: "mcp",
+    cwd: "/tmp/thread-project",
+    env,
+    harnessPid: () => 77,
+    startOf: () => "s",
+    lineageOf: () => ["pid:77:s", "pid:10:s"],
+    psTable: () => ps(args),
+  })
+  const claims = (shim: IdentityInput) => threadClaims(shim, relayIdentity(shim))
+  const bind = claims(input())!
+  expect(bind({})).toBeUndefined()
+  expect(bind({ threadId: "not-a-thread" })).toBeUndefined()
+  expect(bind({ threadId: root, sessionId: root })).toMatchObject({
+    session: `codex:${root}`,
+    harness: "codex-desktop",
+    handle: deriveHandle("codex-desktop", "/tmp/thread-project"),
+    harness_session: root,
+    lineage: ["pid:10:s"],
+  })
+  const meta = { threadId: child, sessionId: root, "x-codex-turn-metadata": { parent_thread_id: root, thread_source: "subagent" } }
+  expect(bind(meta)?.session).toBe(`codex:${root}`)
+  expect(bind({ threadId: child, "x-codex-turn-metadata": { parent_thread_id: root } })?.session).toBe(`codex:${root}`)
+  expect(claims(input({}, "/opt/codex app-server"))!({ threadId: root })).toMatchObject({ session: `codex:${root}`, harness: "codex" })
+  for (const env of [{ CODEX_THREAD_ID: root }, { SCP_SESSION: "x" }, { SCP_NAME: "x" }, { SCP_SHIM_BINDING: "ab" }, { SCP_HARNESS_PID: "9" }])
+    expect(claims(input(env))).toBeUndefined()
+  expect(claims(input({}, desktop, "named"))).toBeUndefined()
+  expect(claims(input({}, "codex"))).toBeUndefined()
+  expect(claims({ ...input(), harness: "claude-code" })).toBeUndefined()
 })
 
 test("T3 Code takes precedence over desktop markers and bundle detection", () => {
