@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hook",
+  "title": "hook",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "payload": {
+          "type": "object"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "properties": {
+            "ANTIGRAVITY_AGENT": {
+              "type": "string"
+            },
+            "ANTIGRAVITY_CONVERSATION_ID": {
+              "type": "string"
+            },
+            "CLAUDECODE": {
+              "type": "string"
+            },
+            "CLAUDE_CODE_ENTRYPOINT": {
+              "type": "string"
+            },
+            "CLAUDE_CODE_IS_COWORK": {
+              "type": "string"
+            },
+            "CLAUDE_CODE_SESSION_ID": {
+              "type": "string"
+            },
+            "CLAUDE_CODE_WORKSPACE_HOST_PATHS": {
+              "type": "string"
+            },
+            "CLAUDE_PID": {
+              "type": "string"
+            },
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": {
+              "type": "string"
+            },
+            "CODEX_SANDBOX": {
+              "type": "string"
+            },
+            "CODEX_SANDBOX_NETWORK_DISABLED": {
+              "type": "string"
+            },
+            "CODEX_THREAD_ID": {
+              "type": "string"
+            },
+            "GROK_HOOK_EVENT": {
+              "type": "string"
+            },
+            "GROK_SESSION_ID": {
+              "type": "string"
+            },
+            "HOME": {
+              "type": "string"
+            },
+            "MUSE_SESSION_ID": {
+              "type": "string"
+            },
+            "OPENCODE": {
+              "type": "string"
+            },
+            "OPENCODE_PID": {
+              "type": "string"
+            },
+            "PATH": {
+              "type": "string"
+            },
+            "PWD": {
+              "type": "string"
+            },
+            "SCP_AGY_CONVERSATION_FILE": {
+              "type": "string"
+            },
+            "SCP_CODEX_THREAD": {
+              "type": "string"
+            },
+            "SCP_DIR": {
+              "type": "string"
+            },
+            "SCP_GRANT": {
+              "type": "string"
+            },
+            "SCP_HARNESS": {
+              "type": "string"
+            },
+            "SCP_HARNESS_DETECT": {
+              "type": "string"
+            },
+            "SCP_HARNESS_PID": {
+              "type": "string"
+            },
+            "SCP_LABELS": {
+              "type": "string"
+            },
+            "SCP_NAME": {
+              "type": "string"
+            },
+            "SCP_PARENT": {
+              "type": "string"
+            },
+            "SCP_PUSH_WAIT": {
+              "type": "string"
+            },
+            "SCP_SESSION": {
+              "type": "string"
+            },
+            "SCP_SHIM_BINDING": {
+              "type": "string"
+            },
+            "SCP_TLDR_EVERY": {
+              "type": "string"
+            },
+            "SCP_TRANSPORT": {
+              "type": "string"
+            },
+            "SCP_UNDER": {
+              "type": "string"
+            },
+            "SCP_WAKE": {
+              "type": "string"
+            },
+            "XDG_CONFIG_HOME": {
+              "type": "string"
+            },
+            "XDG_STATE_HOME": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "origin": {
+          "type": "number"
+        },
+        "ends": {
+          "type": "number"
+        },
+        "ppid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "procs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "pid": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "ppid": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "start": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9:-]{1,64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "args": {
+                "type": "string"
+              },
+              "comm": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pid",
+              "ppid",
+              "start",
+              "args"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "harness_pid": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "args",
+        "payload",
+        "env",
+        "origin",
+        "ends",
+        "ppid",
+        "procs"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exit": {
+          "const": 0
+        },
+        "commit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "exit"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

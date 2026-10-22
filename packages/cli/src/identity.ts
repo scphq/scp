@@ -1,11 +1,11 @@
-import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { coworkLive } from "./hook-fast"
 import { capture } from "./term"
 import { safeCwd } from "./cwd"
 import { tmpdir } from "node:os"
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path"
 import type { Claim } from "@scp-dev/core"
-import { privateDir, relayDir, shortHostname } from "@scp-dev/broker"
+import { privateDir, readOwnedFile, relayDir, shortHostname } from "@scp-dev/broker"
 import { GENERIC_HARNESSES, LIMITS, validHandle, validHarness } from "@scp-dev/core"
 
 /**
@@ -61,7 +61,7 @@ export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
   return () => {
     for (const path of paths) {
       try {
-        if (readFileSync(path, "utf8") === text) rmSync(path)
+        if (readOwnedFile(path) === text) rmSync(path)
       } catch {}
     }
   }
@@ -71,9 +71,9 @@ export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
 export type MuseLaunch = { name?: string; grant?: string; session?: string; launcher?: string }
 
 /** the file where a launcher (`swarm muse`, `swarm spawn`) leaves a muse process's {@link MuseLaunch}: Muse starts its shim and hooks without SCP_* variables */
-function museLaunchFile(key: string, env: Env): string | undefined {
+function museLaunchFile(key: string, env: Env, dir?: string): string | undefined {
   const pid = BINDING_PROCESS.exec(key)?.[1]
-  return pid ? join(relayDir(env), "launch", `muse-${pid}.json`) : undefined
+  return pid ? join(dir ?? relayDir(env), "launch", `muse-${pid}.json`) : undefined
 }
 
 /** leave `launch` for the muse serve process `key`; the returned function removes it */
@@ -86,7 +86,7 @@ export function writeMuseLaunch(key: string, launch: MuseLaunch, env: Env): () =
   chmodSync(path, 0o600)
   return () => {
     try {
-      if (readFileSync(path, "utf8") === text) rmSync(path)
+      if (readOwnedFile(path) === text) rmSync(path)
     } catch {}
   }
 }
@@ -94,11 +94,11 @@ export function writeMuseLaunch(key: string, launch: MuseLaunch, env: Env): () =
 const LAUNCH_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 /** what a launcher left for this muse process, when the file names exactly that process */
-export function readMuseLaunch(key: string, env: Env): MuseLaunch | undefined {
-  const path = museLaunchFile(key, env)
+export function readMuseLaunch(key: string, env: Env, dir?: string): MuseLaunch | undefined {
+  const path = museLaunchFile(key, env, dir)
   if (!path) return undefined
   try {
-    const launch = JSON.parse(readFileSync(path, "utf8")) as MuseLaunch & { process?: unknown }
+    const launch = JSON.parse(readOwnedFile(path)) as MuseLaunch & { process?: unknown }
     if (launch.process !== key) return undefined
     return {
       ...(typeof launch.name === "string" && validHandle(launch.name) ? { name: launch.name } : {}),
@@ -115,7 +115,7 @@ export function readMuseLaunch(key: string, env: Env): MuseLaunch | undefined {
 export function readShimBinding(env: Env, pid: number, table: PsCommTable | undefined): ShimBinding | undefined {
   const read = (name: string, expectedPid?: number): ShimBinding | undefined => {
     try {
-      const binding = JSON.parse(readFileSync(join(relayDir(env), "bindings", `${name}.json`), "utf8")) as ShimBinding
+      const binding = JSON.parse(readOwnedFile(join(relayDir(env), "bindings", `${name}.json`))) as ShimBinding
       const match = typeof binding.process === "string" ? BINDING_PROCESS.exec(binding.process) : null
       if (
         match &&
@@ -661,6 +661,8 @@ export function harnessVariant(
 }
 
 export interface IdentityInput {
+  stateDir?: string
+
   as?: string
   harness?: string
   /** the harness when none is named or detected */
@@ -704,7 +706,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const harness = harnessVariant(detected, input.env, pid, ps, input.t3Hosted)
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
   const own = processKey(pid, input.startOf)
-  const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env) : undefined
+  const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env, input.stateDir) : undefined
   const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? (harness === "claude-cowork" ? coworkHandle(input.env) : deriveHandle(harness, cwd))
   const grant = input.env.SCP_GRANT || launched?.grant
   const harnessProcess = launched?.launcher ?? own

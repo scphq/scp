@@ -5,6 +5,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY scp-relay-store ./scp-relay-store
 COPY scp-relay ./scp-relay
+COPY scp-hook ./scp-hook
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked --bin scp-relay && \
