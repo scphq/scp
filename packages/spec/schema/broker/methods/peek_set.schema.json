@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peek_set",
+  "title": "peek_set",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "on",
+            "local",
+            "off"
+          ]
+        }
+      },
+      "required": [
+        "level"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "peek": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/PeekLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "endpoint",
+        "peek"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

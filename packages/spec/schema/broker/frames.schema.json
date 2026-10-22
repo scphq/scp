@@ -1,0 +1,356 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "frames.schema.json",
+  "title": "Local broker frames",
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": [
+            "string",
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "additionalProperties": false
+    },
+    "SuccessResponse": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": [
+            "string",
+            "number",
+            "null"
+          ]
+        },
+        "result": {}
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": [
+            "string",
+            "number",
+            "null"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/ErrorObject"
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "Notification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "fleet"
+        },
+        "params": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "types.schema.json#/$defs/Timestamp"
+                },
+                "type": {
+                  "const": "presence"
+                },
+                "endpoint": {
+                  "type": "string"
+                },
+                "presence": {
+                  "$ref": "types.schema.json#/$defs/Presence"
+                },
+                "harness": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "labels": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "wake_failed": {
+                  "type": "string"
+                },
+                "wake_declined": {
+                  "type": "string"
+                },
+                "waking": {
+                  "const": true
+                }
+              },
+              "required": [
+                "at",
+                "type",
+                "endpoint",
+                "presence"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "types.schema.json#/$defs/Timestamp"
+                },
+                "type": {
+                  "const": "status"
+                },
+                "endpoint": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "types.schema.json#/$defs/Status"
+                }
+              },
+              "required": [
+                "at",
+                "type",
+                "endpoint",
+                "status"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "activity"
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "at": {
+                  "$ref": "types.schema.json#/$defs/Timestamp"
+                },
+                "endpoint": {
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "types.schema.json#/$defs/ActivityKind"
+                },
+                "tool": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "agent": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "at",
+                "endpoint",
+                "kind",
+                "tool",
+                "summary",
+                "agent"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "types.schema.json#/$defs/Timestamp"
+                },
+                "type": {
+                  "const": "message"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "thread": {
+                  "type": "string"
+                },
+                "kind": {
+                  "$ref": "types.schema.json#/$defs/MessageKind"
+                },
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hop": {
+                  "type": "integer"
+                },
+                "machine": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "at",
+                "type",
+                "id",
+                "thread",
+                "kind",
+                "from",
+                "to",
+                "hop"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "$ref": "types.schema.json#/$defs/Timestamp"
+                },
+                "type": {
+                  "const": "lagged"
+                },
+                "queued_bytes": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "at",
+                "type",
+                "queued_bytes"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "ErrorObject": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            -32700,
+            -32600,
+            -32601,
+            -32602,
+            -32000,
+            -32603
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            "retry_after": {
+              "type": "number",
+              "minimum": 0
+            },
+            "side": {
+              "enum": [
+                "local",
+                "egress",
+                "ingress"
+              ]
+            },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "ErrorCode": {
+      "enum": [
+        "not_found",
+        "inbox_full",
+        "rate_limited",
+        "loop_guard",
+        "data_class_refused",
+        "secret_refused",
+        "policy_refused",
+        "too_large",
+        "invalid_params",
+        "unauthorized",
+        "method_not_found",
+        "scope_refused",
+        "unavailable",
+        "judge_refused",
+        "not_live"
+      ]
+    }
+  }
+}

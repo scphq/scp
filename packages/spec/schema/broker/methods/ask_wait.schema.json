@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ask_wait",
+  "title": "ask_wait",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "wait_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/AskResult"
+    }
+  }
+}

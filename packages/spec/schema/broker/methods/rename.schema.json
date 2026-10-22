@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rename",
+  "title": "rename",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "string"
+        },
+        "take_over": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "handle"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/EndpointView"
+    }
+  }
+}

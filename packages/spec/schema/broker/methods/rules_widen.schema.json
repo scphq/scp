@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rules_widen",
+  "title": "rules_widen",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/ScopeChange"
+    }
+  }
+}

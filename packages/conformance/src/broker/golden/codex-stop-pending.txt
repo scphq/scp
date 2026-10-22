@@ -1,0 +1,1 @@
+{"decision":"block","reason":"You have 1 unread relay message; call relay_inbox, or run swarm inbox from a shell, to read it."}

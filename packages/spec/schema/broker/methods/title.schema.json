@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "title",
+  "title": "title",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/EndpointView"
+    }
+  }
+}

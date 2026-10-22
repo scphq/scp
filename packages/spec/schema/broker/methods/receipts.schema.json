@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "receipts",
+  "title": "receipts",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/MessageReceipts"
+    }
+  }
+}

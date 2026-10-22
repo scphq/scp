@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "title_infer",
+  "title": "title_infer",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "enum": [
+            "prompt",
+            "summary"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "changed"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
