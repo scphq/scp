@@ -1,5 +1,15 @@
 # @scp-dev/broker
 
+## 0.7.3
+
+### Patch Changes
+
+- 14ea99a: The broker's hot paths no longer scale with every endpoint it ever saw. A hello reads only the claimed row instead of every endpoint's view, `list` and `snapshot` read only rows they could show, and calls that visit every row derive each row's scope once per request. Ended subagent and lineage child rows offline for a day with no unread mail are retired by the sweep (`endpointRetireS`, `Infinity` keeps them). A hook's process table read gives up after 1.5 s.
+- 14ea99a: A hook's deadline counts from process start: 3.5 s, so a cold start plus a busy broker stays inside the harnesses' 5 s hook timeout, and its connect retry fits in what is left. Connect retries back off from 50 ms to 400 ms. The CLI, its hooks and the MCP shim no longer fail when the working directory cannot be read: they fall back to the payload's `cwd`, `$PWD`, `HOME` or `/`, and a hook that fails still exits 0 with at most one stderr line.
+- Updated dependencies [14ea99a]
+  - @scp-dev/core@0.10.1
+  - @scp-dev/hub@0.9.1
+
 ## 0.7.2
 
 ### Patch Changes
