@@ -1,10 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process"
 import { randomBytes, randomUUID } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
-import { connectBroker, relayDir } from "@scp-dev/broker"
+import { connectBroker, privateDir, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { attribute, attributed, ROOT_HELP } from "./attribute"
@@ -209,7 +208,7 @@ export async function resumeCommand(
   const runEnv: Env = { ...launch.env, SCP_HARNESS_PID: String(process.pid) }
   const claim = relayIdentity({ harness, fallbackHarness: harness, cwd, env: runEnv, harnessPid: () => process.pid })
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle`)
-  const dir = harness === "agy" ? mkdtempSync(join(tmpdir(), "scp-agy-")) : undefined
+  const dir = harness === "agy" ? mkdtempSync(join(privateDir(join(relayDir(runEnv), "agy")), "resume-")) : undefined
   const file = dir === undefined ? undefined : join(dir, "conversation")
   if (file) runEnv.SCP_AGY_CONVERSATION_FILE = file
   const broker = relayDir(runEnv)

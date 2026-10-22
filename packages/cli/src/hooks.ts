@@ -1,5 +1,5 @@
 import { Readable } from "node:stream"
-import { closeSync, fstatSync, openSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs"
+import { closeSync, fstatSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, join } from "node:path"
 import {
@@ -22,7 +22,17 @@ import {
   validHandle,
   wrapMessage,
 } from "@scp-dev/core"
-import { BrokerUnavailable, type ConnectRetry, connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
+import {
+  BrokerUnavailable,
+  type ConnectRetry,
+  connectBroker,
+  type HelloResult,
+  MAX_LINE,
+  openOwnedFile,
+  readOwnedFile,
+  type RelayClient,
+  relayDir,
+} from "@scp-dev/broker"
 import { coworkBrokerStart, coworkLive, prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
 import {
   appServer,
@@ -227,7 +237,7 @@ function peekTurn(event: HookEvent, named: string, payload: Json): { role: "user
   return { role, text }
 }
 
-export interface HookOptions extends Pick<IdentityInput, "startOf" | "psTable"> {
+export interface HookOptions extends Pick<IdentityInput, "startOf" | "psTable" | "inferHarness" | "stateDir"> {
   env: Env
   cwd: string
   stdin: AsyncIterable<string | Uint8Array>
@@ -240,7 +250,8 @@ export interface HookOptions extends Pick<IdentityInput, "startOf" | "psTable"> 
   /** ms left before the process deadline */
   remaining?: () => number
   /** writes the reply and says whether all of it went out; without it, returning the reply counts as printing it */
-  print?: (text: string) => boolean
+  print?: (text: string) => boolean | Promise<boolean>
+  allowWrite?: (path: string) => boolean
   stopping?: () => boolean
   harnessPid?: (harness: string) => number
 }
@@ -423,8 +434,8 @@ export function nudgeText(nudge: StopNudge[], more = 0): string | undefined {
 const STOP_CONTEXT_SINCE = [2, 1, 163]
 
 /** where `swarm setup` keeps the output of `claude --version`, for a hook whose payload names no version */
-export function claudeVersionFile(env: Env): string {
-  return join(env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config"), "scp", "claude-version")
+export function claudeVersionFile(env: Env, home: () => string = homedir): string {
+  return join(env.XDG_CONFIG_HOME || join(env.HOME || home(), ".config"), "scp", "claude-version")
 }
 
 /** whether a Claude Code of this version text continues a stop on its additionalContext; one that names no version is taken to */
@@ -439,11 +450,11 @@ export function stopContinues(version: string | undefined): boolean {
 }
 
 /** the Claude Code version a hook runs under: its payload's, else the one setup cached */
-function claudeVersion(payload: Json, env: Env): string | undefined {
+function claudeVersion(payload: Json, env: Env, home?: () => string): string | undefined {
   const named = asString(field(payload, "version", "claude_code_version"))
   if (named) return named
   try {
-    return readFileSync(claudeVersionFile(env), "utf8").slice(0, 200)
+    return readOwnedFile(claudeVersionFile(env, home)).slice(0, 200)
   } catch {
     return undefined
   }
@@ -476,7 +487,7 @@ export function transcriptTitle(path: string | undefined, session: string | unde
   if (!path || !session || !path.startsWith("/") || !path.endsWith(`/${session}.jsonl`)) return undefined
   let fd: number | undefined
   try {
-    fd = openSync(path, "r")
+    fd = openOwnedFile(path)
     const size = fstatSync(fd).size
     const start = Math.max(0, size - TITLE_TAIL_BYTES)
     const buffer = Buffer.alloc(size - start)
@@ -606,9 +617,9 @@ const NUDGE = `${CLI_NAME} (optional): a title and a one-line now (relay_set_tit
 export const AGY_CONVERSATION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 /** under `swarm agy`: records the first root conversation a hook reports, which the launcher resumes; a subagent's never counts */
-export function recordAgyConversation(payload: Json, env: Env): void {
+export function recordAgyConversation(payload: Json, env: Env, allowWrite?: (path: string) => boolean): void {
   const file = env.SCP_AGY_CONVERSATION_FILE
-  if (!file || field(payload, "parentConversationId", "parent_conversation_id") !== undefined) return
+  if (!file || (allowWrite && !allowWrite(file)) || field(payload, "parentConversationId", "parent_conversation_id") !== undefined) return
   const id = asString(field(payload, "conversationId", "conversation_id")) ?? env.ANTIGRAVITY_CONVERSATION_ID
   if (!id || !AGY_CONVERSATION.test(id)) return
   try {
@@ -639,17 +650,8 @@ export function hookEnds(agy: boolean, origin: number, loaded: number): number {
   return agy ? Math.min(ceiling, loaded + AGY_DEADLINE_MS) : ceiling
 }
 
-/** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
-export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
-  if (args.includes("--cowork-only") && !coworkLive(options.env)) return
-  const began = options.began ?? Date.now()
-  const blockStop = args.includes(BLOCK_STOP)
-  const takes = !args.includes(NO_INJECT)
-  const subagents = args.includes(SUBAGENT)
-  const waits = pushWait(args, options.env)
-  const wakeAt = args.indexOf(WAKE)
-  const wakeS = wakeAt < 0 ? 0 : Number(args[wakeAt + 1])
-  const [harnessArg, eventArg] = args.filter(
+function hookArgs(args: string[]): string[] {
+  return args.filter(
     (arg, i) =>
       arg !== "--cowork-only" &&
       arg !== BLOCK_STOP &&
@@ -660,6 +662,19 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       arg !== WAKE &&
       args[i - 1] !== WAKE,
   )
+}
+
+/** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
+export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
+  if (args.includes("--cowork-only") && !coworkLive(options.env)) return
+  const began = options.began ?? Date.now()
+  const blockStop = args.includes(BLOCK_STOP)
+  const takes = !args.includes(NO_INJECT)
+  const subagents = args.includes(SUBAGENT)
+  const waits = pushWait(args, options.env)
+  const wakeAt = args.indexOf(WAKE)
+  const wakeS = wakeAt < 0 ? 0 : Number(args[wakeAt + 1])
+  const [harnessArg, eventArg] = hookArgs(args)
   let payload: Json
   try {
     const parsed = JSON.parse(await readCapped(options.stdin)) as unknown
@@ -667,7 +682,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   } catch {
     payload = {}
   }
-  if (harnessArg === "agy") recordAgyConversation(payload, options.env)
+  if (harnessArg === "agy") recordAgyConversation(payload, options.env, options.allowWrite)
   if (Number.isFinite(wakeS) && wakeS > 0) return wakeHook(harnessArg, payload, wakeS, options)
   const event = mapHookPayload(payload, eventArg)
   if (!event || options.env.SCP_TRANSPORT === "cloud") return
@@ -688,6 +703,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       options.env,
       processKey(pid, () => started),
     ),
+    options.stateDir,
   )
   const harnessSession = event.agent && !child ? undefined : asString(field(payload, "session_id", "sessionId"))
   const table: { value?: PsCommTable | undefined } = {}
@@ -703,13 +719,18 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       fallbackHarness: "hook",
       cwd: event.cwd ?? options.cwd,
       env: options.env,
+      ...(options.stateDir ? { stateDir: options.stateDir } : {}),
       harnessPid: () => pid,
-      ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
+      ...(options.inferHarness
+        ? { inferHarness: options.inferHarness }
+        : options.harnessPid
+          ? {}
+          : { inferHarness: (at: number) => harnessAt(at, (options.psTable ?? psTable)() ?? new Map(), options.env) }),
       startOf: () => started,
       psTable: options.psTable ?? psTable,
     })
   let claim = identify("dark" in keyed ? undefined : keyed.handle)
-  const joined = claim.session.startsWith(CODEX_THREAD_KEY) ? membership(options.env, claim.session) : keyed
+  const joined = claim.session.startsWith(CODEX_THREAD_KEY) ? membership(options.env, claim.session, options.stateDir) : keyed
   if ("dark" in joined) return
   if (joined !== keyed) claim = identify(joined.handle)
   if (!validHandle(claim.handle)) return
@@ -721,7 +742,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   const stop = event.kind === "stop" && named === "stop" && ended
   const counts = stop || (format === "opencode" && event.kind === "prompt")
   if (sub && !SUBAGENT_HARNESSES.has(format)) return
-  const client = await options.connect(event.kind === "session_start", hookRetry(options))
+  const client = await options.connect(event.kind === "session_start", { ...hookRetry(options), env: options.env })
   if (sub) {
     try {
       return await subagentHook(client, claim, format, sub, event, takes, options)
@@ -776,7 +797,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
       await ended()
       return tldr ? hookReply(format, event.kind, tldr) : undefined
     }
-    const continues = !stop || format !== "claude-code" || stopContinues(claudeVersion(payload, options.env))
+    const continues = !stop || format !== "claude-code" || stopContinues(claudeVersion(payload, options.env, options.stateDir ? () => "/" : undefined))
     if (stop && !result.value.block) {
       if (waits === undefined || !PUSHES.has(format) || !(result.value.workers || result.value.worker_unread) || result.value.pushes_left === 0) {
         await ended()
@@ -801,7 +822,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     }
     const reply = hookReply(format, event.kind, text, result.value.unread, continues)
     const offered = result.value.offered ?? []
-    if ((stop || offered.length || intro) && (options.print?.(reply) ?? true)) {
+    if ((stop || offered.length || intro) && ((await options.print?.(reply)) ?? true)) {
       const read = directive
         ? directive.read
         : format === "agy"
@@ -848,9 +869,11 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
       options.env,
       processKey(pid, () => started),
     ),
+    options.stateDir,
   )
   if ("dark" in joined) return
   const harnessSession = asString(field(payload, "session_id", "sessionId"))
+  const psTable = options.psTable ?? readPsTable
   const claim = relayIdentity({
     ...(joined.handle ? { as: joined.handle } : {}),
     ...(harnessSession ? { harnessSession } : {}),
@@ -858,15 +881,20 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     fallbackHarness: "hook",
     cwd: asString(payload.cwd) ?? options.cwd,
     env: options.env,
+    ...(options.stateDir ? { stateDir: options.stateDir } : {}),
     harnessPid: () => pid,
-    ...(options.harnessPid ? {} : { inferHarness: (at: number) => harnessAt(at) }),
+    ...(options.inferHarness
+      ? { inferHarness: options.inferHarness }
+      : options.harnessPid
+        ? {}
+        : { inferHarness: (at: number) => harnessAt(at, psTable() ?? new Map(), options.env) }),
     startOf: () => started,
-    ...(options.psTable ? { psTable: options.psTable } : {}),
+    psTable,
   })
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
   options.deadline?.(Date.now() - (options.began ?? Date.now()) + waitMs + PUSH_PRINT_MS + HOOK_AFTER_CONNECT_MS)
-  const client = await options.connect(false, hookRetry(options))
+  const client = await options.connect(false, { ...hookRetry(options), env: options.env })
   try {
     await client.hello({ transient: true, claim })
     await client.request("wake", { via: OPENCODE_WAKE }).catch(() => {})
@@ -878,7 +906,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     if (!text) return
     const reply = hookReply(hookFormat(claim.harness, harness), "prompt", text)
     if (options.stopping?.()) return
-    if (options.print?.(reply) ?? true) {
+    if ((await options.print?.(reply)) ?? true) {
       const read = result.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
       await client.request("injected", {
         seqs: result.offered,
@@ -937,7 +965,7 @@ async function subagentHook(
   const text = [intro, injected ? injectionText({ ...injected, more: await moreNow(client, injected) }) : undefined].filter(Boolean).join("\n\n")
   if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return undefined
   const reply = hookReply(format, event.kind === "prompt" ? "prompt" : "tool", text)
-  if (injected?.offered.length && (options.print?.(reply) ?? true)) {
+  if (injected?.offered.length && ((await options.print?.(reply)) ?? true)) {
     const read = injected.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
     await client
       .request("injected", {
@@ -998,7 +1026,7 @@ async function push(
   const text = pushText(result)
   if (!text || (options.remaining?.() ?? Number.POSITIVE_INFINITY) < CONFIRM_MIN_MS) return undefined
   const reply = hookReply(harness, "stop", text, 0, continues)
-  if (result.offered.length && (options.print?.(reply) ?? true)) {
+  if (result.offered.length && ((await options.print?.(reply)) ?? true)) {
     const read = result.messages.flatMap((message) => (message.seq === undefined ? [] : [message.seq]))
     await client
       .request("injected", {
@@ -1050,19 +1078,60 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
   try {
     const dir = relayDir()
     const launch = coworkBrokerStart(dir, process.env, () => startDaemon(dir))
-    print(
-      await runHook(args, {
+    const stdin = preread === undefined ? await readCapped(process.stdin) : preread
+    let payload: Json = {}
+    try {
+      const value: unknown = JSON.parse(stdin)
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) payload = value as Json
+    } catch {}
+    const { hookEnv, hookProcs, relayHookRpc } = await import("./hook-rpc")
+    const event = mapHookPayload(payload, hookArgs(args)[1])
+    let result: import("@scp-dev/broker").HookResult | undefined
+    if ((event !== null || args.includes(WAKE)) && process.env.SCP_TRANSPORT !== "cloud") {
+      const client = await connectBroker(dir, event?.kind === "session_start" && !args.includes(WAKE) ? launch : undefined, {
+        ...hookRetry({ remaining: () => ends - Date.now() }),
         env: process.env,
-        cwd: safeCwd(),
-        stdin: preread === undefined ? process.stdin : Readable.from([preread]),
-        began: origin,
-        deadline,
-        remaining: () => ends - Date.now(),
-        print,
-        stopping: () => stopping,
-        connect: (start, retry) => connectBroker(dir, start ? launch : undefined, retry),
-      }),
-    )
+      })
+      try {
+        result = await relayHookRpc(
+          client,
+          () => ({
+            args,
+            payload,
+            cwd: safeCwd(),
+            env: hookEnv(process.env),
+            origin,
+            ends,
+            ppid: process.ppid,
+            procs: hookProcs(process.ppid, process.env),
+          }),
+          print,
+          (next) => deadline(next - origin),
+          (text) => {
+            try {
+              writeSync(2, `${text}\n`)
+            } catch {}
+          },
+        )
+      } finally {
+        client.close()
+      }
+    }
+    if (result !== undefined) print(result.stdout)
+    else
+      print(
+        await runHook(args, {
+          env: process.env,
+          cwd: safeCwd(),
+          stdin: Readable.from([stdin]),
+          began: origin,
+          deadline,
+          remaining: () => ends - Date.now(),
+          print,
+          stopping: () => stopping,
+          connect: (start, retry) => connectBroker(dir, start ? launch : undefined, retry),
+        }),
+      )
   } catch (error) {
     if (error instanceof BrokerUnavailable && (error.busy || error.sandboxed)) {
       try {

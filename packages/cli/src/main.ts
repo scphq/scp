@@ -1690,6 +1690,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
     const bridge = await daemonBridge()
     broker = await startBroker({
       dir: relayDir(),
+      hook: (await import("./hook-rpc")).hookHandler(relayDir(), (await import("./relay")).configDir()),
       ...(bridge ? { bridge } : await (await import("./mesh")).meshBrokerOptions()),
       bridgeConfig: () => daemonBridge(),
       ...(idleMs !== undefined ? { idleMs } : {}),
