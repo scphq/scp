@@ -1,3 +1,5 @@
+import { MCP_PROTOCOLS, REMOTE_TOOLS, type ToolResult, ToolInputError, str as mcpString, text as mcpText, validHandle } from "@scp-dev/core"
+import { remoteTool, type McpCall } from "./mcp-tools"
 import {
   type ActivityRow,
   allowlisted,
@@ -54,6 +56,19 @@ import {
 } from "@scp-dev/core"
 import { FederatedCore, MACHINE_NAME, type MirrorChange, type XEndpoint } from "./federation"
 import { type Deliver, type HoldView, type JudgeClientFactory, JudgeGate, type JudgeLimits } from "./judge-gate"
+
+export interface McpRequest {
+  method: string
+  session: string | null
+  client: string
+  body: unknown
+}
+export interface McpResponse {
+  status: number
+  headers: Record<string, string>
+  body: unknown | null
+}
+type McpBinding = { key: string; machine: string; resume: string | null; handle: string }
 
 export type HubAuth = "account" | "account+bridge"
 
@@ -265,6 +280,7 @@ export const HUB_LIMITS = {
   clientMachineIdleS: 14 * 86_400,
   idlePurgeS: 30 * 86_400,
   httpWaitS: 25,
+  mcpWaitS: 50,
   revalidateMs: 300_000,
   deniedS: 3600,
   refusalsPerMinute: 10,
@@ -272,7 +288,7 @@ export const HUB_LIMITS = {
 
 export type HubLimits = { [K in keyof typeof HUB_LIMITS]: number }
 
-const DURATIONS = ["clientMachineIdleS", "idlePurgeS", "httpWaitS", "revalidateMs", "deniedS"] as const satisfies readonly (keyof HubLimits)[]
+const DURATIONS = ["clientMachineIdleS", "idlePurgeS", "httpWaitS", "mcpWaitS", "revalidateMs", "deniedS"] as const satisfies readonly (keyof HubLimits)[]
 
 const SWEEP_MS = 10 * 60_000
 const DAY_MS = 86_400_000
@@ -283,6 +299,9 @@ const DENIED = "denied:"
 const TOUCH_MS = 10_000
 
 const HUB_MIGRATION = [
+  `CREATE TABLE IF NOT EXISTS mcp_machines (token_id TEXT PRIMARY KEY, machine TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS mcp_bindings (key TEXT PRIMARY KEY, token_id TEXT NOT NULL, machine TEXT NOT NULL, resume TEXT, handle TEXT NOT NULL, last_seen INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS mcp_sessions (key TEXT PRIMARY KEY, token_id TEXT NOT NULL, harness TEXT NOT NULL, last_seen INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS machines (name TEXT PRIMARY KEY, token_id TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER)`,
   `CREATE TABLE IF NOT EXISTS hub_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS machine_tombstones (name TEXT PRIMARY KEY, actor_id TEXT, user_id TEXT, at INTEGER NOT NULL)`,
@@ -297,10 +316,28 @@ export const LOCAL_EVENT_KINDS = ["message", "request", "reply", "status", "hand
 /** events per `local_events` frame, recipients per event, and how far back an event's `at` may lie */
 export const LOCAL_EVENTS = { perFrame: 200, recipients: 64, maxAgeMs: 300_000 } as const
 const LOCAL_KEEP_MS = 3_600_000
+/** remote MCP sessions without a joined endpoint: kept this long idle, and at most this many per grant */
+const MCP_SESSION_IDLE_MS = 30 * DAY_MS
+const MCP_SESSIONS_PER_GRANT = 64
 const HASH_ID = /^[0-9a-f]{8,64}$/
 
 const OBSERVER_METHODS = new Set(["list", "snapshot", "watch", "log", "machines", "machines_rm"])
-const CLIENT_METHODS = new Set(["whoami", "send", "ask", "ask_wait", "inbox", "ack", "status", "event", ...OBSERVER_METHODS])
+const CLIENT_METHODS = new Set([
+  "title",
+  "receipts",
+  "peers",
+  "message",
+  "leave",
+  "whoami",
+  "send",
+  "ask",
+  "ask_wait",
+  "inbox",
+  "ack",
+  "status",
+  "event",
+  ...OBSERVER_METHODS,
+])
 
 type Request = { jsonrpc?: string; id?: string | number | null; method?: unknown; params?: unknown }
 type Params = Record<string, unknown>
@@ -384,6 +421,7 @@ export class RelayHub {
   private readonly now: () => number
   private readonly waiters = new Map<string, Set<() => void>>()
   private readonly buckets = new Map<string, { rate: number; tokens: number; at: number; refused: number }>()
+  private readonly mcpSockets = new Set<HubSocket>()
   private readonly transient = new Set<HubSocket>()
   private readonly gone = new Set<string>()
   /** per machine, the full mirror its bridge is sending in several frames; lost on eviction, which only skips that sync's offline sweep */
@@ -527,7 +565,211 @@ export class RelayHub {
     this.release(socket, false)
   }
 
-  /** POST /v1/relay/rpc: a JSON-RPC request or batch run in order on a short-lived connection; returns the response(s) */
+  async mcp(grant: HubGrant, request: McpRequest): Promise<McpResponse> {
+    const headers: Record<string, string> = { "content-type": "application/json" }
+    const response = (body: unknown, status = 200): McpResponse => ({ status, headers, body })
+    const key = request.session ? `session:${grant.tokenId}:${request.session}` : null
+    if (request.method === "GET") return response(null, 405)
+    if (request.method === "DELETE") {
+      if (key) {
+        this.deps.sql.all(`DELETE FROM mcp_bindings WHERE key = ?`, key)
+        this.deps.sql.all(`DELETE FROM mcp_sessions WHERE key = ?`, key)
+      }
+      return response(null, request.session ? 204 : 405)
+    }
+    if (request.method !== "POST") return response(null, 405)
+    const body = request.body
+    const error = (id: unknown, code: number, message: string) => response({ jsonrpc: "2.0", id, error: { code, message } })
+    if (!body || typeof body !== "object" || Array.isArray(body)) return error(null, -32600, "a request is a JSON object")
+    const rpc = body as Params
+    const id = rpc.id ?? null
+    if (rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string" || (id !== null && typeof id !== "string" && typeof id !== "number"))
+      return error(null, -32600, "invalid request")
+    if (!("id" in rpc)) return response(null, 202)
+    const result = (value: unknown) => response({ jsonrpc: "2.0", id, result: value })
+    const params = rpc.params && typeof rpc.params === "object" && !Array.isArray(rpc.params) ? (rpc.params as Params) : {}
+    if (rpc.method === "initialize") {
+      this.mcpMachine(grant, request.client)
+      const session = crypto.randomUUID()
+      headers["mcp-session-id"] = session
+      const info = params.clientInfo as { name?: unknown } | undefined
+      const harness =
+        typeof info?.name === "string"
+          ? info.name
+              .toLowerCase()
+              .replace(/[^a-z0-9._-]/g, "")
+              .replace(/^[^a-z0-9]+/, "")
+              .slice(0, 32) || request.client
+          : request.client
+      const now = this.now()
+      this.deps.sql.all(
+        `INSERT INTO mcp_sessions (key, token_id, harness, last_seen) VALUES (?, ?, ?, ?)`,
+        `session:${grant.tokenId}:${session}`,
+        grant.tokenId,
+        harness,
+        now,
+      )
+      this.deps.sql.all(
+        `DELETE FROM mcp_sessions WHERE token_id = ? AND key NOT IN (SELECT key FROM mcp_bindings) AND (last_seen <= ? OR key NOT IN (SELECT key FROM mcp_sessions WHERE token_id = ? ORDER BY last_seen DESC, rowid DESC LIMIT ?))`,
+        grant.tokenId,
+        now - MCP_SESSION_IDLE_MS,
+        grant.tokenId,
+        MCP_SESSIONS_PER_GRANT,
+      )
+      return result({
+        protocolVersion: (MCP_PROTOCOLS as readonly unknown[]).includes(params.protocolVersion) ? params.protocolVersion : MCP_PROTOCOLS[0],
+        capabilities: { tools: {} },
+        serverInfo: { name: "scp", version: PROTOCOL },
+        instructions: `${PREAMBLE}\n\nUse relay_list and relay_peers to find agents in your account. Use relay_send or relay_ask to message them.\nRead mail with relay_inbox and answer with relay_reply. Mail is seen only at the next tool call.\nUse relay_join to choose a session endpoint and relay_leave to leave it. Keep your title and status current.`,
+      })
+    }
+    if (rpc.method === "ping") return result({})
+    if (rpc.method === "tools/list") return result({ tools: REMOTE_TOOLS })
+    if (rpc.method !== "tools/call") return error(id, -32601, `method not found: ${rpc.method}`)
+    const socket: HubSocket = { conn: RelayHub.connection(grant), send: () => {}, close: () => {} }
+    this.transient.add(socket)
+    this.mcpSockets.add(socket)
+    let output: ToolResult
+    let code = "ok"
+    let fresh: string | null = null
+    const call: McpCall = async <T>(method: string, args: Params = {}): Promise<T> => {
+      this.refuseDenied(socket)
+      this.spend(socket, method, args)
+      return (await this.dispatch(socket, method, args)) as T
+    }
+    try {
+      this.refuseDenied(socket)
+      const machine = this.mcpMachine(grant, request.client)
+      const name = typeof params.name === "string" ? params.name : ""
+      const args = name === "relay_join" ? object(params.arguments, "arguments") : {}
+      const sessionBinding = key ? one<McpBinding>(this.deps.sql, `SELECT * FROM mcp_bindings WHERE key = ?`, key) : undefined
+      const bindingKey = name === "relay_join" && key ? key : sessionBinding ? key! : `grant:${grant.tokenId}`
+      let binding = one<McpBinding>(this.deps.sql, `SELECT * FROM mcp_bindings WHERE key = ?`, bindingKey)
+      const issued = key ? one<{ harness: string }>(this.deps.sql, `SELECT harness FROM mcp_sessions WHERE key = ?`, key) : undefined
+      if (issued) this.deps.sql.all(`UPDATE mcp_sessions SET last_seen = ? WHERE key = ?`, this.now(), key)
+      if (name === "relay_join") {
+        if (!key) throw new RelayError("invalid_params", "relay_join requires a session id")
+        if (!issued && !binding) throw new RelayError("invalid_params", "unknown session id; initialize again")
+        const handle = mcpString(args, "name", true)
+        if (!validHandle(handle)) throw new RelayError("invalid_params", `${JSON.stringify(handle)} is not a valid agent handle`)
+        const base = `${handle.slice(0, 57)}-`
+        if (binding && binding.handle !== handle && !(binding.handle.startsWith(base) && /^\d+$/.test(binding.handle.slice(base.length))))
+          throw new RelayError("invalid_params", "leave before choosing another name")
+        if (!binding) {
+          let chosen = handle
+          for (
+            let suffix = 2;
+            chosen === request.client || one(this.deps.sql, `SELECT 1 FROM mcp_bindings WHERE machine = ? AND handle = ?`, machine, chosen);
+            suffix++
+          ) {
+            chosen = `${handle.slice(0, 57)}-${suffix}`
+          }
+          this.deps.sql.all(
+            `INSERT INTO mcp_bindings (key, token_id, machine, resume, handle, last_seen) VALUES (?, ?, ?, NULL, ?, ?)`,
+            bindingKey,
+            grant.tokenId,
+            machine,
+            chosen,
+            this.now(),
+          )
+          fresh = bindingKey
+        }
+      } else if (!binding) {
+        this.deps.sql.all(
+          `INSERT INTO mcp_bindings (key, token_id, machine, resume, handle, last_seen) VALUES (?, ?, ?, NULL, ?, ?)`,
+          bindingKey,
+          grant.tokenId,
+          machine,
+          request.client,
+          this.now(),
+        )
+      }
+      binding = one<McpBinding>(this.deps.sql, `SELECT * FROM mcp_bindings WHERE key = ?`, bindingKey)!
+      const harness = issued?.harness ?? request.client
+      const claim = { handle: binding.handle, harness, labels: { ...grant.labels, client: request.client }, in: ["*"], out: ["*"] }
+      socket.conn.grant = { ...grant, labels: { ...grant.labels, client: request.client } }
+      const connect = (args: Params) => {
+        this.refuseDenied(socket)
+        this.spend(socket, "hello", args)
+        return this.hello(socket, args) as { endpoint: EndpointView; token?: string }
+      }
+      let hello: { endpoint: EndpointView; token?: string }
+      try {
+        hello = connect({ protocol: PROTOCOL, machine, ...(binding.resume ? { resume: binding.resume } : { claim }) })
+      } catch (err) {
+        if (!binding.resume || !(err instanceof RelayError) || !["unauthorized", "not_found", "stale"].includes(err.code)) throw err
+        hello = connect({ protocol: PROTOCOL, machine, claim })
+      }
+      fresh = null
+      this.deps.sql.all(`UPDATE mcp_bindings SET resume = ?, last_seen = ? WHERE key = ?`, hello.token ?? binding.resume, this.now(), bindingKey)
+      const toolArgs = object(params.arguments, "arguments")
+      if (JSON.stringify(toolArgs).length > this.limits.frameBytes) throw new RelayError("too_large", "tool arguments exceed the frame limit")
+      if (name === "relay_join") output = mcpText(`joined the relay as ${hello.endpoint.address}`)
+      else if (name === "relay_leave") {
+        const view = await call<EndpointView>("leave")
+        socket.conn.endpoint = null
+        this.deps.sql.all(`DELETE FROM mcp_bindings WHERE key = ?`, bindingKey)
+        output = mcpText(`${view.address} left the relay`)
+      } else {
+        if (!REMOTE_TOOLS.some((tool) => tool.name === name)) throw new RelayError("method_not_found", `no tool ${name}`)
+        output = await remoteTool(name, toolArgs, call, hello.endpoint)
+      }
+    } catch (err) {
+      if (fresh) this.deps.sql.all(`DELETE FROM mcp_bindings WHERE key = ?`, fresh)
+      code = err instanceof RelayError ? err.code : err instanceof ToolInputError ? "invalid_params" : "unavailable"
+      output = mcpText(`${code}: ${err instanceof Error ? err.message : "tool failed"}`, true)
+    }
+    try {
+      const stored = key ? one<McpBinding>(this.deps.sql, `SELECT * FROM mcp_bindings WHERE key = ?`, key) : undefined
+      const fallback = stored ?? one<McpBinding>(this.deps.sql, `SELECT * FROM mcp_bindings WHERE key = ?`, `grant:${grant.tokenId}`)
+      const endpoint =
+        socket.conn.endpoint ??
+        (fallback?.resume
+          ? one<{ id: string }>(this.deps.sql, `SELECT id FROM endpoints WHERE token_hash = ?`, this.deps.hash(fallback.resume))?.id
+          : undefined)
+      const unread = endpoint
+        ? one<{ n: number }>(
+            this.deps.sql,
+            `SELECT COUNT(*) AS n FROM deliveries WHERE endpoint = ? AND acked_at IS NULL AND expires_at > ?`,
+            endpoint,
+            this.now(),
+          )!.n
+        : 0
+      const line = unread ? `${unread} unread: call relay_inbox` : "0 unread"
+      const rendered = output.content.map((part) => part.text).join("\n")
+      output.content = [{ type: "text", text: `${rendered.length > 149_800 ? `${rendered.slice(0, 149_750)}\noutput truncated` : rendered}\n${line}` }]
+      if (output.structuredContent) output.structuredContent.unread = unread
+      else output._meta = { unread }
+      return result(output)
+    } finally {
+      this.deps.log?.("mcp_call", { tool: REMOTE_TOOLS.some((tool) => tool.name === params.name) ? params.name : "unknown", code })
+      this.closed(socket)
+      this.transient.delete(socket)
+      this.mcpSockets.delete(socket)
+    }
+  }
+
+  private mcpMachine(grant: HubGrant, client: string): string {
+    if (!MACHINE_NAME.test(client) || client.length > 27) throw new RelayError("invalid_params", "client must be a machine name")
+    const stored = one<{ machine: string }>(this.deps.sql, `SELECT machine FROM mcp_machines WHERE token_id = ?`, grant.tokenId)
+    if (stored) return stored.machine
+    let machine: string
+    do {
+      machine = `${client}-${randomHex(2)}`
+    } while (
+      one(
+        this.deps.sql,
+        `SELECT 1 FROM machines WHERE name = ? UNION SELECT 1 FROM mcp_machines WHERE machine = ? UNION SELECT 1 FROM machine_tombstones WHERE name = ?`,
+        machine,
+        machine,
+        machine,
+      )
+    )
+    this.deps.sql.all(`INSERT INTO mcp_machines (token_id, machine, created_at) VALUES (?, ?, ?)`, grant.tokenId, machine, this.now())
+    return machine
+  }
+
+  /** a request or batch on a short-lived connection */
   async batch(grant: HubGrant, body: unknown): Promise<unknown> {
     if (JSON.stringify(body ?? null).length > this.limits.frameBytes) {
       return { jsonrpc: "2.0", id: null, error: rpcError(new RelayError("too_large", `a request is at most ${this.limits.frameBytes} bytes`)) }
@@ -585,6 +827,7 @@ export class RelayHub {
     for (const token of tokens) {
       denied.set(DENIED + token, now)
       this.setState(DENIED + token, now)
+      for (const table of ["mcp_sessions", "mcp_bindings", "mcp_machines"]) this.deps.sql.all(`DELETE FROM ${table} WHERE token_id = ?`, token)
     }
     this.deps.log?.("relay_action", { account: this.account, method: "revoke", sockets: closed })
     return closed
@@ -639,6 +882,7 @@ export class RelayHub {
     if (now - (this.state("last_sweep") ?? 0) >= SWEEP_MS) {
       this.relay.sweep()
       this.deps.sql.all(`DELETE FROM local_events WHERE at <= ?`, now - LOCAL_KEEP_MS)
+      this.deps.sql.all(`DELETE FROM mcp_sessions WHERE last_seen <= ? AND key NOT IN (SELECT key FROM mcp_bindings)`, now - MCP_SESSION_IDLE_MS)
       this.expireMachines(now)
       this.forgetTombstones(now)
       const denied = this.deniedGrants()
@@ -1025,6 +1269,23 @@ export class RelayHub {
     }
     if (!me) throw new RelayError("unauthorized", "this connection has no endpoint")
     switch (method) {
+      case "title": {
+        const view = core.title(me, params.text)
+        this.announceEndpoint(me)
+        return view
+      }
+      case "receipts":
+        return core.receipts(me, params.id)
+      case "message":
+        return { message: core.delivered(me, params.id) ?? (params.member === true ? core.threadMessage(me, params.id) : null) }
+      case "peers":
+        return { peers: core.peers(me, { unverified: true }) }
+      case "leave": {
+        const left = core.leaveOn(me)
+        core.disconnect(me)
+        this.announceEndpoint(me)
+        return core.whoami(left.id)
+      }
       case "whoami":
         return core.whoami(me)
       case "send":
@@ -2030,7 +2291,10 @@ export class RelayHub {
   private waitMs(socket: HubSocket, value: unknown): number {
     if (value === undefined) return 0
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new RelayError("invalid_params", "wait_s must be a number of seconds")
-    return Math.min(value, this.transient.has(socket) ? this.limits.httpWaitS : LIMITS.waitMaxS) * 1000
+    return (
+      Math.min(value, this.mcpSockets.has(socket) ? Math.min(50, this.limits.mcpWaitS) : this.transient.has(socket) ? this.limits.httpWaitS : LIMITS.waitMaxS) *
+      1000
+    )
   }
 
   private wake(endpoint: string): void {

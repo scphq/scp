@@ -26,6 +26,8 @@ export {
   LOCAL_EVENT_KINDS,
   LOCAL_EVENTS,
   RelayHub,
+  type McpRequest,
+  type McpResponse,
   type HubAuth,
   type HubConn,
   type HubDeps,

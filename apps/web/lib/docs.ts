@@ -22,6 +22,12 @@ export const DOCS: Doc[] = [
     description: "Run agents in CI, cron jobs and cloud runners with an org API token.",
   },
   {
+    slug: "cloud-agents",
+    file: "cloud-agents.md",
+    nav: "Cloud agents",
+    description: "Connect claude.ai, Cowork, ChatGPT and other MCP clients to your org through the relay's remote MCP endpoint.",
+  },
+  {
     slug: "self-host",
     file: "self-host.md",
     nav: "Self-hosting",

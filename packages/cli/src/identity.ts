@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { coworkLive } from "./hook-fast"
 import { capture } from "./term"
 import { tmpdir } from "node:os"
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path"
@@ -26,7 +27,7 @@ export function detectHarness(env: Env): string | undefined {
   if (env.CLAUDECODE === "1") return "claude-code"
   if (env.CODEX_THREAD_ID) return "codex"
   if (inferring(env) && (env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED)) return "codex"
-  if (env.CLAUDE_CODE_IS_COWORK === "1") return "claude-code"
+  if (coworkLive(env)) return "claude-code"
   return undefined
 }
 
@@ -602,7 +603,7 @@ export function harnessVariant(
   const provider = hookFormat(detected, detected)
   if ((provider === "codex" || provider === "claude-code") && hosted(pid)) return T3CODE
   if (provider === "claude-code") {
-    if (detected === "claude-cowork" || env.CLAUDE_CODE_IS_COWORK === "1") return "claude-cowork"
+    if (detected === "claude-cowork" || coworkLive(env)) return "claude-cowork"
     if (detected === "claude-desktop" || env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop") return "claude-desktop"
   }
   if (provider === "codex" && (detected === "codex-desktop" || codexDesktop(env, pid, table))) return "codex-desktop"

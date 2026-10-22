@@ -2,6 +2,9 @@ import { expect, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Readable } from "node:stream"
+import pkg from "../package.json" with { type: "json" }
+import { PINNED_CLI, pluginLauncher } from "./cowork"
+import { coworkBrokerStart, coworkLive } from "./hook-fast"
 import { coworkMcpGuard } from "./mcp"
 import { hookEntries, runHook } from "./hooks"
 import { hookFormat, relayIdentity } from "./identity"
@@ -50,6 +53,89 @@ test("synced hooks return silently before stdin or a broker connection outside C
     if (active) await expect(run).rejects.toThrow("connected")
     else expect(await run).toBeUndefined()
   }
+})
+
+test("the Cowork guard is live in local and cloud Cowork and inert elsewhere", async () => {
+  const cases: [Record<string, string>, boolean][] = [
+    [{ CLAUDE_CODE_IS_COWORK: "1" }, true],
+    [{ CLAUDE_CODE_ENTRYPOINT: "remote_cowork" }, true],
+    [{ CLAUDE_CODE_ENTRYPOINT: "claude-desktop" }, false],
+    [{ CLAUDE_CODE_IS_COWORK: "0", CLAUDE_CODE_ENTRYPOINT: "cli" }, false],
+    [{}, false],
+  ]
+  const state = mkdtempSync(join(process.env.HOME!, "cowork-state-"))
+  for (const [env, live] of cases) {
+    expect(coworkLive(env)).toBe(live)
+    const lines: string[] = []
+    expect(
+      await coworkMcpGuard({ "cowork-only": true }, { env: { ...env, SCP_DIR: state }, input: Readable.from([]), output: (line) => lines.push(line) }),
+    ).toBe(!live)
+    const run = runHook(["claude", "--cowork-only"], {
+      env: { HOME: "/unused", SCP_DIR: "/unused", SCP_HARNESS_DETECT: "0", ...env },
+      cwd: "/work",
+      stdin: Readable.from([JSON.stringify({ hook_event_name: "SessionStart", session_id: "hook-session" })]),
+      connect: async () => {
+        throw new Error("connected")
+      },
+      harnessPid: () => 77,
+      startOf: () => "s",
+      psTable: () => undefined,
+    })
+    if (live) await expect(run).rejects.toThrow("connected")
+    else expect(await run).toBeUndefined()
+  }
+})
+
+test("a cloud Cowork session without a broker dir never starts a broker", () => {
+  const start = () => {}
+  const root = mkdtempSync(join(process.env.HOME!, "cowork-broker-"))
+  const cloud = { CLAUDE_CODE_ENTRYPOINT: "remote_cowork" }
+  expect(coworkBrokerStart(join(root, "missing"), cloud, start)).toBeUndefined()
+  expect(coworkBrokerStart(root, cloud, start)).toBe(start)
+  expect(coworkBrokerStart(join(root, "missing"), { CLAUDE_CODE_IS_COWORK: "1" }, start)).toBe(start)
+  expect(coworkBrokerStart(join(root, "missing"), {}, start)).toBe(start)
+})
+
+test("a cloud Cowork session without a broker dir serves inert MCP pointing at the connector", async () => {
+  const root = mkdtempSync(join(process.env.HOME!, "cowork-cloud-"))
+  const lines: string[] = []
+  const input = Readable.from([`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } })}\n`])
+  const env = { CLAUDE_CODE_ENTRYPOINT: "remote_cowork", SCP_DIR: join(root, "missing") }
+  expect(await coworkMcpGuard({ "cowork-only": true }, { env, input, output: (line) => lines.push(line) })).toBe(true)
+  expect(lines.join("")).toContain("use the SCP connector")
+  expect(await coworkMcpGuard({ "cowork-only": true }, { env: { ...env, SCP_DIR: root }, input: Readable.from([]), output: () => {} })).toBe(false)
+})
+
+test("the plugin launcher runs the host paths when present, else the pinned CLI through npx", async () => {
+  expect(PINNED_CLI).toBe(`@scp-dev/cli@${pkg.version}`)
+  expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/)
+  const root = realpathSync(mkdtempSync(join(process.env.HOME!, "cowork-launch-")))
+  const node = join(root, "host bin", "node")
+  const bin = join(root, "it's", "cli.js")
+  const argv = pluginLauncher([node, bin])
+  expect(argv.slice(0, 2)).toEqual(["sh", "-c"])
+  const script = argv[2]!
+  expect(script).toContain(`npx -y ${PINNED_CLI} "$@"`)
+  expect(script.match(/npx/g)).toHaveLength(1)
+  expect(script).not.toMatch(/@scp-dev\/cli(?!@\d+\.\d+\.\d+ )/)
+  const npx = join(root, "path", "npx")
+  mkdirSync(dirname(npx), { recursive: true })
+  writeFileSync(npx, '#!/bin/sh\necho npx "$@"\n', { mode: 0o755 })
+  const run = async () => {
+    const child = Bun.spawn([...argv, "hook", "claude", "--cowork-only"], { env: { PATH: `${dirname(npx)}:/usr/bin:/bin` }, stdout: "pipe" })
+    expect(await child.exited).toBe(0)
+    return (await new Response(child.stdout).text()).trim()
+  }
+  expect(await run()).toBe(`npx -y ${PINNED_CLI} hook claude --cowork-only`)
+  mkdirSync(dirname(node), { recursive: true })
+  mkdirSync(dirname(bin), { recursive: true })
+  writeFileSync(node, '#!/bin/sh\necho host "$@"\n', { mode: 0o755 })
+  writeFileSync(bin, "")
+  expect(await run()).toBe(`host ${bin} hook claude --cowork-only`)
+  const hook = hookEntries("claude", { launcher: argv, cowork: true }).SessionStart![0]!.hooks[0]!.command
+  const shell = Bun.spawn(["/bin/sh", "-c", hook], { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe" })
+  expect(await shell.exited).toBe(0)
+  expect((await new Response(shell.stdout).text()).trim()).toBe(`host ${bin} hook claude --cowork-only`)
 })
 
 test("the synced MCP server answers requests without tools, ignores notifications and exits at EOF", async () => {
@@ -131,8 +217,9 @@ test("setup builds only the plugin and root zip entries with absolute launch pat
   expect(relaySetup({ cowork: true, bin }, deps)).toBe(0)
   const read = (path: string) => JSON.parse(readFileSync(join(plugin, path), "utf8"))
   expect(read(".claude-plugin/plugin.json")).toMatchObject({ name: "scp", version: "1.2.3", homepage: "https://scp.dev" })
-  expect(read(".mcp.json")).toEqual({ mcpServers: { scp: { command: node, args: [bin, "mcp", "--harness", "claude", "--channels", "--cowork-only"] } } })
-  expect(read("hooks/hooks.json")).toEqual({ hooks: hookEntries("claude", { launcher: [node, bin], cowork: true }) })
+  const [command, ...args] = pluginLauncher([node, bin])
+  expect(read(".mcp.json")).toEqual({ mcpServers: { scp: { command, args: [...args, "mcp", "--harness", "claude", "--channels", "--cowork-only"] } } })
+  expect(read("hooks/hooks.json")).toEqual({ hooks: hookEntries("claude", { launcher: [command!, ...args], cowork: true }) })
   expect(existsSync(home)).toBe(false)
   expect(readdirSync(plugin).sort()).toEqual([".claude-plugin", ".mcp.json", "hooks"])
   const archive = readFileSync(join(state, "scp-cowork.zip"))

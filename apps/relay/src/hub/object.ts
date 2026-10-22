@@ -176,7 +176,14 @@ export class OrgHub extends DurableObject<Env> {
       if (!(await this.ready())) return Response.json({ minutes: GRAPH_MINUTES, machines: [], nodes: [], edges: [] });
       return Response.json(this.hub.graph(minutes));
     }
-    const route = url.pathname === "/ws" && request.method === "GET" ? "ws" : url.pathname === "/rpc" && request.method === "POST" ? "rpc" : null;
+    const route =
+      url.pathname === "/ws" && request.method === "GET"
+        ? "ws"
+        : url.pathname === "/rpc" && request.method === "POST"
+          ? "rpc"
+          : url.pathname === "/mcp"
+            ? "mcp"
+            : null;
     if (!route) return error(404, "not_found", "Not found.");
     const grant = parseGrant(request.headers.get(GRANT_HEADER));
     const org = request.headers.get(ORG_HEADER);
@@ -198,6 +205,42 @@ export class OrgHub extends DurableObject<Env> {
       server.serializeAttachment(RelayHub.connection(grant));
       await this.arm();
       return new Response(null, { status: 101, webSocket: client });
+    }
+    if (route === "mcp") {
+      const client = request.headers.get("x-scp-hub-client") ?? "";
+      if (!/^[a-z][a-z0-9-]{0,30}$/.test(client)) return error(400, "invalid_client", "Invalid client label.");
+      let body: unknown = null;
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        const reader = request.body?.getReader();
+        const decoder = new TextDecoder();
+        let size = 0;
+        let raw = "";
+        if (reader) {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            size += chunk.value.byteLength;
+            if (size > 1_048_576) {
+              await reader.cancel();
+              return error(413, "body_too_large", "Request body is too large.");
+            }
+            raw += decoder.decode(chunk.value, { stream: true });
+          }
+          raw += decoder.decode();
+        }
+        if (raw) {
+          try {
+            body = JSON.parse(raw);
+          } catch {
+            return error(400, "invalid_json", "Invalid JSON.");
+          }
+        }
+      }
+      const result = await this.hub.mcp(grant, { method: request.method, session: request.headers.get("mcp-session-id"), client, body });
+      const headers = new Headers(result.headers);
+      if (result.body !== null) headers.set("content-type", "application/json");
+      await this.arm();
+      return new Response(result.body === null ? null : JSON.stringify(result.body), { status: result.status, headers });
     }
     let body: unknown;
     try {
