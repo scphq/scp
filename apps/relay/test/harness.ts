@@ -59,10 +59,12 @@ export async function startRelay(opts: RelayOptions = {}): Promise<Relay> {
     modules: true,
     script: await script(),
     compatibilityDate: "2026-06-01",
-    compatibilityFlags: ["nodejs_compat"],
+    compatibilityFlags: ["nodejs_compat", "global_fetch_strictly_public"],
+    kvNamespaces: ["OAUTH_KV"],
     d1Databases: { DB: crypto.randomUUID() },
     durableObjects: { HUB: { className: "OrgHub", useSQLite: true } },
     bindings: {
+      RELAY_ORIGIN: "https://relay.test",
       MAILER: "log",
       MAIL_FROM: "login@scp.test",
       SESSION_SECRET: "test-session-secret",
@@ -106,7 +108,7 @@ export async function startRelay(opts: RelayOptions = {}): Promise<Relay> {
     mails,
     fetch(path, init = {}) {
       // Bun's fetch skips the undici dispatcher that sets this, so the Worker would see the loopback URL
-      const headers = new Headers(init.headers);
+      const headers = new Headers(init.headers as ConstructorParameters<typeof Headers>[0]);
       headers.set("MF-Original-URL", origin + path);
       return mf.dispatchFetch(origin + path, { redirect: "manual", ...init, headers } as never) as unknown as Promise<Response>;
     },

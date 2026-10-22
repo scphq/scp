@@ -23,7 +23,7 @@ import {
   wrapMessage,
 } from "@scp-dev/core"
 import { BrokerUnavailable, type ConnectRetry, connectBroker, type HelloResult, MAX_LINE, type RelayClient, relayDir } from "@scp-dev/broker"
-import { prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
+import { coworkBrokerStart, coworkLive, prereadStdin, readCapped, SUBAGENT } from "./hook-fast"
 import {
   appServer,
   CODEX_THREAD_KEY,
@@ -641,7 +641,7 @@ export function hookEnds(agy: boolean, origin: number, loaded: number): number {
 
 /** Posts activity and offers context on one transient connection. Only printed replies are confirmed. */
 export async function runHook(args: string[], options: HookOptions): Promise<string | undefined> {
-  if (args.includes("--cowork-only") && options.env.CLAUDE_CODE_IS_COWORK !== "1") return
+  if (args.includes("--cowork-only") && !coworkLive(options.env)) return
   const began = options.began ?? Date.now()
   const blockStop = args.includes(BLOCK_STOP)
   const takes = !args.includes(NO_INJECT)
@@ -1015,7 +1015,7 @@ async function push(
 
 /** Hooks exit silently {@link HOOK_DEADLINE_MS} after process start (agy: sooner), unless a worker wait extends the deadline. */
 export async function relayHookCommand(args: string[], startDaemon: (dir: string) => void, origin: number = performance.timeOrigin): Promise<number> {
-  if (args.includes("--cowork-only") && process.env.CLAUDE_CODE_IS_COWORK !== "1") return 0
+  if (args.includes("--cowork-only") && !coworkLive(process.env)) return 0
   const agy = args[0] === "agy"
   let printed = false
   let stopping = false
@@ -1049,6 +1049,7 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
   const preread = prereadStdin()
   try {
     const dir = relayDir()
+    const launch = coworkBrokerStart(dir, process.env, () => startDaemon(dir))
     print(
       await runHook(args, {
         env: process.env,
@@ -1059,7 +1060,7 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
         remaining: () => ends - Date.now(),
         print,
         stopping: () => stopping,
-        connect: (start, retry) => connectBroker(dir, start ? () => startDaemon(dir) : undefined, retry),
+        connect: (start, retry) => connectBroker(dir, start ? launch : undefined, retry),
       }),
     )
   } catch (error) {

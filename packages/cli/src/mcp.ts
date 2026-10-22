@@ -2,6 +2,7 @@ import { type Claim, CLI_NAME, validHandle } from "@scp-dev/core"
 import { connectBroker, relayDir } from "@scp-dev/broker"
 import { runRelayMcp, sessionInboxOf, type SpawnRequest } from "@scp-dev/mcp"
 import { CHANNELS_ENV, RelayUsage, startDaemon } from "./common"
+import { cloudWithoutBroker, coworkLive } from "./hook-fast"
 import { spawnDetached } from "./spawn"
 import { mcpInstall } from "./install"
 import {
@@ -151,13 +152,22 @@ export async function coworkMcpGuard(
   values: Values,
   options: { env: Record<string, string | undefined>; input: AsyncIterable<string | Uint8Array>; output: (line: string) => void },
 ): Promise<boolean> {
-  if (!values["cowork-only"] || options.env.CLAUDE_CODE_IS_COWORK === "1") return false
+  if (!values["cowork-only"]) return false
+  if (cloudWithoutBroker(relayDir(options.env), options.env)) {
+    await inertMcp(options.input, options.output, "SCP has no relay in this cloud session; use the SCP connector.")
+    return true
+  }
+  if (coworkLive(options.env)) return false
   await inertMcp(options.input, options.output)
   return true
 }
 
 /** a newline-delimited MCP server with no tools or relay connection */
-export async function inertMcp(input: AsyncIterable<string | Uint8Array>, output: (line: string) => void): Promise<void> {
+export async function inertMcp(
+  input: AsyncIterable<string | Uint8Array>,
+  output: (line: string) => void,
+  instructions = "SCP is inactive outside Cowork.",
+): Promise<void> {
   const decoder = new TextDecoder()
   let pending = ""
   const respond = (line: string) => {
@@ -174,7 +184,7 @@ export async function inertMcp(input: AsyncIterable<string | Uint8Array>, output
             protocolVersion: request.params?.protocolVersion,
             capabilities: {},
             serverInfo: { name: "scp", version: "0.0.0" },
-            instructions: "SCP is inactive outside Cowork.",
+            instructions,
           }
         : request.method === "tools/list"
           ? { tools: [] }

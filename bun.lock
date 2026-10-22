@@ -13,8 +13,9 @@
     },
     "apps/relay": {
       "name": "@scp-dev/relay",
-      "version": "0.3.13",
+      "version": "0.4.0",
       "dependencies": {
+        "@cloudflare/workers-oauth-provider": "1.2.3",
         "@scp-dev/core": "workspace:*",
         "@scp-dev/hub": "workspace:*",
       },
@@ -52,7 +53,7 @@
     },
     "packages/broker": {
       "name": "@scp-dev/broker",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "dependencies": {
         "@scp-dev/core": "workspace:*",
         "@scp-dev/hub": "workspace:*",
@@ -63,7 +64,7 @@
     },
     "packages/cli": {
       "name": "@scp-dev/cli",
-      "version": "0.12.1",
+      "version": "0.12.2",
       "bin": {
         "swarm": "./dist/cli.js",
       },
@@ -92,7 +93,7 @@
     },
     "packages/core": {
       "name": "@scp-dev/core",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "devDependencies": {
         "tsup": "^8.5.1",
       },
@@ -111,7 +112,7 @@
     },
     "packages/hub": {
       "name": "@scp-dev/hub",
-      "version": "0.8.3",
+      "version": "0.9.0",
       "dependencies": {
         "@scp-dev/core": "workspace:*",
       },
@@ -121,7 +122,7 @@
     },
     "packages/mcp": {
       "name": "@scp-dev/mcp",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "dependencies": {
         "@scp-dev/broker": "workspace:*",
         "@scp-dev/core": "workspace:*",
@@ -132,7 +133,7 @@
     },
     "packages/mesh": {
       "name": "@scp-dev/mesh",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "dependencies": {
         "@scp-dev/broker": "workspace:*",
         "@scp-dev/core": "workspace:*",
@@ -156,7 +157,7 @@
     },
     "packages/spec": {
       "name": "@scp-dev/spec",
-      "version": "0.4.5",
+      "version": "0.4.6",
     },
   },
   "packages": {
@@ -353,6 +354,8 @@
     "@cloudflare/workerd-linux-arm64": ["@cloudflare/workerd-linux-arm64@1.20260730.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-YQ+Mi78U3TPdgBPtwq+Sm6rJU+Ihl2y0pjYtuuKkdmUbYzL7oLR6Xqq9wljhasnuCFICssDJaqhMep5WizYoEQ=="],
 
     "@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260730.1", "", { "os": "win32", "cpu": "x64" }, "sha512-27fAN+vUECW1oYVc1KOcHYpkL8COM2Uxtxql7TL595kxbjoqS5yckw7NLz7bTf2pALFCZWjqXDjZGJ/xbG4ZKQ=="],
+
+    "@cloudflare/workers-oauth-provider": ["@cloudflare/workers-oauth-provider@1.2.3", "", {}, "sha512-40eGeA3DnTOEl2ijHYY5Z9yNIf0fdjgomoaA6GHPo4FyKQw0oXPuy4GVjTE/uNfS/MoFAvzsuVBRwTPKUki4hA=="],
 
     "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260702.1", "", {}, "sha512-mOhf5TUEB1m2vPrxtqoIGfz0fUC9xyxRDx5gWHy5s+OCo6dcV+g7wI1R7gYCMFohhqF/2y2xeKVwMwCJjfn/WA=="],
 

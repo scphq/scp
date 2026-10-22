@@ -1,5 +1,17 @@
 # @scp-dev/cli
 
+## 0.12.2
+
+### Patch Changes
+
+- 6881d37: The Cowork plugin works in cloud sessions: the `--cowork-only` guard also accepts `CLAUDE_CODE_ENTRYPOINT=remote_cowork`, the plugin falls back to `npx -y @scp-dev/cli@<version>` pinned to the building CLI when the host paths are missing, and a cloud session without a relay directory starts no broker.
+- Updated dependencies [6881d37]
+- Updated dependencies [6881d37]
+  - @scp-dev/hub@0.9.0
+  - @scp-dev/core@0.10.0
+  - @scp-dev/mcp@0.3.7
+  - @scp-dev/broker@0.7.2
+
 ## 0.12.1
 
 ### Patch Changes

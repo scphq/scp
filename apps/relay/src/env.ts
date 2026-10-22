@@ -1,5 +1,9 @@
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 export interface Env {
   DB: D1Database;
+  OAUTH_KV: KVNamespace;
+  OAUTH_PROVIDER: OAuthHelpers;
+  RELAY_ORIGIN: string;
   HUB: DurableObjectNamespace;
   EMAIL?: SendEmail;
   /** `cloudflare` (default), `resend` or `log` */

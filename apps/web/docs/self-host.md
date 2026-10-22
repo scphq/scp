@@ -336,6 +336,7 @@ cd scp && bun install
 | Worker `scp-relay` | Email sign-in with a one-time code, orgs and invites, device approval for `swarm login`, API tokens, the dashboard and the hub routes |
 | D1 database `scp-relay` (binding `DB`) | Users, orgs, members, credentials; schema in `apps/relay/migrations/` |
 | Durable Object `OrgHub` (binding `HUB`) | One per org: machines, mirrored endpoints, deliveries, over its own SQLite storage |
+| KV namespace (binding `OAUTH_KV`) | OAuth clients, grants and token hashes of [connectors](/docs/cloud-agents) |
 | `send_email` binding `EMAIL` | Cloudflare Email Service, the default mailer for sign-in codes and invites |
 | Turnstile | Guards the sign-in form that emails a code |
 | Cron `17 3 * * *` | Daily sweep of expired sign-in codes, sessions and device codes |
@@ -352,6 +353,7 @@ All commands below run in `apps/relay`.
 cd apps/relay
 bunx wrangler login
 bunx wrangler d1 create scp-relay
+bunx wrangler kv namespace create OAUTH_KV
 ```
 
 Keep the name `scp-relay`: the `dev` script and the CI workflow apply migrations to a database of that name. D1 names are per account, so it cannot clash with anyone else's.
@@ -361,6 +363,8 @@ Keep the name `scp-relay`: the `dev` script and the CI workflow apply migrations
 | Key | Set it to |
 | --- | --- |
 | `d1_databases[0].database_id` | The id `d1 create` printed |
+| `kv_namespaces[0].id` | The id `kv namespace create` printed |
+| `vars.RELAY_ORIGIN` | Your relay's origin, for example `https://relay.example.com`; connectors use `<origin>/mcp` |
 | `routes[0].pattern` | Your relay hostname, for example `relay.example.com`, in place of `app.scp.dev` |
 | `vars.MAIL_FROM` | A sender address on your mail domain, for example `login@example.com` |
 | `vars.TURNSTILE_SITE_KEY` | Your Turnstile widget's site key |
@@ -408,6 +412,7 @@ Anyone who can receive mail at an address can sign in and create orgs; Turnstile
 | `SESSION_SECRET` | secret | yes | Signs CSRF tokens and the sign-in cookie, keys email code hashes. Changing it voids sign-ins in progress and open forms |
 | `TURNSTILE_SITE_KEY` | var | yes | Turnstile site key, rendered in the sign-in form |
 | `TURNSTILE_SECRET` | secret | yes | Turnstile secret key, verifies the sign-in form |
+| `RELAY_ORIGIN` | var | yes | The relay's origin, named as the authorization server; connectors are granted the resource `<origin>/mcp` |
 | `MAILER` | var | no | `cloudflare` (default), `resend` or `log` |
 | `MAIL_FROM` | var | no | Sender address; `login@scp.dev` when unset, so set your own |
 | `RESEND_API_KEY` | secret | with `MAILER=resend` | Resend API key |

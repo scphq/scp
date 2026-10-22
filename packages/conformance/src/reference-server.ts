@@ -396,7 +396,7 @@ const server = Bun.serve<Data>({
         relay: new URL(request.url).origin,
       });
     }
-    if (!["/v1/whoami", "/v1/relay/ws", "/v1/relay/rpc"].includes(path)) return Response.json({ error: "not_found" }, { status: 404 });
+    if (!["/mcp", "/v1/whoami", "/v1/relay/ws", "/v1/relay/rpc"].includes(path)) return Response.json({ error: "not_found" }, { status: 404 });
     const token = authenticate(request);
     if (token instanceof Response) return token;
     if (path === "/v1/whoami")
@@ -411,6 +411,15 @@ const server = Bun.serve<Data>({
         expires_at: token.expires_at === null ? null : new Date(token.expires_at).toISOString(),
       });
     const state = account(token.account);
+    if (path === "/mcp") {
+      const result = await state.hub.mcp(grant(token), {
+        method: request.method,
+        session: request.headers.get("mcp-session-id"),
+        client: "mcp-remote",
+        body: await request.json().catch(() => null),
+      });
+      return new Response(result.body === null ? null : JSON.stringify(result.body), { status: result.status, headers: result.headers });
+    }
     if (path === "/v1/relay/ws") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return Response.json({ error: "upgrade_required" }, { status: 426 });
       if (state.hub.full()) return Response.json({ error: "too_many_sockets" }, { status: 429 });

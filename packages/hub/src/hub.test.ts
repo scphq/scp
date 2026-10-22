@@ -1102,9 +1102,10 @@ describe("quotas", () => {
     await ok(cli, "hello", { protocol: PROTOCOL, machine: "ci", claim: { handle: "impl" } })
     const laptop = await bridge("laptop", [{ address: "me/app-main" }])
     for (const socket of [cli, laptop]) {
-      for (const method of ["inject", "injected", "message"])
-        expect(await fails(socket, method, { seqs: [1], hold: "hld_x", id: "msg_x" })).toBe("method_not_found")
+      for (const method of ["inject", "injected"]) expect(await fails(socket, method, { seqs: [1], hold: "hld_x", id: "msg_x" })).toBe("method_not_found")
     }
+    expect(await ok(cli, "message", { id: "msg_x" })).toEqual({ message: null })
+    expect(await fails(laptop, "message", { id: "msg_x" })).toBe("method_not_found")
   })
 
   test("a human hello needs a full login", async () => {

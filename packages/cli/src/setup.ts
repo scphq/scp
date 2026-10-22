@@ -59,8 +59,8 @@ export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
   The Claude Code and codex hooks and every mount run ${CLI_NAME} by absolute paths (a node script as absolute node plus its
   real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or ${CLI_NAME}.
-  --cowork builds only the local Cowork plugin zip in SCP state, without --write. Upload it in Claude: Customize,
-  Plugins, Add, Upload plugin. Local sessions only; scheduled tasks do not wake; cloud sessions are unsupported.
+  --cowork builds only the Cowork plugin zip in SCP state, without --write. Upload it in Claude: Customize, Plugins,
+  Add, Upload plugin. Cloud sessions run the pinned CLI through npx; scheduled tasks do not wake.
   ${CLI_NAME} setup claude-desktop builds the Claude desktop chat extension (see its --help).`
 
 /** where a harness's binary was found, from PATH or its usual install location */

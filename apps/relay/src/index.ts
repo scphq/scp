@@ -1,3 +1,4 @@
+import { authorize, oauthProvider } from "./oauth";
 import { api } from "./api";
 import { getCode, getSignIn, postCode, postSignIn, postSignOut } from "./auth";
 import { deviceCode, devicePage, devicePost, deviceToken } from "./device";
@@ -41,6 +42,7 @@ async function pages(ctx: Ctx): Promise<Response> {
   const post = req.method === "POST";
   if (!post && req.method !== "GET" && req.method !== "HEAD") throw new HttpError(405, "method_not_allowed", "Method not allowed.");
 
+  if (path === "/authorize") return authorize(ctx);
   if (path === "/") return back(ctx, user ? "/orgs" : "/sign-in");
   if (path === "/sign-in") return post ? postSignIn(ctx) : getSignIn(ctx);
   if (path === "/sign-in/code") return post ? postCode(ctx) : getCode(ctx);
@@ -71,7 +73,7 @@ async function pages(ctx: Ctx): Promise<Response> {
     if (rest.length === 2 && Object.hasOwn(TAB_ALIASES, tab)) return back(ctx, `/orgs/${handle}${TAB_ALIASES[tab]}`);
     throw new HttpError(404, "not_found", "Not found.");
   }
-  if (rest[1] === "tokens" || rest[1] === "devices") return tokensPost(ctx, user, rest[0]!, rest.slice(1));
+  if (rest[1] === "tokens" || rest[1] === "devices" || rest[1] === "connectors") return tokensPost(ctx, user, rest[0]!, rest.slice(1));
   return orgsPost(ctx, user, rest);
 }
 
@@ -89,7 +91,7 @@ function failure(e: unknown, url: URL): Response {
   });
 }
 
-export default {
+const handler = {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     try {
@@ -122,4 +124,11 @@ export default {
       env.DB.prepare("DELETE FROM device_codes WHERE expires_at < ?").bind(now - DAY),
     ]);
   },
+} satisfies ExportedHandler<Env>;
+
+export default {
+  fetch(req: Request, env: Env, ctx: ExecutionContext) {
+    return oauthProvider(env, handler).fetch(req, env, ctx);
+  },
+  scheduled: handler.scheduled,
 } satisfies ExportedHandler<Env>;

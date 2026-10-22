@@ -3,11 +3,21 @@ import { dirname, isAbsolute, join } from "node:path"
 import { relayDir } from "@scp-dev/broker"
 import { CLI_NAME } from "@scp-dev/core"
 import { RelayUsage } from "./common"
-import { hookEntries } from "./hooks"
+import pkg from "../package.json" with { type: "json" }
+import { hookEntries, shellQuote } from "./hooks"
 import { launcher } from "./launcher"
 import { zip } from "./mcpb"
 
 type Env = Record<string, string | undefined>
+
+/** the npx package spec a cloud container runs, pinned to this build */
+export const PINNED_CLI = `${pkg.name}@${pkg.version}`
+
+/** runs `argv` when its host paths exist, else the pinned CLI through npx, with the remaining arguments either way */
+export function pluginLauncher(argv: string[]): string[] {
+  const present = argv.map((path) => `[ -e ${shellQuote(path)} ]`).join(" && ")
+  return ["sh", "-c", `if ${present}; then exec ${argv.map(shellQuote).join(" ")} "$@"; fi; exec npx -y ${PINNED_CLI} "$@"`, CLI_NAME]
+}
 
 export function coworkSetup(
   options: { bin?: string },
@@ -24,16 +34,17 @@ export function coworkSetup(
   }
   const launch = launcher(bin, deps.env, deps.which)
   if (launch.problem) throw new RelayUsage(launch.problem)
-  const [command, ...args] = launch.argv
+  const argv = pluginLauncher(launch.argv)
+  const [command, ...args] = argv
   const files = {
     ".claude-plugin/plugin.json": {
       name: "scp",
       version: deps.version,
-      description: "Message agents on the SCP relay from local Claude Cowork sessions.",
+      description: "Message agents on the SCP relay from Claude Cowork sessions.",
       homepage: "https://scp.dev",
     },
     ".mcp.json": { mcpServers: { scp: { command, args: [...args, "mcp", "--harness", "claude", "--channels", "--cowork-only"] } } },
-    "hooks/hooks.json": { hooks: hookEntries("claude", { launcher: launch.argv, cowork: true }) },
+    "hooks/hooks.json": { hooks: hookEntries("claude", { launcher: argv, cowork: true }) },
   }
   const dir = relayDir(deps.env)
   mkdirSync(dir, { recursive: true })
@@ -71,7 +82,7 @@ export function coworkSetup(
   }
   deps.out(`wrote ${archive}`)
   deps.out("upload it in Claude: Customize, Plugins, Add, Upload plugin")
-  deps.out("Local Cowork sessions only; scheduled tasks do not wake; cloud sessions are unsupported.")
+  deps.out(`Local sessions run this ${CLI_NAME}; cloud sessions run ${PINNED_CLI} through npx; scheduled tasks do not wake.`)
   deps.out("Rerun swarm setup --cowork after moving or upgrading node or swarm to rebuild it.")
   return 0
 }

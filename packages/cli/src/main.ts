@@ -275,7 +275,7 @@ agent sessions:
   ${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH]
                                                  mounts the shim and installs the hooks (--no-hooks: the shim only) in every installed
                                                  harness at user scope; prints the plan, --write applies it, --undo removes what it added
-  ${CLI_NAME} setup --cowork [--bin PATH]            builds the local Cowork plugin zip in SCP state, ready to upload in Claude
+  ${CLI_NAME} setup --cowork [--bin PATH]            builds the Cowork plugin zip in SCP state, ready to upload in Claude
   ${CLI_NAME} setup claude-desktop [--out FILE] [--open] [--bin PATH]
                                                  builds scp.mcpb, the Claude desktop chat extension (pull only: relay_inbox), and
                                                  says how to install it; --open opens it
