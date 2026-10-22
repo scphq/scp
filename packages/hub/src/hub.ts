@@ -474,6 +474,7 @@ export class RelayHub {
       refusalsPerMinute: this.limits.refusalsPerMinute,
       capEverySender: true,
       xinbox: this.deps.crossAccount !== undefined,
+      endpointRetireS: Number.POSITIVE_INFINITY,
     })
     core.migrate()
     this.core = core

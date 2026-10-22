@@ -8,6 +8,7 @@ import { opencodePlugin } from "./hooks"
 import { gitToplevel } from "./identity"
 import { hooksTarget } from "./install"
 import { mcpFile, mountedEntry, whichOnPath } from "./setup"
+import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 
@@ -84,7 +85,7 @@ export async function opencodeCommand(
   args: string[],
   env: Env = process.env,
   err: (line: string) => void = (line) => void process.stderr.write(`${line}\n`),
-  cwd: string = process.cwd(),
+  cwd: string = safeCwd(),
 ): Promise<number> {
   const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args
   if (own.includes("--help") || own.includes("-h")) {

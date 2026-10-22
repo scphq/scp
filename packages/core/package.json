@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/core",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Swarm Communication Protocol core: wire types, framing, scopes, policy, judge and the relay core.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",

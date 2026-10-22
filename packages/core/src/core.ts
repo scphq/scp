@@ -337,6 +337,26 @@ export interface MessageRow {
   link_parent: string | null
 }
 
+/** the ids a viewer sees, as a set or decided per id */
+export type Shown = { has(id: string): boolean }
+
+interface PassMemo {
+  listed?: EndpointRow[]
+  members?: Map<string, string[]>
+  rows: Map<string, EndpointRow | undefined>
+  scopes: Map<string, ScopeSubject>
+  subjects: Map<string, PolicySubject>
+  nodes: Map<string, ScopeNode | null>
+  scope: { ancestors: Map<string, string[]>; limited: Map<string, boolean> }
+}
+
+function newPassMemo(): PassMemo {
+  return { rows: new Map(), scopes: new Map(), subjects: new Map(), nodes: new Map(), scope: { ancestors: new Map(), limited: new Map() } }
+}
+
+/** a statement that only reads: anything else may change what a read pass derived */
+const READ = /^\s*SELECT\b/i
+
 type AdoptSend = (from: string, params: SendParams, origin: { link: "session" | "self" }) => Promise<SendResult>
 
 export interface CoreOptions {
@@ -357,6 +377,10 @@ export interface CoreOptions {
   machine?: string
   /** the short hostname, matched by `machine:` selectors when `machine` is not set */
   hostname?: string
+  /** overrides LIMITS.endpointRetireS; `Infinity` keeps every endpoint row */
+  endpointRetireS?: number
+  /** overrides LIMITS.endpointRetireMax; `Infinity` retires every eligible row in one sweep */
+  endpointRetireMax?: number
 }
 
 interface GrantRow {
@@ -529,30 +553,48 @@ export class RelayCore {
   private readonly hostMachine: string | null
   private readonly namedMachine: string | null
   private readonly hostname: string | null
+  /** endpoint retention: the offline age and the rows one sweep retires */
+  private readonly retention: { afterS: number; max: number }
   private policy: Policy | null = null
   /** the identity each policy `group:<name>` naming no policy group bound to when the policy's text first loaded: that group's then, or `none` */
   private policyBinds = new Map<string, string>()
   private scopeDepth = 0
   /** while a scope world derives a node: what it already derived of ancestor lists and limits */
   private scopeMemo: { ancestors: Map<string, string[]>; limited: Map<string, boolean> } | null = null
+  /** while a read pass runs ({@link pass}): the rows, subjects and scope nodes it already derived; a write starts them over */
+  private passMemo: PassMemo | null = null
   /** subagent titles from their parents' hooks, by `<parent id> <subagent id>`, until the subagent's first claim */
   private readonly subagentTitles = new Map<string, string>()
   private readonly deferred = new WeakMap<RelayError, { endpoint: string | null; detail: Record<string, unknown> }>()
 
-  constructor(
-    protected readonly sql: Sql,
-    options: CoreOptions,
-  ) {
+  protected readonly sql: Sql
+
+  constructor(sql: Sql, options: CoreOptions) {
+    this.sql = {
+      all: (query, ...params) => {
+        if (this.passMemo && !READ.test(query)) this.passMemo = newPassMemo()
+        return sql.all(query, ...params)
+      },
+    }
     this.user = options.user ?? "me"
     this.now = options.now ?? Date.now
     this.hash = options.hash
-    this.tx = options.transaction ?? ((fn) => fn())
+    const tx = options.transaction ?? ((fn) => fn())
+    this.tx = (fn) => {
+      try {
+        return tx(fn)
+      } catch (error) {
+        if (this.passMemo) this.passMemo = newPassMemo()
+        throw error
+      }
+    }
     this.capEverySender = options.capEverySender === true
     this.alive = options.alive ?? (() => true)
     this.startOf = options.startOf
     this.hostMachine = options.machine ?? options.hostname ?? null
     this.namedMachine = options.machine ?? null
     this.hostname = options.hostname ?? null
+    this.retention = { afterS: options.endpointRetireS ?? LIMITS.endpointRetireS, max: options.endpointRetireMax ?? LIMITS.endpointRetireMax }
   }
 
   /** a `machine` label naming this host by its hostname, as clients default it, names it by its machine name when one is set */
@@ -654,6 +696,8 @@ export class RelayCore {
       this.sql.all(`UPDATE groups SET id = ? WHERE name = ?`, newId("grp", this.now()), row.name)
     this.sql.all(`CREATE INDEX IF NOT EXISTS endpoints_process ON endpoints (process)`)
     this.sql.all(`CREATE INDEX IF NOT EXISTS endpoints_parent ON endpoints (parent_ep)`)
+    this.sql.all(`CREATE INDEX IF NOT EXISTS endpoints_session ON endpoints (session)`)
+    this.sql.all(`CREATE INDEX IF NOT EXISTS endpoints_seen ON endpoints (COALESCE(last_seen, created_at))`)
     const deliveryColumns = this.sql.all<{ name: string }>(`PRAGMA table_info(deliveries)`).map((c) => c.name)
     if (!deliveryColumns.includes("offered_until")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN offered_until INTEGER`)
     if (!deliveryColumns.includes("offered_hold")) this.sql.all(`ALTER TABLE deliveries ADD COLUMN offered_hold TEXT`)
@@ -1584,11 +1628,15 @@ export class RelayCore {
     const now = this.now()
     this.endExited(now)
     this.settleOffline(now)
+    return this.pass(() => this.listNow(filters, now))
+  }
+
+  private listNow(filters: NonNullable<Parameters<RelayCore["list"]>[0]>, now: number): EndpointView[] {
     const cutoff = now - LIMITS.listOfflineWithinS * 1000
     const viewer = filters.viewer === undefined ? undefined : this.mustEndpoint(filters.viewer)
-    const shown = viewer ? new Set(this.visibleRows(viewer).map((row) => row.id)) : undefined
+    const shown = viewer ? this.visibility(viewer) : undefined
     const peeker = viewer ?? (filters.peekable === true ? this.byHandle(HUMAN_HANDLE)! : undefined)
-    return this.listed()
+    return (filters.all ? this.listed() : this.recent(cutoff))
       .filter(
         (row) =>
           filters.all ||
@@ -1611,11 +1659,45 @@ export class RelayCore {
 
   /** the addresses `viewer` sees: those it may message or be messaged by, and itself */
   visibleTo(viewer: string): Set<string> {
-    return new Set(this.visibleRows(this.mustEndpoint(viewer)).map((row) => this.address(row)))
+    return this.pass(() => new Set(this.visibleRows(this.mustEndpoint(viewer)).map((row) => this.address(row))))
   }
 
   private visibleRows(me: EndpointRow): EndpointRow[] {
-    return this.listed().filter((row) => row.id === me.id || (me.kind === "human" ? this.mayMessage(me, row, true) : this.sees(me, row)))
+    return this.pass(() => this.listed().filter((row) => this.visibleRow(me, row)))
+  }
+
+  private visibleRow(me: EndpointRow, row: EndpointRow): boolean {
+    return row.id === me.id || (me.kind === "human" ? this.mayMessage(me, row, true) : this.sees(me, row))
+  }
+
+  /** the ids `me` sees ({@link visibleRows}), each decided when first asked */
+  private visibility(me: EndpointRow): Shown {
+    const seen = new Map<string, boolean>()
+    return {
+      has: (id) => {
+        let shown = seen.get(id)
+        if (shown === undefined) {
+          const row = this.byId(id)
+          shown = row !== undefined && row.kind !== "system" && !row.handle.startsWith(GONE_PREFIX) && this.listable(row) && this.visibleRow(me, row)
+          seen.set(id, shown)
+        }
+        return shown
+      },
+    }
+  }
+
+  /**
+   * runs `fn` as one read pass: rows by id, policy subjects and scope nodes are derived once for all of it. A write through this core
+   * starts them over, so a pass never reads its own stale derivations
+   */
+  protected pass<T>(fn: () => T): T {
+    if (this.passMemo) return fn()
+    this.passMemo = newPassMemo()
+    try {
+      return fn()
+    } finally {
+      this.passMemo = null
+    }
   }
 
   /** the user's own inbox */
@@ -1625,6 +1707,10 @@ export class RelayCore {
 
   /** the endpoints `viewer` may message under its scope and the policy, with the rule that admits each; `unverified`: the human without a terminal */
   peers(viewer: string, options: { unverified?: boolean } = {}): PeerView[] {
+    return this.pass(() => this.peersNow(viewer, options))
+  }
+
+  private peersNow(viewer: string, options: { unverified?: boolean }): PeerView[] {
     const me = this.mustEndpoint(viewer)
     const world = this.scopeWorld(me)
     const unverified = me.kind === "human" && options.unverified === true
@@ -2016,7 +2102,7 @@ export class RelayCore {
   }
 
   /** the address of `row`'s parent on another machine, null when it has none; with `shown`, null for a parent outside it */
-  protected linkedParent(_row: EndpointRow, _shown?: Set<string>): string | null {
+  protected linkedParent(_row: EndpointRow, _shown?: Shown): string | null {
     return null
   }
 
@@ -3738,6 +3824,7 @@ export class RelayCore {
     this.sql.all(`DELETE FROM blocks WHERE until <= ?`, now)
     this.endExited(now)
     this.settleOffline(now)
+    this.retireEndpoints(now)
     this.sql.all(
       `DELETE FROM endpoints WHERE kind = 'agent' AND connections = 0 AND COALESCE(last_seen, created_at) <= ?
        AND id NOT IN (SELECT endpoint FROM deliveries) AND id NOT IN (SELECT from_ep FROM messages) AND id NOT IN (SELECT parent_ep FROM endpoints WHERE parent_ep IS NOT NULL)`,
@@ -3765,11 +3852,15 @@ export class RelayCore {
 
   /** ends the hook presence of local agent endpoints whose harness process exited without a session_end, as one would, and lapses wakes whose hook waker never came back */
   endExited(now = this.now()): void {
-    for (const row of this.sql.all<EndpointRow>(
-      `SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL`,
+    const alive = new Map<number, boolean>()
+    for (const { id, process } of this.sql.all<{ id: string; process: string }>(
+      `SELECT id, process FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL`,
     )) {
-      const pid = Number(/^pid:(\d+)/.exec(row.process!)?.[1])
-      if (!pid || !this.localRow(row) || this.alive(pid)) continue
+      const pid = Number(/^pid:(\d+)/.exec(process)?.[1])
+      if (!pid) continue
+      if (!alive.has(pid)) alive.set(pid, this.alive(pid))
+      const row = alive.get(pid) ? undefined : this.byId(id)
+      if (!row || !this.localRow(row)) continue
       this.sql.all(
         `UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL, wake = CASE WHEN wakers = 0 AND NOT ${BROKER_WAKE_SQL} THEN NULL ELSE wake END WHERE id = ? AND connections = 0`,
         now,
@@ -3791,6 +3882,72 @@ export class RelayCore {
       if (this.localRow(row) && this.presence(row, now) === "offline")
         this.sql.all(`UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?`, row.id)
     }
+  }
+
+  /**
+   * deletes, leaves first and at most `retire.max` a sweep, the local agent rows offline past `retire.afterS` that nothing references: a
+   * child (a subagent's or a worker's endpoint) never named or linked, or a `_gone_` row. Its deliveries, memberships, peek turns, activity
+   * and idempotency keys go with it; its audit rows stay. The number deleted
+   */
+  private retireEndpoints(now: number): number {
+    const { afterS, max } = this.retention
+    if (afterS === Infinity || !(max > 0)) return 0
+    const cutoff = now - afterS * 1000
+    const held = one(this.sql, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'judge_holds'`)
+      ? `AND id NOT IN (SELECT from_ep FROM judge_holds WHERE state IN ('held', 'releasing'))`
+      : ""
+    let retired = 0
+    for (let pass = 0; pass < 8 && retired < max; pass++) {
+      const ids: string[] = []
+      for (const row of this.sql.all<EndpointRow>(
+        `SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0
+         AND ((parent_ep IS NOT NULL AND named IS NULL AND linked IS NULL) OR substr(handle, 1, ${GONE_PREFIX.length}) = '${GONE_PREFIX}')
+         AND COALESCE(last_seen, created_at) <= ? AND COALESCE(hook_seen, 0) <= ? AND COALESCE(hook_ended, 0) <= ?
+         AND hibernate IS NULL AND wake IS NULL AND wakers = 0 AND wake_ticket IS NULL AND hold_ref IS NULL
+         AND id NOT IN (SELECT parent_ep FROM endpoints WHERE parent_ep IS NOT NULL)
+         AND id NOT IN (SELECT tree FROM endpoints WHERE tree IS NOT NULL AND tree != id)
+         AND id NOT IN (SELECT endpoint FROM deliveries WHERE acked_at IS NULL AND expires_at > ?)
+         AND id NOT IN (SELECT from_ep FROM messages WHERE expires_at > ?)
+         AND id NOT IN (SELECT d.endpoint FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.expires_at > ? AND (m.kind = 'request' OR m.require_reply = 1))
+         ${held}
+         AND id NOT IN (SELECT owner FROM groups) AND id NOT IN (SELECT tree FROM groups WHERE tree IS NOT NULL)
+         AND id NOT IN (SELECT subject FROM admins)
+         AND id NOT IN (SELECT issuer FROM grants WHERE revoked_at IS NULL AND expires_at > ?)
+         AND id NOT IN (SELECT under FROM grants WHERE revoked_at IS NULL AND expires_at > ?)
+         AND id NOT IN (SELECT used_by FROM grants WHERE used_by IS NOT NULL AND revoked_at IS NULL AND expires_at > ?)
+         ORDER BY COALESCE(last_seen, created_at), id`,
+        cutoff,
+        cutoff,
+        cutoff,
+        now,
+        now,
+        now,
+        now,
+        now,
+        now,
+      )) {
+        if (ids.length >= max - retired) break
+        if (this.localRow(row) && !this.hibernated(row) && (row.process === null || !this.running(row.process))) ids.push(row.id)
+      }
+      if (!ids.length) break
+      this.tx(() => {
+        for (let i = 0; i < ids.length; i += 50) {
+          const chunk = ids.slice(i, i + 50)
+          const marks = chunk.map(() => "?").join(", ")
+          for (const [table, column] of [
+            ["deliveries", "endpoint"],
+            ["group_members", "endpoint"],
+            ["peek_turns", "endpoint"],
+            ["activity", "endpoint"],
+            ["idempotency", "from_ep"],
+            ["endpoints", "id"],
+          ] as const)
+            this.sql.all(`DELETE FROM ${table} WHERE ${column} IN (${marks})`, ...chunk)
+        }
+      })
+      retired += ids.length
+    }
+    return retired
   }
 
   // activity
@@ -3905,18 +4062,50 @@ export class RelayCore {
     activity: ActivityRow[]
     unread: Record<string, number>
   } {
+    return this.pass(() => this.snapshotNow(options))
+  }
+
+  private snapshotNow(options: { all?: boolean | undefined; activity?: number | undefined; viewer?: string | undefined }): ReturnType<RelayCore["snapshot"]> {
     const endpoints = this.list({ all: options.all, viewer: options.viewer })
-    const seen = options.all ? endpoints : this.list({ all: true, viewer: options.viewer })
-    const counts = new Map(
-      this.sql
-        .all<{ endpoint: string; n: number }>(
-          `SELECT endpoint, COUNT(*) AS n FROM deliveries WHERE acked_at IS NULL AND expires_at > ? GROUP BY endpoint`,
-          this.now(),
-        )
-        .map((row) => [row.endpoint, row.n]),
-    )
-    const unread = Object.fromEntries(seen.flatMap((view) => (counts.get(view.id) ? [[view.address, counts.get(view.id)!]] : [])))
+    const viewer = options.viewer === undefined ? undefined : this.mustEndpoint(options.viewer)
+    const unread: Record<string, number> = {}
+    for (const { endpoint, n } of this.sql.all<{ endpoint: string; n: number }>(
+      `SELECT endpoint, COUNT(*) AS n FROM deliveries WHERE acked_at IS NULL AND expires_at > ? GROUP BY endpoint`,
+      this.now(),
+    )) {
+      const row = this.byId(endpoint)
+      if (
+        row &&
+        row.kind !== "system" &&
+        !row.handle.startsWith(GONE_PREFIX) &&
+        this.listable(row) &&
+        (!viewer || row.id === viewer.id || this.mayMessage(viewer, row, viewer.kind === "human"))
+      )
+        unread[this.address(row)] = n
+    }
     return { endpoints, activity: this.activity({ limit: options.activity ?? 50, viewer: options.viewer }), unread }
+  }
+
+  /** the views of the rows a claim may land on (its session, handle or process key, or the human), read before it runs */
+  claimViews(claim: unknown, human = false): Map<string, EndpointView> {
+    const fields = (typeof claim === "object" && claim !== null ? claim : {}) as Record<string, unknown>
+    const key = (name: string): string | null => (typeof fields[name] === "string" ? (fields[name] as string) : null)
+    const now = this.now()
+    this.endExited(now)
+    this.settleOffline(now)
+    return this.pass(
+      () =>
+        new Map(
+          this.sql
+            .all<EndpointRow>(
+              `SELECT * FROM endpoints WHERE session = ? OR handle = ? OR process = ?`,
+              key("session"),
+              human ? HUMAN_HANDLE : key("handle"),
+              key("process"),
+            )
+            .map((row) => [row.id, this.view(row)]),
+        ),
+    )
   }
 
   /** an endpoint's public address by id, for notifications */
@@ -5114,13 +5303,36 @@ export class RelayCore {
 
   /** where a local endpoint sits: computed from its columns, its groups and the policy's groups */
   protected scopeSubject(row: EndpointRow): ScopeSubject {
+    const memo = this.passMemo
+    const hit = memo?.scopes.get(row.id)
+    if (hit) return hit
+    const scope = this.scopeSubjectNow(row)
+    if (memo && this.passMemo === memo) memo.scopes.set(row.id, scope)
+    return scope
+  }
+
+  /** the runtime groups `endpoint` is in, by name; a read pass reads every membership once */
+  private memberships(endpoint: string): string[] {
+    const memo = this.passMemo
+    if (!memo) return this.sql.all<{ name: string }>(`SELECT name FROM group_members WHERE endpoint = ? ORDER BY name`, endpoint).map((r) => r.name)
+    if (!memo.members) {
+      const members = new Map<string, string[]>()
+      for (const { endpoint, name } of this.sql.all<{ endpoint: string; name: string }>(`SELECT endpoint, name FROM group_members ORDER BY name`)) {
+        const names = members.get(endpoint)
+        if (names) names.push(name)
+        else members.set(endpoint, [name])
+      }
+      if (this.passMemo === memo) memo.members = members
+      return members.get(endpoint) ?? []
+    }
+    return memo.members.get(endpoint) ?? []
+  }
+
+  private scopeSubjectNow(row: EndpointRow): ScopeSubject {
     const tree = row.tree ?? row.id
     const root = tree === row.id ? row : this.byId(tree)
     const fixed = new Set((this.policy?.groups ?? []).map((group) => group.name))
-    const runtime = this.sql
-      .all<{ name: string }>(`SELECT name FROM group_members WHERE endpoint = ? ORDER BY name`, row.id)
-      .map((r) => r.name)
-      .filter((name) => !fixed.has(name))
+    const runtime = this.memberships(row.id).filter((name) => !fixed.has(name))
     const scope: ScopeSubject = {
       id: row.id,
       tree,
@@ -5144,7 +5356,7 @@ export class RelayCore {
   private decide(world: ScopeWorld, a: EndpointRow, b: EndpointRow, replyTo?: MessageRow, unverified = false, strict = false): ScopeDecision {
     const solicited =
       replyTo !== undefined && replyTo.from_ep === b.id && a.id !== b.id && replyTo.created_at > (b.reset_at ?? -Infinity) && this.got(replyTo, a)
-    return scopeDecision(world, world.node(a.id) ?? this.scopeNode(a), world.node(b.id) ?? this.scopeNode(b), {
+    return scopeDecision(world, world.node(a.id) ?? this.nodeOf(a), world.node(b.id) ?? this.nodeOf(b), {
       humanAlways: this.defaults().humanAlways,
       solicited,
       linked: a.id !== b.id && this.linkedAcross(a, b),
@@ -5162,28 +5374,29 @@ export class RelayCore {
 
   /** reasons are written for `viewer`; with `hide`, a widener it does not see is named only as an ancestor or admin */
   protected scopeWorld(viewer?: EndpointRow, hide = true): ScopeWorld {
-    const cache = new Map<string, ScopeNode | null>()
-    const memo = { ancestors: new Map<string, string[]>(), limited: new Map<string, boolean>() }
-    let shown: Set<string> | undefined
+    const own = { nodes: new Map<string, ScopeNode | null>(), scope: { ancestors: new Map<string, string[]>(), limited: new Map<string, boolean>() } }
+    let shown: Shown | undefined
     const visible = (viewer: EndpointRow) => {
-      shown ??= new Set(this.visibleRows(viewer).map((row) => row.id))
+      shown ??= this.visibility(viewer)
       return shown
     }
     return {
       ...(viewer ? { viewer: viewer.id } : {}),
       ...(viewer && hide ? { label: (id: string) => (visible(viewer).has(id) ? undefined : "an ancestor or admin") } : {}),
       node: (id) => {
-        if (!cache.has(id)) {
-          const row = this.byId(id)
-          const outer = this.scopeMemo
-          this.scopeMemo = memo
-          try {
-            cache.set(id, row && !row.handle.startsWith(GONE_PREFIX) ? this.scopeNode(row) : null)
-          } finally {
-            this.scopeMemo = outer
-          }
+        const memo = this.passMemo ?? own
+        if (memo.nodes.has(id)) return memo.nodes.get(id) ?? undefined
+        const row = this.byId(id)
+        const outer = this.scopeMemo
+        this.scopeMemo = memo.scope
+        let node: ScopeNode | null
+        try {
+          node = row && !row.handle.startsWith(GONE_PREFIX) ? this.scopeNode(row) : null
+        } finally {
+          this.scopeMemo = outer
         }
-        return cache.get(id) ?? undefined
+        if ((this.passMemo ?? own) === memo) memo.nodes.set(id, node)
+        return node ?? undefined
       },
       administers: (w, x) => x.subject.scope !== undefined && this.administers(w, x.subject.scope),
       group: (name) => {
@@ -5195,7 +5408,7 @@ export class RelayCore {
 
   /** an endpoint as the scope check sees it; a subclass supplies another machine's rows (their place, rules and caps) here */
   protected scopeNode(row: EndpointRow): ScopeNode {
-    const subject = this.subject(row)
+    const subject = this.subjectOf(row)
     const base = { id: row.id, address: this.address(row), subject, human: row.kind === "human" && row.handle === HUMAN_HANDLE }
     if (row.kind !== "agent" || !subject.scope) return { ...base, rules: {}, caps: { caps: [], allow: {} }, groups: [], policy: [] }
     const groups: ScopeGroupRules[] = []
@@ -5254,10 +5467,10 @@ export class RelayCore {
 
   /** whether a stored, group or policy cap limits `row`, or an inherited one does */
   private limited(row: EndpointRow, depth: number): boolean {
-    const known = this.scopeMemo?.limited.get(row.id)
+    const known = (this.scopeMemo ?? this.passMemo?.scope)?.limited.get(row.id)
     if (known !== undefined) return known
     const limited = this.limitedNow(row, depth)
-    this.scopeMemo?.limited.set(row.id, limited)
+    ;(this.scopeMemo ?? this.passMemo?.scope)?.limited.set(row.id, limited)
     return limited
   }
 
@@ -5265,7 +5478,7 @@ export class RelayCore {
     if (depth > LIMITS.depthMax + 1) return true
     const caps = this.capsOf(row)
     if (caps.caps.length) return true
-    const subject = this.subject(row)
+    const subject = this.subjectOf(row)
     if (
       subject.scope?.groups.some((name) => {
         const group = this.groupByName(name)
@@ -5400,7 +5613,7 @@ export class RelayCore {
   private mayMessage(from: EndpointRow, to: EndpointRow, unverified = false, strict = false): boolean {
     return (
       this.scopeRefusal(from, to, { unverified, strict }) === null &&
-      policyRefusal(this.policy, this.subject(from), this.subject(to), this.policyBound) === null
+      policyRefusal(this.policy, this.subjectOf(from), this.subjectOf(to), this.policyBound) === null
     )
   }
 
@@ -5447,7 +5660,7 @@ export class RelayCore {
 
   /** ancestor ids, nearest first */
   private ancestorsOf(row: EndpointRow): string[] {
-    const memo = this.scopeMemo?.ancestors
+    const memo = (this.scopeMemo ?? this.passMemo?.scope)?.ancestors
     const hit = memo?.get(row.id)
     if (hit) return hit
     const out: string[] = []
@@ -5485,11 +5698,35 @@ export class RelayCore {
   }
 
   private listed(): EndpointRow[] {
-    return this.sql
+    const memo = this.passMemo
+    if (memo?.listed) return memo.listed
+    const rows = this.sql
       .all<EndpointRow>(
         `SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY kind DESC, handle`,
       )
       .filter((row) => this.listable(row))
+    if (memo && this.passMemo === memo) {
+      memo.listed = rows
+      for (const row of rows) memo.rows.set(row.id, row)
+    }
+    return rows
+  }
+
+  /** the listed rows `list` may show without `all`: a superset of its filter, so the rest of the table is never read */
+  private recent(cutoff: number): EndpointRow[] {
+    return this.sql
+      .all<EndpointRow>(
+        `SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
+         AND (connections > 0 OR kind = 'human' OR COALESCE(last_seen, 0) >= ? OR wake IS NOT NULL OR hibernate IS NOT NULL OR substr(session, 1, 4) = 'sub:' OR ${this.recentAlso()})
+         ORDER BY kind DESC, handle`,
+        cutoff,
+      )
+      .filter((row) => this.listable(row))
+  }
+
+  /** a further SQL condition for {@link recent}: a subclass's rows that list as hibernated by a column of its own */
+  protected recentAlso(): string {
+    return "0"
   }
 
   /** whether a row is one of this relay's endpoints at all, rather than a stand-in for a sender it only received from */
@@ -5671,10 +5908,10 @@ export class RelayCore {
 
   /** endpoint ids as `viewer` may read them: `place` is null and `name` an ancestor or admin for an agent viewer that does not see the id */
   private namer(viewer: EndpointRow): { name: (id: string) => string; place: (id: string) => string | null } {
-    let shown: Set<string> | undefined
+    let shown: Shown | undefined
     const hides = (id: string) => {
       if (viewer.kind !== "agent") return false
-      shown ??= new Set(this.visibleRows(viewer).map((row) => row.id))
+      shown ??= this.visibility(viewer)
       return !shown.has(id)
     }
     return {
@@ -5776,8 +6013,18 @@ export class RelayCore {
 
   // internals
 
-  private names(): Map<string, string> {
-    return new Map(this.sql.all<EndpointRow>(`SELECT * FROM endpoints`).map((row) => [row.id, this.address(row)]))
+  /** addresses by id, each read when first asked */
+  private names(): { get(id: string): string | undefined } {
+    const known = new Map<string, string | undefined>()
+    return {
+      get: (id) => {
+        if (!known.has(id)) {
+          const row = this.byId(id)
+          known.set(id, row ? this.address(row) : undefined)
+        }
+        return known.get(id)
+      },
+    }
   }
 
   protected subject(row: EndpointRow): PolicySubject {
@@ -5949,7 +6196,31 @@ export class RelayCore {
   }
 
   protected byId(id: string): EndpointRow | undefined {
-    return one<EndpointRow>(this.sql, `SELECT * FROM endpoints WHERE id = ?`, id)
+    const memo = this.passMemo
+    if (memo?.rows.has(id)) return memo.rows.get(id)
+    const row = one<EndpointRow>(this.sql, `SELECT * FROM endpoints WHERE id = ?`, id)
+    if (memo && this.passMemo === memo) memo.rows.set(id, row)
+    return row
+  }
+
+  /** {@link scopeNode}, once per row in a read pass */
+  private nodeOf(row: EndpointRow): ScopeNode {
+    const memo = this.passMemo
+    const hit = memo?.nodes.get(row.id)
+    if (hit) return hit
+    const node = this.scopeNode(row)
+    if (memo && this.passMemo === memo && !memo.nodes.has(row.id)) memo.nodes.set(row.id, node)
+    return node
+  }
+
+  /** {@link subject}, once per row in a read pass */
+  private subjectOf(row: EndpointRow): PolicySubject {
+    const memo = this.passMemo
+    const hit = memo?.subjects.get(row.id)
+    if (hit) return hit
+    const subject = this.subject(row)
+    if (memo && this.passMemo === memo) memo.subjects.set(row.id, subject)
+    return subject
   }
 
   protected byHandle(handle: string): EndpointRow | undefined {
@@ -5963,7 +6234,7 @@ export class RelayCore {
   }
 
   /** with `shown`, the ids a viewer sees: a parent outside it is null */
-  protected view(row: EndpointRow, shown?: Set<string>): EndpointView {
+  protected view(row: EndpointRow, shown?: Shown): EndpointView {
     const now = this.now()
     const presence = this.presence(row, now)
     return {
@@ -5986,10 +6257,10 @@ export class RelayCore {
     }
   }
 
-  private placeView(row: EndpointRow, shown?: Set<string>): Pick<EndpointView, "parent" | "depth" | "scope"> {
+  private placeView(row: EndpointRow, shown?: Shown): Pick<EndpointView, "parent" | "depth" | "scope"> {
     const parent = row.parent_ep && (!shown || shown.has(row.parent_ep)) ? this.byId(row.parent_ep) : undefined
     const across = !parent && row.parent_ep === null && row.parent_addr ? this.linkedParent(row, shown) : null
-    return { parent: parent ? this.address(parent) : across, depth: row.depth ?? 0, scope: presetOf(this.scopeNode(row), this.defaults().symmetric) }
+    return { parent: parent ? this.address(parent) : across, depth: row.depth ?? 0, scope: presetOf(this.nodeOf(row), this.defaults().symmetric) }
   }
 
   /** the presence an endpoint shows ({@link shownPresence}): an in-process subagent whose root's waker it reaches ({@link rootWake}) is at least idle */

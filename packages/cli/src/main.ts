@@ -59,6 +59,7 @@ import { shortHostname } from "./identity"
 import type { RelayTransport } from "./remote"
 import type { UpValues } from "./up"
 import { exitFlushed, FAILED, note, parseSeconds, printTable, SELF } from "./term"
+import { safeCwd } from "./cwd"
 
 /** how long the built-in spawn waker may take to have its runner hold the worker's endpoint */
 const SPAWN_WAKE_TIMEOUT_S = 60
@@ -628,7 +629,7 @@ export function hoistIdentity(argv: string[]): string[] {
   return i > 0 && i < argv.length ? [argv[i]!, ...argv.slice(0, i), ...argv.slice(i + 1)] : argv
 }
 
-export async function relayMain(argv: string[], cwd = process.cwd()): Promise<number> {
+export async function relayMain(argv: string[], cwd = safeCwd()): Promise<number> {
   const [verb, ...rest] = hoistIdentity(argv)
   if (!verb || verb === "help" || verb === "--help" || verb === "-h") {
     const named = verb === "help" ? rest.find((word) => !word.startsWith("-")) : undefined
@@ -1718,7 +1719,13 @@ export async function run(argv: string[]): Promise<never> {
   try {
     code = await relayMain(argv)
   } catch (error) {
-    note(error instanceof Error ? error.message : String(error))
+    const message = error instanceof Error ? error.message : String(error)
+    // a hook never fails its harness: one line, exit 0
+    if (argv[0] === "hook") {
+      note(message.split("\n")[0]!)
+      return exitFlushed(0)
+    }
+    note(message)
     if (error instanceof RelayUsage) note(`run \`${CLI_NAME} --help\` for usage`)
     if (error instanceof RelayError && error.retryAfterS) note(`retry in ${error.retryAfterS} s`)
     code = FAILED
