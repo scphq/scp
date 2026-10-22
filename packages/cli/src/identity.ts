@@ -574,12 +574,58 @@ export function t3Hosted(env: Env, pid: number, table: () => PsCommTable | undef
   return parent !== undefined && t3Process(ps?.get(parent)?.args)
 }
 
+/** codex's top-level options that take a value */
+export const CODEX_VALUED = new Set([
+  "-c",
+  "--config",
+  "--enable",
+  "--disable",
+  "--remote",
+  "--remote-auth-token-env",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "-s",
+  "--sandbox",
+  "-C",
+  "--cd",
+  "--add-dir",
+  "-a",
+  "--ask-for-approval",
+])
+
+/** a codex command line's subcommand: its first word past the binary and the options, an option value split by spaces (`-c k=["a", "b"]`) skipped */
+export function codexSubcommand(args: string): string | undefined {
+  const words = args.split(/\s+/)
+  const start = words.findIndex((word) => /(^|\/)codex(\.js)?$/.test(word)) + 1
+  if (!start) return words.find((word) => word === "exec" || word === "e" || word === "app-server")
+  let depth = 0
+  for (let i = start; i < words.length; i++) {
+    const word = words[i]!
+    if (depth === 0 && !word.startsWith("-")) return word
+    if (depth === 0 && CODEX_VALUED.has(word)) i++
+    for (const char of words[i] ?? "") depth += char === "[" || char === "{" ? 1 : char === "]" || char === "}" ? -1 : 0
+    depth = Math.max(depth, 0)
+  }
+  return undefined
+}
+
+/** the desktop app's bundled codex binary */
+const DESKTOP_CODEX = /^(\/[^\n]*?\.app\/Contents\/Resources\/codex-cli\/(?:[^\n]*\/)?codex)(?:\s|$)/
+
+/** whether a command line runs codex's `app-server` subcommand */
+export const appServer = (args: string | undefined): boolean => !!args && codexSubcommand(args) === "app-server"
+
 /** whether the codex harness process runs the desktop app's bundled CLI */
 export function codexDesktop(env: Env, pid: number, table: () => PsCommTable | undefined): boolean {
   if (env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE === "Codex Desktop") return true
   if (!inferring(env)) return false
   const args = table()?.get(pid)?.args
-  const binary = args && /^(\/[^\n]*?\.app\/Contents\/Resources\/codex-cli\/(?:[^\n]*\/)?codex)\s+app-server(?:\s|$)/.exec(args)?.[1]
+  const binary = appServer(args) && DESKTOP_CODEX.exec(args!)?.[1]
   return !!binary && !/\s\//.test(binary)
 }
 
@@ -633,7 +679,6 @@ export interface IdentityInput {
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 /** a Codex thread id: a UUID of any version */
 export const CODEX_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const APP_SERVER = /(^|\s)app-server(\s|$)/
 /** the session key prefix of a codex thread claimed by its id */
 export const CODEX_THREAD_KEY = "codex:"
 
@@ -673,7 +718,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     !launched &&
     !input.env.SCP_SESSION &&
     !input.env.SCP_SHIM_BINDING &&
-    (harness === "codex-desktop" || APP_SERVER.test(ps()?.get(pid)?.args ?? ""))
+    (harness === "codex-desktop" || appServer(ps()?.get(pid)?.args))
   return {
     handle,
     harness,

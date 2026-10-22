@@ -8,7 +8,9 @@ import { type Broker, localHostName, RelayClient, socketPath, startBroker, syste
 import {
   BLOCK_STOP,
   claudeVersionFile,
+  HOOK_CONNECT_MS,
   hookReply,
+  hookRetry,
   mapHookPayload,
   opencodePlugin,
   promptTitle,
@@ -1064,7 +1066,7 @@ describe("swarm hook", () => {
     expect(broker.core.list({ all: true }).filter((e) => e.address.startsWith("me/claude-") && e.address.includes("fast"))).toEqual([])
   })
 
-  test("codex's subagent payloads are unverified: a --subagent hook of codex claims no child endpoint and prints nothing", async () => {
+  test("a codex child thread's hook claims its subagent endpoint without --subagent, and posts nothing on the session's endpoint", async () => {
     const env = { SCP_DIR: dir, SCP_SESSION: "inject-codex-sub", SCP_NAME: "inject-codex-sub" }
     const base = { session_id: "s", cwd: project }
     await hook(["codex"], { ...base, hook_event_name: "SessionStart", source: "startup" }, env)
@@ -1076,8 +1078,12 @@ describe("swarm hook", () => {
       agent_id: "aceb553c19f223c70",
       agent_type: "worker",
     }
-    expect(await hook(["codex", SUBAGENT], sub, env)).toMatchObject({ stdout: "", stderr: "", code: 0 })
-    expect(broker.core.list({ all: true }).filter((e) => e.address.startsWith("me/inject-codex-sub-"))).toEqual([])
+    expect(json((await hook(["codex"], sub, env)).stdout).hookSpecificOutput).toEqual({
+      hookEventName: "PostToolUse",
+      additionalContext: subagentIntro("me/inject-codex-sub-worker-aceb"),
+    })
+    expect(endpoint("me/inject-codex-sub-worker-aceb")).toMatchObject({ parent: "me/inject-codex-sub" })
+    expect(rows("me/inject-codex-sub").map((r) => r.kind)).toEqual(["session_start"])
   })
 
   test("a stop is held while a require_reply request is unanswered, even once read and without --block-stop-on-unread, and lets go once answered", async () => {
@@ -1198,6 +1204,33 @@ describe("swarm hook", () => {
     })
     expect(await hook(["agy", "PreInvocation"], {}, { SCP_DIR: empty })).toMatchObject({ stdout: "{}\n", stderr: "", code: 0 })
   })
+
+  test("a broker that holds its lock but never accepts is retried for the hook's budget, then skipped with one stderr line and nothing on stdout", async () => {
+    const busy = join(process.env.HOME!, "busy-relay")
+    mkdirSync(busy, { recursive: true, mode: 0o700 })
+    writeFileSync(join(busy, "broker.lock"), `${process.pid}:${Math.floor(Date.now() / 1000)}`, { mode: 0o600 })
+    const result = await hook(["claude"], { hook_event_name: "PostToolUse", tool_name: "Read", tool_input: {} }, { SCP_DIR: busy, CLAUDECODE: "1" })
+    expect(result).toMatchObject({ stdout: "", code: 0 })
+    expect(result.stderr).toStartWith(
+      "swarm hook: relay broker unreachable, hook skipped: the relay broker is running but did not accept a connection within 3000 ms",
+    )
+    expect(result.stderr.trim().split("\n")).toHaveLength(1)
+    expect(result.ms).toBeGreaterThanOrEqual(HOOK_CONNECT_MS)
+    expect(result.ms).toBeLessThan(5000)
+  })
+})
+
+test("a hook's connect budget is capped, extending its deadline only where the harness's timeout leaves room", () => {
+  const set: number[] = []
+  const options = (remaining: number) => ({ remaining: () => remaining, deadline: (ms: number) => void set.push(ms) })
+  const extended = hookRetry(options(1400), Date.now() - 100, true)
+  expect(extended.budgetMs).toBe(HOOK_CONNECT_MS)
+  extended.retrying?.()
+  expect(set[0]).toBeGreaterThanOrEqual(4100)
+  expect(set[0]).toBeLessThan(4300)
+  expect(hookRetry(options(900), Date.now(), false)).toEqual({ budgetMs: 0 })
+  expect(hookRetry(options(2500), Date.now(), false)).toEqual({ budgetMs: 1500 })
+  expect(hookRetry(options(60_000), Date.now(), false)).toEqual({ budgetMs: HOOK_CONNECT_MS })
 })
 
 describe("a stop's nudges", () => {

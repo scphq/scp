@@ -60,8 +60,14 @@ export interface RelayMcpOptions {
   input: AsyncIterable<Uint8Array | string> | ReadableStream<Uint8Array>
   /** one JSON-RPC line, newline included */
   output: (line: string) => void
-  /** whether the session is on the relay now: `dark` (why not) keeps the shim from claiming, `handle` is the name it joined under */
-  membership?: () => { dark: string } | { handle?: string }
+  /** whether `session` is on the relay now: `dark` (why not) keeps the shim from claiming, `handle` is the name it joined under */
+  membership?: (session: string) => { dark: string } | { handle?: string }
+  /** the claim for the thread a tools/call's `_meta` names, undefined when it names none: the first such call binds the shim to it for good */
+  threadClaim?: (meta: Record<string, unknown>) => Claim | undefined
+  /** claim nothing until a tools/call binds a claim: the thread its `_meta` names, else {@link claim} */
+  deferClaim?: boolean
+  /** called with the claim a deferred shim binds on its first tools/call */
+  bound?: (claim: Claim) => void
   /** HOME shortens cwds in relay_list */
   env?: Record<string, string | undefined>
   /** push deliveries as `notifications/claude/channel` to a client that declares `claude/channel` or was launched with channels */
@@ -564,7 +570,8 @@ export function sendToSessionInbox(inbox: SessionInbox, content: string, timeout
 
 /**
  * The relay's MCP server over stdio: newline-delimited JSON-RPC 2.0, nothing else on the output.
- * It claims one agent endpoint, keeps one broker connection (heartbeat, reconnect on the next call), and resolves when the input ends.
+ * It claims one agent endpoint (a deferred shim on its first tools/call, for good), keeps one broker
+ * connection (heartbeat, reconnect on the next call), and resolves when the input ends.
  */
 export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   const log = options.log ?? (() => {})
@@ -588,6 +595,10 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   /** what the endpoint advertises once initialize said whether the client takes channel pushes; null advertises nothing */
   let wake: Wake | null | undefined
   let advertised: { client: RelayClient; via: Wake } | undefined
+  /** the claim the shim acts as; undefined while a deferred shim waits for a tools/call */
+  let bound: Claim | undefined = options.deferClaim ? undefined : options.claim
+  /** whether a call naming another session than the bound one was logged */
+  let rebound = false
 
   const write = (message: Json) => {
     if (!stopped) options.output(`${JSON.stringify(message)}\n`)
@@ -599,11 +610,25 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     while (sent.size > DELIVERED_KEEP) sent.delete(sent.keys().next().value!)
   }
 
-  /** the claim for the session as it stands; a session off the relay is refused `unavailable` */
+  /** the bound claim as the session's membership names it; a session off the relay, or a deferred shim not yet bound, is refused `unavailable` */
   function sessionClaim(): Claim {
-    const joined = options.membership?.() ?? {}
+    if (!bound) throw new RelayError("unavailable", "no thread is bound to this shim yet")
+    const joined = options.membership?.(bound.session ?? "") ?? {}
     if ("dark" in joined) throw new RelayError("unavailable", joined.dark)
-    return joined.handle ? { ...options.claim, handle: joined.handle } : options.claim
+    return joined.handle ? { ...bound, handle: joined.handle } : bound
+  }
+
+  /** a deferred shim's first tools/call binds it for good; a later call naming another session keeps the binding */
+  function bind(claim: Claim) {
+    if (bound) {
+      if (bound.session !== claim.session && !rebound) {
+        rebound = true
+        log(`${CLI_NAME} mcp: a tool call named session ${claim.session ?? ""}; this shim stays bound to ${bound.session ?? ""}`)
+      }
+      return
+    }
+    bound = claim
+    options.bound?.(claim)
   }
 
   async function open(): Promise<RelayClient> {
@@ -613,7 +638,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       let hello: HelloResult | undefined
       if (token) {
         try {
-          hello = await next.hello({ resume: token, ...(options.claim.cwd === undefined ? {} : { cwd: options.claim.cwd }) })
+          hello = await next.hello({ resume: token, ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }) })
         } catch (error) {
           if (!(error instanceof RelayError)) throw error
         }
@@ -850,8 +875,9 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       case "relay_join": {
         const name = str(args, "name")
         const under = str(args, "under")
-        const joined = options.membership?.() ?? {}
-        const claim = "handle" in joined && joined.handle ? { ...options.claim, handle: joined.handle } : options.claim
+        const current = bound ?? options.claim
+        const joined = options.membership?.(current.session ?? "") ?? {}
+        const claim = "handle" in joined && joined.handle ? { ...current, handle: joined.handle } : current
         const next = await options.connect()
         try {
           const hello = await next.hello({ transient: true, claim, join: { ...(name ? { handle: name } : {}), ...(under ? { under } : {}) } })
@@ -1075,6 +1101,10 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         if (!tools.some((t) => t.name === params.name)) {
           return write({ jsonrpc: "2.0", id, error: { code: -32602, message: `unknown tool ${JSON.stringify(params.name)}` } })
         }
+        const meta = typeof params._meta === "object" && params._meta !== null && !Array.isArray(params._meta) ? (params._meta as Json) : {}
+        const named = options.threadClaim?.(meta)
+        if (named) bind(named)
+        else if (!bound) bind(options.claim)
         return respond(await callTool(params))
       }
     }
@@ -1100,6 +1130,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   }
 
   const dark = (() => {
+    if (!bound) return true
     try {
       sessionClaim()
       return false

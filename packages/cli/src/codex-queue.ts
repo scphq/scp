@@ -4,8 +4,7 @@ import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, type Envelope } from "@scp-dev/core"
-import { CODEX_THREAD, type PsCommTable, readPsTable } from "./identity"
-import { CODEX_VALUED } from "./spawn"
+import { CODEX_THREAD, codexSubcommand, type PsCommTable, readPsTable } from "./identity"
 import { note } from "./term"
 
 type Env = Record<string, string | undefined>
@@ -29,6 +28,8 @@ const IDE = /Visual Studio Code|Code Helper|Cursor\.app|Windsurf|\.vscode|\.curs
 const SCP_SERVER = /--listen\s+unix:\/\/\S*\/scp-codex-[^/\s]*\/app\.sock/
 const CODEX = /(^|\/)codex(\.js)?(\s|$)/
 const RUN_TIMEOUT_MS = 30_000
+/** how long the waker keeps trying a busy broker: well inside its run's timeout */
+const WAKER_CONNECT_MS = 15_000
 /** the most one `codex queue` message carries, under any argument length limit */
 const BATCH_BYTES = 96 * 1024
 const PAGES = 5
@@ -53,27 +54,11 @@ export const runFile: Run = (bin, args) =>
     })
   })
 
-/** a codex command line's subcommand: its first word past the binary and the options, an option value split by spaces (`-c k=["a", "b"]`) skipped */
-function subcommand(args: string): string | undefined {
-  const words = args.split(/\s+/)
-  const start = words.findIndex((word) => /(^|\/)codex(\.js)?$/.test(word)) + 1
-  if (!start) return words.find((word) => word === "exec" || word === "e" || word === "app-server")
-  let depth = 0
-  for (let i = start; i < words.length; i++) {
-    const word = words[i]!
-    if (depth === 0 && !word.startsWith("-")) return word
-    if (depth === 0 && CODEX_VALUED.has(word)) i++
-    for (const char of words[i] ?? "") depth += char === "[" || char === "{" ? 1 : char === "]" || char === "}" ? -1 : 0
-    depth = Math.max(depth, 0)
-  }
-  return undefined
-}
-
 /** the surface process `pid` holding a writer lock belongs to, from the process table */
 export function ownerOf(pid: number, table: PsCommTable | undefined): CodexOwner {
   const holder = table?.get(pid)
   if (!holder) return "unknown"
-  const sub = subcommand(holder.args)
+  const sub = codexSubcommand(holder.args)
   if (sub === "exec" || sub === "e") return "exec"
   if (sub !== "app-server") return CODEX.test(holder.args) ? "tui" : "other"
   if (SCP_SERVER.test(holder.args)) return "scp"
@@ -197,7 +182,7 @@ export async function codexWakeCommand(
   const run = deps.run ?? runFile
   if ((await codexOwner(thread, env, { ...deps, run })) === "exec") return 0
   const { framed } = await import("./hold")
-  const client = await connectBroker(relayDir(env))
+  const client = await connectBroker(relayDir(env), undefined, { budgetMs: WAKER_CONNECT_MS, env })
   let queued = false
   try {
     await client.hello({ observe: true, ticket })

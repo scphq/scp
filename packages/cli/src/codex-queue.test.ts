@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { RelayClient, startBroker } from "@scp-dev/broker"
 import { codexLaunch } from "./codex"
 import { codexLockPath, codexOwner, codexThread, codexWakeCommand, ownerOf, type Run } from "./codex-queue"
-import { runHook } from "./hooks"
+import { runHook, subagentIntro } from "./hooks"
 import { type PsCommTable, relayIdentity } from "./identity"
 
 const THREAD = "01a1602d-b655-70a1-b717-0af8f5083d80"
@@ -404,6 +404,61 @@ describe("desktop threads", () => {
       }),
     )
     expect(new Set(shells)).toEqual(new Set(threads.map((view) => view.id)))
+  })
+})
+
+describe("desktop child threads and forks", () => {
+  test("a child thread's hooks claim a subagent of its root thread's endpoint; an app server's ephemeral fork claims nothing, an ephemeral exec does", async () => {
+    const root = temp()
+    const broker = await startBroker({ dir: join(root, "state"), policyPath: join(root, "policy.json"), idleMs: 0 })
+    cleanups.push(() => broker.stop())
+    const hook = (payload: Record<string, unknown>, server = `${DESKTOP_CLI} -c features.code_mode_host=true app-server`) =>
+      runHook(["codex"], {
+        env: { SCP_DIR: join(root, "state"), ...(server.includes("app-server") ? { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" } : {}) },
+        cwd: root,
+        stdin: Readable.from([JSON.stringify({ cwd: root, transcript_path: join(root, "rollout.jsonl"), ...payload })]),
+        connect: async () => RelayClient.connect(broker.socket),
+        harnessPid: () => process.pid,
+        startOf: () => START,
+        psTable: () => table([[process.pid, 1, server]]),
+        print: () => true,
+      })
+    await hook({ hook_event_name: "SessionStart", session_id: THREAD, source: "startup" })
+    const desktop = () => broker.core.list({ all: true }).filter((e) => e.harness === "codex-desktop")
+    const thread = desktop()[0]!
+    const child = { session_id: THREAD, agent_id: "01a16032-a1c8-7512-b648-be089f3cebf6", agent_type: "default" }
+    const address = `${thread.address}-default-01a1`
+    expect(JSON.parse((await hook({ ...child, hook_event_name: "UserPromptSubmit", prompt: "task" }))!).hookSpecificOutput).toEqual({
+      hookEventName: "UserPromptSubmit",
+      additionalContext: subagentIntro(address),
+    })
+    const sub = () => broker.core.list({ all: true }).find((e) => e.address === address)!
+    expect(sub()).toMatchObject({ parent: thread.address, harness: "codex-desktop" })
+    expect(broker.core.sessionOf(sub().id)).toBe(`sub:${child.agent_id}:codex:${THREAD}`)
+    await hook({ ...child, hook_event_name: "PostToolUse", tool_name: "shell", tool_input: { command: "ls" } })
+    await hook({ ...child, hook_event_name: "SubagentStop" })
+    expect(sub().status?.state).toBe("done")
+    const ended = { session_id: THREAD, agent_id: "01a16033-0000-7000-8000-000000000000", agent_type: "default" }
+    await hook({ ...ended, hook_event_name: "PostToolUse", tool_name: "shell", tool_input: { command: "ls" } })
+    const second = () => broker.core.list({ all: true }).find((e) => e.address === `${thread.address}-default-01a1-2`)!
+    expect(second().status?.state).not.toBe("done")
+    await hook({ ...ended, hook_event_name: "SessionEnd", reason: "other" })
+    expect(second().status?.state).toBe("done")
+    expect(
+      broker.core
+        .activity({ limit: 100 })
+        .filter((r) => r.endpoint === thread.address)
+        .map((r) => r.kind),
+    ).toEqual(["session_start"])
+    const fork = { session_id: "01a16040-0000-7000-8000-000000000000", transcript_path: null }
+    expect(await hook({ ...fork, hook_event_name: "SessionStart", source: "fork" })).toBeUndefined()
+    expect(await hook({ ...fork, hook_event_name: "UserPromptSubmit", prompt: "suggest" })).toBeUndefined()
+    expect(
+      await hook({ sessionId: fork.session_id, transcript_path: undefined, transcriptPath: null, hook_event_name: "UserPromptSubmit", prompt: "x" }),
+    ).toBeUndefined()
+    expect(desktop().map((e) => e.address)).toEqual([thread.address, address, `${thread.address}-default-01a1-2`])
+    await hook({ ...fork, hook_event_name: "UserPromptSubmit", prompt: "run" }, "/opt/codex exec --ephemeral run")
+    expect(broker.core.list({ all: true }).filter((e) => e.harness === "codex")).toHaveLength(1)
   })
 })
 
