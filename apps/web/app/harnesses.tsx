@@ -6,12 +6,12 @@
  */
 
 export const HARNESSES = ["claude", "codex", "opencode", "pi", "gemini", "agy", "grok", "muse", "t3code"] as const;
-export type Harness = (typeof HARNESSES)[number];
+export type Harness = (typeof HARNESSES)[number] | "claude-desktop" | "claude-cowork" | "claude-desktop-chat" | "codex-desktop";
 
 type Part = { d: string; alpha?: number; evenodd?: boolean };
 
 /** `scale` evens out visual weight: a mark is drawn that much larger or smaller around its centre. */
-export const HARNESS: Record<Harness, { label: string; parts: Part[]; scale?: number }> = {
+const PROVIDER: Record<(typeof HARNESSES)[number], { label: string; parts: Part[]; scale?: number }> = {
   claude: {
     label: "Claude Code",
     parts: [
@@ -80,12 +80,21 @@ export const HARNESS: Record<Harness, { label: string; parts: Part[]; scale?: nu
   },
 };
 
+export const HARNESS = {
+  ...PROVIDER,
+  "claude-desktop": { ...PROVIDER.claude, label: "Claude Desktop" },
+  "claude-cowork": { ...PROVIDER.claude, label: "Claude Cowork" },
+  "claude-desktop-chat": { ...PROVIDER.claude, label: "Claude desktop chat" },
+  "codex-desktop": { ...PROVIDER.codex, label: "Codex desktop" },
+};
+
 export function HarnessIcon({ h, size = 14 }: { h: Harness; size?: number }) {
+  const icon = ["claude-desktop", "claude-cowork", "claude-desktop-chat"].includes(h) ? "claude" : h === "codex-desktop" ? "codex" : h;
   const v = 24 / (HARNESS[h].scale ?? 1);
   const o = 12 - v / 2;
   return (
     <svg
-      className={`h-icon h-${h}`}
+      className={`h-icon h-${icon}`}
       width={size}
       height={size}
       viewBox={`${o} ${o} ${v} ${v}`}

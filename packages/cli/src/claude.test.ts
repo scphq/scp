@@ -20,6 +20,7 @@ function fixture(mount?: string[]) {
       `if [ "$1" = agents ]; then cat "${home}/agents.json" 2>/dev/null || echo '[]'; exit 0; fi`,
       `printf '%s\\n' "$@" > "${record}.args"`,
       `printf '%s\\n' "$SCP_NAME" "$${CHANNELS_ENV}" "$SCP_GRANT" > "${record}.env"`,
+      `env > "${record}.all-env"`,
       `for a in "$@"; do [ "$a" = --bg ] && { echo 'backgrounded · 1a2b3c4d (idle)'; exit 0; }; done`,
       "exit 7",
       "",
@@ -28,7 +29,13 @@ function fixture(mount?: string[]) {
   )
   if (mount) writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { scp: { type: "stdio", command: "swarm", args: mount } } }))
   const env = { HOME: home, PATH: `${bin}:/usr/bin:/bin` }
-  return { home, env, args: () => readFileSync(`${record}.args`, "utf8"), vars: () => readFileSync(`${record}.env`, "utf8") }
+  return {
+    home,
+    env,
+    args: () => readFileSync(`${record}.args`, "utf8"),
+    allEnv: () => readFileSync(`${record}.all-env`, "utf8"),
+    vars: () => readFileSync(`${record}.env`, "utf8"),
+  }
 }
 
 describe("swarm claude", () => {
@@ -182,4 +189,21 @@ describe("swarm claude", () => {
     expect(launchedWithChannels({ [CHANNELS_ENV]: "1" }, () => 500, parentOf)).toBe(false)
     expect(launchedWithChannels({}, () => 500, parentOf)).toBe(false)
   })
+})
+
+test("Claude foreground and background launches clear inherited desktop and Cowork identity", async () => {
+  for (const args of [["--root"], ["--root", "--bg"]]) {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const session = {
+      CLAUDE_CODE_IS_COWORK: "1",
+      CLAUDE_CODE_ENTRYPOINT: "claude-desktop",
+      CLAUDE_CODE_MESSAGING_SOCKET: "/fake/socket",
+      CLAUDE_CODE_MESSAGING_TOKEN: "fake-token",
+      CLAUDE_CODE_SESSION_ID: "fake-session",
+      CLAUDE_CODE_WORKSPACE_HOST_PATHS: "/fake/workspace",
+    }
+    const env = { ...f.env, ...session }
+    await claudeCommand(args, env, () => {}, f.home, { out: () => {} })
+    for (const key of Object.keys(session)) expect(f.allEnv()).not.toContain(`${key}=`)
+  }
 })

@@ -273,6 +273,15 @@ An endpoint row holds at least: `id`, `handle`, `kind`, `harness`, `model`, `cwd
 - An integration that cannot name its harness directly SHOULD determine it by other means before falling back to a provisional name.
 - Handles, titles, status notes and claim fields are scanned for credentials (section 7.8). A match is refused `secret_refused`.
 
+Hosted sessions may use a harness label distinct from their provider. The reference integration uses these labels; other valid harness names remain permitted:
+
+| Harness | Session |
+| --- | --- |
+| `claude-cowork` | Claude Code in a local Claude Cowork session. |
+| `claude-desktop` | Claude Code in the Claude desktop app's Code tab. |
+| `codex-desktop` | Codex in the Codex desktop app. |
+| `t3code` | A provider session hosted by T3 Code. |
+
 ### 6.3 Addresses
 
 | Form | Resolves to |
@@ -1826,7 +1835,7 @@ This appendix is normative for brokers and integrations on Unix hosts (Linux, ma
 
 ### E.7 Shim bindings for sandboxed shells
 
-A sandbox can hide the harness's process from shells the agent runs, so that no `self` can be computed. Shim bindings exist for the harnesses that do this, currently `codex` and `t3code` (a T3 Code session run by Codex); a binding for any other harness is ignored. A tool-surface process (a shim) of such a harness that knows its harness-instance key MAY publish it:
+A sandbox can hide the harness's process from shells the agent runs, so that no `self` can be computed. Shim bindings exist for the harnesses that do this, currently `codex`, `codex-desktop` and `t3code` (a T3 Code session run by Codex); a binding for any other harness is ignored. A tool-surface process (a shim) of such a harness that knows its harness-instance key MAY publish it:
 
 - The shim writes `<relay dir>/bindings/pid-<harness pid>.json` holding `{process, handle, harness}`, where `process` is the full harness-instance key, with mode 0600, and removes it on exit when it can.
 - When the harness environment carries `SCP_SHIM_BINDING` (1 to 128 lowercase hex digits, set by a launcher to a fresh random value), the shim also writes `bindings/key-<SCP_SHIM_BINDING>.json` with the same content.

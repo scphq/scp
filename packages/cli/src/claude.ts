@@ -5,7 +5,7 @@ import { basename, join } from "node:path"
 import { privateDir, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { type AttributeDeps, attribute, attributed, underText, type Attribution } from "./attribute"
-import { CHANNELS_ENV, RelayUsage } from "./common"
+import { CHANNELS_ENV, CLAUDE_SESSION_ENV, RelayUsage } from "./common"
 import { deriveHandle } from "./identity"
 import { joinMode } from "./relay"
 import { entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
@@ -63,6 +63,7 @@ export function claudeLaunchArgs(args: string[], added: string[]): string[] {
 
 /** a launcher's own identity, which claude's daemon must not keep for the sessions it starts later */
 const LAUNCHER_IDENTITY = [
+  ...CLAUDE_SESSION_ENV,
   "SCP_NAME",
   "SCP_GRANT",
   "SCP_SESSION",
@@ -339,7 +340,11 @@ export async function claudeCommand(
   return runClaude(
     bin,
     claudeLaunchArgs(args, namePrompt(name, args, launchEnv, cwd)),
-    { ...launchEnv, ...(name !== undefined ? { SCP_NAME: name } : {}), [CHANNELS_ENV]: String(process.pid) },
+    {
+      ...Object.fromEntries(Object.entries(launchEnv).filter(([key]) => !CLAUDE_SESSION_ENV.includes(key))),
+      ...(name !== undefined ? { SCP_NAME: name } : {}),
+      [CHANNELS_ENV]: String(process.pid),
+    },
     cwd,
   )
 }

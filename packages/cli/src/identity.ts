@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { capture } from "./term"
 import { tmpdir } from "node:os"
-import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path"
 import type { Claim } from "@scp-dev/core"
 import { privateDir, relayDir, shortHostname } from "@scp-dev/broker"
 import { GENERIC_HARNESSES, LIMITS, validHandle, validHarness } from "@scp-dev/core"
@@ -26,18 +26,19 @@ export function detectHarness(env: Env): string | undefined {
   if (env.CLAUDECODE === "1") return "claude-code"
   if (env.CODEX_THREAD_ID) return "codex"
   if (inferring(env) && (env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED)) return "codex"
+  if (env.CLAUDE_CODE_IS_COWORK === "1") return "claude-code"
   return undefined
 }
 
 type ShimBinding = { process: string; handle: string; harness: string }
-/** the harnesses whose shim publishes a binding: codex, and codex as T3 Code runs it */
-const BOUND_HARNESSES: ReadonlySet<string> = new Set(["codex", "t3code"])
+/** the harnesses whose codex shim publishes a binding */
+const BOUND_HARNESSES: ReadonlySet<string> = new Set(["codex", "codex-desktop", "t3code"])
 const BINDING_KEY = /^[0-9a-f]{1,128}$/
 const BINDING_PROCESS = /^pid:([1-9][0-9]*):[A-Za-z0-9:-]{1,64}$/
 
 /** whether this shell may recover its hidden codex harness from a shim binding */
 export function codexShell(env: Env): boolean {
-  return env.SCP_HARNESS === "codex" || (inferring(env) && detectHarness(env) === "codex")
+  return env.SCP_HARNESS === "codex" || env.SCP_HARNESS === "codex-desktop" || (inferring(env) && detectHarness(env) === "codex")
 }
 
 /** publish the codex shim's harness key for shells whose sandbox hides its process */
@@ -190,6 +191,22 @@ export function toHandle(raw: string): string {
 export function deriveHandle(harness: string, cwd: string): string {
   const top = gitToplevel(cwd) ?? resolve(cwd)
   return toHandle(`${SHORT[harness] ?? harness}-${basename(top) || "root"}`)
+}
+
+/** the first attached folder, else the local Cowork session id */
+export function coworkHandle(env: Env): string {
+  const raw = env.CLAUDE_CODE_WORKSPACE_HOST_PATHS ?? ""
+  let paths: unknown = raw.split(delimiter)
+  if (raw.trim().startsWith("[")) {
+    try {
+      paths = JSON.parse(raw)
+    } catch {
+      paths = []
+    }
+  }
+  const first = Array.isArray(paths) ? paths.find((path) => typeof path === "string" && path.trim()) : undefined
+  const folder = typeof first === "string" ? basename(first.replace(/[\\/]+$/, "")) : ""
+  return toHandle(`cowork-${folder || env.CLAUDE_CODE_SESSION_ID?.slice(0, 8) || "session"}`)
 }
 
 /** `k=v,k=v` with invalid keys dropped */
@@ -366,8 +383,8 @@ export function harnessOf(args: string | undefined): string | undefined {
 export const inferring = (env: Env): boolean => env.SCP_HARNESS_DETECT !== "0"
 
 /** the harness process `pid` runs, from the ps table */
-export function harnessAt(pid: number, table: PsCommTable | undefined = readPsTable()): string | undefined {
-  return inferring(process.env) ? harnessOf(table?.get(pid)?.args) : undefined
+export function harnessAt(pid: number, table: PsCommTable | undefined = readPsTable(), env: Env = process.env): string | undefined {
+  return inferring(env) ? harnessOf(table?.get(pid)?.args) : undefined
 }
 
 let roots: string[] | undefined
@@ -521,7 +538,7 @@ export function harnessPid(ppid = process.ppid, parentOf = psParent): number {
 
 /** a hook's harness pid: $CLAUDE_PID for a Claude Code hook, $OPENCODE_PID for an OpenCode one, else {@link harnessPid} */
 export function hookHarnessPid(env: Env, harness: string, ppid = process.ppid, parentOf = psParent): number {
-  const named = harness === "claude-code" ? env.CLAUDE_PID : harness === "opencode" ? env.OPENCODE_PID : undefined
+  const named = hookFormat(harness, harness) === "claude-code" ? env.CLAUDE_PID : harness === "opencode" ? env.OPENCODE_PID : undefined
   const pid = Number(named)
   if (Number.isInteger(pid) && pid > 1) return pid
   return harnessPid(ppid, parentOf)
@@ -557,9 +574,39 @@ export function t3Hosted(env: Env, pid: number, table: () => PsCommTable | undef
   return parent !== undefined && t3Process(ps?.get(parent)?.args)
 }
 
-/** the harness whose hook format a claim speaks: the provider of a T3 Code session, else the claimed harness */
+/** whether the codex harness process runs the desktop app's bundled CLI */
+export function codexDesktop(env: Env, pid: number, table: () => PsCommTable | undefined): boolean {
+  if (env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE === "Codex Desktop") return true
+  if (!inferring(env)) return false
+  const args = table()?.get(pid)?.args
+  const binary = args && /^(\/[^\n]*?\.app\/Contents\/Resources\/codex-cli\/(?:[^\n]*\/)?codex)\s+app-server(?:\s|$)/.exec(args)?.[1]
+  return !!binary && !/\s\//.test(binary)
+}
+
+/** the provider's hook format for hosted and desktop sessions */
 export function hookFormat(claimed: string, provider: string): string {
-  return claimed === T3CODE ? provider : claimed
+  const harness = claimed === T3CODE ? provider : claimed
+  if (harness === "claude-desktop" || harness === "claude-cowork") return "claude-code"
+  if (harness === "codex-desktop") return "codex"
+  return harness
+}
+
+/** the session label shared by shims, hooks and shells */
+export function harnessVariant(
+  detected: string,
+  env: Env,
+  pid = process.ppid,
+  table: () => PsCommTable | undefined = readPsTable,
+  hosted: (pid: number) => boolean = (at) => t3Hosted(env, at, table),
+): string {
+  const provider = hookFormat(detected, detected)
+  if ((provider === "codex" || provider === "claude-code") && hosted(pid)) return T3CODE
+  if (provider === "claude-code") {
+    if (detected === "claude-cowork" || env.CLAUDE_CODE_IS_COWORK === "1") return "claude-cowork"
+    if (detected === "claude-desktop" || env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop") return "claude-desktop"
+  }
+  if (provider === "codex" && (detected === "codex-desktop" || codexDesktop(env, pid, table))) return "codex-desktop"
+  return provider
 }
 
 export interface IdentityInput {
@@ -579,6 +626,8 @@ export interface IdentityInput {
   harnessSession?: string
   /** whether T3 Code runs the harness process (default {@link t3Hosted}) */
   t3Hosted?: (pid: number) => boolean
+  /** process table shared by hosted harness detection and lineage */
+  psTable?: () => PsCommTable | undefined
 }
 
 const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
@@ -587,18 +636,18 @@ const HARNESS_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 export function relayIdentity(input: IdentityInput): Claim & { handle: string; harness: string; session: string; process: string; cwd: string } {
   const resolved = resolveHarness(input.harness, input.env, input.fallbackHarness)
   const pid = input.harnessPid(resolved)
-  const provider = (GENERIC_HARNESSES.has(resolved) && input.inferHarness?.(pid)) || resolved
+  const detected = (GENERIC_HARNESSES.has(resolved) && input.inferHarness?.(pid)) || resolved
+  const provider = hookFormat(detected, detected)
   let table: { value: PsCommTable | undefined } | undefined
   const ps = () => {
-    table ??= { value: readPsTable() }
+    table ??= { value: input.psTable ? input.psTable() : readPsTable() }
     return table.value
   }
-  const hosted = (provider === "codex" || provider === "claude-code") && (input.t3Hosted ? input.t3Hosted(pid) : t3Hosted(input.env, pid, ps))
-  const harness = hosted ? T3CODE : provider
+  const harness = harnessVariant(detected, input.env, pid, ps, input.t3Hosted)
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
   const own = processKey(pid, input.startOf)
   const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env) : undefined
-  const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? deriveHandle(harness, cwd)
+  const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? (harness === "claude-cowork" ? coworkHandle(input.env) : deriveHandle(harness, cwd))
   const grant = input.env.SCP_GRANT || launched?.grant
   const harnessProcess = launched?.launcher ?? own
   const claimed = launched?.launcher ? Number(BINDING_PROCESS.exec(launched.launcher)![1]) : pid

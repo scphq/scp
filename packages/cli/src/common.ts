@@ -7,6 +7,7 @@ import {
   codexShell,
   detectHarness,
   harnessAt,
+  harnessVariant,
   inferring,
   harnessLineage,
   hiddenHarness,
@@ -31,6 +32,7 @@ export const OPTIONS = {
   "no-browser": { type: "boolean" },
   json: { type: "boolean" },
   channels: { type: "boolean" },
+  "cowork-only": { type: "boolean" },
   write: { type: "boolean" },
   print: { type: "boolean" },
   "block-stop-on-unread": { type: "boolean" },
@@ -228,7 +230,9 @@ export function walkNow(env = process.env, pid = process.ppid, table: PsCommTabl
       return { keys: bound, self: bound, harness: binding.harness }
     }
   }
-  const harness = self.length ? harnessAt(Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]), table) : undefined
+  const harnessPid = Number(/^pid:(\d+)/.exec(self.at(-1) ?? "")?.[1])
+  const provider = self.length ? harnessAt(harnessPid, table, env) : undefined
+  const harness = provider ? harnessVariant(provider, env, harnessPid, () => table) : undefined
   return { keys, self, ...(harness ? { harness } : {}) }
 }
 
@@ -251,7 +255,10 @@ export async function connectShell(dir: string, tool: string): Promise<RelayClie
 
 /** an `--as` claim's harness: --harness or $SCP_HARNESS, else the harness this shell's walk or environment shows, else cli */
 export function claimHarness(values: Identity, env: Record<string, string | undefined>, walk: Walk | undefined): string {
-  return values.harness ?? env.SCP_HARNESS ?? (inferring(env) ? (walk?.harness ?? detectHarness(env)) : undefined) ?? "cli"
+  const explicit = values.harness ?? env.SCP_HARNESS
+  if (explicit) return explicit
+  if (!inferring(env)) return "cli"
+  return harnessVariant(walk?.harness ?? detectHarness(env) ?? "cli", env)
 }
 
 export async function open(verb: string, values: Identity, cwd: string, bodyFromStdin: boolean, walk?: Walk): Promise<Opened> {
@@ -442,8 +449,18 @@ export const CHANNELS_ENV = "SCP_CHANNELS"
 /** set for a detached spawn's runner: the walk of the shell that ran `swarm spawn`, as JSON */
 export const SPAWN_RUNNER = "SCP_SPAWN_RUNNER"
 
+export const CLAUDE_SESSION_ENV = [
+  "CLAUDE_CODE_IS_COWORK",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_WORKSPACE_HOST_PATHS",
+]
+
 /** the spawner's own identity, which the harness it starts must not inherit */
 const SPAWNER_IDENTITY = [
+  ...CLAUDE_SESSION_ENV,
   "SCP_NAME",
   "SCP_SESSION",
   "SCP_GRANT",
