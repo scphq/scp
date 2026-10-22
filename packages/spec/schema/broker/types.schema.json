@@ -2305,6 +2305,20 @@
           "type": "integer",
           "const": 2592000
         },
+        "endpointRetireS": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "endpointRetireMax": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
         "idempotencyS": {
           "type": "integer",
           "const": 86400
@@ -2442,6 +2456,8 @@
         "deferredSettleMs",
         "listOfflineWithinS",
         "handleBoundS",
+        "endpointRetireS",
+        "endpointRetireMax",
         "idempotencyS",
         "auditKeepS",
         "noteChars",

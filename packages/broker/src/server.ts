@@ -143,6 +143,8 @@ interface Connection {
   queue: string[]
   queueHead: number
   lineTimer?: ReturnType<typeof setTimeout> | undefined
+  /** a line passed the cap: what follows is discarded, and too_large goes once the lines before it are answered */
+  tooLarge?: boolean
 }
 
 const SWEEP_MS = 10 * 60_000
@@ -727,19 +729,27 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   function onData(s: Conn<Connection>, chunk: Uint8Array) {
+    if (s.data.tooLarge) return
     const { lines, tooLong } = s.data.reader.push(chunk)
     for (const line of lines) s.data.queue.push(line)
-    pump(s)
     if (tooLong) {
-      write(s, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "request too large", data: { code: "too_large" } } })
-      s.end()
-      return
+      s.data.tooLarge = true
+      clearTimeout(s.data.lineTimer)
+      s.data.lineTimer = undefined
     }
+    pump(s)
+    if (tooLong) return endTooLarge(s)
     if (!s.data.reader.buffered || lines.length) {
       clearTimeout(s.data.lineTimer)
       s.data.lineTimer = undefined
     }
     if (s.data.reader.buffered && !s.data.lineTimer) armLineTimer(s)
+  }
+
+  function endTooLarge(s: Conn<Connection>) {
+    if (s.data.inFlight || s.data.queueHead < s.data.queue.length) return
+    write(s, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "request too large", data: { code: "too_large" } } })
+    s.end()
   }
 
   /** a line must end within partialLineMs of its first byte, not counting time the broker itself paused reading */
@@ -798,6 +808,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     } finally {
       s.data.inFlight--
       pump(s)
+      if (s.data.tooLarge) endTooLarge(s)
     }
   }
 
