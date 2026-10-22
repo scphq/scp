@@ -1,5 +1,11 @@
 # @scp-dev/core
 
+## 0.10.0
+
+### Minor Changes
+
+- 6881d37: The MCP tool definitions and their result rendering live in `@scp-dev/core` (`TOOLS`, `MCP_PROTOCOLS` and the helpers), with `REMOTE_TOOLS`, the surface the remote MCP endpoint serves; the stdio MCP server uses them from there.
+
 ## 0.9.0
 
 ### Minor Changes
