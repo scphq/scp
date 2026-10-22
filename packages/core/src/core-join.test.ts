@@ -237,3 +237,59 @@ describe("a resumed harness session", () => {
     expect(core.log({}).find((row) => row.event === "take_over")?.detail).toMatchObject({ by: "human", retired: root.id })
   })
 })
+
+describe("harness sessions sharing a handle", () => {
+  const A = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+  const B = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c"
+  const APP = key(50)
+
+  function threads() {
+    const ctx = setup()
+    const thread = (id: string, extra: Record<string, unknown> = {}) =>
+      ctx.core.claim(
+        { handle: "codex-app", harness: "codex-desktop", process: APP, session: `codex:${id}`, harness_session: id, lineage: [key(1)], ...extra },
+        { transient: true },
+      )
+    const a = thread(A).endpoint
+    ctx.core.event(a.id, { kind: "tool", tool: "Bash", session_id: A }, { transient: true, process: APP })
+    ctx.core.send(ctx.peer.id, { to: "codex-app", body: "for A" })
+    return { ...ctx, thread, a }
+  }
+
+  test("another thread's claim never takes a thread's offline endpoint or its mail; the thread itself takes it back", () => {
+    const { core, clock, thread, a } = threads()
+    clock.now += (LIMITS.hookIdleS + 60) * 1000
+    expect(core.whoami(a.id).presence).toBe("offline")
+    const b = thread(B).endpoint
+    expect(b).toMatchObject({ address: "me/codex-app-2" })
+    expect(b.id).not.toBe(a.id)
+    expect(core.inbox(b.id)).toEqual([])
+    expect(core.claim({ handle: "codex-app", harness: "codex-desktop", process: APP, session: `codex:${B}`, harness_session: B }).endpoint.id).toBe(b.id)
+    expect(thread(A).endpoint.id).toBe(a.id)
+    expect(core.inbox(a.id).map((m) => m.body.text)).toEqual(["for A"])
+  })
+
+  test("a new harness instance's other session still takes an ended session's endpoint by its handle, with its mail", () => {
+    const { core, clock, hook, peer } = setup()
+    const first = hook(9, { harness_session: A }).endpoint
+    core.event(first.id, { kind: "tool", tool: "Bash", session_id: A }, { transient: true, process: key(9) })
+    core.send(peer.id, { to: "claude-app", body: "queued" })
+    core.event(first.id, { kind: "session_end" }, { transient: true, process: key(9) })
+    clock.now += (LIMITS.hookEndedGraceS + 1) * 1000
+    const next = hook(10, { harness_session: B }).endpoint
+    expect(next).toMatchObject({ id: first.id, address: "me/claude-app" })
+    expect(core.inbox(next.id).map((m) => m.body.text)).toEqual(["queued"])
+  })
+
+  test("a shell of a thread with no endpoint binds to none; the thread's own and a legacy row's still bind", () => {
+    const { core, thread, a } = threads()
+    expect(core.placeLineage([APP, key(1)], undefined, B)).toBeNull()
+    expect(core.placeLineage([APP, key(1)], undefined, A)).toBe(a.id)
+    expect(core.placeLineage([APP, key(1)])).toBe(a.id)
+    const b = thread(B).endpoint
+    core.event(b.id, { kind: "tool", tool: "Bash", session_id: B }, { transient: true, process: APP })
+    expect(core.placeLineage([APP, key(1)], undefined, B)).toBe(b.id)
+    const legacy = core.claim({ handle: "codex-cli", harness: "codex", process: key(60), session: key(60) }, { transient: true }).endpoint
+    expect(core.placeLineage([key(60)], undefined, B)).toBe(legacy.id)
+  })
+})

@@ -1028,7 +1028,7 @@ export class RelayCore {
         held.kind === "agent" &&
         ((held.connections === 0 && presenceOf(held, now) === "offline") || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
-        !otherSession(held, fields.harness_session) &&
+        !otherSession(held, fields.harness_session, fields.process) &&
         held.id !== scope.subagent?.root &&
         !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
       ) {
@@ -1491,14 +1491,14 @@ export class RelayCore {
   }
 
   /**
-   * the endpoint a plain shell's lineage lands on, or null; with `handle`, the one holding it among the endpoints on that lineage key, else the
-   * one of `harnessSession` when one is (threads of one shared harness instance), else the first
+   * the endpoint a plain shell's lineage lands on, or null; with `handle`, the one holding it among the endpoints on that lineage key; with
+   * `harnessSession` (threads of one shared harness instance), the one of that session, else the first that reported none; else the first
    */
   placeLineage(lineage: unknown, handle?: string, harnessSession?: unknown): string | null {
     const rows = this.lineageRows(lineageKeys(lineage))
     if (handle !== undefined) return rows.find((row) => row.handle === handle)?.id ?? null
-    const named = typeof harnessSession === "string" ? rows.find((row) => row.harness_session === harnessSession) : undefined
-    return (named ?? rows[0])?.id ?? null
+    if (typeof harnessSession !== "string") return rows[0]?.id ?? null
+    return (rows.find((row) => row.harness_session === harnessSession) ?? rows.find((row) => row.harness_session === null))?.id ?? null
   }
 
   /** whether a shell carrying the spawn-env grant `token` may act as `endpoint`: the endpoint that spent the grant, or one below it */
@@ -6334,9 +6334,13 @@ function brokerWake(row: EndpointRow): boolean {
   return row.hibernate === null && row.wake !== null && BROKER_WAKES.includes(row.wake as Wake)
 }
 
-/** a row a broker wake keeps for another harness session than `harnessSession`: a claim never takes it by its handle */
-function otherSession(row: EndpointRow, harnessSession: string | null | undefined): boolean {
-  return brokerWake(row) && row.harness_session !== null && !!harnessSession && row.harness_session !== harnessSession
+/**
+ * a row kept for another harness session than `harnessSession`, by its broker wake or because the claim's harness instance `process` holds
+ * it (another thread of a shared app server): a claim never takes it by its handle
+ */
+function otherSession(row: EndpointRow, harnessSession: string | null | undefined, process: string | null): boolean {
+  if (row.harness_session === null || !harnessSession || row.harness_session === harnessSession) return false
+  return brokerWake(row) || (process !== null && row.process !== null && sameHarness(row.process, process))
 }
 
 /** two harness names of one provider: equal, or the same name before a `-` (`codex` and `codex-desktop`) */
