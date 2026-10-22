@@ -66,7 +66,7 @@ import {
   wokeBy,
 } from "./hold"
 import { steerPrompt } from "./hooks"
-import { detectHarness, type MuseLaunch, processKey, spawnerKey, writeMuseLaunch } from "./identity"
+import { CODEX_VALUED, detectHarness, type MuseLaunch, processKey, spawnerKey, writeMuseLaunch } from "./identity"
 import { readConversation } from "./resume"
 import { agyRules, agySettingsFile, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF, note } from "./term"
@@ -126,29 +126,6 @@ export function codexOverrides(env: Env, mount: Json | undefined, self: string[]
   ]
 }
 
-/** codex's top-level options that take a value */
-export const CODEX_VALUED = new Set([
-  "-c",
-  "--config",
-  "--enable",
-  "--disable",
-  "--remote",
-  "--remote-auth-token-env",
-  "-i",
-  "--image",
-  "-m",
-  "--model",
-  "--local-provider",
-  "-p",
-  "--profile",
-  "-s",
-  "--sandbox",
-  "-C",
-  "--cd",
-  "--add-dir",
-  "-a",
-  "--ask-for-approval",
-])
 /** codex subcommands that start a session and take their own `-c`, which replaces the top-level ones */
 const CODEX_SESSIONS = new Set(["exec", "e", "review", "resume", "fork"])
 

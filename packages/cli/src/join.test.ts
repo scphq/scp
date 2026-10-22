@@ -54,7 +54,7 @@ test("join and shell commands use the codex shim binding when the sandbox hides 
 test("join --under in a codex sandbox that blocks the relay socket names relay_join and the setting, and starts no broker", async () => {
   const root = mkdtempSync(join(process.env.HOME!, "sandbox-socket-"))
   const dir = privateDir(join(root, "relay"))
-  const env = cleanEnv({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_SHIM_BINDING: "e".repeat(32) })
+  const env = cleanEnv({ SCP_DIR: dir, SCP_HARNESS: "codex", SCP_SHIM_BINDING: "e".repeat(32), CODEX_SANDBOX: "seatbelt" })
   const clear = writeShimBinding({ handle: "boxed", harness: "codex", process: processKey(process.pid) }, env)
   const path = socketPath(dir)
   privateDir(dirname(path))

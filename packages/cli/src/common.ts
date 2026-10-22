@@ -252,7 +252,7 @@ export async function connectShell(dir: string, tool: string): Promise<RelayClie
   try {
     return await connectBroker(dir, codex ? undefined : () => startDaemon(dir))
   } catch (error) {
-    if (!(error instanceof BrokerUnavailable) || !codex) throw error
+    if (!(error instanceof BrokerUnavailable) || !codex || error.busy) throw error
     throw new RelayUsage(
       `${error.message}. In a codex sandbox use ${tool} instead: the scp MCP server runs outside the sandbox. Or let the sandbox reach the socket (codex: sandbox_workspace_write.network_access = true)`,
     )

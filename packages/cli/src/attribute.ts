@@ -63,7 +63,7 @@ export async function attribute(
     timer = setTimeout(() => reject(new Error(`no answer from the relay broker within ${ms} ms`)), ms)
   })
   const mint = async (): Promise<Attribution | undefined> => {
-    const connected = await (deps.connect ?? ((dir: string) => connectBroker(dir)))(opts.dir ?? relayDir(env as NodeJS.ProcessEnv))
+    const connected = await (deps.connect ?? ((dir: string) => connectBroker(dir, undefined, ms)))(opts.dir ?? relayDir(env as NodeJS.ProcessEnv))
     if (settled) {
       connected.close()
       return undefined
@@ -105,7 +105,8 @@ export async function attribute(
   try {
     return await Promise.race([mint(), deadline])
   } catch (error) {
-    if (caller === undefined && (!harnessed || error instanceof RelayError || (error instanceof BrokerUnavailable && !error.sandboxed))) return undefined
+    if (caller === undefined && (!harnessed || error instanceof RelayError || (error instanceof BrokerUnavailable && !error.sandboxed && !error.busy)))
+      return undefined
     unlinked(error instanceof Error ? error.message : String(error))
     return caller === undefined ? undefined : ROOT
   } finally {

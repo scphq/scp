@@ -240,7 +240,7 @@ describe("broker", () => {
     await Promise.race([started!.stopped, Bun.sleep(3000).then(() => Promise.reject(new Error("broker did not idle out")))])
   })
 
-  test("a socket that refuses connects while the broker lock is held is a sandbox, not a missing broker", async () => {
+  test("a socket that refuses connects while the broker lock is held is a busy broker, a sandbox only under a sandbox marker", async () => {
     const root = mkdtempSync(join(tmpdir(), "relay-broker-"))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }))
     const dir = privateDir(join(root, "state"))
@@ -253,10 +253,20 @@ describe("broker", () => {
     const lock = takeBrokerLock(join(dir, "broker.lock"))
     let starts = 0
     try {
-      const error = await connectBroker(dir, () => starts++, 300).catch((e: unknown) => e)
-      expect(error).toBeInstanceOf(BrokerUnavailable)
-      expect((error as Error).message).toMatch(/^the sandbox blocks the relay socket \((ECONNREFUSED|ENOENT)\)/)
-      expect((error as Error).message).toEndWith(`; allow ${path} or run outside the sandbox`)
+      const busy = await connectBroker(dir, () => starts++, 300).catch((e: unknown) => e)
+      expect(busy).toMatchObject({ busy: true, sandboxed: false })
+      expect((busy as Error).message).toMatch(/^the relay broker is running but did not accept a connection within 300 ms \((ECONNREFUSED|ENOENT)\)/)
+      expect((busy as Error).message).toEndWith("swarm status shows it")
+      const refused = Object.assign(new Error("Failed to connect"), { code: "ECONNREFUSED" })
+      const connect = spyOn(RelayClient, "connect").mockRejectedValue(refused)
+      try {
+        const sandboxed = await connectBroker(dir, () => starts++, { budgetMs: 300, env: { CODEX_SANDBOX: "seatbelt" } }).catch((e: unknown) => e)
+        expect(sandboxed).toMatchObject({ sandboxed: true, busy: false })
+        expect((sandboxed as Error).message).toBe(`the sandbox blocks the relay socket (ECONNREFUSED); allow ${path} or run outside the sandbox`)
+        expect(connect).toHaveBeenCalledTimes(1)
+      } finally {
+        connect.mockRestore()
+      }
       expect(starts).toBe(0)
     } finally {
       releaseBrokerLock(lock)
@@ -264,6 +274,36 @@ describe("broker", () => {
     const error = await connectBroker(dir, () => starts++, 300).catch((e: unknown) => e)
     expect((error as Error).message).toStartWith("the relay broker did not start within 300 ms")
     expect(starts).toBe(1)
+  })
+
+  test("a running broker's refused or missing socket is retried with backoff until it accepts, starting none", async () => {
+    const root = mkdtempSync(join(tmpdir(), "relay-broker-"))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const dir = privateDir(join(root, "state"))
+    const path = socketPath(dir)
+    privateDir(dirname(path))
+    cleanups.push(() => rmSync(path, { force: true }))
+    const lock = takeBrokerLock(join(dir, "broker.lock"))
+    const refused = () => Object.assign(new Error("Failed to connect"), { code: "ECONNREFUSED" })
+    const connect = spyOn(RelayClient, "connect").mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused())
+    let listener: ReturnType<typeof Bun.listen> | undefined
+    const later = setTimeout(() => {
+      listener = Bun.listen({ unix: path, socket: { data() {} } })
+    }, 200)
+    let starts = 0
+    let retrying = 0
+    try {
+      const client = await connectBroker(dir, () => starts++, { budgetMs: 3000, retrying: () => retrying++ })
+      expect(client).toBeInstanceOf(RelayClient)
+      client.close()
+      expect([starts, retrying]).toEqual([0, 1])
+      expect(connect.mock.calls.length).toBeGreaterThan(3)
+    } finally {
+      clearTimeout(later)
+      connect.mockRestore()
+      listener?.stop(true)
+      releaseBrokerLock(lock)
+    }
   })
 
   test("a /tmp socket directory that is a link or writable by others is refused before a hello is sent", async () => {
