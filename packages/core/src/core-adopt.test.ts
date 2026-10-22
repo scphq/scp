@@ -208,6 +208,7 @@ describe("adopt", () => {
 
   test("a child under another parent is asked instead, through the send path; the recipient accepts a short id once it is a root", () => {
     const { core, lead, peer } = setup()
+    core.rulesSet(HUMAN, { endpoint: "lead", in: ["*"], out: ["*"] })
     const other = core.claim({ handle: "other", harness: "cli" }).endpoint
     core.adopt(HUMAN, { endpoint: "peer", parent: other.address })
     const result = core.adopt(self(lead.id), { endpoint: "peer" })
@@ -234,6 +235,7 @@ describe("adopt", () => {
 
   test("only the recipient's own session accepts an authentic link request", () => {
     const { core, lead, peer } = setup()
+    core.rulesSet(HUMAN, { endpoint: "lead", in: ["*"], out: ["*"] })
     core.adopt(HUMAN, { endpoint: "peer", parent: core.claim({ handle: "other", harness: "cli" }).endpoint.address })
     const { requested: id } = core.adopt({ kind: "endpoint", id: lead.id, auth: "self" }, { endpoint: "peer", parent: "lead" })
     core.unlink(HUMAN, { endpoint: "peer" })
@@ -248,6 +250,7 @@ describe("adopt", () => {
 
   test("acceptance rechecks cycles, depth, existing placement, expiry and the sender", () => {
     const { core, lead, peer, clock, db } = setup()
+    core.rulesSet(HUMAN, { endpoint: "lead", in: ["*"], out: ["*"] })
     const other = core.claim({ handle: "other", harness: "cli" }).endpoint
     core.adopt(HUMAN, { endpoint: "peer", parent: other.address })
     const { requested: id } = core.adopt(self(lead.id), { endpoint: "peer" })

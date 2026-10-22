@@ -83,6 +83,14 @@ export class Machine {
     await client.hello({ claim: { handle, harness: "cli", exact: true } });
     return client;
   }
+  /** a child of `parent`'s endpoint, placed by a grant it mints, with no lists of its own */
+  async child(parent: RelayClient, handle: string) {
+    const { token } = await parent.grant({ name: handle });
+    const client = await RelayClient.connect(socketPath(this.env.SCP_DIR!));
+    this.clients.push(client);
+    await client.hello({ claim: { handle, harness: "cli", grant: token } });
+    return client;
+  }
   async list(): Promise<EndpointView[]> {
     return (await this.json<{ endpoints: EndpointView[] }>(["list", "--all"])).endpoints;
   }

@@ -14,7 +14,7 @@ export const SPAWN_HELP = `${CLI_NAME} spawn [flags] [--] <harness cmd...>: run 
   --handback-bytes N    hand back only the last N bytes of its final output (1 to ${LIMITS.handbackBytes})
   --peek local          peekable from its start
   --scope P --rules S --in S --out S --allow S --group G --under EP --ttl S --labels K=V,...
-                        its scope and grant, as for ${CLI_NAME} spawn-env (default scope: parent)
+                        its scope and grant, as for ${CLI_NAME} spawn-env (default: no scope, the default reach)
   --via R               start it on another machine through runner R (runners.json, see help --all)
 The command starts after -- or at the first word that is not one of these flags.
 

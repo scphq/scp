@@ -128,7 +128,7 @@ test.skipIf(!bin)(
     )
     expect(kid()).toMatchObject({ harness: "muse", parent: "me/parent" })
 
-    expect(swarm("send", "--as", "peer", "kid", "ping from a peer").status).toBe(0)
+    expect(swarm("send", "--human", "kid", "ping from a peer").status).toBe(0)
     await until(
       () => out.includes("ping from a peer"),
       60_000,

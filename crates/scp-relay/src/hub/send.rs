@@ -412,6 +412,10 @@ impl AccountHub {
                 changes,
             )
             .await?;
+        self.observe(from, now);
+        for e in &recipients {
+            self.observe(&e.id, now);
+        }
         if let Some(values) = result["deliveries"].as_array_mut() {
             for (v, d) in values.iter_mut().zip(&deliveries) {
                 v["seq"] = json!(d.seq);

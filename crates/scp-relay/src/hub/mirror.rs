@@ -132,6 +132,7 @@ impl AccountHub {
                     "title",
                     "wake",
                     "incarnation",
+                    "active_at",
                 ] {
                     if raw.get(key).is_none() {
                         f[key] = if fresh && key != "incarnation" {
@@ -140,6 +141,11 @@ impl AccountHub {
                             before[key].clone()
                         };
                     }
+                }
+                if f["active_at"].is_null()
+                    && let Some(o) = f.as_object_mut()
+                {
+                    o.remove("active_at");
                 }
                 if f["presence"] == "hibernated" {
                     f["waking_until"] = before["waking_until"].clone();
@@ -349,6 +355,20 @@ fn parse(v: &Value, grant: Option<&Grant>) -> Result<(String, Value)> {
         return Err(invalid("invalid endpoint address or kind"));
     }
     let mut f = json!({});
+    if let Some(active) = v.get("active_at") {
+        if !active.is_null()
+            && active
+                .as_str()
+                .and_then(|s| {
+                    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+                        .ok()
+                })
+                .is_none()
+        {
+            return Err(invalid("invalid active_at"));
+        }
+        f["active_at"] = active.clone();
+    }
     for (key, max) in [("harness", 32), ("model", 128), ("cwd", 1024)] {
         f[key] = text(v.get(key), key, max)?;
     }

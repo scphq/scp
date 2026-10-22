@@ -42,7 +42,6 @@ import {
   localClient,
   open,
   RelayUsage,
-  selectorList,
   SPAWN_RUNNER,
   spawnEnvironment,
   walkNow,
@@ -946,18 +945,11 @@ export function splitSpawn(args: string[]): { flags: string[]; command: string[]
   return { flags: args.slice(0, i), command: args.slice(args[i] === "--" ? i + 1 : i) }
 }
 
-/** Default to parent reach, retaining access to the spawner under --under and to each group unless scope flags override it. */
-export function spawnDefaults(values: Values, command: string[], random?: () => string, spawner?: string): Values {
-  const scoped = (["scope", "rules", "in", "out", "allow"] as const).some((key) => values[key] !== undefined)
-  const under = typeof values.under === "string" ? values.under : undefined
-  const reach = [
-    ...(spawner && under && under.replace(/^me\//, "") !== spawner ? [`ep:${spawner}`] : []),
-    ...(selectorList(values.group) ?? []).map((group) => `group:${group}`),
-  ]
+/** No scope by default: the worker has the default reach, its whole tree and the roots. A title and a name fill in when absent. */
+export function spawnDefaults(values: Values, command: string[], random?: () => string): Values {
   const title = values.title === undefined ? spawnTitle(command) : undefined
   return {
     ...values,
-    ...(scoped ? {} : { scope: "parent", ...(reach.length ? { allow: reach } : {}) }),
     ...(title ? { title } : {}),
     ...(values.name === undefined ? { name: workerName(command, random) } : {}),
   }
@@ -1025,10 +1017,9 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   let steer: { key?: unknown; parent?: unknown } | undefined
   try {
     const opened = await open("spawn", values as Identity, cwd, false, walk)
-    const { me } = opened
     const client = localClient(opened.client, opened.broker, "spawn")
     try {
-      values = spawnDefaults(values, command, undefined, me?.kind === "agent" && me.address.startsWith("me/") ? me.address.slice(3) : undefined)
+      values = spawnDefaults(values, command)
       const params = { ttl_s: SPAWN_GRANT_TTL_S, ...grantParams(values), ...(bound ? { bind_process: bound } : {}), spawn: true, ...(prompt ? { prompt } : {}) }
       const granted = await client.grant(params)
       grant = granted.env

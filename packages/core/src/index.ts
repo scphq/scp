@@ -128,6 +128,7 @@ export {
   groupCapKey,
   hasScope,
   isLeaving,
+  isRoot,
   leavesFleet,
   narrower,
   PRESET_LISTS,

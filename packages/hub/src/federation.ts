@@ -89,6 +89,8 @@ interface FederatedRow extends EndpointRow {
   mirrored_presence: Presence | null
   /** another machine's hibernated row whose machine waker accepted a wake: until when it shows waking */
   waking_until: number | null
+  /** another machine's row: the activity time its bridge mirrored last */
+  mirrored_active: number | null
 }
 
 /** own rules as they cross machines: selector lists per direction */
@@ -138,6 +140,8 @@ export interface MirrorView extends MirrorScope {
   wake?: string | null
   /** the handle the endpoint had before a rename: its mirror is renamed in place */
   was?: string
+  /** an agent's last activity on its machine */
+  active_at?: string | null
 }
 
 export interface RemoteView extends Omit<EndpointView, "depth">, MirrorScope {
@@ -172,6 +176,7 @@ type ParsedView = {
   status: { state: StatusState; note: string } | null
   presence: Presence
   lastSeen: number | null
+  activeAt: number | null
   scope: ParsedScope
   was: string | null
 }
@@ -281,6 +286,8 @@ export class FederatedCore extends RelayCore {
   private readonly refusals = new Map<string, { minute: number; written: number; suppressed: number }>()
   private readonly xinbox: boolean
   private xfrom: Set<string> | null = null
+  /** per row, the latest activity this relay saw of another machine's endpoint; lost on restart, a full mirror refills it */
+  private readonly observed = new Map<string, number>()
 
   constructor(sql: ConstructorParameters<typeof RelayCore>[0], options: FederatedOptions) {
     super(sql, options)
@@ -302,6 +309,7 @@ export class FederatedCore extends RelayCore {
     if (!columns.includes("mirrored_caps")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_caps TEXT`)
     if (!columns.includes("mirrored_presence")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_presence TEXT`)
     if (!columns.includes("waking_until")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN waking_until INTEGER`)
+    if (!columns.includes("mirrored_active")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN mirrored_active INTEGER`)
     this.sql.all(`CREATE UNIQUE INDEX IF NOT EXISTS endpoints_remote ON endpoints (remote) WHERE remote IS NOT NULL`)
     if (this.xinbox) for (const statement of XACCT_MIGRATION) this.sql.all(statement)
   }
@@ -309,13 +317,42 @@ export class FederatedCore extends RelayCore {
   /** with xinbox, a delivery takes the next seq past xinbox's too, so a bridge's replay and ack cursor stay one space */
   protected override insertDelivery(messageId: string, endpoint: string, expiresAt: number): number {
     if (!this.xinbox) return super.insertDelivery(messageId, endpoint, expiresAt)
-    return one<{ seq: number }>(
+    const seq = one<{ seq: number }>(
       this.sql,
       `INSERT INTO deliveries (seq, message_id, endpoint, expires_at) VALUES (1 + ${SEQ_TOP}, ?, ?, ?) RETURNING seq`,
       messageId,
       endpoint,
       expiresAt,
     )!.seq
+    this.mailed(endpoint)
+    return seq
+  }
+
+  /** another machine's row's activity seen here is kept in memory, never written per event */
+  protected override mailed(endpoint: string): void {
+    if ((this.byId(endpoint) as FederatedRow | undefined)?.remote) this.observe(endpoint)
+    else super.mailed(endpoint)
+  }
+
+  /** records activity of another machine's row seen here: a message routed from or to it, or an event naming it */
+  observe(endpoint: string, at = this.now()): void {
+    if ((this.observed.get(endpoint) ?? 0) < at) this.observed.set(endpoint, at)
+  }
+
+  /**
+   * a mirrored row's activity is what its machine mirrored (its last_seen when it mirrored none) and what this relay saw of it; a row a
+   * direct client holds here is active as a local one
+   */
+  protected override activeAt(row: EndpointRow): number {
+    const { remote, token_hash: held, mirrored_active: mirrored } = row as FederatedRow
+    const seen = this.observed.get(row.id) ?? 0
+    if (!remote || held !== null) return Math.max(super.activeAt(row), seen)
+    return Math.max(mirrored ?? row.last_seen ?? row.created_at, seen)
+  }
+
+  /** whether another machine's row is a root: its machine placed it at depth 0, or a direct client claimed it here */
+  private placedRoot(row: EndpointRow): boolean {
+    return row.parent_ep === null && (row.depth === 0 || row.token_hash !== null)
   }
 
   setAliases(aliases: string[]): void {
@@ -584,7 +621,16 @@ export class FederatedCore extends RelayCore {
     const ancestors: string[] = []
     for (let id = row.parent_ep; id && id !== row.id && !ancestors.includes(id) && ancestors.length <= LIMITS.depthMax; id = this.byId(id)?.parent_ep ?? null)
       ancestors.push(id)
-    return { id: row.id, tree: row.tree ?? row.id, ancestors, groups: [], rootHandle: "", machine: machinePart(remote), local: false }
+    return {
+      id: row.id,
+      tree: row.tree ?? row.id,
+      ancestors,
+      groups: [],
+      rootHandle: "",
+      machine: machinePart(remote),
+      local: false,
+      ...(row.kind === "agent" && !this.placedRoot(row) ? { root: false } : {}),
+    }
   }
 
   /** another machine's row has the rules and caps its machine mirrored; only the hub's own human (a full login on the hub) is the account's human */
@@ -724,6 +770,7 @@ export class FederatedCore extends RelayCore {
           mirrored_presence: view.presence,
           waking_until: view.presence === "hibernated" ? row.waking_until : null,
           last_seen: view.lastSeen ?? (live ? now : (before?.last_seen ?? null)),
+          mirrored_active: view.activeAt,
           auth: auth ?? row.auth,
           ...(view.kind === "agent" ? this.scopeColumns(machine, view.scope, row, place(view.handle)) : {}),
         }
@@ -885,7 +932,7 @@ export class FederatedCore extends RelayCore {
     if (!row.remote || !row.token_hash) throw new RelayError("invalid_params", "only a direct client endpoint can leave")
     if (row.parent_ep !== null && row.linked === null) throw new RelayError("scope_refused", "a spawned worker stays joined while it runs")
     this.sql.all(
-      `UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ?, wake = NULL, hold_ref = NULL WHERE id = ?`,
+      `UPDATE endpoints SET session = NULL, token_hash = NULL, depth = CASE WHEN parent_ep IS NULL THEN COALESCE(depth, 0) ELSE depth END, hook_seen = NULL, hook_ended = ?, wake = NULL, hold_ref = NULL WHERE id = ?`,
       this.now(),
       endpoint,
     )
@@ -1003,7 +1050,7 @@ export class FederatedCore extends RelayCore {
   }
 
   /**
-   * hands a machine's direct-client rows with no connection (or only `endpoint`) to its bridge: their resume tokens are
+   * hands a machine's direct-client rows with no connection (or only `endpoint`) to its bridge, as the roots they were: their resume tokens are
    * dropped, so the bridge mirrors them, and their unread deliveries get fresh seqs past any bridge's replay cursor;
    * returns those deliveries
    */
@@ -1011,7 +1058,8 @@ export class FederatedCore extends RelayCore {
     return this.tx(() => {
       const now = this.now()
       const rows = this.sql.all<{ id: string }>(
-        `UPDATE endpoints SET token_hash = NULL WHERE substr(remote, 1, ?) = ? AND token_hash IS NOT NULL AND connections = 0 ${endpoint ? "AND id = ?" : ""} RETURNING id`,
+        `UPDATE endpoints SET token_hash = NULL, depth = CASE WHEN parent_ep IS NULL THEN COALESCE(depth, 0) ELSE depth END
+         WHERE substr(remote, 1, ?) = ? AND token_hash IS NOT NULL AND connections = 0 ${endpoint ? "AND id = ?" : ""} RETURNING id`,
         ...[machine.length + 1, `${machine}/`, ...(endpoint ? [endpoint] : [])],
       )
       const adopted: { seq: number; endpoint: string }[] = []
@@ -1350,6 +1398,12 @@ export class FederatedCore extends RelayCore {
    */
   override sweep(): void {
     super.sweep()
+    if (this.observed.size) {
+      const live = new Set(
+        this.sql.all<{ id: string }>(`SELECT id FROM endpoints WHERE substr(handle, 1, ?) != ?`, GONE_PREFIX.length, GONE_PREFIX).map((row) => row.id),
+      )
+      for (const id of this.observed.keys()) if (!live.has(id)) this.observed.delete(id)
+    }
     if (!this.xinbox) return
     this.xfloor()
     const now = this.now()
@@ -1746,6 +1800,7 @@ export class FederatedCore extends RelayCore {
     const presence = view.presence ?? "offline"
     if (!PRESENCES.includes(presence)) throw new RelayError("invalid_params", "presence is online, idle, offline or hibernated")
     const parsedSeen = typeof view.last_seen === "string" ? Date.parse(view.last_seen) : Number.NaN
+    const parsedActive = kind === "agent" && typeof view.active_at === "string" ? Date.parse(view.active_at) : Number.NaN
     const out = {
       handle,
       kind,
@@ -1756,6 +1811,7 @@ export class FederatedCore extends RelayCore {
       status,
       presence,
       lastSeen: Number.isFinite(parsedSeen) ? parsedSeen : null,
+      activeAt: Number.isFinite(parsedActive) ? Math.min(parsedActive, this.now()) : null,
       scope: kind === "agent" ? parseScope(view) : {},
       was: kind === "agent" && typeof view.was === "string" && validHandle(view.was) && view.was !== handle ? view.was : null,
     }
@@ -1784,11 +1840,12 @@ export class FederatedCore extends RelayCore {
       const other = id ? (this.byId(id) as FederatedRow | undefined) : undefined
       return other?.remote ? handlePart(other.remote) : null
     }
+    const depth = row.depth ?? (remote && this.placedRoot(row) ? 0 : null)
     return {
       ...view,
-      tree: row.depth === null ? null : row.tree ? handle(row.tree) : remote ? handlePart(remote) : row.handle,
+      tree: depth === null ? null : row.tree ? handle(row.tree) : remote ? handlePart(remote) : row.handle,
       parent_ep: handle(row.parent_ep),
-      depth: row.depth,
+      depth,
       parent_addr: row.parent_addr ?? null,
       rules: row.rules ? (JSON.parse(row.rules) as MirrorRules) : null,
       caps: row.caps ? this.wireCaps(JSON.parse(row.caps) as ScopeCaps) : null,
@@ -1874,6 +1931,7 @@ export class FederatedCore extends RelayCore {
     const ref = (value: string) => {
       if (REFS.has(value)) return value
       const row = this.byId(value) as FederatedRow | undefined
+      if (row?.kind === "human" && !row.remote && row.handle === HUMAN_HANDLE) return "human"
       if (row?.kind !== "agent") return "gone"
       return `ep:${row.remote ? handlePart(row.remote) : row.handle}`
     }

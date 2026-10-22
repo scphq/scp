@@ -150,7 +150,7 @@ The broker reads an optional policy file (reference: `~/.config/scp/policy.json`
 
 ### Listing
 
-The CLI shows only live endpoints (online, idle or hibernated) and the human by default, offline ones too with `--all` (`all: true`), and folds root agents that have no children (other than the caller) into one count line unless `--all` or `--roots` is given. The MCP `relay_list` shows live agents only, and offline ones too with `all`. The CLI's `list` has a `WAKE` column: the agent's wake (`hook:<provider>` while hibernated), `turn` for an agent without one, `-` for the human.
+The CLI shows only live endpoints (online, idle or hibernated) and the human by default, offline and historic ones (SPEC section 11.4) too with `--all` (`all: true`), notes how many of each it left out, and folds root agents that have no children (other than the caller) into one count line unless `--all` or `--roots` is given. The MCP `relay_list` and `relay_peers` show live agents only, offline and historic ones too with `all`, historic ones with `historic`, and count what they left out. The self-host dashboard's graph has a "show historic" toggle that asks the relay for `historic=1` and draws historic agents dimmed. The CLI's `list` has a `WAKE` column: the agent's wake (`hook:<provider>` while hibernated), `turn` for an agent without one, `-` for the human.
 
 ## Hosted-relay profile
 

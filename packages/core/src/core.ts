@@ -56,8 +56,11 @@ import { digestText, PEEK, peekLevel, readText } from "./peek"
 import { clock, shortId, stripControl, wrapMessage } from "./render"
 import {
   clipped,
+  crossFleet,
   expandRules,
+  hasScope,
   groupCapKey,
+  isRoot,
   narrower,
   presetOf,
   PRESET_LISTS,
@@ -298,6 +301,8 @@ export interface EndpointRow {
   declined_from: string | null
   /** a held spawn's durable ref: when its holding connection goes without a hibernate or spawn_end, the broker hibernates it by `spawn` with this ref */
   hold_ref: string | null
+  /** when a message was last queued into its inbox */
+  mail_at: number | null
   /** the hash of the wake ticket the last `spawn` waker run got: a claim with it takes the hibernated row back as its resumed session */
   wake_ticket: string | null
 }
@@ -381,6 +386,8 @@ export interface CoreOptions {
   endpointRetireS?: number
   /** overrides LIMITS.endpointRetireMax; `Infinity` retires every eligible row in one sweep */
   endpointRetireMax?: number
+  /** overrides LIMITS.historicAfterS; `Infinity` makes no agent historic */
+  historicAfterS?: number
 }
 
 interface GrantRow {
@@ -555,6 +562,8 @@ export class RelayCore {
   private readonly hostname: string | null
   /** endpoint retention: the offline age and the rows one sweep retires */
   private readonly retention: { afterS: number; max: number }
+  /** the idle time after which an agent is historic */
+  protected readonly historicAfterS: number
   private policy: Policy | null = null
   /** the identity each policy `group:<name>` naming no policy group bound to when the policy's text first loaded: that group's then, or `none` */
   private policyBinds = new Map<string, string>()
@@ -595,6 +604,7 @@ export class RelayCore {
     this.namedMachine = options.machine ?? null
     this.hostname = options.hostname ?? null
     this.retention = { afterS: options.endpointRetireS ?? LIMITS.endpointRetireS, max: options.endpointRetireMax ?? LIMITS.endpointRetireMax }
+    this.historicAfterS = options.historicAfterS ?? LIMITS.historicAfterS
   }
 
   /** a `machine` label naming this host by its hostname, as clients default it, names it by its machine name when one is set */
@@ -672,6 +682,7 @@ export class RelayCore {
       ["declined_from", "TEXT"],
       ["hold_ref", "TEXT"],
       ["wake_ticket", "TEXT"],
+      ["mail_at", "INTEGER"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -1618,6 +1629,8 @@ export class RelayCore {
   list(
     filters: {
       all?: boolean | undefined
+      /** historic agents too, which only `all` lists otherwise */
+      historic?: boolean | undefined
       harness?: string | undefined
       kind?: EndpointKind | undefined
       presence?: Presence | undefined
@@ -1647,6 +1660,7 @@ export class RelayCore {
           this.rootWake(row, now) !== null ||
           this.hibernated(row),
       )
+      .filter((row) => filters.all || filters.historic === true || !this.historic(row, now))
       .filter((row) => !filters.harness || row.harness === filters.harness)
       .filter((row) => !filters.kind || row.kind === filters.kind)
       .filter((row) => !viewer || row.id === viewer.id || this.mayMessage(viewer, row, viewer.kind === "human"))
@@ -1706,16 +1720,19 @@ export class RelayCore {
   }
 
   /** the endpoints `viewer` may message under its scope and the policy, with the rule that admits each; `unverified`: the human without a terminal */
-  peers(viewer: string, options: { unverified?: boolean } = {}): PeerView[] {
+  peers(viewer: string, options: { unverified?: boolean; all?: boolean | undefined; historic?: boolean | undefined } = {}): PeerView[] {
     return this.pass(() => this.peersNow(viewer, options))
   }
 
-  private peersNow(viewer: string, options: { unverified?: boolean }): PeerView[] {
+  /** without `all` or `historic`, historic agents are left out */
+  private peersNow(viewer: string, options: { unverified?: boolean; all?: boolean | undefined; historic?: boolean | undefined }): PeerView[] {
     const me = this.mustEndpoint(viewer)
     const world = this.scopeWorld(me)
     const unverified = me.kind === "human" && options.unverified === true
+    const now = this.now()
+    const historic = options.all === true || options.historic === true
     return this.listed()
-      .filter((row) => row.id !== me.id && this.mayMessage(me, row, unverified))
+      .filter((row) => row.id !== me.id && (historic || !this.historic(row, now)) && this.mayMessage(me, row, unverified))
       .map((row) => {
         const view = this.view(row)
         return {
@@ -1726,6 +1743,7 @@ export class RelayCore {
           status: view.status,
           reason: this.peerReason(world, me, row, unverified),
           ...(this.peekableBy(me, row, unverified) ? { peekable: row.peek! } : {}),
+          ...(view.historic ? { historic: true as const } : {}),
         }
       })
   }
@@ -4034,10 +4052,18 @@ export class RelayCore {
 
   /** with `viewer`, only the activity of endpoints it sees, and its own */
   activity(
-    options: { since?: number | undefined; limit?: number | undefined; endpoint?: string | undefined; viewer?: string | undefined } = {},
+    options: {
+      since?: number | undefined
+      limit?: number | undefined
+      endpoint?: string | undefined
+      viewer?: string | undefined
+      /** only these endpoint ids' rows */
+      among?: string[] | undefined
+    } = {},
   ): ActivityRow[] {
     const limit = Math.min(Math.max(1, Math.floor(options.limit ?? 100)), 1000)
-    const visible = options.viewer === undefined ? null : this.visibleRows(this.mustEndpoint(options.viewer)).map((row) => row.id)
+    const seen = options.viewer === undefined ? null : this.visibleRows(this.mustEndpoint(options.viewer)).map((row) => row.id)
+    const visible = options.among === undefined ? seen : seen ? options.among.filter((id) => seen.includes(id)) : options.among
     const rows = this.sql.all<{
       id: number
       at: number
@@ -4057,7 +4083,7 @@ export class RelayCore {
   }
 
   /** the fleet right now: every listed endpoint, the latest activity, and the unread mail of each endpoint the viewer sees, listed or not */
-  snapshot(options: { all?: boolean | undefined; activity?: number | undefined; viewer?: string | undefined } = {}): {
+  snapshot(options: { all?: boolean | undefined; historic?: boolean | undefined; activity?: number | undefined; viewer?: string | undefined } = {}): {
     endpoints: EndpointView[]
     activity: ActivityRow[]
     unread: Record<string, number>
@@ -4065,8 +4091,8 @@ export class RelayCore {
     return this.pass(() => this.snapshotNow(options))
   }
 
-  private snapshotNow(options: { all?: boolean | undefined; activity?: number | undefined; viewer?: string | undefined }): ReturnType<RelayCore["snapshot"]> {
-    const endpoints = this.list({ all: options.all, viewer: options.viewer })
+  private snapshotNow(options: Parameters<RelayCore["snapshot"]>[0] & {}): ReturnType<RelayCore["snapshot"]> {
+    const endpoints = this.list({ all: options.all, historic: options.historic, viewer: options.viewer })
     const viewer = options.viewer === undefined ? undefined : this.mustEndpoint(options.viewer)
     const unread: Record<string, number> = {}
     for (const { endpoint, n } of this.sql.all<{ endpoint: string; n: number }>(
@@ -4083,7 +4109,11 @@ export class RelayCore {
       )
         unread[this.address(row)] = n
     }
-    return { endpoints, activity: this.activity({ limit: options.activity ?? 50, viewer: options.viewer }), unread }
+    return {
+      endpoints,
+      activity: this.activity({ limit: options.activity ?? 50, viewer: options.viewer, among: endpoints.map((row) => row.id) }),
+      unread,
+    }
   }
 
   /** the views of the rows a claim may land on (its session, handle or process key, or the human), read before it runs */
@@ -5605,9 +5635,14 @@ export class RelayCore {
     return row
   }
 
-  /** whether `a` may message `b` or `b` may message `a`; an ancestor's pass down makes the descendant visible to it, not it to the descendant */
+  /**
+   * whether `a` may message `b`, or `b` may message `a` while `b` has a list, sits in `a`'s tree or is a root: neither an ancestor's pass
+   * down nor another tree's worker reaching a root by the default reach makes the sender visible to the recipient
+   */
   private sees(a: EndpointRow, b: EndpointRow): boolean {
-    return this.mayMessage(a, b) || this.mayMessage(b, a, false, true)
+    if (this.mayMessage(a, b)) return true
+    const node = this.nodeOf(b)
+    return (hasScope(node) || isRoot(node) || !crossFleet(this.nodeOf(a), node)) && this.mayMessage(b, a, false, true)
   }
 
   private mayMessage(from: EndpointRow, to: EndpointRow, unverified = false, strict = false): boolean {
@@ -6138,13 +6173,30 @@ export class RelayCore {
 
   /** inserts one delivery and returns its seq; a subclass that hands out seqs elsewhere too keeps them in one space here */
   protected insertDelivery(messageId: string, endpoint: string, expiresAt: number): number {
-    return one<{ seq: number }>(
+    const seq = one<{ seq: number }>(
       this.sql,
       `INSERT INTO deliveries (message_id, endpoint, expires_at) VALUES (?, ?, ?) RETURNING seq`,
       messageId,
       endpoint,
       expiresAt,
     )!.seq
+    this.mailed(endpoint)
+    return seq
+  }
+
+  /** a message was queued into `endpoint`'s inbox: it counts as the endpoint's activity */
+  protected mailed(endpoint: string): void {
+    this.sql.all(`UPDATE endpoints SET mail_at = ? WHERE id = ?`, this.now(), endpoint)
+  }
+
+  /** an agent's last activity: its claim, a call or connection, a hook, a read or a message queued to it */
+  protected activeAt(row: EndpointRow): number {
+    return Math.max(row.created_at, row.last_seen ?? 0, row.hook_seen ?? 0, row.last_received_at ?? 0, row.mail_at ?? 0)
+  }
+
+  /** an agent with no activity for historicAfterS; never the human or the relay */
+  protected historic(row: EndpointRow, now: number): boolean {
+    return row.kind === "agent" && Number.isFinite(this.historicAfterS) && now - this.activeAt(row) >= this.historicAfterS * 1000
   }
 
   /** a RelayError, audited with its message and `detail`: never a message body */
@@ -6250,7 +6302,12 @@ export class RelayCore {
       status: row.status_state ? { state: row.status_state, note: row.status_note ?? "" } : null,
       last_seen: iso(row.last_seen),
       ...(row.kind === "agent"
-        ? { ...this.placeView(row, shown), wake: row.hibernate ? (`hook:${row.hibernate}` as const) : (wakeOf(row) ?? this.rootWake(row, now)?.wake ?? null) }
+        ? {
+            ...this.placeView(row, shown),
+            wake: row.hibernate ? (`hook:${row.hibernate}` as const) : (wakeOf(row) ?? this.rootWake(row, now)?.wake ?? null),
+            active_at: iso(this.activeAt(row)),
+            ...(this.historic(row, now) ? { historic: true as const } : {}),
+          }
         : {}),
       ...((row.hibernate || brokerWake(row)) && row.wake_note ? { wake_failed: row.wake_note.replace(/^wake_failed: /, "") } : {}),
       ...((row.hibernate || brokerWake(row)) && row.wake_declined ? { wake_declined: row.wake_declined } : {}),

@@ -7,6 +7,15 @@ impl Hub {
         account: &scp_relay_store::Account,
         activity: u64,
     ) -> std::result::Result<Value, Value> {
+        self.overview_historic(account, activity, false).await
+    }
+    /// Read the dashboard with optional historic agents.
+    pub async fn overview_historic(
+        &self,
+        account: &scp_relay_store::Account,
+        activity: u64,
+        historic: bool,
+    ) -> std::result::Result<Value, Value> {
         let hub = self.account_by_id(&account.id, &account.handle).await;
         let mut hub = hub.lock().await;
         hub.initialize().await.map_err(|e| e.wire())?;
@@ -15,7 +24,7 @@ impl Hub {
                 "",
                 &Connection::default(),
                 "snapshot",
-                &json!({"activity":activity}),
+                &json!({"activity":activity,"historic":historic}),
             )
             .await
             .map_err(|e| e.wire())?;
@@ -29,10 +38,21 @@ impl Hub {
         account: &scp_relay_store::Account,
         minutes: i64,
     ) -> std::result::Result<Value, Value> {
+        self.graph_historic(account, minutes, false).await
+    }
+    /// Read the graph with optional historic agents.
+    pub async fn graph_historic(
+        &self,
+        account: &scp_relay_store::Account,
+        minutes: i64,
+        historic: bool,
+    ) -> std::result::Result<Value, Value> {
         let hub = self.account_by_id(&account.id, &account.handle).await;
         let mut hub = hub.lock().await;
         hub.initialize().await.map_err(|e| e.wire())?;
-        hub.graph(minutes.clamp(1, 60)).await.map_err(|e| e.wire())
+        hub.graph(minutes.clamp(1, 60), historic)
+            .await
+            .map_err(|e| e.wire())
     }
     /// Subscribe before reading the initial dashboard state to avoid missed events.
     pub async fn dashboard_events(
@@ -48,9 +68,14 @@ impl Hub {
     }
 }
 impl AccountHub {
-    async fn graph(&mut self, minutes: i64) -> Result<Value> {
+    async fn graph(&mut self, minutes: i64, historic: bool) -> Result<Value> {
         let listed = self
-            .client_method("", &Connection::default(), "list", &json!({}))
+            .client_method(
+                "",
+                &Connection::default(),
+                "list",
+                &json!({"historic":historic}),
+            )
             .await?;
         let endpoints = listed["endpoints"].as_array().unwrap();
         let by_id: BTreeMap<_, _> = endpoints
@@ -78,7 +103,7 @@ impl AccountHub {
             ] {
                 node[key] = e[key].clone();
             }
-            for key in ["wake", "waking"] {
+            for key in ["wake", "waking", "historic"] {
                 if let Some(value) = e.get(key) {
                     node[key] = value.clone();
                 }

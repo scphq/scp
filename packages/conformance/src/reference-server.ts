@@ -268,11 +268,13 @@ const server = Bun.serve<Data>({
           scoped: !token.device,
         });
       }
-      if (path.endsWith("/overview")) return json(state.hub.overview(20));
+      const query = new URL(request.url).searchParams;
+      const historic = ["1", "true"].includes(query.get("historic") ?? "");
+      if (path.endsWith("/overview")) return json(state.hub.overview(20, { historic }));
       if (path.endsWith("/graph")) {
-        const raw = new URL(request.url).searchParams.get("minutes");
+        const raw = query.get("minutes");
         const number = raw === null ? 15 : Number(raw);
-        return json(state.hub.graph(Number.isFinite(number) ? Math.min(60, Math.max(1, Math.floor(number))) : 15));
+        return json(state.hub.graph(Number.isFinite(number) ? Math.min(60, Math.max(1, Math.floor(number))) : 15, { historic }));
       }
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         if (srv.upgrade(request, { headers, data: { account: token.account, grant: grant(token), dashboard: true } })) return;

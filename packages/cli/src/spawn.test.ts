@@ -422,7 +422,7 @@ describe("swarm spawn", () => {
     await inbox()
   })
 
-  test("a spawn without --name, --title or a scope flag gets <harness>-<id>, the prompt's first line and the parent scope; explicit flags win", async () => {
+  test("a spawn without --name, --title or a scope flag gets <harness>-<id>, the prompt's first line and no scope; explicit flags win", async () => {
     await inbox()
     const spawned = await swarm(
       ["spawn", "--fg", "codex", "exec", "Review the parser\nthen report"],
@@ -435,7 +435,7 @@ describe("swarm spawn", () => {
     expect((await inbox()).map((m) => m.from.address)).toEqual([`me/${name}`, `me/${name}`])
     const listed = (await lead.request<{ endpoints: { address: string; title: string | null }[] }>("list", { all: true })).endpoints
     expect(listed.find((e) => e.address === `me/${name}`)!.title).toBe("Review the parser")
-    expect((await lead.rules(name)).preset).toBe("parent")
+    expect((await lead.rules(name)).preset).toBe("open")
     await swarm(["spawn", "--fg", "--name", "wa1", "--allow", "ep:lead", "--", "sh", "-c", "exit 0"], env())
     await swarm(["spawn", "--fg", "--name", "wa2", "--scope", "open", "--", "sh", "-c", "exit 0"], env())
     await inbox()
@@ -443,7 +443,7 @@ describe("swarm spawn", () => {
     try {
       const caps = (grant: string) =>
         JSON.parse((db.query("SELECT caps FROM grants WHERE name = ?").get(grant) as { caps: string }).caps) as { dir: string; sels: { sel: string }[] }[]
-      expect(caps(name)).toEqual(caps("w1"))
+      expect(caps(name)).toEqual([])
       expect(caps("wa1").flatMap((c) => c.sels.map((e) => e.sel))).not.toContain("tree:parent")
       expect(caps("wa2")).toEqual([])
     } finally {
@@ -451,7 +451,7 @@ describe("swarm spawn", () => {
     }
   })
 
-  test("without a scope flag, a worker spawned --under another endpoint still reaches its spawner, and one spawned --group reaches the group", async () => {
+  test("without a scope flag, a worker spawned --under another endpoint reaches its spawner by the default reach, and one spawned --group reaches the group", async () => {
     await inbox()
     const mid = await RelayClient.connect(broker.socket)
     const buddy = await RelayClient.connect(broker.socket)
@@ -474,7 +474,7 @@ describe("swarm spawn", () => {
       expect(take().find((r) => r.shim)!.shim!.result!.isError).toBeFalsy()
       const got = (await buddy.request<{ messages: { from: { address: string }; body: { text: string } }[] }>("inbox")).messages
       expect(got.map((m) => [m.from.address, m.body.text])).toContainEqual(["me/wg1", "hello from the worker"])
-      expect((await lead.rules("wg1")).preset).not.toBe("open")
+      expect((await lead.rules("wg1")).preset).toBe("open")
     } finally {
       mid.close()
       buddy.close()
@@ -1712,24 +1712,26 @@ test("spawn's command starts after --, or without it at the first word that is n
   expect(splitSpawn(["-h"])).toEqual({ flags: ["-h"], command: [] })
 })
 
-test("spawn defaults: the parent scope unless a scope flag is given, the prompt's first line as title, a <harness>-<id> name; given flags win", () => {
+test("spawn defaults: no scope unless a scope flag is given, the prompt's first line as title, a <harness>-<id> name; given flags win", () => {
   const command = ["codex", "exec", "Fix the parser\nnow"]
   const random = () => "ab12c"
-  expect(spawnDefaults({}, command, random)).toEqual({ scope: "parent", title: "Fix the parser", name: "codex-ab12c" })
-  expect(spawnDefaults({ name: "w1", title: "own" }, command, random)).toEqual({ name: "w1", title: "own", scope: "parent" })
+  expect(spawnDefaults({}, command, random)).toEqual({ title: "Fix the parser", name: "codex-ab12c" })
+  expect(spawnDefaults({ name: "w1", title: "own" }, command, random)).toEqual({ name: "w1", title: "own" })
   for (const flag of [{ scope: "tree" }, { rules: "ep:x" }, { in: "ep:x" }, { out: "ep:x" }, { allow: ["ep:x"] }])
     expect(spawnDefaults(flag, command, random)).not.toHaveProperty("scope", "parent")
-  expect(spawnDefaults({}, ["sh", "-c", "exit 0"], random)).toEqual({ scope: "parent", name: "sh-ab12c" })
+  expect(spawnDefaults({}, ["sh", "-c", "exit 0"], random)).toEqual({ name: "sh-ab12c" })
   expect(grantParams(spawnDefaults({ rules: "ep:x" }, command, random))).toMatchObject({ scope: "none", allow: ["ep:x"] })
 })
 
-test("the default parent scope keeps the spawner under --under and the groups of --group; a scope flag still replaces it", () => {
+test("without a scope flag the grant carries no caps: --under and --group place the worker and leave its reach the default", () => {
   const command = ["codex", "exec", "go"]
   const random = () => "ab12c"
-  expect(grantParams(spawnDefaults({ under: "mid" }, command, random, "lead"))).toMatchObject({ under: "mid", scope: "parent", allow: ["ep:lead"] })
-  expect(grantParams(spawnDefaults({ group: "crew" }, command, random, "lead"))).toMatchObject({ scope: "parent", allow: ["group:crew"], groups: ["crew"] })
-  expect(grantParams(spawnDefaults({ under: "mid", group: ["a,b"] }, command, random, "lead")).allow).toEqual(["ep:lead", "group:a", "group:b"])
-  expect(grantParams(spawnDefaults({ under: "lead" }, command, random, "lead"))).not.toHaveProperty("allow")
-  expect(grantParams(spawnDefaults({ under: "mid" }, command, random))).not.toHaveProperty("allow")
-  expect(grantParams(spawnDefaults({ under: "mid", scope: "tree" }, command, random, "lead"))).not.toHaveProperty("allow")
+  const under = grantParams(spawnDefaults({ under: "mid" }, command, random))
+  expect(under).toMatchObject({ under: "mid" })
+  expect(under).not.toHaveProperty("scope")
+  expect(under).not.toHaveProperty("allow")
+  const grouped = grantParams(spawnDefaults({ group: "crew" }, command, random))
+  expect(grouped).toMatchObject({ groups: ["crew"] })
+  expect(grouped).not.toHaveProperty("scope")
+  expect(grantParams(spawnDefaults({ under: "mid", scope: "tree" }, command, random))).toMatchObject({ scope: "tree" })
 })

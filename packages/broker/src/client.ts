@@ -230,8 +230,8 @@ export class RelayClient {
     return this.request("admin", params)
   }
 
-  async peers(): Promise<PeerView[]> {
-    return (await this.request<{ peers: PeerView[] }>("peers")).peers
+  async peers(params: { all?: boolean; historic?: boolean } = {}): Promise<PeerView[]> {
+    return (await this.request<{ peers: PeerView[] }>("peers", params)).peers
   }
 
   why(from: string, to: string): Promise<WhyResult> {

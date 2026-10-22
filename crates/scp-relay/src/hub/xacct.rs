@@ -612,6 +612,7 @@ impl AccountHub {
                 now,
             )
             .await?;
+        self.observe(&sender.id, now);
         Ok(Dispatch::Send(Box::new(Pending {
             contact,
             message,
@@ -787,6 +788,7 @@ impl AccountHub {
                 json!({"id":x.id,"state":if x.acked{"delivered"}else{"queued"},"duplicate":true}),
             );
         }
+        self.observe(&target.id, now);
         let mut pushed = false;
         for c in self
             .connections

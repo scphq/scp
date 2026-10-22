@@ -155,13 +155,13 @@ export function startMesh(options: MeshOptions): MeshLink {
       status: view.status ? { state: view.status.state, note: view.status.note } : null,
       presence: view.presence,
       last_seen: view.last_seen,
-      ...(view.kind === "agent" ? { wake: view.wake ?? null } : {}),
+      ...(view.kind === "agent" ? { wake: view.wake ?? null, active_at: view.active_at ?? null } : {}),
       ...(renames.has(view.id) ? { was: renames.get(view.id) } : {}),
     }
   }
 
   function localViews(): object[] {
-    const endpoints = core.list().filter(mirrored).map(outward)
+    const endpoints = core.list({ historic: true }).filter(mirrored).map(outward)
     if (endpoints.length > 512) throw new RelayError("too_large", "a mesh record carries at most 512 endpoints")
     return endpoints
   }

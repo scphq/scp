@@ -212,7 +212,7 @@ describe("a held spawn", () => {
     const { core, actor, grant, worker, hold, row, audit, db } = setup()
     hold(REF)
     const stranger = core.claim({ handle: "stranger", harness: "codex", process: key(30), session: key(30) }).endpoint
-    expect(code(() => core.spawnEnd({ kind: "endpoint", id: stranger.id, auth: "session" }, { endpoint: "w1" }))).toBe("unauthorized")
+    expect(code(() => core.spawnEnd({ kind: "endpoint", id: stranger.id, auth: "session" }, { endpoint: "w1" }))).toBe("not_found")
     expect(code(() => core.spawnEnd(actor, { endpoint: "nobody" }))).toBe("not_found")
     const ended = core.spawnEnd(actor, { endpoint: "w1" })
     expect([ended.held, ended.endpoint.wake]).toEqual([true, null])

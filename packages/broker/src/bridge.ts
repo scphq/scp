@@ -355,12 +355,12 @@ export function startBridge(options: BridgeOptions): Bridge {
       status: view.status ? { state: view.status.state, note: options.redact ? "" : view.status.note } : null,
       presence: view.presence,
       last_seen: view.last_seen,
-      ...(view.kind === "agent" ? { wake: view.wake ?? null } : {}),
+      ...(view.kind === "agent" ? { wake: view.wake ?? null, active_at: view.active_at ?? null } : {}),
     }
   }
 
   function localViews(): object[] {
-    return core.list().filter(mirrored).map(outward)
+    return core.list({ historic: true }).filter(mirrored).map(outward)
   }
 
   /**

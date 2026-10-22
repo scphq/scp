@@ -2,6 +2,8 @@
 
 Build with `cargo build --locked --bin scp-relay` in this directory. The relay serves a stable public dashboard data API, with no embedded UI. See [the OpenAPI contract](../docs/openapi/relay-dashboard.yaml).
 
+Historic agents are hidden from overview and graph by default. Add `historic=1` (or `historic=true`) to include them with `historic: true`. Message and spawn edges touching omitted endpoints are hidden. `historicAfterS` defaults to 3600 seconds; `Infinity` disables it. Activity uses mirrored activity timestamps and activity observed by the hub, without a database write per event.
+
 Every dashboard request uses an Authorization bearer credential. The always-on routes are `GET /v1/dashboard/session`, `/v1/dashboard/overview`, `/v1/dashboard/graph?minutes=15`, and `/v1/dashboard/events`. Events use WebSocket when upgraded, otherwise SSE so browser clients can fetch with an Authorization header. Both send hello first, then metadata events. SSE sends a comment heartbeat every 25 seconds. Revocation closes WebSockets with 4003 and ends SSE at the configured revalidation interval. All data comes from the resolved account, never a query or path account.
 
 Allow browser origins with repeatable `--cors-origin https://console.example.test` or comma-separated `SCP_RELAY_CORS_ORIGIN`. Matching is exact, the default allows none, and credentials mode is not used.
@@ -18,7 +20,7 @@ User values are matched first, then email values. Unknown users reject unless `d
 
 Embedders can implement the public async `RelayAuth::authenticate(&self, &AuthRequest) -> AuthOutcome` trait, then call `AppState::with_auth(AuthChain(vec![...]))` before `http::router(state)`. `AuthRequest` includes method, path, headers, TCP peer and optional TLS client certificate DER. Serve with `into_make_service_with_connect_info::<SocketAddr>()` to supply the peer; a missing peer cannot authenticate trusted headers. TLS listeners may supply `http::TlsClientCertDer` through request extensions. Open sockets rerun the chain against their original metadata and reject changed identities. JWT/JWKS and mTLS verification are deferred; their extension requirements are sketched on the trait.
 
-Self-host defaults remove account caps and rates. Override each hub key with `--limit key=value` or comma-separated `SCP_RELAY_LIMIT` values. `Infinity` disables a cap. Durations must remain finite and positive.
+Self-host defaults remove account caps and rates. Override each hub key with `--limit key=value` or comma-separated `SCP_RELAY_LIMIT` values. `Infinity` disables a cap. Operational durations must remain finite and positive. `historicAfterS` also accepts `Infinity` to disable historic filtering.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -38,6 +40,7 @@ Self-host defaults remove account caps and rates. Override each hub key with `--
 | httpWaitS | 25 | Maximum HTTP polling wait in seconds |
 | revalidateMs | 300000 | Credential revalidation interval in milliseconds |
 | deniedS | 3600 | Revocation denial retention in seconds |
+| historicAfterS | 3600 | Agent inactivity threshold in seconds, Infinity disables |
 
 When `frameBytes=Infinity`, transport input still has a 16 MiB safety ceiling. HTTP RPC permits JSON escaping overhead up to six times the frame ceiling plus 1024 bytes. Other HTTP request bodies use the frame ceiling. An unlimited endpoint cap permits up to 1000000 entries in a single mirror call, still bounded by the frame ceiling.
 

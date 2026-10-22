@@ -50,6 +50,13 @@ paths:
   /v1/dashboard/overview:
     get:
       operationId: overview
+      parameters:
+        - in: query
+          name: historic
+          description: Include historic agents. Hidden by default, along with activity and edges touching omitted endpoints.
+          schema:
+            type: string
+            enum: ["1", "true", "0", "false"]
       responses:
         "200":
           description: Caller account data
@@ -112,6 +119,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
       parameters:
+        - in: query
+          name: historic
+          description: Include historic agents. Hidden by default, along with activity and edges touching omitted endpoints.
+          schema:
+            type: string
+            enum: ["1", "true", "0", "false"]
         - in: query
           name: minutes
           description: Floored and clamped to 1..60. Invalid input uses 15.
@@ -292,6 +305,14 @@ components:
     EndpointView:
       type: object
       properties:
+        active_at:
+          type: [string, "null"]
+          format: date-time
+          description: Latest activity time, agents only.
+        historic:
+          type: boolean
+          const: true
+          description: Present only for historic agents when requested.
         id:
           type: string
         address:
@@ -388,6 +409,10 @@ components:
     GraphNode:
       type: object
       properties:
+        historic:
+          type: boolean
+          const: true
+          description: Present only for historic agents when requested.
         address:
           type: string
         kind:

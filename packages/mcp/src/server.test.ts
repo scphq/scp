@@ -118,6 +118,7 @@ describe("relay MCP shim, in process", () => {
     const child = shim(broker, { handle: "link-child" })
     try {
       await parent.hello({ claim: { handle: "link-parent", harness: "cli" } })
+      broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "link-parent", in: ["*"], out: ["*"] })
       await child.call("relay_whoami")
       const human = { kind: "human", tty: true } as const
       broker.core.claim({ handle: "link-keeper", harness: "cli" })
@@ -987,6 +988,7 @@ describe("relay MCP shim, in process", () => {
       })
       await hook.request("status", { state: "done" })
       await peer.hello({ claim: { handle: "sub-pusher", harness: "codex" } })
+      broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "sub-pusher", out: ["*"] })
       await peer.request("send", { to: sub.endpoint!.address, body: "for the subagent" })
       const pushes = () => a.messages().filter((m) => m.method === "notifications/claude/channel")
       for (let i = 0; i < 500 && !pushes().length; i++) await Bun.sleep(10)

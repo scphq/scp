@@ -73,19 +73,28 @@ async fn session(
         json!({"org":{"handle":i.account.handle,"name":i.account.handle},"member":{"id":i.member.id,"name":i.member.name,"role":i.member.role},"members":members.into_iter().map(|m|json!({"id":m.id,"name":m.name})).collect::<Vec<_>>(),"devices":devices,"tokens":tokens,"scoped":i.scoped}),
     ))
 }
+fn include_historic(query: &HashMap<String, String>) -> bool {
+    query
+        .get("historic")
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true"))
+}
 async fn overview(
     State(s): State<AppState>,
     RequestAuth(request): RequestAuth,
+    Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
     let i = identity(&s, &request).await?;
-    Ok(Json(s.hub.overview(&i.account, 20).await.map_err(
-        |_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error":"server_error"}),
-            )
-        },
-    )?))
+    Ok(Json(
+        s.hub
+            .overview_historic(&i.account, 20, include_historic(&query))
+            .await
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error":"server_error"}),
+                )
+            })?,
+    ))
 }
 async fn graph(
     State(s): State<AppState>,
@@ -99,14 +108,17 @@ async fn graph(
         .filter(|v| v.is_finite())
         .map(|v| v.floor().clamp(1.0, 60.0) as i64)
         .unwrap_or(15);
-    Ok(Json(s.hub.graph(&i.account, minutes).await.map_err(
-        |_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error":"server_error"}),
-            )
-        },
-    )?))
+    Ok(Json(
+        s.hub
+            .graph_historic(&i.account, minutes, include_historic(&query))
+            .await
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error":"server_error"}),
+                )
+            })?,
+    ))
 }
 async fn events(
     State(s): State<AppState>,
@@ -257,6 +269,9 @@ mod tests {
             .filter(|path| path.starts_with(concat!("/v1/", "dashboard/")))
             .collect();
         assert_eq!(paths.len(), 4);
+        assert_eq!(yaml.matches("name: historic").count(), 2);
+        assert_eq!(yaml.matches("        historic:").count(), 2);
+        assert!(yaml.contains("        active_at:"));
         for path in paths {
             assert!(yaml.contains(&format!("  {path}:")), "missing {path}");
         }

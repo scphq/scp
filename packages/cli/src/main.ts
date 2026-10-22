@@ -75,7 +75,7 @@ results back, as with native subagents.
   ${CLI_NAME} reply <id> [text|-]         answer a message in its thread: ${CLI_NAME} reply 5af1f2 "done"
   ${CLI_NAME} ask <to> [text|-] [--wait S]   send a request and wait for its reply: ${CLI_NAME} ask lead "which branch?"
   ${CLI_NAME} inbox [--wait S]            your unread messages, then marked read: ${CLI_NAME} inbox
-  ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, wake, status; --all adds offline ones
+  ${CLI_NAME} list [--all]                agents on the relay: address, title, presence, wake, status; --all adds offline and historic ones
   ${CLI_NAME} join [name]                 put this session on the relay, named once: ${CLI_NAME} join lead (${CLI_NAME} name renames it)
   ${CLI_NAME} join --under <parent>       link this session under an orchestrator, as a spawned worker sits: ${CLI_NAME} join --under lead
   ${CLI_NAME} adopt <child>              link a local root agent you may message under you as your worker, at once
@@ -101,7 +101,8 @@ More: ${CLI_NAME} help --all (the full reference), ${CLI_NAME} <verb> --help (on
 export const RELAY_HELP = `${CLI_NAME}: messages between the agent sessions on this machine, and a live view of the fleet
 
 usage:
-  ${CLI_NAME} list [--all] [--roots] [--tree]    agents on the relay: address, title, presence, wake, status, cwd; offline only with --all;
+  ${CLI_NAME} list [--all] [--roots] [--tree]    agents on the relay: address, title, presence, wake, status, cwd; offline and
+                                                 historic (idle for an hour) only with --all;
                                                  sessions nobody spawned that spawned nobody fold into one line, --roots (or --all) lists
                                                  them; --tree nests them by parent; (you) marks your own
   ${CLI_NAME} list --contacts                    the endpoints of other accounts your contacts let you reach: address, harness, presence
@@ -249,7 +250,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   Run from an agent's shell, these launchers and ${CLI_NAME} claude link what they start under that agent by themselves, with the
   grant ${CLI_NAME} spawn-env --name N would mint there; a grant minted for it in $SCP_GRANT applies instead (an agent's own spent
   grant is replaced), a resumed session keeps its place, and --root starts it as a root.
-  ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline ones and
+  ${CLI_NAME} peers [--all] [--roots]            who you may message: title, status and the rule that admits each; offline, historic and
                                                  sessions nobody spawned that spawned nobody only with --all (--roots: those sessions)
   ${CLI_NAME} why <from> <to>                    whether from may message to, and why
   Without --as or a terminal, these act for the agent whose harness runs this shell, with its full reach; from any
@@ -854,16 +855,15 @@ async function runVerb(
         else for (const e of contacts) out(`${e.address.padEnd(36)} ${(e.harness ?? "unknown").padEnd(14)} ${e.presence}`)
         return 0
       }
-      const listed = (await client.request<{ endpoints: EndpointView[] }>("list", { all: values.all === true })).endpoints
-      const endpoints = values.all ? listed : listed.filter((e) => e.kind === "human" || e.presence !== "offline")
-      const hidden = listed.length - endpoints.length
-      if (asJson) json({ endpoints, ...(hidden ? { hidden } : {}) })
+      const listed = (await client.request<{ endpoints: EndpointView[] }>("list", { all: values.all === true, historic: true })).endpoints
+      const { shown: endpoints, hidden, historic } = unlisted(listed, values.all === true)
+      if (asJson) json({ endpoints, ...(hidden + historic ? { hidden: hidden + historic } : {}) })
       else {
         const folded = values.all || values.roots ? new Set<string>() : unspawned(listed, me)
         const shown = endpoints.filter((e) => !folded.has(e.address))
         if (values.tree) printTree(shown, me)
         else printEndpoints(shown, me)
-        if (hidden) note(`${hidden} offline hidden (--all lists them)`)
+        hiddenNotes(hidden, historic)
         foldNote(endpoints.length - shown.length)
       }
       return 0
@@ -908,10 +908,9 @@ async function runVerb(
       return 0
     }
     case "peers": {
-      const listed = await localClient(client, broker, verb).peers()
-      const peers = values.all ? listed : listed.filter((p) => p.kind === "human" || p.presence !== "offline")
-      const hidden = listed.length - peers.length
-      if (asJson) json({ peers, ...(hidden ? { hidden } : {}) })
+      const listed = await localClient(client, broker, verb).peers({ all: values.all === true, historic: true })
+      const { shown: peers, hidden, historic } = unlisted(listed, values.all === true)
+      if (asJson) json({ peers, ...(hidden + historic ? { hidden: hidden + historic } : {}) })
       else {
         const folded =
           values.all || values.roots ? new Set<string>() : unspawned((await client.request<{ endpoints: EndpointView[] }>("list", { all: true })).endpoints, me)
@@ -932,7 +931,7 @@ async function runVerb(
             ]),
           ])
         }
-        if (hidden) note(`${hidden} offline hidden (--all lists them)`)
+        hiddenNotes(hidden, historic)
         foldNote(peers.length - shown.length)
       }
       return 0
@@ -1467,6 +1466,19 @@ function printScope(view: ScopeView): void {
     out(`cap ${cap.id} ${cap.dir} by ${cap.by}: ${sels}`)
   }
   if (view.groups.length) out(`groups: ${view.groups.join(", ")}`)
+}
+
+/** what list and peers show without --all: no historic agents, and no offline rows but the human; with the counts left out */
+function unlisted<T extends { kind: string; presence: string; historic?: true }>(rows: T[], all: boolean): { shown: T[]; hidden: number; historic: number } {
+  if (all) return { shown: rows, hidden: 0, historic: 0 }
+  const shown = rows.filter((row) => !row.historic && (row.kind === "human" || row.presence !== "offline"))
+  const historic = rows.filter((row) => row.historic).length
+  return { shown, hidden: rows.length - shown.length - historic, historic }
+}
+
+function hiddenNotes(offline: number, historic: number): void {
+  const parts = [...(offline ? [`${offline} offline`] : []), ...(historic ? [`${historic} historic`] : [])]
+  if (parts.length) note(`${parts.join(", ")} hidden (--all lists them)`)
 }
 
 /** the agents nobody spawned that spawned nobody, the caller aside: list and peers fold them into one line */

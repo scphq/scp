@@ -53,6 +53,8 @@ export const LIMITS = {
   /** a deferred showing older than this settles at the session's next tool event or prompt: the harness has handed it over by then */
   deferredSettleMs: 2000,
   listOfflineWithinS: 86_400,
+  /** an agent with no activity for this long is historic: list, peers and snapshots leave it out unless asked; Infinity disables it */
+  historicAfterS: 3600,
   handleBoundS: 30 * 86_400,
   /** how long an offline child endpoint (a subagent's, a worker's) or a `_gone_` row that nothing references stays before the sweep retires it */
   endpointRetireS: 86_400,
@@ -308,6 +310,8 @@ export interface PeerView {
   reason: string
   /** set only when the viewer may peek this endpoint */
   peekable?: PeekLevel
+  /** see {@link EndpointView.historic} */
+  historic?: true
 }
 
 export interface WhyResult {
@@ -346,6 +350,10 @@ export interface EndpointView {
   wake_declined?: WakeDecline
   /** a hub's hibernated row whose machine waker accepted a wake, until its session reclaims it or the wake times out */
   waking?: true
+  /** an agent's last activity: its claim, a call, a hook, a read or a message to it */
+  active_at?: string | null
+  /** an agent with no activity for `LIMITS.historicAfterS`; derived, it clears with the next activity */
+  historic?: true
 }
 
 export type PeekLevel = "local"

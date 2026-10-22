@@ -3,7 +3,7 @@ use scp_relay_store::{Event, EventLog, PairEvent};
 use validation::pattern;
 
 impl AccountHub {
-    pub(super) async fn event(&self, e: &Endpoint, p: &Value) -> Result<Value> {
+    pub(super) async fn event(&mut self, e: &Endpoint, p: &Value) -> Result<Value> {
         let kind = string(p, "kind");
         if !matches!(
             kind,
@@ -39,6 +39,7 @@ impl AccountHub {
                 },
             )
             .await?;
+        self.observe(&e.id, now);
         row["id"] = json!(id);
         let mut fleet = row.clone();
         fleet["type"] = json!("activity");
@@ -46,12 +47,17 @@ impl AccountHub {
         self.fleet(fleet);
         Ok(row)
     }
-    pub(super) async fn local_events(&self, c: &Connection, p: &Value) -> Result<Value> {
+    pub(super) async fn local_events(&mut self, c: &Connection, p: &Value) -> Result<Value> {
         let events = p["events"]
             .as_array()
             .filter(|a| a.len() <= 200)
             .ok_or_else(|| invalid("events must be a list of at most 200"))?;
         let rows = self.endpoints().await?;
+        let by_handle: HashMap<_, _> = rows
+            .iter()
+            .filter(|r| r.machine == c.machine)
+            .map(|r| (r.handle.as_str(), r))
+            .collect();
         let now = crate::now_ms();
         let mut changes = HubWrite::default();
         let mut recorded = 0;
@@ -66,24 +72,25 @@ impl AccountHub {
                 continue;
             };
             let at = at.clamp((now - 300000) as f64, now as f64) as i64;
-            let Some(from) = rows
-                .iter()
-                .find(|r| r.machine == c.machine && r.handle == string(e, "from"))
-            else {
+            let Some(from) = by_handle.get(string(e, "from")).copied() else {
                 continue;
             };
             let Some(to) = e["to"].as_array().filter(|a| a.len() <= 64) else {
                 continue;
             };
+            self.observe(&from.id, at);
             let mut recipients = Vec::new();
+            let mut addresses = Vec::new();
             for t in to {
-                if let Some(r) = rows.iter().find(|r| {
-                    r.machine == c.machine
-                        && Some(r.handle.as_str()) == t.as_str()
-                        && r.id != from.id
-                }) && !recipients.contains(&r.id)
+                if let Some(r) = t
+                    .as_str()
+                    .and_then(|h| by_handle.get(h).copied())
+                    .filter(|r| r.id != from.id)
+                    && !recipients.contains(&r.id)
                 {
+                    self.observe(&r.id, at);
                     recipients.push(r.id.clone());
+                    addresses.push(self.address(r));
                     changes.pairs.push((
                         PairEvent {
                             from_ep: from.id.clone(),
@@ -98,7 +105,7 @@ impl AccountHub {
                 continue;
             }
             recorded += 1;
-            let mut event = json!({"type":"message","machine":c.machine,"local":true,"kind":e["kind"],"from":self.address(from),"to":rows.iter().filter(|r|recipients.contains(&r.id)).map(|r|self.address(r)).collect::<Vec<_>>()});
+            let mut event = json!({"type":"message","machine":c.machine,"local":true,"kind":e["kind"],"from":self.address(from),"to":addresses});
             for key in ["id", "thread"] {
                 if e[key]
                     .as_str()
@@ -123,4 +130,39 @@ pub(super) fn activity_view(e: &Event) -> Value {
     row["at"] = json!(iso(e.at));
     row["kind"] = json!(e.kind);
     row
+}
+
+impl AccountHub {
+    pub(super) fn observe(&mut self, id: &str, now: i64) {
+        self.observed_activity
+            .entry(id.into())
+            .and_modify(|at| *at = (*at).max(now))
+            .or_insert(now);
+    }
+    pub(super) fn active_at(&self, e: &Endpoint, now: i64) -> i64 {
+        let f = fields(e);
+        let mirrored = f["active_at"]
+            .as_str()
+            .and_then(|s| {
+                time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+            })
+            .map(|t| ((t.unix_timestamp_nanos() / 1_000_000) as i64).min(now));
+        mirrored
+            .or(e.last_seen)
+            .unwrap_or(e.created_at)
+            .max(e.last_seen.unwrap_or(i64::MIN))
+            .max(
+                self.observed_activity
+                    .get(&e.id)
+                    .copied()
+                    .unwrap_or(i64::MIN),
+            )
+    }
+    pub(super) fn historic(&self, e: &Endpoint, now: i64) -> bool {
+        e.kind == "agent"
+            && self.limits.cap("historicAfterS").is_some_and(|s| {
+                now.saturating_sub(self.active_at(e, now))
+                    >= i64::try_from(s.saturating_mul(1000)).unwrap_or(i64::MAX)
+            })
+    }
 }

@@ -178,9 +178,12 @@ The public data API serves the caller's account and works without the optional d
 | Method | Endpoint | Returns |
 | --- | --- | --- |
 | `GET` | `/v1/dashboard/session` | Account, member, members, credential counts and scope |
-| `GET` | `/v1/dashboard/overview` | Machines, endpoints and recent activity |
-| `GET` | `/v1/dashboard/graph?minutes=15` | Graph nodes, edges and machines; minutes are floored and clamped to 1 through 60, default 15 |
+| `GET` | `/v1/dashboard/overview?historic=1` | Machines, endpoints and their recent activity |
+| `GET` | `/v1/dashboard/graph?minutes=15&historic=1` | Graph nodes, edges and machines; minutes are floored and clamped to 1 through 60, default 15 |
 | `GET` | `/v1/dashboard/events` | WebSocket with an upgrade, otherwise SSE; a hello event first, then live events |
+
+Historic agents, idle for `historicAfterS` (default 3600 s, `--limit historicAfterS=<s>`), are left out of the overview and the graph,
+with the edges and activity that touch them, unless the query has `historic=1` (or `true`); each then carries `historic: true`.
 
 With native auth, send `Authorization: Bearer <token>` on every request, including event connections.
 The same auth chain applies to the API, so trusted proxies can supply identity headers instead.
@@ -308,6 +311,7 @@ Repeat `--limit key=value` on `serve`, or use comma-separated `SCP_RELAY_LIMIT` 
 | `httpWaitS` | 25 | Maximum HTTP wait in seconds |
 | `revalidateMs` | 300000 | Credential revalidation interval in milliseconds |
 | `deniedS` | 3600 | Denied delivery retention in seconds |
+| `historicAfterS` | 3600 | Idle seconds after which an agent is historic; `Infinity` makes none historic |
 
 Machine wake caps `senderAccountPerHour` and `targetPerHour` also default to `Infinity`.
 Override them with `--wake senderAccountPerHour=100 --wake targetPerHour=20`.

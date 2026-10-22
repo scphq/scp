@@ -63,10 +63,22 @@ async function optional<T>(path: string): Promise<T | null> {
   }
 }
 
+/** whether the graph's "show historic" toggle is on: the graph then asks for historic agents too */
+function historic(): boolean {
+  try {
+    return localStorage.getItem("scp.graph.historic") === "1";
+  } catch {
+    return false;
+  }
+}
+
 async function snapshot(tab: DashboardTab): Promise<Snapshot> {
   const live = ["overview", "activity", "sessions", "graph", "graph/full"].includes(tab);
   const graph = ["overview", "graph", "graph/full"].includes(tab);
-  const [overview, g] = await Promise.all([live ? optional<Overview>("overview") : null, graph ? optional<HubGraph>("graph") : null]);
+  const [overview, g] = await Promise.all([
+    live ? optional<Overview>("overview") : null,
+    graph ? optional<HubGraph>(historic() ? "graph?historic=1" : "graph") : null,
+  ]);
   return { overview, graph: g };
 }
 

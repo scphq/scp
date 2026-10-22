@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
-import { type Envelope, LIMITS, RelayError, type Sql, type SqlValue, wrapMessage } from "@scp-dev/core"
+import { type Envelope, GONE_PREFIX, LIMITS, RelayError, type Sql, type SqlValue, wrapMessage } from "@scp-dev/core"
 import { FederatedCore, type FederatedOptions, type RemoteView } from "./federation"
 
 const START = 1_800_000_000_000
@@ -36,7 +36,15 @@ function code(fn: () => unknown): string | undefined {
   return undefined
 }
 
-const view = (address: string, extra: Record<string, unknown> = {}) => ({ address, kind: "agent", harness: "claude-code", presence: "online", ...extra })
+const view = (address: string, extra: Record<string, unknown> = {}) => ({
+  address,
+  kind: "agent",
+  harness: "claude-code",
+  presence: "online",
+  parent_ep: null,
+  depth: 0,
+  ...extra,
+})
 
 describe("wake", () => {
   test("a mirrored agent keeps the wake its machine sent, until a view changes it; an unknown value or none is null", () => {
@@ -379,6 +387,7 @@ describe("across machines", () => {
     const { broker, hub } = pair()
     const none = { messages: [], offered: [], hold: null, more: 0, unread: 0, block: false }
     const local = broker.claim({ handle: "app-main", harness: "claude-code" })
+    broker.rulesSet({ kind: "human", tty: true }, { endpoint: "app-main", out: ["*"] })
     broker.mirror("desk", [view("ada/desk/review")])
     const mirrored = broker.remoteEndpoint("desk", "review")
     expect(broker.send(local.endpoint.id, { to: "desk/review", body: "queued on a mirrored row" }).deliveries[0]!.endpoint).toBe(mirrored)
@@ -501,11 +510,12 @@ describe("mirrored scope fields", () => {
 
   test("an older bridge that sends none of them keeps working, and its endpoints' place is unknown, never a root", () => {
     const { hub } = pair()
-    hub.mirror("desk", [view("me/old")], { full: true })
+    hub.mirror("desk", [{ address: "me/old", kind: "agent", harness: "claude-code", presence: "online" }], { full: true })
     expect(hub.remoteRowsOf("desk").map(pick)).toEqual([["ada/desk/old", null, null, null, null, null, null]])
     const impl = hub.claimOn("ci", { handle: "impl" })
-    expect(hub.send(impl.endpoint.id, { to: "desk/old", body: "x" }).deliveries.length).toBe(1)
-    expect(hub.remoteRowsOf("ci").map((v) => v.depth)).toEqual([null])
+    expect(() => hub.send(impl.endpoint.id, { to: "desk/old", body: "x" })).toThrow("no endpoint desk/old")
+    expect(hub.send(hub.humanId(), { to: "desk/old", body: "x" }, { tty: true }).deliveries.length).toBe(1)
+    expect(hub.remoteRowsOf("ci").map((v) => v.depth)).toEqual([0])
   })
 
   test("the hub places endpoints itself: depth from the mirrored parent, roots without one, no parent on another machine or unmirrored", () => {
@@ -526,7 +536,7 @@ describe("mirrored scope fields", () => {
       adopted: [null, null, null],
       deep: ["main", "orch", 2],
       far: [null, null, null],
-      impl: [null, null, null],
+      impl: ["impl", null, 0],
       liar: [null, null, null],
       lost: [null, null, null],
       main: ["main", null, 0],
@@ -542,7 +552,7 @@ describe("mirrored scope fields", () => {
     const { hub } = pair()
     const impl = hub.claimOn("ci", { handle: "impl" }).endpoint.id
     const cap = { id: "cap_p", dir: "in" as const, by: "ep:main", sels: [{ sel: "tree:parent" }] }
-    const orch = (caps: unknown, incarnation = "i1") => view("me/orch", { parent_ep: "main", depth: 1, caps, incarnation })
+    const orch = (caps: unknown, incarnation = "i1") => view("me/orch", { caps, incarnation })
     hub.mirror("desk", [view("me/main", { parent_ep: null, depth: 0, incarnation: "i0" }), orch({ caps: [cap], allow: {} })])
     expect(code(() => hub.send(impl, { to: "desk/orch", body: "x" }))).toBe("not_found")
     hub.mirror("desk", [orch({ caps: [], allow: {} })])
@@ -703,7 +713,8 @@ describe("links across machines", () => {
     expect(code(() => broker.adopt(HUMAN, { endpoint: "app", parent: "me/desk/" }))).toBe("invalid_params")
 
     const solo = broker.claim({ handle: "solo", harness: "claude-code" }).endpoint
-    broker.mirror("desk", [view("ada/desk/kid", { parent_addr: "laptop/solo" }), view("ada/desk/lead", { parent_addr: "laptop/solo" })])
+    const relink = { parent_ep: undefined, depth: undefined, parent_addr: "laptop/solo" }
+    broker.mirror("desk", [view("ada/desk/kid", relink), view("ada/desk/lead", relink)])
     expect(byAddress(broker, "me/desk/kid").parent).toBe("me/desk/lead")
     expect(byAddress(broker, "me/desk/lead").parent).toBe("me/solo")
     expect(code(() => broker.adopt(HUMAN, { endpoint: "solo", parent: "desk/kid" }))).toBe("scope_refused")
@@ -722,4 +733,17 @@ describe("links across machines", () => {
       ["unlink", "me/desk/lead"],
     ])
   })
+})
+
+test("sweep prunes observed activity for deleted and retired rows while retaining live rows", () => {
+  const { core, clock, db } = setup()
+  core.mirror("host", [view("me/deleted"), view("me/retired"), view("me/live")])
+  const rows = core.list()
+  const id = (handle: string) => rows.find((row) => row.address === `me/host/${handle}`)!.id
+  for (const handle of ["deleted", "retired", "live"]) core.observe(id(handle))
+  db.query("DELETE FROM endpoints WHERE id = ?").run(id("deleted"))
+  db.query("UPDATE endpoints SET handle = ? WHERE id = ?").run(`${GONE_PREFIX}${id("retired")}`, id("retired"))
+  core.sweep()
+  // biome-ignore lint/complexity/useLiteralKeys: inspect private activity storage
+  expect([...core["observed"]]).toEqual([[id("live"), clock.now]])
 })

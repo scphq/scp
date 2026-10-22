@@ -90,7 +90,7 @@ describe("wake", () => {
     core.setWake(id, "codex-app-server")
     core.waker(id, true)
     clock.now += (LIMITS.listOfflineWithinS + 1) * 1000
-    expect(core.list().find((e) => e.id === id)?.presence).toBe("idle")
+    expect(core.list({ historic: true }).find((e) => e.id === id)).toMatchObject({ presence: "idle", historic: true })
     core.waker(id, false)
     expect(core.whoami(id).presence).toBe("offline")
   })

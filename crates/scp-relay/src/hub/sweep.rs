@@ -27,6 +27,9 @@ impl AccountHub {
             )
             .await?;
         let endpoints = self.endpoints().await?;
+        let ids: std::collections::HashSet<_> = endpoints.iter().map(|e| e.id.as_str()).collect();
+        self.observed_activity
+            .retain(|id, _| ids.contains(id.as_str()));
         let cutoff = now.saturating_sub(
             self.limits
                 .duration("clientMachineIdleS", 1209600)

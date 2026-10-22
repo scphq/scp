@@ -860,7 +860,7 @@ A spawn runs a worker harness under a fresh spawn grant. Launching the worker (i
 
 | Item | Default |
 | --- | --- |
-| Scope | `parent` when no scope, rules, `in`, `out` or `allow` is given. `allow` gains `ep:<spawner>` when `under` places the worker elsewhere, and `group:<g>` for each requested group. |
+| Scope | None when no scope, rules, `in`, `out` or `allow` is given: the worker has the default reach (section 10.1), its whole tree and the roots. Requested groups are joined as the grant's groups. |
 | Title | The prompt's first non-empty line, control characters removed, whitespace collapsed, redacted, cut to 64 characters; dropped if it still contains a credential. |
 | Name | `<program base name>-<5 random [a-z0-9]>`, else `worker-<5 random>`. |
 
@@ -938,7 +938,7 @@ A worker whose harness runs one headless session per process (a run that exits w
 
 Every agent has, per direction, a set of selector lists. `out(A)` decides which endpoints A may send to; `in(B)` decides which endpoints B accepts from. A message from A to B is admitted only when `out(A)` admits B and `in(B)` admits A, unless an exemption (section 10.4) applies. Independently, the policy file (section 10.9) MAY refuse any pair.
 
-The lists of one direction are ANDed; the entries within a list are ORed. A direction with no list admits everything within the endpoint's own tree, and an endpoint with no list in either direction is open, admitting other trees and other accounts too.
+The lists of one direction are ANDed; the entries within a list are ORed. A direction with no list admits everything within the endpoint's own tree. An agent with no list in either direction has the **default reach**: its `out` admits its own tree (ancestors, descendants, siblings and cousins), every root of the account on any machine (an agent with no parent here; an agent with only a cross-machine `parent_addr` is a root, and another machine's row is a root only when its machine mirrored it with `parent_ep: null` and `depth: 0`, so a row whose place is unknown is not), the endpoints of contacts (their allowlist is the widening, section 14.6) and every endpoint that is not an agent; its `in` admits everything. A child of another tree is neither reached nor seen (section 11.2) unless a widening reaches it. The default reach bounds an agent's `out` with lists too: its own rules, the rules of a group an agent owns and a cap an agent set only narrow within it, and an endpoint past it is admitted only when, in every list, an admitting entry was widened (it carries `via`, so the via clip bounds it by the widener's own reach) or the list was set by the human or the policy (a policy cap or a policy group's rules). The human, the system endpoint and a contact's endpoint with no list are unrestricted.
 
 ### 10.2 Selectors
 
@@ -967,14 +967,14 @@ The lists of one direction are ANDed; the entries within a list are ORed. A dire
 
 | Preset | List |
 | --- | --- |
-| `open` | No list (the direction is cleared). |
+| `open` | No list (the direction is cleared): the default reach, section 10.1. |
 | `tree` | `[tree:parent, tree:descendants]` |
 | `parent` | `[tree:parent]` |
 | `none` | `[]` |
 
 `allow` appends selectors to a preset, or to `none` when given alone; `open` with `allow` is `invalid_params`. With the policy default `symmetric_presets` (true), a preset sets both directions; otherwise only `out`. Explicit `in` and `out` override per direction.
 
-**Rules** are the endpoint's own lists, set by its claim or by `rules_set` without a target. A root without claimed rules is open.
+**Rules** are the endpoint's own lists, set by its claim or by `rules_set` without a target. A root without claimed rules has the default reach (section 10.1).
 
 **Caps** are lists set from above, each `{id, dir, by, sels[]}` where `by` is an endpoint id, `human`, `policy` or `inherited`, and each entry `{sel, via?, group?, base?, member?}`:
 
@@ -988,7 +988,7 @@ The lists of a direction are: the endpoint's rules, each stored cap, each group'
 
 **Child default.** When `child_default` is a preset, every placed child without grant caps receives a policy cap holding that preset, which nobody can loosen.
 
-**Spawned workers** carry the caps of their grant (section 9.1); the spawn default is `parent`. Subagent endpoints carry no caps of their own and are limited by inheritance.
+**Spawned workers** carry the caps of their grant (section 9.1); a spawn without scope flags carries none, so the worker has the default reach. Subagent endpoints carry no caps of their own and are limited by inheritance.
 
 ### 10.4 Exemptions
 
@@ -1018,7 +1018,7 @@ The policy has no exemptions. Admins receive authority but no messaging exemptio
 - `authority(W, D)`: W is the human, an ancestor of D, or an admin of D's tree or of one of D's groups. An endpoint never has authority over itself.
 - **Admins** are granted and revoked only by the human at a terminal, over one tree or one group.
 - **Narrow-only actors** (lineage auth, human without a terminal) may only narrow.
-- **Narrowing** one's own rules means replacing a list by a subset, or adding a list where none was. Clearing a list or rebinding a group selector widens.
+- **Narrowing** one's own rules means replacing a list by a subset, or adding a list where none was. Clearing a list or rebinding a group selector widens. A list an agent sets, on itself, on another endpoint or as a group's rules, never takes an agent past its default reach (section 10.1), whatever its selectors; only the human, the policy or a widening (`rules_widen`, a grant's or a group's allowance, each with its `via`) do.
 - **Caps on another endpoint** (`rules_set` with a target) require authority. Each actor holds at most one cap per direction on an endpoint. Creating a cap narrows; adding selectors to one's own cap widens; setting `open` removes one's own cap.
 - **Widening** (`rules_widen`) requires authority and a widening-capable actor. It adds the selectors to every stored cap and group cap the actor may loosen, and to the allowance of any inherited cap. Unless the actor is the human, each selector that matches at least one agent and none the actor could reach is clipped. An addition of nothing is `scope_refused` ("nothing to widen"). For each added `ep:X`, when X's opposite side still refuses, the broker widens X back if the actor has authority over X (`mirrored`), else reports it with the command that would fix it (`refused`, `unseen` when the actor cannot see X).
 - **Lifting** (`rules_lift`) removes a stored cap the actor may loosen. Group and policy caps are not stored caps and cannot be lifted.
@@ -1049,13 +1049,19 @@ send(A, params):
   check tree rate (loop_guard), group rate (rate_limited)
 
 admits(E, dir, X):
-  if E has no list in either direction:         allow
+  if E has no list in either direction:
+    if dir is in, or E is not an agent of this account:  allow
+    if X is in E's own tree, a root of the account, a contact's endpoint
+       or not an agent:                         allow
+    deny                                        # the default reach
+  beyond = dir is out, E is an agent of this account and X is past E's default reach
   cross = X is in another account, another machine or another tree
   if E has no list in dir:                      allow unless cross
   for list in lists(E, dir):
     hits = entries of list matching X, bound, and passing the via clip
     if hits is empty:                           deny
     if cross and no hit is a leaving selector:  deny
+    if beyond and no hit has a via, and the human or the policy did not set list:  deny
   allow
 ```
 
@@ -1122,15 +1128,24 @@ A broker MAY load a policy document with the schema below. Where the document li
 ### 11.2 Visibility
 
 - The human at a terminal sees every endpoint.
-- An agent sees itself and every endpoint it may message (scope and policy). Seeing is directional: an ancestor's downward exemption does not reveal the ancestor to its descendant.
+- An agent A sees itself, every endpoint it may message (scope and policy), and an endpoint B that may message A when B has a list of its own, sits in A's tree or is a root. Seeing is directional: an ancestor's downward exemption does not reveal the ancestor to its descendant, and the default reach does not reveal another tree's child to a root. Root R2 does not see W1, a worker under root R1, although W1 may message R2; R2 still receives W1's message and may answer it (the reply grant, section 10.4 step 4).
 - The human without a terminal sees endpoints it may message without exemptions.
 - `watch` events, the audit log (`log`) and scope views are filtered by the same rule. In an agent's views, parents, roots and wideners it cannot see are null or named "an ancestor or admin".
 
 ### 11.3 Listing
 
-- `list {all?, harness?, kind?, presence?}` returns `EndpointView` rows: `id`, `address`, `kind`, `harness`, `model`, `cwd`, `labels`, `title`, `presence`, `status`, `last_seen`, and for agents `parent`, `depth`, `scope` (preset name or `custom`) and `wake` (section 11.1, null when unset), plus `peekable` when the viewer may peek. Without `all`, only connected rows, the human, rows with a live waker (section 9.4), hibernated rows (section 19.1) and rows seen within `LIMITS.listOfflineWithinS` (1 day) are listed; `harness`, `kind` and `presence` filter further.
-- `peers` returns `PeerView` rows (`address`, `kind`, `presence`, `title`, `status`, `reason`, `peekable?`) for every endpoint the viewer may message except itself. `reason` names the relation and the admitting selectors, or the exemption.
+- `list {all?, historic?, harness?, kind?, presence?}` returns `EndpointView` rows: `id`, `address`, `kind`, `harness`, `model`, `cwd`, `labels`, `title`, `presence`, `status`, `last_seen`, and for agents `parent`, `depth`, `scope` (preset name or `custom`), `wake` (section 11.1, null when unset), `active_at` (its activity time, section 11.4) and `historic: true` when it is historic, plus `peekable` when the viewer may peek. Without `all`, only connected rows, the human, rows with a live waker (section 9.4), hibernated rows (section 19.1) and rows seen within `LIMITS.listOfflineWithinS` (1 day) are listed, and of those no historic agent unless `historic` is true; `harness`, `kind` and `presence` filter further.
+- `peers {all?, historic?}` returns `PeerView` rows (`address`, `kind`, `presence`, `title`, `status`, `reason`, `peekable?`, `historic?`) for every endpoint the viewer may message except itself, historic agents only with `all` or `historic`. `reason` names the relation and the admitting selectors, or the exemption.
+- `snapshot {all?, historic?}` (and `watch`) lists endpoints as `list` does, so without `all` it leaves historic agents out.
 - `list {contacts: true}` lists contact accounts' allowlisted endpoints through the hub (section 14.6).
+
+### 11.4 Historic
+
+- An agent's **activity time** is the latest of its creation, `last_seen` (a call or connection), its last hook event, its last inbox read and its last delivery: every message queued into its inbox (a send, ask, notice, handback or hub delivery) counts. A send counts for the sender as a call.
+- An agent is **historic** when no activity happened for `LIMITS.historicAfterS` (3600 s); `Infinity` disables it. Humans and the system endpoint are never historic.
+- The flag is derived, never stored: nothing is written when it flips, and the next activity or a new message to the agent clears it. A historic agent keeps its mail, place, identity, wake and hibernation; sending to it, waking it and peeking it work as for any other agent.
+- Historic agents are left out of `list`, `peers` and `snapshot` unless asked for (section 11.3), and out of the hub's `list` and its dashboard views unless asked for (section 14.1).
+- **On a hub.** The hub derives the flag itself for every row it serves, from the latest of the mirrored `active_at` (the mirrored `last_seen` when a bridge sends none), its own `last_seen` for a direct client's row, and the activity it sees: a message it routes from or to the row, a bridge `event` from it, a `local_events` event naming it as sender or recipient. The hub keeps that activity in memory; a restart forgets it until the next mirror.
 
 ---
 
@@ -1202,7 +1217,8 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 - A machine name matches `^[a-z0-9][a-z0-9-]{0,31}$` and is neither `me`, `local` nor the account handle. A machine binds to the first credential whose bridge, `claim` or `resume` hello succeeds on it; such a hello from another credential is `unauthorized`. Human and observer hellos bind nothing. A `claim` or `resume` hello on a machine bound by a bridge is `invalid_params`. A machine whose credential was revoked can be taken back only by a full login of the same member, or by an owner or admin.
 - Errors use the codes of section 5.5; a hub does not forward refusal detail.
 - Hub notifications to a bridge: `deliver {seq, endpoint, message}`, `endpoints {machine, endpoints, full, own?, released?}` (`own`: whether the receiving bridge's member bound the machine; `released: true` when the machine was released or expired, and the bridge then drops its rows), `fleet {at, type, ...}`, `revoked {reason}`. A newer bridge for the same machine replaces the older one, which is closed with 4000.
-- Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored; 120 calls per minute per credential (600 for a bridge), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise, lower or remove (`Infinity`) any cap, count, rate or the frame size; durations (revalidation, HTTP wait, idle times, the revoked-credential window) stay finite. `hello` reports the limits in force in `limits`, merged over the broker's `LIMITS`, a removed one as `null`, under the keys `machines`, `endpoints`, `sockets`, `frameBytes`, `callsPerMinute`, `bridgeCallsPerMinute`, `accountCallsPerMinute`, `acksPerMinute`, `accountAcksPerMinute`, `storedBytes`, `refusalsPerMinute` and the durations `clientMachineIdleS`, `idlePurgeS`, `httpWaitS`, `mcpWaitS`, `revalidateMs`, `deniedS` (Appendix D).
+- Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored; 120 calls per minute per credential (600 for a bridge), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise, lower or remove (`Infinity`) any cap, count, rate or the frame size; durations (revalidation, HTTP wait, idle times, the revoked-credential window) stay finite. `hello` reports the limits in force in `limits`, merged over the broker's `LIMITS`, a removed one as `null`, under the keys `machines`, `endpoints`, `sockets`, `frameBytes`, `callsPerMinute`, `bridgeCallsPerMinute`, `accountCallsPerMinute`, `acksPerMinute`, `accountAcksPerMinute`, `storedBytes`, `refusalsPerMinute`, `historicAfterS` (section 11.4; `Infinity` makes no agent historic) and the durations `clientMachineIdleS`, `idlePurgeS`, `httpWaitS`, `mcpWaitS`, `revalidateMs`, `deniedS` (Appendix D).
+- The hub's `list {all?, historic?, harness?, kind?, presence?}` filters as section 11.3: without `all` or `historic` it leaves historic agents out, and its views carry `active_at` and `historic` as the hub derives them (section 11.4).
 
 ### 14.2 Bridge
 
@@ -1212,12 +1228,12 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 
 | Mirrored | Not mirrored |
 | --- | --- |
-| `address`, `kind`, `harness`, `model`, `cwd`, `labels`, `status`, `presence`, `last_seen`, for agents `title`, `wake`, `tree`, `parent_ep`, `parent_addr`, `depth`, `rules`, `caps`, `incarnation` | Message bodies, resume tokens, grants, hook state, groups and policy (their reach is folded into `caps`), peek state |
+| `address`, `kind`, `harness`, `model`, `cwd`, `labels`, `status`, `presence`, `last_seen`, for agents `title`, `wake`, `active_at`, `tree`, `parent_ep`, `parent_addr`, `depth`, `rules`, `caps`, `incarnation` | Message bodies, resume tokens, grants, hook state, groups and policy (their reach is folded into `caps`), peek state |
 
 - `mirror {endpoints, full, sync?}` answers `{changed}`, the number of rows it changed. `full` is true only for a full mirror.
-- A mirrored view is an object with these members. `address` (required) is the view's local address, `me/<handle>` for an agent and `me/` for the human; the hub takes the handle from the segment after the last `/` and ignores the rest. There is no separate handle member. `kind` (required) is `agent` or `human`; `system` rows are never sent. `harness`, `model`, `cwd`, `title`, `wake` follow sections 6 and 11.1 (null when unset). `labels` is an object of at most 16 string labels. `status` is null or `{state, note}` (section 11.1). `presence` is `online`, `idle` or `offline` (default `offline`). `last_seen` is a timestamp or null.
+- A mirrored view is an object with these members. `address` (required) is the view's local address, `me/<handle>` for an agent and `me/` for the human; the hub takes the handle from the segment after the last `/` and ignores the rest. There is no separate handle member. `kind` (required) is `agent` or `human`; `system` rows are never sent. `harness`, `model`, `cwd`, `title`, `wake` follow sections 6 and 11.1 (null when unset). `labels` is an object of at most 16 string labels. `status` is null or `{state, note}` (section 11.1). `presence` is `online`, `idle` or `offline` (default `offline`). `last_seen` is a timestamp or null. An agent's `active_at` is its activity time (section 11.4), a timestamp or null; a later one than the hub's clock counts as now. A bridge mirrors historic agents too.
 - An agent's tree fields name rows of the same machine by handle, never by id: `tree` is the root's handle, `parent_ep` the parent's handle (null for a root), `depth` an integer from 0 (a root has `parent_ep: null` and `depth: 0`), and `parent_addr` null or `<machine>/<handle>`. The hub places the row from `parent_ep` and `depth`.
-- `rules` is null (no own rules: open) or `{in?, out?}`, each a list of at most 64 selectors. `caps` is null (no caps) or an object `{caps: [{id, dir, by, sels}], allow?}` in the form of section 10.3, with endpoints referenced as `ep:<handle>`; an array is `invalid_params`. Rules and caps together are at most 16 KiB (`too_large`).
+- `rules` is null (no own rules: the default reach) or `{in?, out?}`, each a list of at most 64 selectors. `caps` is null (no caps) or an object `{caps: [{id, dir, by, sels}], allow?}` in the form of section 10.3, with endpoints referenced as `ep:<handle>`; an array is `invalid_params`. Rules and caps together are at most 16 KiB (`too_large`).
 - `incarnation` is null or matches `^[A-Za-z0-9._:-]{1,128}$`. The part before the first `.` identifies the holder (the reference hashes the endpoint id with its spawn time); the epoch after it moves when caps loosen. A changed holder part drops what the hub had queued for that endpoint. A scope member that is left out means unknown, or unchanged once known; a changed incarnation resets the ones left out.
 - With redaction configured, `cwd` and `title` are nulled, status notes emptied and activity summaries dropped.
 - A view that carries a credential is refused.
@@ -1263,7 +1279,7 @@ A hub reads contacts, allowlists and the egress and ingress gates from its host 
 - Each side's allowlist governs which of its own endpoints the peer may reach and which may send to the peer. An entry is `{machine: "*" | <machine>, sel: "tree:root" | "ep:<machine>/<handle>", allow_worker?}`.
 - `tree:root` matches root agents. `ep:` matches that endpoint at its known depth; depth 2 or more requires `allow_worker`; an unknown depth is refused. A machine's human matches any entry that names its machine or `*`.
 - Direction `in`: the peer may message this account only. `out`: this account may message the peer only. `both`.
-- Endpoint scopes still apply: a scoped endpoint needs `acct:<peer>` or `acct:*` in each list. An open endpoint admits contacts.
+- Endpoint scopes still apply: a scoped endpoint needs `acct:<peer>` or `acct:*` in each list. An endpoint with no list admits contacts.
 
 ### 14.5 Cross-account messages
 
@@ -1676,8 +1692,8 @@ The results of `cloud_status` and `bridge_relink`, and the `file` members of the
 | `stop_wait` | `wait_s?`, `prompts?` | StopWaitResult | | ep, hook |
 | `prompted` | `tldr_every?` | `{prompted, tldr?}` | | ep, hook |
 | `peek_turn` | `role`, `text` | `{stored}` | `unauthorized`, `invalid_params` | hook of the holding harness instance |
-| `list` | `all?`, `harness?`, `kind?`, `presence?`, `contacts?` | `{endpoints}` or `{contacts}` | `unavailable` | obs, ep |
-| `snapshot` | `all?`, `activity?` | `{endpoints, activity, unread, broker}` | | obs, ep |
+| `list` | `all?`, `historic?`, `harness?`, `kind?`, `presence?`, `contacts?` | `{endpoints}` or `{contacts}` | `unavailable` | obs, ep |
+| `snapshot` | `all?`, `historic?`, `activity?` | `{endpoints, activity, unread, broker}` | | obs, ep |
 | `watch` | | snapshot; subscribes to `fleet` | | obs, ep |
 | `log` | `since?`, `limit?`, `scope?`, `judge?`, `peek?` | `{rows}` | | obs, ep |
 | `policy` | | `{file, state, error?, policy}` (policy text for the human only) | | obs, ep |
@@ -1691,7 +1707,7 @@ The results of `cloud_status` and `bridge_relink`, and the `file` members of the
 | `grant` | section 9.1 | `{token, steer?}`, plus any binding fields (section 9.1) | `invalid_params`, `not_found`, `scope_refused`, `secret_refused` | ep, lineage obs |
 | `group` | `action` (`create`, `add`, `remove`, `rules`, `ls`, `show`, `drop`, `pin`, `unpin`), `name?`, `endpoint?`, `in?`, `out?`, `rules?` | per action | `invalid_params`, `not_found`, `scope_refused` | ep, lineage obs |
 | `admin` | `action` (`grant`, `revoke`, `ls`), `subject?`, `tree?` or `group?` | per action | `invalid_params`, `not_found`, `scope_refused` | tty (`ls`: ep) |
-| `peers` | | `{peers}` | | ep, lineage obs |
+| `peers` | `all?`, `historic?` | `{peers}` | | ep, lineage obs |
 | `why` | `from`, `to` | WhyResult | `invalid_params`, `not_found` | obs, ep |
 | `peek` | `endpoint`, `turns?`, `full?` | PeekResult | `invalid_params`, `not_found`, `rate_limited` | ep, lineage obs |
 | `peek_set` | `endpoint?`, `level` (`on`, `local`, `off`) | `{endpoint, peek}` | `invalid_params`, `not_found`, `scope_refused` | ep, lineage obs |
@@ -1791,7 +1807,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 
 ## Appendix D. Limits and defaults
 
-**Broker (`LIMITS`).** Fixed in the reference broker and reported by `hello` as `limits`; they are not configurable, except `endpointRetireS` and `endpointRetireMax` (section 6.4 rule 3).
+**Broker (`LIMITS`).** Fixed in the reference broker and reported by `hello` as `limits`; they are not configurable, except `endpointRetireS` and `endpointRetireMax` (section 6.4 rule 3) and `historicAfterS` (section 11.4).
 
 | Name | Value | Name | Value |
 | --- | --- | --- | --- |
@@ -1827,7 +1843,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `stderrBytes` | 1024 | `wakeDebounceS` | 60 |
 | `wakeBackoffMaxS` | 900 | `wakeRefChars` | 512 |
 | `wakeEtaMaxS` | 3600 | `endpointRetireS` | 86400 |
-| `endpointRetireMax` | 1000 | | |
+| `endpointRetireMax` | 1000 | `historicAfterS` | 3600 |
 
 **Other local values.** Line 256 KiB; partial line 30 s; 32 concurrent requests per connection; 4 MiB output buffer (the last three are defaults an embedding MAY change at broker start); title 64 characters; labels 16; `client_id` 128 characters; mime 64 characters; selectors per list 64; message short id 6 characters, suffix references at least 4.
 

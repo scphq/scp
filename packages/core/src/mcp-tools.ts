@@ -45,7 +45,8 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        all: { type: "boolean", description: "include offline agents" },
+        all: { type: "boolean", description: "include offline and historic agents" },
+        historic: { type: "boolean", description: "include historic agents: those idle for an hour or more" },
         contacts: {
           type: "boolean",
           description: "instead, the endpoints of other accounts your account's contacts let you reach, as <account>/<machine>/<handle>",
@@ -223,7 +224,14 @@ export const TOOLS = [
   {
     name: "relay_peers",
     description: "The agents you may message, each with the rule that admits it.",
-    inputSchema: { type: "object", properties: { all: { type: "boolean", description: "include offline agents" } }, additionalProperties: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        all: { type: "boolean", description: "include offline and historic agents" },
+        historic: { type: "boolean", description: "include historic agents: those idle for an hour or more" },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "relay_peek",
@@ -277,8 +285,31 @@ export function statusLine(status: { state: string; note: string }): string {
   return `${status.state}${status.note ? `: ${quote(status.note)}` : ""}`
 }
 
-export function hiddenNote(hidden: number): string[] {
-  return hidden ? [`${hidden} offline hidden (all: true lists them)`] : []
+export function hiddenNote(hidden: number, historic = 0): string[] {
+  return [
+    ...(hidden ? [`${hidden} offline hidden (all: true lists them)`] : []),
+    ...(historic ? [`${historic} historic hidden (historic: true lists them)`] : []),
+  ]
+}
+
+/**
+ * the rows a list or peers tool shows: everything with `all`; else historic agents only with `historic`, other offline rows never (the human
+ * aside, with `human`), with the notes that count what it left out
+ */
+export function shownRows<T extends { kind: string; presence: string; historic?: true }>(
+  rows: T[],
+  options: { all: boolean; historic: boolean; human?: boolean },
+): { shown: T[]; notes: string[] } {
+  if (options.all) return { shown: rows, notes: [] }
+  const shown: T[] = []
+  let offline = 0
+  let historic = 0
+  for (const row of rows) {
+    if (row.historic ? options.historic : row.presence !== "offline" || (options.human === true && row.kind === "human")) shown.push(row)
+    else if (row.historic) historic++
+    else offline++
+  }
+  return { shown, notes: hiddenNote(offline, historic) }
 }
 
 export function bool(args: Json, key: string): boolean | undefined {
@@ -399,6 +430,7 @@ export function listLine(e: EndpointView, me?: EndpointView | null, home?: strin
     status,
     cwd ? quote(cwd) : "",
     e.peekable ? "peekable" : "",
+    e.historic ? "historic" : "",
   ]
     .filter(Boolean)
     .join("  ")

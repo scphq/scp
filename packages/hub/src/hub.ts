@@ -128,6 +128,8 @@ export interface GraphNode {
   wake?: Wake | null
   /** a hibernated agent its machine waker is waking */
   waking?: true
+  /** an agent with no recent activity, drawn only when the graph is asked for historic agents */
+  historic?: true
 }
 
 /** `spawn`: parent to child; `message`: sender to recipient, with the count and newest send in the graph's window */
@@ -284,6 +286,7 @@ export const HUB_LIMITS = {
   revalidateMs: 300_000,
   deniedS: 3600,
   refusalsPerMinute: 10,
+  historicAfterS: LIMITS.historicAfterS,
 } as const
 
 export type HubLimits = { [K in keyof typeof HUB_LIMITS]: number }
@@ -405,9 +408,16 @@ function grantViews(grant: HubGrant, views: unknown): unknown {
   )
 }
 
-function listFilters(params: Params): { all?: boolean; harness?: string | undefined; kind?: EndpointKind | undefined; presence?: Presence | undefined } {
+function listFilters(params: Params): {
+  all?: boolean
+  historic?: boolean
+  harness?: string | undefined
+  kind?: EndpointKind | undefined
+  presence?: Presence | undefined
+} {
   return {
     all: params.all === true,
+    historic: params.historic === true,
     harness: typeof params.harness === "string" ? params.harness : undefined,
     kind: params.kind === "agent" || params.kind === "human" ? params.kind : undefined,
     presence: params.presence === "online" || params.presence === "idle" || params.presence === "offline" ? params.presence : undefined,
@@ -475,6 +485,7 @@ export class RelayHub {
       capEverySender: true,
       xinbox: this.deps.crossAccount !== undefined,
       endpointRetireS: Number.POSITIVE_INFINITY,
+      historicAfterS: this.limits.historicAfterS,
     })
     core.migrate()
     this.core = core
@@ -1251,7 +1262,11 @@ export class RelayHub {
         if (params.contacts === true) return { contacts: await this.contactList() }
         return { endpoints: core.list(listFilters(params)) }
       case "snapshot":
-        return core.snapshot({ all: params.all === true, activity: typeof params.activity === "number" ? params.activity : undefined })
+        return core.snapshot({
+          all: params.all === true,
+          historic: params.historic === true,
+          activity: typeof params.activity === "number" ? params.activity : undefined,
+        })
       case "watch":
         conn.watching = true
         this.save(socket)
@@ -1280,7 +1295,7 @@ export class RelayHub {
       case "message":
         return { message: core.delivered(me, params.id) ?? (params.member === true ? core.threadMessage(me, params.id) : null) }
       case "peers":
-        return { peers: core.peers(me, { unverified: true }) }
+        return { peers: core.peers(me, { unverified: true, all: params.all === true, historic: params.historic === true }) }
       case "leave": {
         const left = core.leaveOn(me)
         core.disconnect(me)
@@ -1409,6 +1424,7 @@ export class RelayHub {
       case "event": {
         const sender = core.remoteEndpoint(machine, params.from)
         const row = core.event(sender, params)
+        core.observe(sender)
         this.fleet({ type: "activity", machine, ...row })
         return row
       }
@@ -1638,6 +1654,7 @@ export class RelayHub {
       at: this.now(),
     })
     if (seq === null) return raced()!
+    core.observe(target.id)
     this.stash(stored)
     let pushed = false
     for (const socket of this.deps.sockets()) {
@@ -1789,7 +1806,11 @@ export class RelayHub {
 
   private delivered(from: string, result: SendResult, kind: string): void {
     const core = this.relay
-    for (const delivery of result.deliveries) this.route(delivery.seq, delivery.endpoint)
+    core.observe(from)
+    for (const delivery of result.deliveries) {
+      core.observe(delivery.endpoint)
+      this.route(delivery.seq, delivery.endpoint)
+    }
     this.fleet({
       type: "message",
       machine: core.machineOf(from),
@@ -1829,6 +1850,7 @@ export class RelayHub {
       const to = [...new Set(event.to.map(resolve).filter((id): id is string => id !== null && id !== from))]
       if (!to.length) continue
       for (const ep of to) this.deps.sql.all(`INSERT INTO local_events (from_ep, to_ep, at) VALUES (?, ?, ?)`, from, ep, at)
+      for (const ep of [from, ...to]) core.observe(ep, at)
       this.fleet({
         type: "message",
         machine,
@@ -2400,16 +2422,19 @@ export class RelayHub {
   }
 
   /** bindings, then names a revoke left behind (kind `revoked`) */
-  /** a read-only view of the account for a dashboard: its machines, listed endpoints and latest activity */
-  overview(activity = 20): { machines: MachineRow[]; endpoints: EndpointView[]; activity: ActivityRow[] } {
-    const { endpoints, activity: rows } = this.relay.snapshot({ activity })
-    return { machines: this.machineList(), endpoints, activity: rows }
+  /** a read-only view of the account for a dashboard: its machines, listed endpoints and their latest activity; historic agents only with `historic` */
+  overview(activity = 20, options: { historic?: boolean } = {}): { machines: MachineRow[]; endpoints: EndpointView[]; activity: ActivityRow[] } {
+    const endpoints = this.relay.list({ historic: options.historic === true })
+    return { machines: this.machineList(), endpoints, activity: this.relay.activity({ limit: activity, among: endpoints.map((e) => e.id) }) }
   }
 
-  /** a read-only graph for a dashboard: listed endpoints, spawn edges among them, and message counts per sender and recipient; never a body */
-  graph(minutes = GRAPH_MINUTES): HubGraph {
+  /**
+   * a read-only graph for a dashboard: listed endpoints, spawn edges among them, and message counts per sender and recipient; never a body.
+   * Historic agents, and the edges touching them, only with `historic`
+   */
+  graph(minutes = GRAPH_MINUTES, options: { historic?: boolean } = {}): HubGraph {
     const window = Math.min(Math.max(1, Math.floor(Number.isFinite(minutes) ? minutes : GRAPH_MINUTES)), GRAPH_MINUTES_MAX)
-    const endpoints = this.relay.list()
+    const endpoints = this.relay.list({ historic: options.historic === true })
     const byId = new Map(endpoints.map((e) => [e.id, e.address]))
     const listed = new Set(byId.values())
     const nodes: GraphNode[] = endpoints.map((e) => ({
@@ -2423,6 +2448,7 @@ export class RelayHub {
       parent: e.parent ?? null,
       ...(e.wake !== undefined ? { wake: e.wake } : {}),
       ...(e.waking ? { waking: true as const } : {}),
+      ...(e.historic ? { historic: true as const } : {}),
     }))
     const edges: GraphEdge[] = nodes.flatMap((n) =>
       n.parent && n.parent !== n.address && listed.has(n.parent) ? [{ kind: "spawn" as const, from: n.parent, to: n.address }] : [],

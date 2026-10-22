@@ -122,7 +122,10 @@ function setup(
   ): Promise<FakeSocket> {
     const socket = connect(tokenId, actorId, extra)
     await ok(socket, "hello", { protocol: PROTOCOL, machine, bridge: true })
-    await ok(socket, "mirror", { full: true, endpoints: endpoints.map((e) => ({ kind: "agent", harness: "claude-code", presence: "online", ...e })) })
+    await ok(socket, "mirror", {
+      full: true,
+      endpoints: endpoints.map((e) => ({ kind: "agent", harness: "claude-code", presence: "online", parent_ep: null, depth: 0, ...e })),
+    })
     await ok(socket, "subscribe", { after: 0 })
     return socket
   }
@@ -1224,6 +1227,58 @@ describe("in-flight calls and forwards", () => {
       params: { to: "desk/review", body: "see the file", attachments: [{ kind: "path", path: "/home/ada/notes.md" }] },
     })
     expect(desk.pushes("deliver").map((p) => p.message.attachments)).toEqual([[]])
+  })
+})
+
+describe("the default reach and historic agents on the hub", () => {
+  test("a bridge's agent reaches its own tree and every root of the account, another tree's child only through a list", async () => {
+    const { bridge, ok, fails } = setup()
+    const laptop = await bridge("laptop", [{ address: "me/lead" }, { address: "me/kid", tree: "lead", parent_ep: "lead", depth: 1 }])
+    const desk = await bridge("desk", [{ address: "me/review" }, { address: "me/helper", tree: "review", parent_ep: "review", depth: 1 }], "tok_b")
+    expect((await ok(laptop, "forward", { from: "kid", params: { to: "desk/review", body: "to a root" } })).deliveries).toHaveLength(1)
+    expect(desk.pushes("deliver").map((p) => p.endpoint)).toEqual(["desk/review"])
+    expect(await fails(laptop, "forward", { from: "kid", params: { to: "desk/helper", body: "x" } })).toBe("not_found")
+    expect(await fails(laptop, "forward", { from: "lead", params: { to: "desk/helper", body: "x" } })).toBe("not_found")
+    const kid = { address: "me/kid", kind: "agent", presence: "online", tree: "lead", parent_ep: "lead", depth: 1 }
+    await ok(laptop, "mirror", { endpoints: [{ ...kid, rules: { out: ["*"] } }] })
+    expect(await fails(laptop, "forward", { from: "kid", params: { to: "desk/helper", body: "its own rules" } })).toBe("not_found")
+    const caps = { caps: [{ id: "cap_h", dir: "out", by: "human", sels: [{ sel: "*" }] }], allow: {} }
+    await ok(laptop, "mirror", { endpoints: [{ ...kid, rules: null, caps, incarnation: "i2" }] })
+    expect((await ok(laptop, "forward", { from: "kid", params: { to: "desk/helper", body: "the human's cap" } })).deliveries).toHaveLength(1)
+  })
+
+  test("a mirrored agent idle past historicAfterS leaves list, overview and graph unless asked for; a routed message or a local event brings it back", async () => {
+    const { hub, clock, bridge, ok } = setup()
+    const idle = new Date(START - 2 * 3_600_000).toISOString()
+    const laptop = await bridge("laptop", [{ address: "me/fresh" }, { address: "me/old", presence: "offline", last_seen: idle, active_at: idle }])
+    const desk = await bridge("desk", [{ address: "me/review" }], "tok_b")
+    const addresses = (rows: { address: string }[]) => rows.map((row) => row.address)
+    expect(addresses((await ok(laptop, "list")).endpoints)).not.toContain("ada/laptop/old")
+    expect((await ok(laptop, "list", { historic: true })).endpoints.find((e: any) => e.address === "ada/laptop/old")).toMatchObject({
+      historic: true,
+      active_at: idle,
+    })
+    expect(addresses(hub.overview().endpoints)).not.toContain("ada/laptop/old")
+    expect(addresses(hub.overview(20, { historic: true }).endpoints)).toContain("ada/laptop/old")
+    expect(addresses(hub.graph().nodes)).not.toContain("ada/laptop/old")
+    expect(hub.graph(15, { historic: true }).nodes.find((n) => n.address === "ada/laptop/old")).toMatchObject({ historic: true })
+    await ok(laptop, "forward", { from: "fresh", params: { to: "desk/review", body: "x" } })
+    expect(hub.graph().nodes.find((n) => n.address === "ada/laptop/old")).toBeUndefined()
+    clock.now += 1000
+    expect((await ok(laptop, "local_events", { events: [{ kind: "message", at: clock.now, from: "fresh", to: ["old"] }] })).recorded).toBe(1)
+    expect(hub.graph().nodes.find((n) => n.address === "ada/laptop/old")?.historic).toBeUndefined()
+    clock.now += HUB_LIMITS.historicAfterS * 1000
+    expect(hub.graph(15, { historic: true }).nodes.find((n) => n.address === "ada/laptop/old")).toMatchObject({ historic: true })
+    await ok(desk, "forward", { from: "review", params: { to: "laptop/old", body: "wake up" } })
+    expect(hub.graph().nodes.find((n) => n.address === "ada/laptop/old")?.historic).toBeUndefined()
+  })
+
+  test("historicAfterS Infinity makes no agent historic", async () => {
+    const { hub, bridge } = setup({ limits: { historicAfterS: Number.POSITIVE_INFINITY } })
+    await bridge("laptop", [
+      { address: "me/old", presence: "offline", last_seen: new Date(START - 86_400_000).toISOString(), active_at: new Date(START - 86_400_000).toISOString() },
+    ])
+    expect(hub.graph().nodes.find((n) => n.address === "ada/laptop/old")?.historic).toBeUndefined()
   })
 })
 

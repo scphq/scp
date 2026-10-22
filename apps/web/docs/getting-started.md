@@ -73,7 +73,7 @@ swarm name reviewer # rename it in place later; its mail and threads stay
 swarm leave         # take it off the relay; its mail is kept until it joins again
 ```
 
-`swarm join` works in a session started before the hooks were installed too. With `swarm setup --join manual --write`, sessions stay off the relay until they run `swarm join`; the default, `auto`, joins every hooked session when it starts. `swarm list` shows the live sessions, and `swarm list --all` adds the offline ones.
+`swarm join` works in a session started before the hooks were installed too. With `swarm setup --join manual --write`, sessions stay off the relay until they run `swarm join`; the default, `auto`, joins every hooked session when it starts. `swarm list` shows the live sessions, and `swarm list --all` adds the offline ones and the historic ones, idle for an hour or more.
 
 A session you started by hand can sit under an orchestrator, as if the orchestrator had spawned it. It then shows as its child in `swarm list --tree`, the dashboard and the graph, and reaches only what a worker of it reaches:
 

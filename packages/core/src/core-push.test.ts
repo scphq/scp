@@ -7,6 +7,7 @@ import { steerNote, wrapMessage } from "./render"
 import type { Sql, SqlValue } from "./sql"
 
 const key = (pid: number) => `pid:${pid}:Fri-Oct-17-09:00:00-2026`
+const HUMAN: ScopeActor = { kind: "human", tty: true }
 
 /** `main` on pid 1; `spawn(name, pid)` mints a grant bound to pid+1000 and claims it from pid under that key, as `relay spawn` and its harness do */
 function setup() {
@@ -49,6 +50,7 @@ describe("relation on delivered envelopes", () => {
     const w1 = spawn("w1", 10).endpoint!
     const sub = spawn("sub", 20, { by: w1.id, parents: [10, 1] }).endpoint!
     const peer = core.claim({ handle: "peer", harness: "codex", process: key(30), lineage: [key(30)] }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     const human = core.humanId()
     core.send(main.id, { to: "w1", body: "steer" })
     core.send(main.id, { to: "sub", body: "from above" })
@@ -159,6 +161,7 @@ describe("stop_wait", () => {
     const { core, db, main, spawn } = setup()
     const w1 = spawn("w1", 10).endpoint!
     const peer = core.claim({ handle: "peer", harness: "codex", process: key(30), lineage: [key(30)] }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     core.send(peer.id, { to: "main", body: "unrelated" })
     core.send(w1.id, { to: "main", body: "done-42" })
     const relay = (db.query("SELECT id FROM endpoints WHERE handle = '_relay'").get() as { id: string }).id
@@ -407,6 +410,7 @@ describe("parent directives", () => {
     const w1 = spawn("w1", 10).endpoint!
     const env = spawn("env", 30, { spawn: false }).endpoint!
     const peer = core.claim({ handle: "peer", harness: "codex", process: key(40), lineage: [key(40)] }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     expect(core.inject(w1.id)).toMatchObject({ messages: [], intro: "me/main" })
     expect(core.inject(w1.id, { count: true })).toMatchObject({ intro: "me/main" })
     expect(core.inject(w1.id, { stop: true })).not.toHaveProperty("intro")
@@ -438,6 +442,7 @@ describe("parent directives", () => {
     const { core, main, spawn } = setup()
     const w1 = spawn("w1", 10).endpoint!
     const peer = core.claim({ handle: "peer", harness: "codex", process: key(40), lineage: [key(40)] }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     core.send(peer.id, { to: "w1", body: "fyi" })
     const steer = core.send(main.id, { to: "w1", body: "echo PINEAPPLE" })
     expect(core.inject(w1.id, { stop: true })).toMatchObject({ block: false })
@@ -499,6 +504,7 @@ describe("ancestors and the stop hold", () => {
     const { core, clock, main, spawn } = setup()
     const w1 = spawn("w1", 10).endpoint!
     const peer = core.claim({ handle: "peer", harness: "codex", process: key(40), lineage: [key(40)] }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     for (let i = 0; i < LIMITS.inboxPage; i++) {
       core.send(peer.id, { to: "w1", body: `fyi ${i}` })
       clock.now += 2100
@@ -539,6 +545,7 @@ describe("steer keys", () => {
     const w1 = spawn("w1", 10)
     const sub = spawn("sub", 20, { by: w1.endpoint!.id, parents: [10, 1] })
     const peer = core.claim({ handle: "peer", harness: "codex", process: key(30), lineage: [key(30)] }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     core.send(main.id, { to: "w1", body: "steer" })
     core.send(peer.id, { to: "w1", body: "hi" })
     core.send(main.id, { to: "sub", body: "from above" })

@@ -79,7 +79,7 @@ function sandbox(extra: Record<string, string> = {}) {
     return { child, exited, stderr: () => stderr }
   }
   type Listed = { address: string; harness: string; wake: string | null; parent?: string | null }
-  const listed = () => (JSON.parse(swarm("list", "--as", "tester", "--all", "--json").stdout || "{}") as { endpoints?: Listed[] }).endpoints ?? []
+  const listed = () => (JSON.parse(swarm("list", "--as", "lead", "--all", "--json").stdout || "{}") as { endpoints?: Listed[] }).endpoints ?? []
   return { root, cwd, env, swarm, swarmAsync, launch, listed }
 }
 

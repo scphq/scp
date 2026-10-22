@@ -189,7 +189,7 @@ async function rawPeer(
     authenticated: () => authenticated,
     closeCode: () => closeCode,
     ready: () => waitFor(() => frames.some((frame) => frame.method === "records"), "raw peer authentication"),
-    record(endpoints: unknown[] = [{ address: "me/source", kind: "agent", harness: "test", presence: "online" }]) {
+    record(endpoints: unknown[] = [{ address: "me/source", kind: "agent", harness: "test", presence: "online", parent_ep: null, depth: 0 }]) {
       const record = signRecord(key, { v: 1, acct, machine: name, epoch, seq: ++seq, endpoints, cert })
       notify("records", { records: [record] })
       return record

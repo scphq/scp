@@ -3,7 +3,7 @@ import {
   text,
   statusLine,
   str,
-  hiddenNote,
+  shownRows,
   bool,
   selectors,
   oneOf,
@@ -375,10 +375,9 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
           )
         }
         const all = bool(args, "all") === true
-        const { endpoints } = await call<{ endpoints: EndpointView[] }>("list", { all })
+        const { endpoints } = await call<{ endpoints: EndpointView[] }>("list", { all, historic: true })
         const listed = endpoints.filter((e) => e.kind === "agent")
-        const agents = all ? listed : listed.filter((e) => e.presence !== "offline")
-        const hidden = hiddenNote(listed.length - agents.length)
+        const { shown: agents, notes: hidden } = shownRows(listed, { all, historic: bool(args, "historic") === true })
         if (!agents.length) return text(["no agents on the relay", ...hidden].join("\n"))
         return text(
           [
@@ -577,9 +576,9 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         return text(groupText(result))
       }
       case "relay_peers": {
-        const { peers: listed } = await call<{ peers: PeerView[] }>("peers")
-        const peers = bool(args, "all") === true ? listed : listed.filter((p) => p.kind === "human" || p.presence !== "offline")
-        const hidden = hiddenNote(listed.length - peers.length)
+        const all = bool(args, "all") === true
+        const { peers: listed } = await call<{ peers: PeerView[] }>("peers", { all, historic: true })
+        const { shown: peers, notes: hidden } = shownRows(listed, { all, historic: bool(args, "historic") === true, human: true })
         const line = (p: PeerView) =>
           [
             p.address,

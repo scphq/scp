@@ -84,9 +84,10 @@ describe("endpoints", () => {
     core.claim({ handle: "b", harness: "codex" })
     core.disconnect(a.endpoint.id)
     clock.now += (LIMITS.listOfflineWithinS + 1) * 1000
-    const listed = core.list()
+    expect(core.list().map((e) => e.address)).toEqual(["me/"])
+    const listed = core.list({ historic: true })
     expect(listed.map((e) => e.address)).toEqual(["me/", "me/b"])
-    expect(listed[1]!.presence).toBe("idle")
+    expect(listed[1]).toMatchObject({ presence: "idle", historic: true })
     expect(core.list({ all: true }).find((e) => e.address === "me/a")).toMatchObject({ presence: "offline", cwd: "/repo", harness: "claude-code" })
   })
 

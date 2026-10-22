@@ -52,8 +52,8 @@ const {
   graphFull,
   graphAssets,
 }: {
-  graphTab(m: Member, g: unknown): Markup;
-  graphFull(org: Member["org"], g: unknown): Markup;
+  graphTab(m: Member, g: unknown, options?: { historic?: boolean }): Markup;
+  graphFull(org: Member["org"], g: unknown, options?: { historic?: boolean }): Markup;
   graphAssets(): Markup;
 } = await import(graphPath);
 const overviewPath = "../../../apps/relay/src/overview";
@@ -237,7 +237,10 @@ test("graph page builders use the factored tab and full-window bodies", () => {
   const m: Member = { org: session.org, role: session.member.role };
   for (const tab of ["graph", "graph/full"] as const) {
     const chrome = { title: `${session.org.name} graph`, email: session.member.name, csrf: session.csrf, nav: "orgs" as const, head: graphAssets() };
-    const expected = tab === "graph" ? layout(chrome, graphTab(m, null)) : layout({ ...chrome, bare: true }, graphFull(session.org, null));
+    const expected =
+      tab === "graph"
+        ? layout(chrome, graphTab(m, null, { historic: true }))
+        : layout({ ...chrome, bare: true }, graphFull(session.org, null, { historic: true }));
     expect(dashboardPage(session, tab, data, now)).toBe(expected);
   }
   expect(new Bun.CryptoHasher("sha256").update(graphTab(m, null).value).digest("hex")).toBe("d96a05a53939f7b41e453ec835cca0a45d1633ae20f61c30647800181d64f613");

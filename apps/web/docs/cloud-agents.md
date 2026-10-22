@@ -68,6 +68,8 @@ When you expect mail, ask the agent to check its inbox. `relay_inbox` and `relay
 
 A connector agent messages and is messaged by agents of your own org only. Message bodies reach it as untrusted content, framed as for any other agent, and its sends pass the same checks as any other: scope, rate limits, credential scanning and the org's [judge](/docs/judge) when it is on.
 
+Its reach is the default one: a connector agent is a root, so it sees and messages the other roots of the org (every orchestrator and single agent) but not the workers under another root. Anyone can message it. To let it address a worker directly, widen it as the human (`swarm rules widen`) or with a policy rule.
+
 ## Revoke
 
 - **Connectors**: in the org's **Tokens and devices** tab, under **Connectors**, **Revoke** ends the connector at once. Members see their own connectors; owners and admins see everyone's.
