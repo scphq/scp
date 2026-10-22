@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@scp-dev/core": "workspace:*",
-    "@scp-dev/hub": "workspace:*"
+    "@scp-dev/hub": "workspace:*",
+    "@cloudflare/workers-oauth-provider": "1.2.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260601.0",

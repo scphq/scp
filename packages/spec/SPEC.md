@@ -277,7 +277,7 @@ Hosted sessions may use a harness label distinct from their provider. The refere
 
 | Harness | Session |
 | --- | --- |
-| `claude-cowork` | Claude Code in a local Claude Cowork session. |
+| `claude-cowork` | Claude Code in a Claude Cowork session, local or cloud. |
 | `claude-desktop` | Claude Code in the Claude desktop app's Code tab. |
 | `codex-desktop` | Codex in the Codex desktop app. |
 | `t3code` | A provider session hosted by T3 Code. |
@@ -1191,17 +1191,17 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 ### 14.1 Hub
 
 - A hub serves one account. It holds the account's machines, the endpoints mirrored from them, deliveries between machines, a cross-account inbox, contacts and the hosted judge with its hold queue.
-- Transports: a WebSocket (reference path `/v1/relay/ws`), one JSON-RPC request per text frame of at most 262144 bytes (larger frames close the socket with 1009); and an HTTP endpoint (reference path `/v1/relay/rpc`) that takes one request or a batch run in order. Long polls are capped at 25 s over HTTP and at `LIMITS.waitMaxS` over WebSocket. A bridge MUST use the WebSocket; a bridge `hello` over HTTP is `invalid_params`.
+- Transports: a WebSocket (reference path `/v1/relay/ws`), one JSON-RPC request per text frame of at most 262144 bytes (larger frames close the socket with 1009); and an HTTP endpoint (reference path `/v1/relay/rpc`) that takes one request or a batch run in order. A hub MAY also serve a remote MCP endpoint (reference path `/mcp`, section 14.9). Long polls are capped at 25 s over HTTP, at `mcpWaitS` (50 s) on the remote MCP endpoint and at `LIMITS.waitMaxS` over WebSocket. A bridge MUST use the WebSocket; a bridge `hello` over HTTP is `invalid_params`.
 - Each HTTP request, single or batch, is its own connection: it MUST begin with `hello` (a `resume` hello rebinds an agent that an earlier `claim` received a token for), and any other first call is refused `unauthorized` ("call hello first"). A batch answers with an array of responses in request order.
 - Authentication: the client presents an account bearer credential in the HTTP request that opens the WebSocket, or in each HTTP request, as the header `Authorization: Bearer <credential>`. No other carrier (query parameter, subprotocol or cookie) is accepted. A request without a valid credential is answered before any JSON-RPC with HTTP 401 and a JSON body `{error, message?}`, where `error` is `unauthorized` (none presented), `invalid`, `revoked` or `expired`. A request to the WebSocket path without `Upgrade: websocket` is 426, and a non-`POST` request to the HTTP path is 405. The hub revalidates the credential every 300 s and closes the socket when it is revoked (1008, after a `revoked {reason}` notification) or expired (4001, after which a client MAY reconnect with a fresh credential); a revoked credential is refused for 3600 s.
 - Credentials are opaque to clients and at most 128 characters. A hub SHOULD give the credentials it issues a prefix the credential scanner recognises (section 7.8). How a client obtains one is up to the hub; the hosted-relay profile (device login, `scp_d_` device credentials and `scp_t_` API tokens) is described in `IMPLEMENTATION.md`.
-- A credential MAY carry labels. The hub sets them on every endpoint the credential claims, resumes or mirrors, over the client's own labels for the same keys, so a client can neither change nor drop them; the merged set is held to the usual label limits.
+- A credential MAY carry labels. The hub sets them on every endpoint the credential claims, resumes or mirrors, over the client's own labels for the same keys, so a client can neither change nor drop them; the merged set is held to the usual label limits. On the remote MCP endpoint the hub also forces `client=<label>`, the label the host gave the request, over the credential's own `client` label (section 14.9).
 - `hello` takes `protocol: "scp/1"`, `machine`, and one of `bridge: true`, `human: true` with `tty`, `observe: true`, or `claim`/`resume`. `machine` is optional with `observe`, and `human` needs a full login. It returns `{account, capabilities, server_time, limits, machine?}`; a human or agent also receives `endpoint` and `preamble`, and a new claim its `token`; a bridge also receives `machine`, `endpoints` (every other machine's endpoints as views of section 11.3 plus `machine` and, for agents, the mirrored fields of section 14.2, with addresses rendered `<account>/<machine>/<handle>`, a human's `<account>/<machine>/`) and `others`, the names of the machines another member of the org bound (section 6.3). A bridge or `claim` hello without a valid `machine` is `invalid_params`. Hook (transient) hellos are refused.
 - A `claim` hello follows section 6's claim rules on its machine: `scope`, `allow`, `in` and `out` set a new endpoint's own rules (an endpoint taken over keeps its own), and `exact` follows section 6.8.
 - A machine name matches `^[a-z0-9][a-z0-9-]{0,31}$` and is neither `me`, `local` nor the account handle. A machine binds to the first credential whose bridge, `claim` or `resume` hello succeeds on it; such a hello from another credential is `unauthorized`. Human and observer hellos bind nothing. A `claim` or `resume` hello on a machine bound by a bridge is `invalid_params`. A machine whose credential was revoked can be taken back only by a full login of the same member, or by an owner or admin.
 - Errors use the codes of section 5.5; a hub does not forward refusal detail.
 - Hub notifications to a bridge: `deliver {seq, endpoint, message}`, `endpoints {machine, endpoints, full, own?, released?}` (`own`: whether the receiving bridge's member bound the machine; `released: true` when the machine was released or expired, and the bridge then drops its rows), `fleet {at, type, ...}`, `revoked {reason}`. A newer bridge for the same machine replaces the older one, which is closed with 4000.
-- Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored; 120 calls per minute per credential (600 for a bridge), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise, lower or remove (`Infinity`) any cap, count, rate or the frame size; durations (revalidation, HTTP wait, idle times, the revoked-credential window) stay finite. `hello` reports the limits in force in `limits`, merged over the broker's `LIMITS`, a removed one as `null`, under the keys `machines`, `endpoints`, `sockets`, `frameBytes`, `callsPerMinute`, `bridgeCallsPerMinute`, `accountCallsPerMinute`, `acksPerMinute`, `accountAcksPerMinute`, `storedBytes`, `refusalsPerMinute` and the durations `clientMachineIdleS`, `idlePurgeS`, `httpWaitS`, `revalidateMs`, `deniedS` (Appendix D).
+- Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored; 120 calls per minute per credential (600 for a bridge), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise, lower or remove (`Infinity`) any cap, count, rate or the frame size; durations (revalidation, HTTP wait, idle times, the revoked-credential window) stay finite. `hello` reports the limits in force in `limits`, merged over the broker's `LIMITS`, a removed one as `null`, under the keys `machines`, `endpoints`, `sockets`, `frameBytes`, `callsPerMinute`, `bridgeCallsPerMinute`, `accountCallsPerMinute`, `acksPerMinute`, `accountAcksPerMinute`, `storedBytes`, `refusalsPerMinute` and the durations `clientMachineIdleS`, `idlePurgeS`, `httpWaitS`, `mcpWaitS`, `revalidateMs`, `deniedS` (Appendix D).
 
 ### 14.2 Bridge
 
@@ -1331,6 +1331,44 @@ This section is experimental and non-normative: it describes the phase-1 mesh wi
 
 - The receiving broker does what the hub does in section 14.2, then runs its own send path: at most 600 forwards per minute per link (`rate_limited`), an unusable local policy is `policy_refused`, `hop_floor` outside 0..1000 or any server-set field is `invalid_params`, the sender must be in the peer's stored record (`not_found`), every recipient must be on the receiving machine (`not_found`, no multi-hop), and `hop_floor` is capped at `LIMITS.hopMax + 1`.
 - Scope with both sides' rules and caps, loop guards, policy, inbox cap and the local judge (section 15) then run exactly as for a local send. `from.auth` is `account+bridge` in this phase.
+
+### 14.9 Remote MCP endpoint
+
+A hub MAY serve its account to MCP clients that run no broker (a chat product's custom connector, a hosted agent) as a remote MCP server. Each tool call runs as a hub client (section 14.1) on a connection that lasts for that call. A hub that serves it follows this section.
+
+**Transport.**
+
+- One HTTP path (reference `/mcp`) takes MCP over Streamable HTTP without server-sent events. `POST` carries one JSON-RPC 2.0 request object and is answered with one JSON body (`content-type: application/json`), never a stream. A body that is not a request object (a batch included) is error -32600, an unknown method -32601. A notification (no `id`) is answered 202 with no body.
+- `GET` is 405: the endpoint pushes nothing. `DELETE` with an `Mcp-Session-Id` header ends that session and drops its binding (below), answered 204; without one it is 405, as is any other method.
+- `initialize` returns a new session id in the `Mcp-Session-Id` response header (a hub keeps at most 64 sessions per grant without a joined endpoint and forgets those idle for 30 days; a call with a forgotten id runs as a call without one), echoes the client's `protocolVersion` when the hub speaks it and otherwise offers its newest, declares `capabilities: {tools: {}}`, and returns `instructions` that begin with the preamble of section 7.9. `ping` answers `{}`, `tools/list` the tool surface below, and `tools/call` runs one tool.
+- A client sends the session id on later requests. The session id is not a credential: every request carries the bearer.
+- A failed tool call is a tool result with `isError: true` and text `<code>: <message>` (codes of section 5.5), not a JSON-RPC error; an unknown tool is `method_not_found`, and tool arguments over the frame limit of section 14.1 are `too_large`.
+
+**Authentication.** Every request carries `Authorization: Bearer <credential>` and is refused with HTTP 401 before any JSON-RPC as section 14.1 says. Which credentials a host accepts here, and which client label each carries, is the host's; the hosted relay's OAuth 2.1 profile is in `IMPLEMENTATION.md`. A credential issued only for this endpoint (an access token bound to it as its resource) MUST be refused on the other hub paths of section 14.1.
+
+**Identity.**
+
+- **Client label.** The host passes the hub a label naming the kind of client, a machine name of at most 27 characters (reference: `claude-ai`, `chatgpt`, `mcp-oauth` for other OAuth clients, `mcp-remote` for a bearer credential of section 14.1). The hub forces `client=<label>` on every endpoint the grant claims (section 14.1).
+- **Client machine.** A grant (one credential, or one OAuth grant across its token refreshes) gets one client machine, named `<label>-<4 hex>` at its first call, a name no bound machine, other client machine or machine tombstone holds, and keeps it. The machine binds to the grant and counts toward the machine limit as any client machine (section 14.1).
+- **Default endpoint.** A call from a session that did not join, or without a session id, acts on the grant's default endpoint on that machine, whose handle is the label. Every such session of the grant shares it and its inbox.
+- **Join.** `relay_join {name}` in a session gives that session its own endpoint on the grant's machine; without a session id, or with one the hub did not issue to this grant, it is `invalid_params`. When the label or another session's endpoint on the machine holds `name`, the hub appends `-2`, `-3` and so on (to the name cut to 57 characters). The session keeps the endpoint across calls and hub restarts; a join with the same name again changes nothing, with another name it is `invalid_params` (leave first). The remote join takes no `under` and does not rename.
+- **Leave.** `relay_leave` sends `leave` (section 6.12) for the endpoint the call acts on and drops its binding. A joined session falls back to the default endpoint; the default endpoint is claimed again by the grant's next call.
+- **Binding.** Each call opens with `hello`: a `resume` with the token the binding keeps, or a `claim` when it keeps none or the resume is refused `unauthorized`, `not_found` or `stale`. The claim carries the handle, the harness (the `clientInfo.name` of the session's `initialize`, lowercased, cut to `[a-z0-9._-]` and 32 characters, else the label), the forced labels, and `in: ["*"]` and `out: ["*"]`.
+- **Default rules.** `*` matches no endpoint of another account (section 10.2), so a new remote endpoint reaches and is reached by its own account only. A send to another account is refused as section 14.5 refuses one from an endpoint that is not mirrored.
+
+**Presence and wake.** The endpoint holds a connection only while a call runs, and its `wake` is none (section 11.1). Nothing is pushed: a message is seen at the agent's next tool call.
+
+**Unread line.** Every `tools/call` result, a failed one included, is one text part ending in the line `0 unread` or `<n> unread: call relay_inbox`, where `n` counts the endpoint's unacknowledged, unexpired deliveries after the call. The count is also set as `structuredContent.unread` when the result has structured content, else as `_meta.unread`.
+
+**Tools.** `tools/list` returns the remote surface of Appendix F: `relay_whoami`, `relay_list`, `relay_peers`, `relay_send`, `relay_reply`, `relay_inbox`, `relay_ask`, `relay_ask_wait`, `relay_status`, `relay_set_status`, `relay_set_now`, `relay_set_title`, `relay_join` and `relay_leave`. `relay_spawn`, `relay_rules`, `relay_group`, `relay_peek`, `relay_set_peek` and `relay_link_accept` are not served (`method_not_found`).
+
+**Limits.**
+
+- A wait (`wait_s` of `relay_inbox`, `relay_ask` and `relay_ask_wait`) is capped at `mcpWaitS`, 50 s by default and never more than 50 s; the served schemas give `wait_s` a maximum of 50.
+- A result's text is at most 150000 characters: longer text is cut and ends with the line `output truncated`, before the unread line. `relay_inbox` returns messages until the next would pass 145000 characters, acknowledges only those it returns, and says how many it left unread.
+- Sends, replies and asks take the hub's send path as any hub client's do: scope with the endpoint's rules and caps, policy, the hop rule, credential scanning, idempotency, the judge gate (section 15) and the rate limits of section 14.1, where every call spends its `hello` and its methods against the grant.
+
+**Framing.** Message bodies appear only inside the framing of section 7.9, with the full preamble, as in any tool result.
 
 ---
 
@@ -1517,6 +1555,15 @@ A conforming hub:
 - [ ] Applies the cross-account checks, envelope rewriting, reply grants, rate limits, reservation and refund rules of sections 14.5 to 14.7.
 - [ ] Runs the egress and ingress judge gates, applies the fail behaviour of section 15.5 for its side on a model failure, and keeps held bodies only until resolution.
 
+A hub that serves the remote MCP endpoint (section 14.9) additionally:
+
+- [ ] Answers `POST` with JSON only, `GET` with 405 and `DELETE` of a session with 204, and issues `Mcp-Session-Id` at `initialize`.
+- [ ] Refuses on its other paths a credential issued only for the endpoint.
+- [ ] Gives each grant one client machine `<label>-<4 hex>` with a default endpoint named for the label, forces `client=<label>`, and gives a joined session its own endpoint.
+- [ ] Claims new endpoints with `in` and `out` of `["*"]`, so they stay within the account.
+- [ ] Ends every tool result with the unread line, caps waits at 50 s and result text at 150000 characters.
+- [ ] Serves exactly the remote tool surface of Appendix F, and runs every send through the same checks as any hub client's.
+
 ### 18.3 Harness integration
 
 A conforming integration:
@@ -1656,7 +1703,7 @@ The results of `cloud_status` and `bridge_relink`, and the `file` members of the
 | `hold_release` | `id`, `redacted?` | SendResult | `unauthorized`, `not_found`, `invalid_params`, `policy_refused` | tty |
 | `hold_refuse` | `id`, `reason` | hold | `unauthorized`, `not_found`, `invalid_params` | tty |
 
-Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`, `status`, `event`; observer `list`, `snapshot`, `watch`, `log`, `machines`, `machines_rm`; bridge `mirror`, `forward`, `subscribe`, `ack`, `reject`, `event`, `local_events`, `list`, `watch`, and the optional `machine_wake` (sections 14 and 19.3).
+Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`, `message`, `receipts`, `title`, `status`, `event`, `peers` and `leave` (of a direct client endpoint only, else `invalid_params`; a spawned worker is `scope_refused`); observer `list`, `snapshot`, `watch`, `log`, `machines`, `machines_rm`; bridge `mirror`, `forward`, `subscribe`, `ack`, `reject`, `event`, `local_events`, `list`, `watch`, and the optional `machine_wake` (sections 14 and 19.3).
 
 ## Appendix B. Schemas
 
@@ -1784,7 +1831,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 
 **Peek.** Ring 20 turns; store 2000 characters; read 600 (full 2000) per turn; 8 KiB total; 3 turns default, 10 maximum; 6 per viewer and target per minute; 60 per target per hour; quote cut 40 characters against 50 bodies; `peek_who` 50 rows; `whoami` 5 rows; tool lists 20 names; raw turn input 65536 characters.
 
-**Hub** (defaults, section 14.1). 16 machines; 512 endpoints; 64 sockets; frame 262144 bytes; 120 calls per minute per credential (bridge 600), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account; 256 MiB stored; 10 refusal audit rows per minute per code; client machine idle 14 d; idle hub storage purged after 30 d; HTTP wait 25 s; revalidation 300 s, a check failing that long closes with 1013; revoked credential refused 3600 s; a mirror sync at most 4096 parts of 261120 bytes.
+**Hub** (defaults, section 14.1). 16 machines; 512 endpoints; 64 sockets; frame 262144 bytes; 120 calls per minute per credential (bridge 600), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account; 256 MiB stored; 10 refusal audit rows per minute per code; client machine idle 14 d; idle hub storage purged after 30 d; HTTP wait 25 s; remote MCP wait 50 s (`mcpWaitS`, at most 50); remote MCP result text 150000 characters, `relay_inbox` messages 145000; revalidation 300 s, a check failing that long closes with 1013; revoked credential refused 3600 s; a mirror sync at most 4096 parts of 261120 bytes.
 
 **Cross-account.** Body 16384; hop 8; thread 50; pair 10 per minute and 100 per hour; contact 200 per day (at most 2000); reservation step at most 20; true-up after 5 minutes; 50 active contacts; 20 invites per day; 32 allowlist entries.
 
@@ -1877,6 +1924,27 @@ The reference integration exposes the pull surface (section 8.1) as these MCP to
 | `relay_group` | `action`, `name`, `endpoint`, `rules`, `in`, `out` | `group` |
 | `relay_peek` | `endpoint`, `turns` (1 to 10), `full?`, `who?` | `peek`, `peek_who` |
 | `relay_set_peek` | `on` | `peek_set` |
+
+**Remote surface.** The remote MCP endpoint (section 14.9) serves these tools, run by the hub as a client of the grant's machine; the wire column is the hub method. Every result ends with the unread line.
+
+| Tool | Parameters | Wire |
+| --- | --- | --- |
+| `relay_whoami` | | `whoami` |
+| `relay_list` | `all?`, `contacts?` | `list` |
+| `relay_peers` | `all?` | `peers` |
+| `relay_send` | `to` (1 to 16), `body`, `thread?`, `private?`, `live?` | `send` with a `client_id` |
+| `relay_reply` | `id` (id, short id, suffix of 4 or more, or `last`), `body` | `message {member}`, `send {kind: reply}` |
+| `relay_inbox` | `wait_s` (0 to 50, default 0), `ack` (default true) | `inbox`, `ack` |
+| `relay_ask` | `to`, `body`, `wait_s` (0 to 50, default 30), `require_reply?` | `ask` |
+| `relay_ask_wait` | `id`, `wait_s` (0 to 50, default 30) | `ask_wait` |
+| `relay_status` | `id` (id, short id or `last`) | `receipts` |
+| `relay_set_status` | `state`, `note?` | `status` |
+| `relay_set_now` | `now` | `status {note}` |
+| `relay_set_title` | `title` (at most 64) | `title` |
+| `relay_join` | `name` | a session binding and its `hello {claim}` (section 14.9) |
+| `relay_leave` | | `leave`, then the binding is dropped |
+
+Not served: `relay_spawn`, `relay_rules`, `relay_group`, `relay_peek`, `relay_set_peek`, `relay_link_accept`.
 
 ---
 

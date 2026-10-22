@@ -123,3 +123,9 @@ export async function readJson(req: Request): Promise<Record<string, unknown>> {
 }
 
 export const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+export function connectorLabel(host: string): string {
+  if (host === "claude.ai" || host.endsWith(".claude.ai")) return "claude-ai";
+  if (host === "chatgpt.com" || host === "chat.openai.com") return "chatgpt";
+  return "mcp-oauth";
+}

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { slowConformance } from "./environment";
+import { ensureBuilt, Machine } from "./machines";
 import { enabled, ProcessTarget, type Target, targetNames, waitFor } from "./targets";
 import { type Frame, rpc, Wire } from "./wire";
 
@@ -102,6 +103,48 @@ describe.each(targetNames)("%s hub wire scenarios", (name) => {
   const target = new ProcessTarget(name);
   beforeAll(() => target.start(), 20000);
   afterAll(() => target.stop());
+
+  if (name === "ts")
+    test("remote MCP exchanges mail with a local CLI agent on a bridged machine", async () => {
+      await fixture(target, async ({ account, token }) => {
+        ensureBuilt();
+        const local = new Machine("desk", target, token);
+        try {
+          await local.start();
+          await local.claim("worker");
+          let session: string | null = null;
+          const mcp = async (method: string, params: object = {}) => {
+            const response = await fetch(`${target.url}/mcp`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(session ? { "mcp-session-id": session } : {}) },
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+            });
+            session = response.headers.get("mcp-session-id") ?? session;
+            expect(response.status).toBe(200);
+            return (await response.json()) as { result: { content: { text: string }[]; structuredContent?: { id: string }; isError?: boolean } };
+          };
+          await mcp("initialize", { protocolVersion: "2025-11-25" });
+          await waitFor(
+            async () => (await mcp("tools/call", { name: "relay_list", arguments: { all: true } })).result.content[0]!.text.includes("/desk/worker"),
+            "CLI agent discovery",
+          );
+          const sent = await mcp("tools/call", { name: "relay_send", arguments: { to: `${account}/desk/worker`, body: "remote question" } });
+          expect(sent.result.isError).toBeUndefined();
+          const incoming = await waitFor(
+            async () => (await local.inbox("worker", true)).find((message) => message.id === sent.result.structuredContent!.id),
+            "CLI inbox",
+          );
+          expect(incoming.body.text).toBe("remote question");
+          await local.json(["reply", incoming.id, "local answer", "--as", "worker"]);
+          const inbox = await mcp("tools/call", { name: "relay_inbox", arguments: { wait_s: 1 } });
+          expect(inbox.result.content[0]!.text).toContain("local answer");
+          expect(inbox.result.content[0]!.text).toContain("<relay-message");
+          expect(inbox.result.content[0]!.text).toEndWith("0 unread");
+        } finally {
+          await local.stop();
+        }
+      });
+    }, 60000);
 
   test("full and delta mirrors announce fields, ownership and omitted rows offline", async () => {
     await fixture(target, async ({ account, bridge }) => {

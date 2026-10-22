@@ -1,5 +1,7 @@
+import type { GrantSummary } from "@cloudflare/workers-oauth-provider";
 import { mint, TOKEN_PREFIX } from "./credentials";
 import { closeGrants, hubOverview } from "./hub/routes";
+import { userGrants } from "./grants";
 import type { User } from "./env";
 import { type Html, html } from "./html";
 import { canManage, type Membership, notice, orgTab, requireMember } from "./orgs";
@@ -132,9 +134,19 @@ interface Flash {
   created?: { name: string; token: string };
 }
 
+async function connectors(ctx: Ctx, m: Membership, user: User): Promise<GrantSummary[]> {
+  const users = canManage(m.role)
+    ? (await ctx.env.DB.prepare("SELECT user_id FROM memberships WHERE org_id = ?").bind(m.org.id).all<{ user_id: string }>()).results.map((u) => u.user_id)
+    : [user.id];
+  const grants: GrantSummary[] = [];
+  for (const userId of users) grants.push(...(await userGrants(ctx.env.OAUTH_PROVIDER, userId)).filter((g) => g.metadata?.orgId === m.org.id));
+  return grants;
+}
+
 export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Flash = {}, status = 200): Promise<Response> {
   const m = await requireMember(ctx.env.DB, handle, user.id);
   const [tokens, devices, machines] = await Promise.all([listTokens(ctx.env.DB, m.org.id), listDevices(ctx.env.DB, m, user), machinesBlock(ctx, m.org.id)]);
+  const grants = await connectors(ctx, m, user);
   const revoke = (path: string) =>
     html`<form method="post" action="/orgs/${m.org.handle}/${path}/revoke"><input type="hidden" name="csrf" value="${ctx.csrf}"><button class="btn btn-ghost btn-small" type="submit">Revoke</button></form>`;
   return orgTab(
@@ -187,6 +199,14 @@ export async function tokensPage(ctx: Ctx, user: User, handle: string, flash: Fl
             : html`<p class="empty">No devices. Run <code>swarm up</code> in a terminal.</p>`
         }
       </section>
+      <section class="block"><h2>Connectors</h2>
+      ${
+        grants.length
+          ? html`<div class="table"><table><thead><tr><th>Client</th><th>Label</th><th>Redirect host</th><th>Created</th><th></th></tr></thead><tbody>
+      ${grants.map((g) => html`<tr><td>${g.metadata.clientName}</td><td>${g.metadata.label}</td><td>${g.metadata.redirectHost}</td><td>${when(g.createdAt * 1000)}</td><td><form method="post" action="/orgs/${m.org.handle}/connectors/${g.id}/revoke"><input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="user_id" value="${g.userId}"><button class="btn btn-ghost btn-small">Revoke</button></form></td></tr>`)}
+      </tbody></table></div>`
+          : html`<p class="empty">No connectors.</p>`
+      }</section>
       ${machines}`,
     { status },
   );
@@ -197,6 +217,13 @@ export async function tokensPost(ctx: Ctx, user: User, handle: string, rest: str
   const m = await requireMember(ctx.env.DB, handle, user.id);
   const [kind, id, action] = rest as [string, string?, string?];
   try {
+    if (kind === "connectors" && id && action === "revoke") {
+      const grant = (await connectors(ctx, m, user)).find((g) => g.id === id && g.userId === field(form, "user_id"));
+      if (!grant) throw new HttpError(404, "not_found", "No such connector.");
+      await ctx.env.OAUTH_PROVIDER.revokeGrant(id, grant.userId);
+      await closeGrants(ctx.env, m.org.id, { tokenId: `oauth_${id}` });
+      return back(ctx, `/orgs/${handle}/tokens`);
+    }
     if (kind === "tokens" && !id) {
       const created = await createToken(ctx.env.DB, m, user, field(form, "name"), field(form, "expires_in_days"), ctx.now);
       return tokensPage(ctx, user, handle, { created });

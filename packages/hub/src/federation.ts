@@ -875,6 +875,19 @@ export class FederatedCore extends RelayCore {
     })
   }
 
+  leaveOn(endpoint: string): EndpointView {
+    const row = this.mustEndpoint(endpoint) as FederatedRow
+    if (!row.remote || !row.token_hash) throw new RelayError("invalid_params", "only a direct client endpoint can leave")
+    if (row.parent_ep !== null && row.linked === null) throw new RelayError("scope_refused", "a spawned worker stays joined while it runs")
+    this.sql.all(
+      `UPDATE endpoints SET session = NULL, token_hash = NULL, hook_seen = NULL, hook_ended = ?, wake = NULL, hold_ref = NULL WHERE id = ?`,
+      this.now(),
+      endpoint,
+    )
+    this.record("leave", endpoint, null, { handle: row.handle })
+    return this.whoami(endpoint)
+  }
+
   /**
    * resume() for a direct client of `machine`, its labels replaced by what `relabel` makes of them, held to the label limits: a token of
    * another machine's endpoint is refused

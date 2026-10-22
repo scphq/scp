@@ -39,6 +39,7 @@ impl Default for Limits {
                 ("clientMachineIdleS", Some(14 * 86400)),
                 ("idlePurgeS", Some(30 * 86400)),
                 ("httpWaitS", Some(25)),
+                ("mcpWaitS", Some(50)),
                 ("revalidateMs", Some(300000)),
                 ("deniedS", Some(3600)),
             ]
@@ -57,7 +58,12 @@ impl Limits {
         }
         let duration = matches!(
             key,
-            "clientMachineIdleS" | "idlePurgeS" | "httpWaitS" | "revalidateMs" | "deniedS"
+            "clientMachineIdleS"
+                | "idlePurgeS"
+                | "httpWaitS"
+                | "mcpWaitS"
+                | "revalidateMs"
+                | "deniedS"
         );
         let parsed = if value == "Infinity" && !duration {
             None
