@@ -1,7 +1,7 @@
 import { BrokerUnavailable, connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, RelayError } from "@scp-dev/core"
 import { spawnEnvironment, terminalAttached, type Walk, walkNow } from "./common"
-import { codexShell } from "./identity"
+import { CODEX_THREAD, codexShell } from "./identity"
 
 type Env = Record<string, string | undefined>
 
@@ -71,7 +71,17 @@ export async function attribute(
     client = connected
     let bound: Awaited<ReturnType<RelayClient["hello"]>>
     try {
-      bound = await client.hello({ observe: true, lineage: walk.keys, ...(self.length ? { self } : {}), ...(grant ? { grant } : {}), cwd, brief: true })
+      const thread = codexShell(env) ? env.CODEX_THREAD_ID : undefined
+      const session = thread && CODEX_THREAD.test(thread) ? { harness_session: thread } : {}
+      bound = await client.hello({
+        observe: true,
+        lineage: walk.keys,
+        ...session,
+        ...(self.length ? { self } : {}),
+        ...(grant ? { grant } : {}),
+        cwd,
+        brief: true,
+      })
     } catch (error) {
       if (grant) return undefined
       throw error

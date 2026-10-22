@@ -215,6 +215,20 @@ describe("attribute", () => {
     expect(warned).toEqual(["swarm codex: not linked under the agent that ran it (refused); it starts as a root, swarm adopt <name> links it later"])
   })
 
+  test("a Codex thread shell names its thread, so a shared app server binds the caller by thread", async () => {
+    const hellos: unknown[] = []
+    const thread = "01a160cb-247a-7903-b0e3-1bba7cf21078"
+    const env = { SCP_HARNESS: "codex-desktop", CODEX_THREAD_ID: thread }
+    await attribute("claude", {}, env, project, () => {}, { walk, connect: async () => fakeClient("me/lead", [], undefined, hellos) })
+    expect(hellos).toEqual([expect.objectContaining({ observe: true, harness_session: thread })])
+    hellos.length = 0
+    await attribute("claude", {}, { SCP_HARNESS: "codex-desktop", CODEX_THREAD_ID: "not a thread" }, project, () => {}, {
+      walk,
+      connect: async () => fakeClient("me/lead", [], undefined, hellos),
+    })
+    expect(hellos[0]).not.toHaveProperty("harness_session")
+  })
+
   test("a caller bound by hello whose rules fail is still unlinked as a root, and $SCP_NAME may carry me/", async () => {
     const warned: string[] = []
     const bound = {
