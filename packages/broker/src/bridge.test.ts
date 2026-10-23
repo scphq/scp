@@ -841,7 +841,7 @@ describe("bridge", () => {
     })
     cleanups.push(() => broker.stop())
     const impl = await agent(broker, "impl")
-    broker.core.mirror("b", [{ address: "me/review", kind: "agent", presence: "online" }])
+    broker.core.mirror("b", [{ address: "me/review", kind: "agent", presence: "online", parent_ep: null, depth: 0 }])
     expect(await code(impl.request("send", { to: "b/review", body: "x" }))).toBe("unavailable")
     expect(broker.bridge!.status()).toMatchObject({ enabled: true, connected: false, last_error: "no hub credential" })
   })

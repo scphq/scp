@@ -1366,7 +1366,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         return { endpoints: core.list({ ...(params as Parameters<FederatedCore["list"]>[0]), viewer, peekable: viewer === undefined }) }
       case "snapshot":
         return {
-          ...core.snapshot({ all: params.all === true, activity: typeof params.activity === "number" ? params.activity : undefined, viewer }),
+          ...core.snapshot({
+            all: params.all === true,
+            historic: params.historic === true,
+            activity: typeof params.activity === "number" ? params.activity : undefined,
+            viewer,
+          }),
           broker: brokerInfo(),
         }
       case "watch":
@@ -1438,7 +1443,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "admin":
         return core.admin(actor, params as Parameters<FederatedCore["admin"]>[1])
       case "peers":
-        return { peers: core.peers(viewerOf(s) ?? s.data.endpoint!, { unverified: !atTerminal(s) }) }
+        return {
+          peers: core.peers(viewerOf(s) ?? s.data.endpoint!, { unverified: !atTerminal(s), all: params.all === true, historic: params.historic === true }),
+        }
       case "why":
         return core.why(actor, required(params, "from"), required(params, "to"))
       case "peek":

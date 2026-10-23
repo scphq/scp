@@ -62,6 +62,7 @@ describe("subagent endpoints", () => {
     const root = hook(9).endpoint
     const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
     const peer = core.claim({ handle: "peer", harness: "codex" }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     core.send(peer.id, { to: sub.address, body: "for the subagent" })
     core.send(peer.id, { to: root.address, body: "for the root" })
     expect(core.inject(root.id, { transient: true, process: key(9) }).messages.map((m) => m.body.text)).toEqual(["for the root"])
@@ -149,7 +150,9 @@ describe("subagent endpoints", () => {
     const { core, hook, clock } = setup()
     hook(9)
     const first = hook(9, { subagent: { id: "aceb01", type: "Explore" } }).endpoint
-    core.send(core.claim({ handle: "peer", harness: "codex" }).endpoint.id, { to: first.address, body: "for the first" })
+    const peer = core.claim({ handle: "peer", harness: "codex" }).endpoint.id
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
+    core.send(peer, { to: first.address, body: "for the first" })
     clock.now += 3600_000
     hook(9)
     const second = hook(9, { subagent: { id: "aceb02", type: "Explore" } }).endpoint
@@ -385,6 +388,7 @@ describe("a subagent woken through its root", () => {
     const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
     core.status(sub.id, "done", undefined)
     const peer = core.claim({ handle: "peer", harness: "codex" }).endpoint
+    core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
     return { core, clock, db, hook, root, sub, peer }
   }
 

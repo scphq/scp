@@ -434,6 +434,7 @@ describe("the check", () => {
     claim("x", 4)
     core.rulesSet(as("main"), { endpoint: "w", in: [], out: [] })
     core.admin(HUMAN, { action: "grant", subject: "adm", tree: "main" })
+    core.rulesSet(HUMAN, { endpoint: "adm", out: ["*"] })
     const refusal = (from: string) => {
       try {
         core.send(ids[from]!, { to: "w", body: "hi" })
@@ -724,6 +725,7 @@ describe("discovery", () => {
     claim("w", 2, [1])
     claim("x", 3)
     core.rulesSet(as("w"), { scope: "parent" })
+    core.rulesSet(HUMAN, { endpoint: "x", out: ["*"] })
     expect(core.why(as("w"), "w", "main")).toMatchObject({ allowed: true })
     expect(code(() => core.why(as("w"), "w", "x"))).toBe("not_found")
     expect(code(() => core.why(as("x"), "main", "w"))).toBe("not_found")
@@ -741,6 +743,7 @@ describe("discovery", () => {
     claim("x", 5)
     core.rulesSet(as("main"), { endpoint: "w", in: [], out: [] })
     core.admin(HUMAN, { action: "grant", subject: "adm", tree: "main" })
+    core.rulesSet(HUMAN, { endpoint: "adm", out: ["*"] })
     expect(core.why(as("main"), "w", "v")).toMatchObject({
       allowed: false,
       reasons: ["you limit w's messages to nobody; widen with swarm rules widen w --out ep:v"],
@@ -1433,7 +1436,7 @@ describe("group selectors need a group", () => {
     expect(send("x", "main")).toBe("policy_refused")
     core.group(as("q"), { action: "create", name: "quiet" })
     core.group(as("q"), { action: "add", name: "quiet" })
-    expect(send("q", "w")).toBeUndefined()
+    expect(send("q", "x")).toBeUndefined()
   })
 
   test("a group dropped and remade in the same millisecond is another group", () => {

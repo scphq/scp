@@ -141,6 +141,24 @@ brokerSuite("broker scopes", (start) => {
     expect(addresses((await main.request<{ endpoints: View[] }>("list")).endpoints)).toEqual(["me/", "me/main", "me/orch", "me/w"]);
   });
 
+  test("an agent with no list reaches its own tree and the roots until the human widens it", async () => {
+    const broker = await start();
+    await placed(broker, "main", 100);
+    const orch = await placed(broker, "orch", 200, [100]);
+    await placed(broker, "w", 300, [200, 100]);
+    const r2 = await placed(broker, "r2", 400);
+    await placed(broker, "c2", 500, [400]);
+    expect(addresses((await orch.request<{ peers: View[] }>("peers", { all: true, historic: true })).peers)).toEqual(["me/", "me/main", "me/r2", "me/w"]);
+    expect(addresses((await r2.request<{ peers: View[] }>("peers", { historic: true })).peers)).toEqual(["me/", "me/c2", "me/main"]);
+    expect(await refusal(send(orch, "c2"))).toBe("not_found");
+    expect(await refusal(send(r2, "w"))).toBe("not_found");
+    await send(orch, "r2");
+    const listed = (await r2.request<{ endpoints: View[] }>("list", { historic: true })).endpoints.find((e) => e.address === "me/r2");
+    expect(Date.parse(String(listed?.active_at))).not.toBeNaN();
+    await (await broker.human()).request("rules_set", { endpoint: "r2", out: ["*"] });
+    await send(r2, "w");
+  });
+
   test("hidden and missing endpoints have indistinguishable errors", async () => {
     const broker = await start();
     const { w } = await fleet(broker);

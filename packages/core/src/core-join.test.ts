@@ -28,6 +28,7 @@ function setup() {
   })
   const hook = (pid: number, extra: Record<string, unknown> = {}) => core.claim(claim(pid, extra), { transient: true })
   const peer = core.claim({ handle: "peer", harness: "codex" }).endpoint
+  core.rulesSet(HUMAN, { endpoint: "peer", out: ["*"] })
   return { core, clock, claim, hook, peer }
 }
 

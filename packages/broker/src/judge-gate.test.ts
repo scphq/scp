@@ -70,6 +70,7 @@ describe("judge gate", () => {
       answer({ verdict: "hold", categories: ["private"], reason: "review" }),
     ])
     const parent = await agent(broker, "parent")
+    broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "parent", in: ["*"], out: ["*"] })
     const child = await agent(broker, "child")
     await agent(broker, "other")
     broker.core.adopt({ kind: "human", tty: true }, { endpoint: "child", parent: "other" })

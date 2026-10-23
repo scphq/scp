@@ -62,7 +62,7 @@ export function tabBody(s: MemberSession, tab: OrgTab, data: Snapshot, now: numb
     case "members":
       return html`${notice("Members are managed with the scp-relay account CLI.")}`;
     case "graph":
-      return graphTab({ org: s.org, role: s.member.role }, g);
+      return graphTab({ org: s.org, role: s.member.role }, g, { historic: true });
   }
 }
 
@@ -71,7 +71,7 @@ export function dashboardPage(s: MemberSession, tab: DashboardTab, data: Snapsho
   const title = tab === "overview" ? s.org.name : `${s.org.name} ${tab === "graph/full" ? "graph" : tab}`;
   if (tab === "graph/full") {
     const g = data.graph ? identify(data.graph, identities(s.members.map((member) => ({ user_id: member.id, email: member.name })))) : null;
-    return page(s, { title, bare: true, head: graphAssets() }, graphFull(s.org, g));
+    return page(s, { title, bare: true, head: graphAssets() }, graphFull(s.org, g, { historic: true }));
   }
   const body = tabBody(s, tab, data, now);
   if (tab === "graph") return page(s, { title, nav: "orgs", head: graphAssets() }, body);

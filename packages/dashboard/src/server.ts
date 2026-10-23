@@ -257,7 +257,9 @@ export function createDashboard(options: Options) {
       }
       if (get && ["/v1/dashboard/overview", "/v1/dashboard/graph"].includes(path)) {
         if (!ctx.identity) return json(res, 401, { error: "signed_out" });
-        const response = await call(req, path + (path.endsWith("/graph") ? url.search : ""), ctx.session);
+        const historic = url.searchParams.get("historic");
+        const query = path.endsWith("/graph") ? url.search : historic === null ? "" : `?${new URLSearchParams({ historic })}`;
+        const response = await call(req, path + query, ctx.session);
         if (response.status === 401) {
           endSession(res, ctx.key);
           return json(res, 401, { error: "signed_out" });

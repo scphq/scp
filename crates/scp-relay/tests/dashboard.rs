@@ -470,3 +470,68 @@ async fn trusted_headers_use_tcp_peer_and_native_rejection_is_terminal() {
         task.abort();
     }
 }
+
+#[tokio::test]
+async fn historic_dashboard_query_includes_flagged_agents() {
+    let s = Server::new().await;
+    let (token, _) = s.mint("team", false).await;
+    let account = s.store.account("team").await.unwrap().unwrap();
+    let old = now_ms() - 3_700_000;
+    for (id, kind) in [("stale", "agent"), ("human", "human")] {
+        s.store
+            .put_endpoint(
+                &account.id,
+                Endpoint {
+                    id: id.into(),
+                    machine: "host".into(),
+                    handle: id.into(),
+                    kind: kind.into(),
+                    token_hash: None,
+                    last_seen: Some(old),
+                    created_at: old,
+                    fields: json!({"presence":"online"}).to_string(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let client = reqwest::Client::new();
+    for (route, key) in [("overview", "endpoints"), ("graph", "nodes")] {
+        for query in [
+            "",
+            "?historic=0",
+            "?historic=false",
+            "?historic=1",
+            "?historic=true",
+        ] {
+            let response = client
+                .get(format!("{}/v1/dashboard/{route}{query}", s.url))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let body: Value = response.json().await.unwrap();
+            let rows = body[key].as_array().unwrap();
+            let include = matches!(query, "?historic=1" | "?historic=true");
+            assert_eq!(
+                rows.len(),
+                if include { 2 } else { 1 },
+                "{route}{query}: {body}"
+            );
+            assert!(
+                rows.iter()
+                    .find(|e| e["kind"] == "human")
+                    .unwrap()
+                    .get("historic")
+                    .is_none()
+            );
+            if include {
+                assert_eq!(
+                    rows.iter().find(|e| e["kind"] == "agent").unwrap()["historic"],
+                    true
+                );
+            }
+        }
+    }
+}

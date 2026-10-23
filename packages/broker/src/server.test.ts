@@ -108,6 +108,7 @@ describe("broker", () => {
     const { broker } = await setup()
     const HUMAN = { kind: "human", tty: true } as const
     const parent = await agent(broker, "parent")
+    broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "parent", in: ["*"], out: ["*"] })
     const child = await agent(broker, "child")
     const stranger = await agent(broker, "stranger")
     await agent(broker, "loose")
@@ -128,6 +129,7 @@ describe("broker", () => {
   test("human and hook connections cannot accept; lineage cannot accept or adopt an ancestor; self can accept", async () => {
     const { broker } = await setup()
     const parent = await agent(broker, "parent")
+    broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "parent", in: ["*"], out: ["*"] })
     await agent(broker, "other")
     const key = "pid:200:Thu-Oct-15-10:00:00-2026"
     const claim = { handle: "child", harness: "codex", process: key, session: key, lineage: [key] }

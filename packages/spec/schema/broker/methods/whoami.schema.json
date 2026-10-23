@@ -158,6 +158,19 @@
         "waking": {
           "const": true
         },
+        "active_at": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "historic": {
+          "const": true
+        },
         "peek": {
           "anyOf": [
             {

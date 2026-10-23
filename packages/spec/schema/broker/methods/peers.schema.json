@@ -5,7 +5,14 @@
   "$defs": {
     "Params": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "all": {
+          "type": "boolean"
+        },
+        "historic": {
+          "type": "boolean"
+        }
+      },
       "additionalProperties": false
     },
     "Result": {

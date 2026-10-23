@@ -22,12 +22,12 @@ function world() {
   const fenced = broker.claim({ handle: "fenced", harness: "claude-code", scope: "tree" }).endpoint.id
   const open = broker.claim({ handle: "open", harness: "claude-code" }).endpoint.id
   const views = [
-    { address: "me/review", kind: "agent", harness: "codex", presence: "online" },
+    { address: "me/review", kind: "agent", harness: "codex", presence: "online", parent_ep: null, depth: 0 },
     { address: "me/", kind: "human", presence: "online" },
   ]
   hub.mirror("laptop", [
-    { address: "me/fenced", kind: "agent", presence: "online" },
-    { address: "me/open", kind: "agent", presence: "online" },
+    { address: "me/fenced", kind: "agent", presence: "online", parent_ep: null, depth: 0 },
+    { address: "me/open", kind: "agent", presence: "online", parent_ep: null, depth: 0 },
   ])
   hub.mirror("desk", views)
   broker.mirror(
@@ -175,6 +175,8 @@ describe("scopes with other machines", () => {
 
   test("a mirrored cap's widened entry is clipped by its widener's mirrored scope, as the local core clips it; an unmirrored widener admits nothing", () => {
     const { hub } = world()
+    const caps = { caps: [{ id: "cap_h", dir: "out", by: "human", sels: [{ sel: "*" }] }], allow: {} }
+    hub.mirror("laptop", [{ address: "me/open", kind: "agent", presence: "online", parent_ep: null, depth: 0, caps }])
     const laptopOpen = hub.remoteEndpoint("laptop", "open")
     const desk = (leadRules: unknown, via = "ep:lead") => {
       hub.mirror("desk", [
@@ -202,6 +204,16 @@ describe("scopes with other machines", () => {
   })
 })
 
+test("a cap the human's grant set crosses to the hub as the human's, so it still leaves the default reach there", () => {
+  const laptop = setup({ machine: "laptop", aliases: ["ada"] })
+  laptop.claim({ handle: "main", harness: "codex" })
+  const token = laptop.grant(HUMAN, { under: "main", name: "kid", out: ["*"] }).token
+  const kid = laptop.claim({ handle: "kid", harness: "codex", grant: token }).endpoint.id
+  const caps = laptop.mirrorScope(kid).caps?.caps ?? []
+  expect(caps.some((cap) => cap.dir === "out" && cap.by === "human")).toBe(true)
+  expect(caps.some((cap) => cap.by === "gone")).toBe(false)
+})
+
 const pid = (n: number) => `pid:${n}:Thu-Oct-15-10:00:00-2026`
 const HUMAN: ScopeActor = { kind: "human", tty: true }
 
@@ -220,7 +232,8 @@ function desks() {
     ids[handle] = desk.claim({ handle, harness: "codex", process: pid(lineage[0]), lineage: lineage.map(pid) }).endpoint.id
   }
   const open = laptop.claim({ handle: "open", harness: "claude-code" }).endpoint.id
-  hub.mirror("laptop", [{ address: "me/open", kind: "agent", harness: "claude-code", presence: "online" }])
+  laptop.rulesSet(HUMAN, { endpoint: "open", out: ["*"] })
+  hub.mirror("laptop", [{ address: "me/open", kind: "agent", harness: "claude-code", presence: "online", ...laptop.mirrorScope(open) }])
   const laptopOpen = hub.remoteEndpoint("laptop", "open")
   const as = (handle: string): ScopeActor => ({ kind: "endpoint", id: ids[handle]!, auth: "session" })
   const views = () =>

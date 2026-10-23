@@ -68,7 +68,10 @@ function setup() {
   async function bridge(machine: string, handle: string): Promise<FakeSocket> {
     const socket = connect()
     await ok(socket, "hello", { protocol: PROTOCOL, machine, bridge: true })
-    await ok(socket, "mirror", { full: true, endpoints: [{ address: `me/${handle}`, kind: "agent", harness: "test-harness", presence: "online" }] })
+    await ok(socket, "mirror", {
+      full: true,
+      endpoints: [{ address: `me/${handle}`, kind: "agent", harness: "test-harness", presence: "online", parent_ep: null, depth: 0 }],
+    })
     await ok(socket, "subscribe", { after: 0 })
     return socket
   }

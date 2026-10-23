@@ -67,6 +67,7 @@ brokerSuite("broker framing and hello", (start) => {
       deferredShowS: 600,
       deferredSettleMs: 2000,
       listOfflineWithinS: 86400,
+      historicAfterS: 3600,
       handleBoundS: 2592000,
       idempotencyS: 86400,
       auditKeepS: 2592000,

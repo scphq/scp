@@ -9,6 +9,9 @@
         "all": {
           "type": "boolean"
         },
+        "historic": {
+          "type": "boolean"
+        },
         "harness": {
           "type": "string"
         },

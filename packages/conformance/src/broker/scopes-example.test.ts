@@ -36,7 +36,7 @@ brokerSuite("broker scoped fleet", (start) => {
       "orch-a": [true, null, true, true, true, false, true, true],
       "orch-b": [true, true, null, false, false, true, false, true],
       a1: [false, true, false, null, true, false, false, true],
-      "app-main": [false, true, false, false, false, false, null, true],
+      "app-main": [false, false, false, false, false, false, null, true],
       human: [true, true, true, true, true, true, true, null],
     };
     for (const [from, row] of Object.entries(table)) {

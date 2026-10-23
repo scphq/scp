@@ -15,6 +15,11 @@ impl AccountHub {
         let f = fields(e);
         let mut view = json!({"id":e.id,"address":self.address(e),"machine":e.machine,"kind":e.kind,"harness":f["harness"],"model":f["model"],"cwd":f["cwd"],"labels":f.get("labels").cloned().unwrap_or_else(||json!({})),"status":f["status"],"presence":f.get("presence").cloned().unwrap_or(json!("offline")),"last_seen":e.last_seen.map(iso),"title":f["title"]});
         if e.kind == "agent" {
+            let now = crate::now_ms();
+            view["active_at"] = json!(iso(self.active_at(e, now)));
+            if self.historic(e, now) {
+                view["historic"] = json!(true);
+            }
             for key in [
                 "tree",
                 "parent_ep",

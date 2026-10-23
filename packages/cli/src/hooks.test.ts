@@ -673,6 +673,7 @@ for (const mode of hookModes)
 
       const sendTo = (handle: string, body: string) => {
         const peer = broker.core.claim({ handle: "inject-peer", harness: "cli" }).endpoint.id
+        broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "inject-peer", out: ["*"] })
         const sent = broker.core.send(peer, { to: handle, body })
         broker.core.disconnect(peer)
         return sent.id
@@ -1117,6 +1118,7 @@ for (const mode of hookModes)
         await hook(["claude"], { hook_event_name: "SessionStart", cwd: project }, env)
         const stop = () => hook(["claude"], { hook_event_name: "Stop", cwd: project, stop_hook_active: false }, env)
         const peer = broker.core.claim({ handle: "inject-asker", harness: "cli" }).endpoint.id
+        broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "inject-asker", in: ["*"], out: ["*"] })
         const asked = broker.core.send(peer, { to: "inject-required", body: "must know", kind: "request", require_reply: true })
         const tool = await hook(["claude"], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Read", tool_input: {} }, env)
         expect(json(tool.stdout).hookSpecificOutput!.additionalContext).toContain("</relay-message>\n[reply required: the sender waits for your relay_reply]")
@@ -1137,6 +1139,7 @@ for (const mode of hookModes)
         await hook(["claude"], { hook_event_name: "SessionStart", cwd: project }, env)
         const stop = () => hook(["claude"], { hook_event_name: "Stop", cwd: project, stop_hook_active: false }, env)
         const peer = broker.core.claim({ handle: "inject-lead", harness: "cli" }).endpoint.id
+        broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "inject-lead", in: ["*"], out: ["*"] })
         const asked = broker.core.send(peer, { to: "inject-nudge", body: "NUDGE-BODY-MARKER", kind: "request" })
         const held = await stop()
         expect(held.stderr).toBe("")

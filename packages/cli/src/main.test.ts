@@ -653,6 +653,8 @@ describe("swarm", () => {
       await lead.hello({ claim: { handle: "fold-lead", harness: "codex" } })
       await kid.hello({ claim: { handle: "fold-kid", harness: "codex", grant: (await lead.grant({ name: "fold-kid" })).token } })
       const folded = /\d+ other sessions? \(--all or --roots shows them\)/
+      expect((await swarm(["whoami", "--as", "fold-viewer"])).code).toBe(0)
+      broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "fold-viewer", out: ["*"] })
       for (const args of [["list"], ["list", "--tree"], ["peers", "--as", "fold-viewer"]]) {
         const shown = await swarm(args)
         expect([args, shown.stdout.includes("me/lone-root"), shown.stdout.includes("me/fold-lead"), shown.stdout.includes("me/fold-kid")]).toEqual([

@@ -77,7 +77,7 @@ const TABLE: Record<(typeof ROWS)[number], Partial<Record<(typeof COLUMNS)[numbe
   "orch-a": { main: true, "orch-b": true, a1: true, a2: true, b1: false, "app-main": true, human: true },
   "orch-b": { main: true, "orch-a": true, a1: false, a2: false, b1: true, "app-main": false, human: true },
   a1: { main: false, "orch-a": true, "orch-b": false, a2: true, b1: false, "app-main": false, human: true },
-  "app-main": { main: false, "orch-a": true, "orch-b": false, a1: false, a2: false, b1: false, human: true },
+  "app-main": { main: false, "orch-a": false, "orch-b": false, a1: false, a2: false, b1: false, human: true },
   human: { main: true, "orch-a": true, "orch-b": true, a1: true, a2: true, b1: true, "app-main": true },
 }
 
@@ -103,7 +103,12 @@ test("the who-can-message-whom table holds through send and why", () => {
     }
   }
   expect(core.why(HUMAN, "main", "a1").reasons).toEqual(["me/main is an ancestor of me/a1: scopes never stop it"])
-  expect(core.why(HUMAN, "app-main", "a1").reasons.at(-1)).toContain("who may message a1")
+  expect(core.why(HUMAN, "app-main", "a1").reasons.at(-1)).toBe(
+    "out(me/app-main) has the default reach: its own tree and the roots; only the human, the policy or a widening reaches further",
+  )
+  expect(core.why(HUMAN, "app-main", "orch-a").reasons.at(-1)).toBe(
+    "out(me/app-main) has the default reach: its own tree and the roots; only the human, the policy or a widening reaches further",
+  )
   expect(core.why(HUMAN, "main", "app-main").reasons.at(-1)).toContain("out(me/main) admits only its own fleet")
   expect(core.why(HUMAN, "app-main", "main").reasons.at(-1)).toContain("who may message main")
   const refused = core.log({ scope: true }).filter((row) => row.event === "scope_refused")
@@ -197,6 +202,7 @@ test("the widening steps apply in order, each with its audit row", () => {
   expect(send("a1", "a4")).toBe("loop_guard")
   expect(send("orch-b", "main")).toBe("loop_guard")
   expect(send("a1", "human")).toBeUndefined()
+  core.rulesSet(HUMAN, { endpoint: "app-main", out: ["ep:orch-a"] })
   expect(send("app-main", "orch-a")).toBeUndefined()
   expect(core.inbox(ids.human!).some((m) => m.kind === "status" && m.body.text.includes("paused the tree of me/main"))).toBe(true)
   expect(core.inbox(ids.main!).some((m) => m.kind === "status" && m.body.text.includes("paused the tree of me/main"))).toBe(true)

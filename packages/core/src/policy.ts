@@ -73,6 +73,8 @@ export interface ScopeSubject {
   rootHandle: string
   machine: string | null
   local: boolean
+  /** false for another machine's row its machine did not mirror as a root; absent, a row with no ancestors is a root */
+  root?: boolean
 }
 
 export interface PolicySubject {

@@ -18,7 +18,7 @@ use scp_relay_store::*;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
-/// Runtime hub limits; None removes a cap. Durations always remain finite.
+/// Runtime hub limits; None removes a cap. Operational durations remain finite.
 #[derive(Clone, Debug)]
 pub struct Limits(pub BTreeMap<String, Option<u64>>);
 impl Default for Limits {
@@ -42,6 +42,7 @@ impl Default for Limits {
                 ("mcpWaitS", Some(50)),
                 ("revalidateMs", Some(300000)),
                 ("deniedS", Some(3600)),
+                ("historicAfterS", Some(3600)),
             ]
             .into_iter()
             .map(|(k, v)| (k.into(), v))
@@ -50,7 +51,7 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    /// Apply key=value or key=Infinity, rejecting unknown keys and infinite durations.
+    /// Apply key=value or key=Infinity, rejecting unknown keys and infinite operational durations.
     pub fn apply(&mut self, raw: &str) -> std::result::Result<(), String> {
         let (key, value) = raw.split_once('=').ok_or("limit must be key=value")?;
         if !self.0.contains_key(key) {

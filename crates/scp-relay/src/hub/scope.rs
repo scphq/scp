@@ -292,6 +292,29 @@ fn lists(e: &Endpoint, dir: &str) -> Vec<Vec<Value>> {
     }
     out
 }
+/// who set each of `lists(e, dir)`: `self` for the endpoint's own rules, else the cap's `by`
+fn setters(e: &Endpoint, dir: &str) -> Vec<String> {
+    let f = fields(e);
+    let mut out = Vec::new();
+    if f["rules"][dir].is_array() {
+        out.push("self".to_owned());
+    }
+    if let Some(caps) = f["caps"]["caps"].as_array() {
+        for cap in caps.iter().filter(|cap| cap["dir"] == dir) {
+            out.push(string(cap, "by").to_owned());
+        }
+    }
+    out
+}
+/// what an agent with no list reaches out to: its own tree, the roots, contacts' endpoints and every non-agent
+fn default_reach(e: &Endpoint, x: &Endpoint) -> bool {
+    e.kind != "agent"
+        || !fields(e)["xaccount"].is_null()
+        || same_tree(e, x)
+        || !fields(x)["xaccount"].is_null()
+        || (fields(x)["parent_ep"].is_null() && (x.machine.is_empty() || fields(x)["depth"] == 0))
+        || x.kind != "agent"
+}
 fn admits(
     e: &Endpoint,
     dir: &str,
@@ -307,15 +330,21 @@ fn admits(
     let scoped = !lists(e, "in").is_empty() || !lists(e, "out").is_empty();
     if !scoped {
         trail.pop();
-        return true;
+        return dir == "in" || default_reach(e, x);
     }
     let cross = !same_tree(e, x);
+    let free = dir == "in" || default_reach(e, x);
     let lists = lists(e, dir);
+    let setters = setters(e, dir);
     let result = if lists.is_empty() {
         !cross
     } else {
-        lists.iter().all(|list| {
+        lists.iter().zip(&setters).all(|(list, by)| {
+            let leaves = free || by == "human" || by == "policy";
             list.iter().any(|entry| {
+                if !leaves && entry.get("via").and_then(Value::as_str).is_none() {
+                    return false;
+                }
                 let sel = string(entry, "sel");
                 if !matches(sel, x, e, all)
                     || (cross
@@ -484,5 +513,80 @@ mod tests {
             );
         }
         assert!(selector(&json!("handle:agent-?*")));
+    }
+}
+
+#[cfg(test)]
+mod default_reach_tests {
+    use super::*;
+
+    fn row(handle: &str, tree: &str, parent: Option<&str>) -> Endpoint {
+        Endpoint {
+            id: handle.into(),
+            machine: String::new(),
+            handle: handle.into(),
+            kind: "agent".into(),
+            token_hash: None,
+            last_seen: None,
+            created_at: 0,
+            fields: json!({"tree":tree,"parent_ep":parent}).to_string(),
+        }
+    }
+
+    #[test]
+    fn default_reach_and_explicit_widening() {
+        let r1 = row("r1", "r1", None);
+        let w1 = row("w1", "r1", Some("r1"));
+        let r2 = row("r2", "r2", None);
+        let w2 = row("w2", "r2", Some("r2"));
+        let sibling = row("sibling", "r1", Some("r1"));
+        let rows = vec![
+            r1.clone(),
+            w1.clone(),
+            r2.clone(),
+            w2.clone(),
+            sibling.clone(),
+        ];
+        for (from, to, expected) in [
+            (&w1, &r2, true),
+            (&r1, &r2, true),
+            (&w1, &w2, false),
+            (&r1, &w2, false),
+            (&w1, &sibling, true),
+            (&w1, &r1, true),
+        ] {
+            assert_eq!(
+                allowed(from, to, &rows, false, false),
+                expected,
+                "{} -> {}",
+                from.handle,
+                to.handle
+            );
+        }
+        let mut wide = w1.clone();
+        wide.fields = json!({"tree":"r1","parent_ep":"r1","rules":{"out":["*"]}}).to_string();
+        assert!(!allowed(&wide, &w2, &rows, false, false));
+        wide.fields = json!({"tree":"r1","parent_ep":"r1","caps":{"caps":[{"id":"c","dir":"out","by":"human","sels":[{"sel":"*"}]}]}}).to_string();
+        assert!(allowed(&wide, &w2, &rows, false, false));
+        wide.fields = json!({"tree":"r1","parent_ep":"r1","caps":{"caps":[{"id":"c","dir":"out","by":"r1","sels":[{"sel":"*"}]}]}}).to_string();
+        assert!(!allowed(&wide, &w2, &rows, false, false));
+        let mut remote = w2.clone();
+        remote.machine = "remote".into();
+        for (f, expected) in [
+            (json!({}), false),
+            (json!({"parent_ep":"r2","depth":1}), false),
+            (json!({"parent_ep":null,"depth":0}), true),
+            (json!({"parent_addr":"other/root"}), false),
+            (
+                json!({"parent_ep":null,"depth":0,"parent_addr":"other/root"}),
+                true,
+            ),
+        ] {
+            remote.fields = f.to_string();
+            assert_eq!(allowed(&w1, &remote, &rows, false, false), expected);
+        }
+        let mut contact = remote;
+        contact.fields = json!({"xaccount":"peer"}).to_string();
+        assert!(allowed(&w1, &contact, &rows, false, false));
     }
 }

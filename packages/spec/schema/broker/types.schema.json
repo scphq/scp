@@ -392,6 +392,19 @@
         },
         "waking": {
           "const": true
+        },
+        "active_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "historic": {
+          "const": true
         }
       },
       "required": [
@@ -696,6 +709,9 @@
           "enum": [
             "local"
           ]
+        },
+        "historic": {
+          "const": true
         }
       },
       "required": [
@@ -2319,6 +2335,13 @@
           ],
           "minimum": 1
         },
+        "historicAfterS": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
         "idempotencyS": {
           "type": "integer",
           "const": 86400
@@ -2458,6 +2481,7 @@
         "handleBoundS",
         "endpointRetireS",
         "endpointRetireMax",
+        "historicAfterS",
         "idempotencyS",
         "auditKeepS",
         "noteChars",

@@ -140,6 +140,7 @@ describe("broker, subagent endpoints", () => {
     expect(broker.core.whoami(sub.endpoint!.id).wake).toBe("channels")
     const peer = await open(broker)
     await peer.hello({ claim: { handle: "peer", harness: "codex" } })
+    broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "peer", out: ["*"] })
     const waiting = main.request<{ messages: { body: { text: string }; for?: { address: string; subagent: string } }[] }>("inbox", {
       wait_s: 5,
       offer: true,
@@ -166,6 +167,7 @@ describe("broker, subagent endpoints", () => {
     await hook.request("status", { state: "working" })
     const peer = await open(broker)
     await peer.hello({ claim: { handle: "peer", harness: "codex" } })
+    broker.core.rulesSet({ kind: "human", tty: true }, { endpoint: "peer", out: ["*"] })
     await peer.request("send", { to: sub.endpoint!.address, body: "late" })
     const waiting = main.request<{ messages: { body: { text: string } }[] }>("inbox", { wait_s: 5, offer: true })
     await Bun.sleep(50)

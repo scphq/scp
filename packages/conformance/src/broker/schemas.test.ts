@@ -106,7 +106,7 @@ describe("broker wire schemas", () => {
     const table = spec.slice(spec.indexOf("**Broker (`LIMITS`).**"), spec.indexOf("**Other local values.**"));
     const limits = Object.fromEntries([...table.matchAll(/`(\w+)` \| (\d+)/g)].map((match) => [match[1]!, Number(match[2])]));
     const configurable = [...table.slice(0, table.indexOf("| Name |")).matchAll(/`(\w+)`/g)].map((match) => match[1]!).filter((key) => key in limits);
-    expect(configurable.sort()).toEqual(["endpointRetireMax", "endpointRetireS"]);
+    expect(configurable.sort()).toEqual(["endpointRetireMax", "endpointRetireS", "historicAfterS"]);
     const schema = JSON.parse(readFileSync(join(schemaDir, "types.schema.json"), "utf8")).$defs.Limits;
     expect([...schema.required].sort()).toEqual(Object.keys(limits).sort());
     expect(validate("types.schema.json#/$defs/Limits", { ...limits, engineLimit: 42 })).toEqual([]);

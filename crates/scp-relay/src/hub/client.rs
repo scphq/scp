@@ -18,6 +18,9 @@ impl AccountHub {
                     let f = fields(e);
                     e.kind != "system"
                         && (p["all"] == true
+                            || p["historic"] == true
+                            || !self.historic(e, crate::now_ms()))
+                        && (p["all"] == true
                             || string(&f, "presence") != "offline"
                             || e.last_seen
                                 .is_some_and(|at| at > crate::now_ms() - 86400000))
@@ -50,6 +53,9 @@ impl AccountHub {
                     .filter(|e| {
                         e.kind != "system"
                             && (p["all"] == true
+                                || p["historic"] == true
+                                || !self.historic(e, crate::now_ms()))
+                            && (p["all"] == true
                                 || e.kind == "human"
                                 || fields(e)["presence"] != "offline"
                                 || e.last_seen
@@ -61,10 +67,18 @@ impl AccountHub {
                     .store
                     .events(&self.account_id, EventLog::Activity, 0)
                     .await?;
+                let shown: std::collections::HashSet<_> =
+                    endpoints.iter().filter_map(|e| e["id"].as_str()).collect();
                 let limit = p["activity"].as_u64().unwrap_or(20).min(1000) as usize;
                 let mut activity: Vec<_> = activity
                     .iter()
                     .rev()
+                    .filter(|event| {
+                        event
+                            .endpoint
+                            .as_deref()
+                            .is_none_or(|id| shown.contains(id))
+                    })
                     .take(limit)
                     .map(|event| {
                         let mut value = activity_view(event);

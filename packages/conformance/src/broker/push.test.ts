@@ -207,6 +207,7 @@ brokerSuite("broker push", (start) => {
     const sub = await broker.agent("sub", "codex", {}, { grant: childGrant.token });
     const peer = await broker.agent("peer");
     const human = await broker.human();
+    await human.request("rules_set", { endpoint: "peer", out: ["*"] });
     await main.request("send", { to: "w1", body: "parent" });
     await main.request("send", { to: "sub", body: "ancestor" });
     await sub.request("send", { to: "main", body: "descendant" });

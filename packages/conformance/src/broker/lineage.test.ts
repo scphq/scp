@@ -83,6 +83,7 @@ brokerSuite("broker lineage", (start) => {
     await broker.agent("other");
     const h = await broker.human();
     await h.request("adopt", { endpoint: "peer", parent: "other" });
+    await h.request("rules_set", { endpoint: "lead", in: ["*"], out: ["*"] });
     const result = await lead.request<{ requested: string }>("adopt", { endpoint: "peer" });
     expect(await peer.request("inbox")).toMatchObject({ messages: [{ id: result.requested, kind: "request", link: { parent: "me/lead" } }] });
     expect(await refusal(peer.request("link_accept", { id: result.requested }))).toBe("scope_refused");
@@ -101,6 +102,7 @@ brokerSuite("broker lineage", (start) => {
     await broker.agent("other");
     const h = await broker.human();
     await h.request("adopt", { endpoint: "peer", parent: "other" });
+    await h.request("rules_set", { endpoint: "lead", in: ["*"], out: ["*"] });
     const { requested: id } = await lead.request<{ requested: string }>("adopt", { endpoint: "peer" });
     await h.request("unlink", { endpoint: "peer" });
     const shell = await broker.wire();

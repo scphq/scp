@@ -22,7 +22,7 @@ function setup() {
   core.migrate()
   const sender = core.claim({ handle: "impl", harness: "test" }).endpoint.id
   const local = core.claim({ handle: "local", harness: "test" }).endpoint.id
-  core.mirror("b", [{ address: "me/review", kind: "agent", harness: "test", presence: "online" }])
+  core.mirror("b", [{ address: "me/review", kind: "agent", harness: "test", presence: "online", parent_ep: null, depth: 0 }])
   const link = startMesh({
     core,
     hooks: { wake: () => {}, fleet: () => {}, policyError: () => null },

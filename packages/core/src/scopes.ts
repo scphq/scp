@@ -131,10 +131,37 @@ export function scopeLists(node: ScopeNode, dir: ScopeDirection): ScopeList[] {
   return lists
 }
 
-/** whether anything scopes the endpoint, in either direction; an endpoint with nothing is open, other fleets included */
+/** whether anything scopes the endpoint, in either direction; an endpoint with nothing has the default reach ({@link admits}) */
 export function hasScope(node: ScopeNode): boolean {
   return scopeLists(node, "in").length > 0 || scopeLists(node, "out").length > 0
 }
+
+/** whether `x` is a root of this account: a placed agent with no parent here; another machine's row only when its machine mirrored it so */
+export function isRoot(x: ScopeNode): boolean {
+  const scope = x.subject.scope
+  return x.subject.account === undefined && !!scope && scope.ancestors.length === 0 && scope.root !== false
+}
+
+/**
+ * what an agent with no list reaches out to: its own tree, every root of its account, the endpoints of contacts (their allowlist is the
+ * widening) and every endpoint that is not an agent; a human, the relay or a contact's endpoint with no list reaches everything
+ */
+function defaultReach(e: ScopeNode, x: ScopeNode): boolean {
+  if (e.subject.kind !== "agent" || !e.subject.scope || e.subject.account !== undefined) return true
+  return !crossFleet(e, x) || x.subject.account !== undefined || x.subject.kind !== "agent" || !x.subject.scope || isRoot(x)
+}
+
+/**
+ * whether a list's admitting entry may take an agent past its default reach: a widened entry (its via clip bounds it by the widener's own
+ * reach), or a list the human or the policy set; an agent's own rules, an agent's group and an agent's plain cap only narrow within it
+ */
+function widens(world: ScopeWorld, list: ScopeList, entry: ScopeEntry): boolean {
+  if (entry.via !== undefined || list.by === "human" || list.by === "policy") return true
+  if (list.group !== undefined && world.group(list.group)?.policy === true) return true
+  return world.node(list.by)?.subject.kind === "human"
+}
+
+const BEYOND = "has the default reach: its own tree and the roots; only the human, the policy or a widening reaches further"
 
 /** whether `x` sits in another fleet than `e`: another tree, or not local; the human and the system endpoint are in none */
 export function crossFleet(e: ScopeNode, x: ScopeNode): boolean {
@@ -191,13 +218,20 @@ export function leavesFleet(world: ScopeWorld, list: ScopeList, entry: ScopeEntr
   return !!group && (group.policy || (group.pinned && (entry.group === group.id || entry.sel === "group:self")))
 }
 
-/** whether direction `dir` of `e` admits `x`: every list admits it, and another fleet only through a leaving selector in every list */
+/**
+ * whether direction `dir` of `e` admits `x`: every list admits it, and another fleet only through a leaving selector in every list; past an
+ * agent's default reach, out only through an entry that {@link widens} in every list
+ */
 export function admits(world: ScopeWorld, e: ScopeNode, dir: ScopeDirection, x: ScopeNode, memo: Memo = new Map()): Admission {
   const side = `${dir}(${e.address})`
   const lists = scopeLists(e, dir)
-  if (!hasScope(e)) return { ok: true, why: `${side} is open`, by: [] }
+  if (!hasScope(e)) {
+    if (dir === "in") return { ok: true, why: `${side} is open`, by: [] }
+    return defaultReach(e, x) ? { ok: true, why: `${side} has the default reach`, by: [] } : { ok: false, why: `${side} ${BEYOND}` }
+  }
   const cross = crossFleet(e, x)
   if (!lists.length) return cross ? { ok: false, why: `${side} admits only its own fleet` } : { ok: true, why: `${side} has no list`, by: [] }
+  const bounded = dir === "out" && !defaultReach(e, x)
   const hits: string[] = []
   const by: string[] = []
   for (const list of lists) {
@@ -205,7 +239,9 @@ export function admits(world: ScopeWorld, e: ScopeNode, dir: ScopeDirection, x: 
     if (!admitting.length) return { ok: false, why: limitText(world, e, list, dir, x, false) }
     const leaving = admitting.filter((entry) => leavesFleet(world, list, entry))
     if (cross && !leaving.length) return { ok: false, why: limitText(world, e, list, dir, x, true) }
-    const entry = cross ? leaving[0]! : admitting[0]!
+    const candidates = cross ? leaving : admitting
+    const entry = bounded ? candidates.find((candidate) => widens(world, list, candidate)) : candidates[0]!
+    if (!entry) return { ok: false, why: `${side} ${BEYOND}` }
     const via = entry.via === undefined ? "" : entry.via === "human" ? "the human" : (world.label?.(entry.via) ?? world.node(entry.via)?.address ?? entry.via)
     const sel = `${effectiveSelector(list, entry)}${via ? ` via ${via}` : ""}`
     by.push(sel)

@@ -48,6 +48,7 @@ export function graphData(g: IdentifiedGraph | null): Html {
       wake: n.wake && n.wake !== "none" ? n.wake : null,
       how: n.waking ? "its machine is waking" : n.wake && n.wake !== "none" ? wakeHow(n.wake) : null,
       parent: n.parent,
+      historic: n.historic === true,
     };
   });
   const machines = g.machines.filter((m) => m.kind !== "revoked").map((m) => ({ name: m.name, online: m.online, identity: m.identity ?? null }));
@@ -61,7 +62,9 @@ const trails = html`<span class="trails" role="group" aria-label="Message trail 
   (v) => html`<button type="button" data-trail="${v}" aria-pressed="${v === "1" ? "true" : "false"}">${v}x</button>`,
 )}</span></span>`;
 
-const filters = html`<label class="mini"><input type="checkbox" data-graph-nextturn> show next-turn idle</label><label class="mini"><input type="checkbox" data-graph-offline> show offline</label>`;
+/** the graph's filters; `historic`: the page asks its hub for historic agents too while the toggle is on */
+const filters = (historic: boolean): Html =>
+  html`<label class="mini"><input type="checkbox" data-graph-nextturn> show next-turn idle</label><label class="mini"><input type="checkbox" data-graph-offline> show offline</label>${historic ? html`<label class="mini"><input type="checkbox" data-graph-historic> show historic</label>` : ""}`;
 const legend = html`<p class="mini graph-legend"><span class="key spawn" aria-hidden="true"></span>spawned <span class="key msg" aria-hidden="true"></span>messages, last <span data-graph-minutes>15</span> min</p>`;
 
 /** the stamped script and stylesheet tags a graph page loads */
@@ -69,7 +72,7 @@ export const graphAssets = (): Html =>
   html`<script src="/app.js?v=${stamp(APP_JS)}" defer></script><script src="/graph.js?v=${stamp(graphScript())}" defer></script><link rel="stylesheet" href="/graph.css?v=${stamp(GRAPH_CSS)}">`;
 
 /** the full-window view's body: the canvas under a small overlay, and a hidden live region the refresh swaps */
-export function graphFull(org: { handle: string; name: string }, g: IdentifiedGraph | null): Html {
+export function graphFull(org: { handle: string; name: string }, g: IdentifiedGraph | null, options: { historic?: boolean } = {}): Html {
   return html`<div class="graph gfull" data-graph data-full data-events="/orgs/${org.handle}/events" aria-label="Live graph of agents and their links">
       ${canvas}
       <header class="g-over g-left">
@@ -80,7 +83,7 @@ export function graphFull(org: { handle: string; name: string }, g: IdentifiedGr
       </header>
       <div class="g-over g-right">
         ${legend}
-        ${filters}
+        ${filters(options.historic === true)}
         <span class="mini">${trails}</span>
       </div>
       <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
@@ -101,7 +104,7 @@ export async function graphTabPage(ctx: Ctx, user: User, handle: string): Promis
   return page(ctx, { title: `${m.org.name} graph`, nav: "orgs", head: graphAssets() }, graphTab(m, g));
 }
 
-export function graphTab(m: OrgChromeMember, g: IdentifiedGraph | null): Html {
+export function graphTab(m: OrgChromeMember, g: IdentifiedGraph | null, options: { historic?: boolean } = {}): Html {
   return html`${orgHeader(m, "graph")}
       <div class="graph gfull gtab" data-graph data-full data-events="/orgs/${m.org.handle}/events" aria-label="Live graph of agents and their links">
         ${canvas}
@@ -111,7 +114,7 @@ export function graphTab(m: OrgChromeMember, g: IdentifiedGraph | null): Html {
         </div>
         <div class="g-over g-right">
           ${legend}
-          <span class="g-acts">${filters}<a class="mini-link" href="/orgs/${m.org.handle}/graph/full">Full screen</a></span>
+          <span class="g-acts">${filters(options.historic === true)}<a class="mini-link" href="/orgs/${m.org.handle}/graph/full">Full screen</a></span>
           <span class="mini">${trails}</span>
         </div>
         <div hidden data-live="${REFRESH_MS}">${graphData(g)}</div>
@@ -172,6 +175,7 @@ export const GRAPH_CSS = `
 .graph-svg .node.online .disc{stroke:color-mix(in srgb,var(--fg) 34%,transparent)}
 .graph-svg .node.human .disc{stroke-dasharray:2.5 2}
 .graph-svg .node.offline{opacity:.5}
+.graph-svg .node.historic{opacity:.3}
 .graph-svg .node.offline .disc{stroke-dasharray:2 2}
 .graph-svg .node.enter{opacity:0}
 .graph-svg .node:hover .disc,.graph-svg .node:focus-visible .disc,.graph-svg .node.on .disc{stroke:var(--fg);stroke-width:1.5}
@@ -219,8 +223,12 @@ body.bare{overflow:hidden;height:100dvh;min-height:0}
  * under a badge strip, bands wrap into rows near the `aspect` the view wants, and with `hub` set the hub sits above a
  * single row or between the middle rows. Returns each machine's top left, each band's rect and the hub point
  */
-/** whether a node is drawn: online and wakeable idle always, next-turn idle and offline only when asked; an offline human stays while it talks */
+/**
+ * whether a node is drawn: online and wakeable idle always, next-turn idle, offline and historic only when asked; an offline human stays while
+ * it talks
+ */
 export const DRAWN_JS = `function drawn(n, o, talks) {
+  if (n.historic) return !!o.historic;
   if (n.presence === "offline") return o.offline || (n.kind === "human" && talks.has(n.address));
   if (n.presence === "idle" && n.kind === "agent" && !n.wake) return o.nextTurn;
   return true;
@@ -399,6 +407,7 @@ const canvas = root.querySelector(".graph-canvas");
 const tip = root.querySelector(".graph-tip");
 const offline = document.querySelector("[data-graph-offline]");
 const nextTurn = document.querySelector("[data-graph-nextturn]");
+const historic = document.querySelector("[data-graph-historic]");
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const load = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -462,7 +471,7 @@ function setView(v) {
 }
 
 function visible(g) {
-  const o = { offline: !!(offline && offline.checked), nextTurn: !!(nextTurn && nextTurn.checked) };
+  const o = { offline: !!(offline && offline.checked), nextTurn: !!(nextTurn && nextTurn.checked), historic: !!(historic && historic.checked) };
   const talks = new Set();
   for (const e of g.edges) if (e.kind === "message") { talks.add(e.from); talks.add(e.to); }
   const nodes = g.nodes.filter((n) => drawn(n, o, talks));
@@ -680,7 +689,8 @@ function paintNode(e) {
   const n = e.n, c = e.g.classList;
   for (const p of ["online", "idle", "offline"]) c.toggle(p, n.presence === p);
   c.toggle("human", n.kind === "human");
-  e.g.setAttribute("aria-label", n.name + ", " + n.presence + (n.how ? ", " + n.how : ""));
+  c.toggle("historic", !!n.historic);
+  e.g.setAttribute("aria-label", n.name + ", " + n.presence + (n.historic ? ", historic" : "") + (n.how ? ", " + n.how : ""));
   if (e.icon !== n.icon) {
     e.icon = n.icon;
     e.glyph.innerHTML = ICONS[n.icon] || ICONS.generic;
@@ -968,6 +978,10 @@ for (const [input, key] of [[offline, "scp.overview.offline"], [nextTurn, "scp.g
   if (!input) continue;
   input.checked = load(key) === "1";
   input.addEventListener("change", () => { save(key, input.checked ? "1" : "0"); apply(); });
+}
+if (historic) {
+  historic.checked = load("scp.graph.historic") === "1";
+  historic.addEventListener("change", () => { save("scp.graph.historic", historic.checked ? "1" : "0"); apply(); refresh(); });
 }
 let size = "";
 new ResizeObserver(() => { const s = canvas.clientWidth + "x" + (full ? canvas.clientHeight : 0); if (canvas.clientWidth && s !== size) { size = s; apply(); } }).observe(canvas);
