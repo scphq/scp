@@ -48,6 +48,21 @@ A new trusted publisher configuration expires if it does not complete a publish 
 Once a release has published every package through OIDC, delete the `NPM_TOKEN` secret, revoke the token, and set each package's publishing
 access to "Require two-factor authentication and disallow tokens".
 
+## Native hook packages
+
+The CLI has five exact optional dependencies, generated outside the workspaces at publish time:
+`@scp-dev/native-darwin-arm64`, `@scp-dev/native-darwin-x64`, `@scp-dev/native-linux-x64-gnu`,
+`@scp-dev/native-linux-arm64-gnu`, and `@scp-dev/native-linux-x64-musl`.
+Bootstrap each name once with a manual publish or the temporary `NPM_TOKEN` described above, then register
+`release.yml` as its trusted publisher with no environment. The same owner and repository settings apply.
+
+With no pending changesets, `release.yml` builds native artifacts before its release job, verifies their checksums,
+and publishes missing native versions with provenance before running changesets publish. Release PR runs skip native builds.
+`version-packages` runs `scripts/native-version.ts sync` after changesets, pinning all five dependencies to the CLI version.
+The generated packages and the Rust client's version read that same manifest; tests reject drift. Native packages are
+outside the workspaces, so `.changeset/config.json` needs no entries. Bun accepts their unpublished optional dependencies
+with registry warnings; no placeholder packages or install overrides are needed.
+
 ## NPM_TOKEN fallback
 
 The release step always passes `secrets.NPM_TOKEN` to npm as `NODE_AUTH_TOKEN`. npm (11.5.1 or later, from Node 24) tries the OIDC exchange
@@ -110,6 +125,5 @@ Already published npm versions are skipped; the dashboard publishes after the re
 versions are skipped too. A created release tag is never overwritten, and a manual run of the workflow skips a tagged
 version like a push does: complete a partial release by re-running the failed jobs of its run while its build artifacts last (7 days). A manual run releases a
 version whose push run failed before tagging.
-
 
 If only the crates job of a released version failed, run **Release relay** manually with `crates_only` checked. It publishes the crates missing for the anchor version from the release tag, and nothing else.

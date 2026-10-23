@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "injected",
+  "title": "injected",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "seqs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        },
+        "hold": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        },
+        "deferred": {
+          "type": "boolean"
+        },
+        "stop": {
+          "type": "boolean"
+        },
+        "push": {
+          "type": "boolean"
+        },
+        "nudged": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        },
+        "restated": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        },
+        "preamble": {
+          "type": "boolean"
+        },
+        "intro": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "seqs",
+        "hold"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "injected": {
+          "type": "integer"
+        },
+        "held": {
+          "type": "boolean"
+        },
+        "pushed": {
+          "type": "boolean"
+        },
+        "nudged": {
+          "type": "integer"
+        },
+        "restated": {
+          "type": "integer"
+        },
+        "briefed": {
+          "type": "boolean"
+        },
+        "introduced": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "injected"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

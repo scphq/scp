@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inject",
+  "title": "inject",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "stop": {
+          "type": "boolean"
+        },
+        "count": {
+          "type": "boolean"
+        },
+        "hold_unread": {
+          "type": "boolean"
+        },
+        "directives": {
+          "type": "boolean"
+        },
+        "wait_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/InjectResult"
+    }
+  }
+}

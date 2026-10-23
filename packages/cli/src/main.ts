@@ -273,7 +273,7 @@ agent sessions:
                                                  or handback and continues with it, at most 20 times a prompt; a prompt you type ends
                                                  the wait. On by default, since spawning is explicit; 0 turns it off, and
                                                  $SCP_PUSH_WAIT=S lowers it for one session (0 opts out)
-  ${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH]
+  ${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--undo] [--bin PATH] [--engine auto|ts|native]
                                                  mounts the shim and installs the hooks (--no-hooks: the shim only) in every installed
                                                  harness at user scope; prints the plan, --write applies it, --undo removes what it added
   ${CLI_NAME} setup --cowork [--bin PATH]            builds the Cowork plugin zip in SCP state, ready to upload in Claude
@@ -1702,6 +1702,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
     const bridge = await daemonBridge()
     broker = await startBroker({
       dir: relayDir(),
+      hook: (await import("./hook-rpc")).hookHandler(relayDir(), (await import("./relay")).configDir()),
       ...(bridge ? { bridge } : await (await import("./mesh")).meshBrokerOptions()),
       bridgeConfig: () => daemonBridge(),
       ...(idleMs !== undefined ? { idleMs } : {}),

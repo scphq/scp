@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "whoami",
+  "title": "whoami",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "../types.schema.json#/$defs/EndpointKind"
+        },
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presence": {
+          "$ref": "../types.schema.json#/$defs/Presence"
+        },
+        "status": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "state": {
+              "$ref": "../types.schema.json#/$defs/StatusState"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "note"
+          ],
+          "additionalProperties": false
+        },
+        "last_seen": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depth": {
+          "type": "integer"
+        },
+        "scope": {
+          "enum": [
+            "none",
+            "open",
+            "tree",
+            "parent",
+            "custom"
+          ]
+        },
+        "peekable": {
+          "enum": [
+            "local"
+          ]
+        },
+        "wake": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "const": "channels"
+            },
+            {
+              "const": "pi"
+            },
+            {
+              "const": "opencode-plugin"
+            },
+            {
+              "const": "codex-app-server"
+            },
+            {
+              "const": "claude-inbox"
+            },
+            {
+              "const": "agy-resume"
+            },
+            {
+              "const": "grok-resume"
+            },
+            {
+              "const": "muse-serve"
+            },
+            {
+              "const": "t3code"
+            },
+            {
+              "const": "spawn-resume"
+            },
+            {
+              "const": "codex-queue"
+            },
+            {
+              "type": "string",
+              "pattern": "^hook:"
+            }
+          ]
+        },
+        "wake_failed": {
+          "type": "string"
+        },
+        "wake_declined": {
+          "type": "string"
+        },
+        "waking": {
+          "const": true
+        },
+        "active_at": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "historic": {
+          "const": true
+        },
+        "peek": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/PeekLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peeked_by": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/PeekSeen"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "address",
+        "kind",
+        "harness",
+        "model",
+        "cwd",
+        "labels",
+        "title",
+        "presence",
+        "status",
+        "last_seen"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

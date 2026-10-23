@@ -206,7 +206,7 @@ Validation of a received line, in order:
 Every connection MUST begin with `hello`. Any other method on a connection that has not completed `hello` is refused `unauthorized` ("call hello first"), including unknown methods. A second `hello` is `invalid_params`.
 
 - `params.protocol` MUST equal `scp/1`. A broker MUST refuse any other value with `invalid_params`. There is no version negotiation: a peer that speaks another version is refused.
-- The result advertises `capabilities`, the features the server implements. Version 1 defines `inbox.wait` (long-poll inbox), `ask` (send and wait for a reply), `scopes` (rules, caps, `why`) and `groups`, which every broker and hub lists. A local broker also lists `peek` (section 13), `judge` (section 15) and `holds` (hold review, section 15.7), which a hub does not serve. A client MUST NOT use a feature the server does not list. The server ignores any capabilities a client sends.
+- The result advertises `capabilities`, the features the server implements. Version 1 defines `inbox.wait` (long-poll inbox), `ask` (send and wait for a reply), `scopes` (rules, caps, `why`) and `groups`, which every broker and hub lists. A local broker also lists `peek` (section 13), `judge` (section 15) and `holds` (hold review, section 15.7), which a hub does not serve. A local broker with a hook handler also lists `hook` (section 8.10). A client MUST NOT use a feature the server does not list. The server ignores any capabilities a client sends.
 
 Result of every `hello`:
 
@@ -225,6 +225,8 @@ Result of every `hello`:
 The binding modes and the parameters that select them are specified in section 6.6.
 
 ### 5.4 Server notifications
+
+A connection running `hook` MAY receive `hook_deadline {ends}` notifications, where `ends` is its revised deadline in epoch milliseconds (section 8.10).
 
 A connection that called `watch` receives `fleet` notifications. For a scoped viewer the broker filters events to endpoints the viewer can see and trims a message's recipient list to those.
 
@@ -374,7 +376,7 @@ Auth levels and their powers:
 | human, tty | The human at a terminal. | Sees everything, is exempt from scopes, may review judge holds, may grant admins, may lift inherited caps. Its sends are hop 0 and exempt from the daily cap. |
 | human, no tty | The human without a terminal. | Sends as an unverified human (section 10.4); may only narrow; may not set caps, grants, groups or admins (`scope_refused` "no terminal"). |
 | hook | A transient hook connection. | Only `event`, `status`, `whoami`, `inject`, `injected`, `peek_turn`, `stop_wait`, `prompted`, `title_infer`, `subagent_title`, `wake`. Scope methods are `scope_refused`; anything else is `unauthorized`. Never counted as connected. |
-| observer | An unbound observer. | Only `list`, `snapshot`, `watch`, `log`, `policy`, `policy_check`, `cloud_status`, `bridge_relink`, `why`; scope methods only with a `lineage`. Anything else is `unauthorized` ("this connection only observes"). |
+| observer | An unbound observer. | Only `list`, `snapshot`, `watch`, `log`, `policy`, `policy_check`, `cloud_status`, `bridge_relink`, `why`, and, when advertised, `hook` and `hook_commit` on a plain observer; scope methods only with a `lineage`. Anything else is `unauthorized` ("this connection only observes"). |
 
 - Lineage-bound connections are brief (they never count as connected).
 - A hook connection whose claim comes from a harness instance other than the endpoint's holding one receives empty results and its budgets do not count. Once the holding instance has ended, the endpoint is taken over.
@@ -817,6 +819,37 @@ Conformance depends on what a harness exposes, not on its vendor:
 Appendix G lists the delivery points by capability class (informative). How the reference integration binds each harness is described in `IMPLEMENTATION.md`.
 
 ---
+
+### 8.10 Hook RPC
+
+A local broker MAY implement `hook` to run the delivery flow on behalf of a thin client. It advertises the `hook` capability only when a handler is installed. The client first sends `hello {protocol: "scp/1", observe: true}` with no `self`, `lineage`, `grant`, `ticket` or `claim`. Only that plain observer may call `hook` and `hook_commit`. Without the capability the client MUST fall back to its direct hook implementation.
+
+`hook` takes a closed object with these fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `args` | string[] | Arguments after the literal `hook`, including harness, event and flags. |
+| `payload` | object | Parsed stdin, or `{}` for invalid JSON or a non-object. Shrunk as below. |
+| `cwd` | string? | The client's working directory, omitted if unavailable. |
+| `env` | object<string,string> | Only variables named in HOOK_ENV below. Missing variables stay absent. |
+| `origin`, `ends` | number | Process start and exit deadline, epoch milliseconds. |
+| `ppid` | positive integer | The client's parent pid. |
+| `procs` | object[], at most 64 | Ancestor chains from `ppid`, then from the pids in `CLAUDE_PID`, `OPENCODE_PID` and `SCP_HARNESS_PID`, skipping duplicates and stopping before pid 0. Each entry is closed: `{pid, ppid, start, args, comm?}`. `pid` is positive, `ppid` nonnegative, `start` is the E.3 start string or null, `args` is the full command line. `comm` is the command name and is required on an entry for `ppid`. |
+| `harness_pid` | positive integer? | Test override for harness pid derivation. |
+
+Malformed params are `invalid_params`. The broker derives the harness pid, keys and lineage only from the supplied environment and process table, following E.3, and does not spawn `ps` for a hook. Hook execution uses the client's environment, never the daemon's. A revised hook deadline sends `hook_deadline {ends}` on the same connection; the client moves its exit timer to that absolute deadline.
+
+The result is `{stdout?: string, stderr?: string, exit: 0, commit?: string}`. The client writes non-empty stdout followed by a newline, and stderr as at most one line followed by a newline. Only after the entire stdout write succeeds and before the deadline may it send `hook_commit {commit}`. The result of `hook_commit` is `{}`, after bounded confirmation work completes. Unknown, expired or other-connection tokens return `{}`. Closing the connection or passing the deadline before commit counts as not printed: messages MUST NOT be confirmed. Exit status is always 0; an agy client printing nothing emits `{}` and a newline.
+
+Payload shrink is deterministic. Measure the UTF-8 byte length of the encoded request line, including its newline. At most 245760 bytes is sent unchanged. Otherwise try cuts of 8192, 1024, then 128 Unicode code points: recursively cut every longer string value (keys unchanged), and every array to its first 64 elements. Each candidate starts from the original payload. Send the first fitting candidate. If none fits, retain only top-level numbers, booleans, null and strings of at most 128 code points.
+
+HOOK_ENV is the JSON array in `schema/broker/hook-env.json`:
+
+```json
+["ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_IS_COWORK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_WORKSPACE_HOST_PATHS", "CLAUDE_PID", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_THREAD_ID", "GROK_HOOK_EVENT", "GROK_SESSION_ID", "HOME", "MUSE_SESSION_ID", "OPENCODE", "OPENCODE_PID", "PATH", "PWD", "SCP_AGY_CONVERSATION_FILE", "SCP_CODEX_THREAD", "SCP_DIR", "SCP_GRANT", "SCP_HARNESS", "SCP_HARNESS_DETECT", "SCP_HARNESS_PID", "SCP_LABELS", "SCP_NAME", "SCP_PARENT", "SCP_PUSH_WAIT", "SCP_SESSION", "SCP_SHIM_BINDING", "SCP_TLDR_EVERY", "SCP_TRANSPORT", "SCP_UNDER", "SCP_WAKE", "XDG_CONFIG_HOME", "XDG_STATE_HOME"]
+```
+
+This RPC grants nothing beyond a transient hook claim with the same derived data (sections 6.6 and 17.2). The outer observer remains unbound. Paths supplied by the client may be read only as regular files owned by the broker's uid. Writes MUST stay inside the broker's own state or configuration directories.
 
 ## 9. Spawn and supervision
 
@@ -1665,6 +1698,8 @@ The results of `cloud_status` and `bridge_relink`, and the `file` members of the
 
 | Method | Params | Result | Errors | Caller |
 | --- | --- | --- | --- | --- |
+| `hook` | section 8.10 | `{stdout?, stderr?, exit: 0, commit?}` | `invalid_params`, `unauthorized` | plain obs, when advertised |
+| `hook_commit` | `commit` | `{}` | `invalid_params`, `unauthorized` | plain obs, same connection |
 | `hello` | section 6.6; `join` with `transient` (section 6.12) | section 5.3 | `invalid_params`, `too_large`, `unauthorized`, `secret_refused`, `not_found`, `scope_refused` | any, once |
 | `whoami` | | EndpointView, plus `peek` and `peeked_by` (not for hooks) | | ep, hook |
 | `send` | SendParams | SendResult | section 7.3 | ep |

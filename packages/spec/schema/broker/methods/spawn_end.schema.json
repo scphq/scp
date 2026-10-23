@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spawn_end",
+  "title": "spawn_end",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "../types.schema.json#/$defs/EndpointView"
+        },
+        "held": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "endpoint",
+        "held"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,18 @@
+SPEC 5.2 and Appendix B: Request constrains present jsonrpc to "2.0" and present params to an object, as a conforming client sends.
+SPEC 5.5: the reference broker emits structured detail beyond judge_refused in error.data; the schema accepts additional fields, a gap to resolve.
+SPEC 5.5 and Appendix B: the reference broker emits fractional retry_after seconds; the schema accepts numeric seconds, a gap to resolve against integer seconds.
+SPEC 7.3, 6.9 and Appendix B: the reference broker emits Envelope.link and Envelope.for; the schema includes both despite their omission from the Appendix B shape.
+SPEC 6.4 and 10.2: the reference broker accepts allow on claims; Claim includes optional allow despite its omission from the claim field table.
+SPEC Appendix A and 7.12: the reference broker returns thread, hop, warnings and duplicate with ask results; ask.Result accepts these send-result fields.
+SPEC Appendix A and 7.11: the reference broker floors and clamps numeric inbox limits instead of refusing values above 100; Params accepts numbers, a gap to resolve.
+SPEC Appendix A and 11.1: the reference broker accepts null title.text to clear a title; the schema accepts null despite the Appendix A parameter notation.
+SPEC 7.2 and Appendix B: the reference broker always emits harness and model in from.claims, including null; the schema requires both, following the claims description in 7.2.
+SPEC 5.3 and Appendix A: hello.broker, snapshot.broker, cloud_status and bridge_relink details are informative open objects.
+SPEC 10.9 and Appendix A: policy.file and policy_check.file are optional and open; the reference broker emits strings. policy.policy is raw parsed policy content or null.
+SPEC 9.1: grant requires only token; steer and host-binding conveyance fields are optional and unknown conveyance fields are accepted.
+SPEC Appendix A: admin and group action results have defined shapes; maps such as labels, env, unread and audit detail allow dynamic keys.
+SPEC 5.2, 7.3 and 10: byte limits, credential checks, filesystem checks, authorization and stateful cross-field constraints remain runtime checks outside the schema keyword subset.
+SPEC 5.3: every local hello includes preamble, including an unbound observer.
+SPEC Appendix D: Limits requires the named broker defaults and permits additional implementation limits.
+SPEC 16.1: audit detail is an open object; tests assert listed event names and privacy guarantees, not detail shapes.
+SPEC 11.1 and 19.1: none clears wake on input; views carry null when cleared.

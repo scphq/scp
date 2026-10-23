@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spawn_exit",
+  "title": "spawn_exit",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "grant": {
+          "type": "string"
+        },
+        "code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stderr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unapplied": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100
+        },
+        "exits": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 8
+        },
+        "started": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "run": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "reply_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "grant",
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "joined": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "$ref": "../types.schema.json#/$defs/EndpointView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handback": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "joined",
+        "name",
+        "endpoint",
+        "handback"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "snapshot",
+  "title": "snapshot",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": "boolean"
+        },
+        "historic": {
+          "type": "boolean"
+        },
+        "activity": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/Snapshot"
+    }
+  }
+}

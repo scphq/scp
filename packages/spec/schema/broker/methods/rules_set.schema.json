@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "rules_set",
+  "title": "rules_set",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "$ref": "../types.schema.json#/$defs/ScopePreset"
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/ScopeView"
+    }
+  }
+}

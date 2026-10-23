@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, rmdirSync, unlinkSync } from "node:fs"
@@ -30,6 +31,7 @@ import {
   type Wake,
 } from "@scp-dev/core"
 import { FederatedCore } from "@scp-dev/hub"
+import type { RelayClient } from "./client"
 import { type Bridge, type BridgeConfig, type BridgeHooks, remoteSend, startBridge } from "./bridge"
 import { type Deliver, type JudgeClientFactory, JudgeGate } from "./judge-gate"
 import { releaseBrokerLock, takeBrokerLock } from "./lock"
@@ -37,10 +39,13 @@ import { encodeLine, LineReader, LineWriter, MAX_LINE } from "./ndjson"
 import { accountHome, accountHomeVerified, policyPath as defaultPolicyPath, privateDir, shortHostname, socketPath } from "./paths"
 import { writeSessionMarker } from "./sessions"
 import { Conn } from "./socket"
+import { HookCalls, type HookHandler, type HookParams, validateHook } from "./hook"
 import { type Database, openDatabase } from "./sqlite"
 import { startWakers, type Wakers } from "./wakers"
 
 export interface BrokerOptions {
+  hook?: HookHandler
+
   dir: string
   /** the policy file; missing means open */
   policyPath?: string | undefined
@@ -105,6 +110,10 @@ export interface Broker {
 }
 
 interface Connection {
+  closeWaiters?: Set<() => void>
+  hookCalls?: HookCalls
+  plainObserver?: boolean
+
   reader: LineReader
   writer: LineWriter
   endpoint?: string | undefined
@@ -143,6 +152,8 @@ interface Connection {
   queue: string[]
   queueHead: number
   lineTimer?: ReturnType<typeof setTimeout> | undefined
+  /** a line passed the cap: what follows is discarded, and too_large goes once the lines before it are answered */
+  tooLarge?: boolean
 }
 
 const SWEEP_MS = 10 * 60_000
@@ -281,6 +292,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   let bridge: Bridge | null = null
   let wakers: Wakers | null = null
   let listener!: Server
+  const hookProcesses = new AsyncLocalStorage<Map<number, string | null>>()
   let socketIno: number | bigint | undefined
   try {
     privateDir(dirname(socket))
@@ -296,7 +308,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       hash: (value) => createHash("sha256").update(value).digest("hex"),
       transaction: (fn) => db.transaction(fn),
       alive: running,
-      startOf: options.startOf ?? startedAt,
+      startOf: (pid, expected) => {
+        const supplied = hookProcesses.getStore()
+        return supplied ? (supplied.get(pid) ?? undefined) : (options.startOf ?? startedAt)(pid, expected)
+      },
     })
     core.migrate()
     core.relabelMachine()
@@ -649,7 +664,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     s.data.cwd = typeof params.cwd === "string" ? params.cwd : undefined
     return {
       endpoint: core.whoami(endpoint),
-      capabilities: BROKER_CAPABILITIES,
+      capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
       server_time: new Date().toISOString(),
       limits: LIMITS,
       preamble: PREAMBLE,
@@ -687,6 +702,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       const done = () => {
         clearTimeout(timer)
         waiters.get(endpoint)?.delete(done)
+        s.data.closeWaiters?.delete(done)
         resolve()
       }
       const timer = setTimeout(done, ms)
@@ -696,6 +712,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         waiters.set(endpoint, set)
       }
       set.add(done)
+      s.data.closeWaiters ??= new Set()
+      s.data.closeWaiters.add(done)
       if (s.data.closed) done()
     })
   }
@@ -727,19 +745,27 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   }
 
   function onData(s: Conn<Connection>, chunk: Uint8Array) {
+    if (s.data.tooLarge) return
     const { lines, tooLong } = s.data.reader.push(chunk)
     for (const line of lines) s.data.queue.push(line)
-    pump(s)
     if (tooLong) {
-      write(s, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "request too large", data: { code: "too_large" } } })
-      s.end()
-      return
+      s.data.tooLarge = true
+      clearTimeout(s.data.lineTimer)
+      s.data.lineTimer = undefined
     }
+    pump(s)
+    if (tooLong) return endTooLarge(s)
     if (!s.data.reader.buffered || lines.length) {
       clearTimeout(s.data.lineTimer)
       s.data.lineTimer = undefined
     }
     if (s.data.reader.buffered && !s.data.lineTimer) armLineTimer(s)
+  }
+
+  function endTooLarge(s: Conn<Connection>) {
+    if (s.data.inFlight || s.data.queueHead < s.data.queue.length) return
+    write(s, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "request too large", data: { code: "too_large" } } })
+    s.end()
   }
 
   /** a line must end within partialLineMs of its first byte, not counting time the broker itself paused reading */
@@ -757,6 +783,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   function onClose(s: Conn<Connection>) {
     if (s.data.closed) return
     s.data.closed = true
+    s.data.hookCalls?.close()
+    for (const done of s.data.closeWaiters ?? []) done()
     clearTimeout(s.data.lineTimer)
     connections.delete(s)
     const held = !closing && s.data.waker ? core.hibernateHeld(s.data.waker) : []
@@ -798,6 +826,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     } finally {
       s.data.inFlight--
       pump(s)
+      if (s.data.tooLarge) endTooLarge(s)
     }
   }
 
@@ -888,6 +917,34 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     })
   }
 
+  async function internalHookClient(params: HookParams): Promise<RelayClient> {
+    const state: Connection = {
+      reader: new LineReader(MAX_LINE),
+      writer: new LineWriter(),
+      observer: false,
+      watching: false,
+      closed: false,
+      inFlight: 0,
+      queue: [],
+      queueHead: 0,
+    }
+    const conn = { data: state, end: () => onClose(conn) } as Conn<Connection>
+    connections.add(conn)
+    const table = new Map(params.procs.map((proc) => [proc.pid, proc.start]))
+    const request = <T>(method: string, values: object = {}): Promise<T> => {
+      if (state.closed) return Promise.reject(new Error("hook connection closed"))
+      return hookProcesses.run(table, () => dispatch(conn, method, values as Record<string, unknown>)) as Promise<T>
+    }
+    return {
+      request,
+      hello: (hello: object) => request("hello", { protocol: PROTOCOL, ...hello }),
+      close: () => conn.end(),
+      get closed() {
+        return state.closed
+      },
+    } as RelayClient
+  }
+
   async function dispatch(s: Conn<Connection>, method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === "hello") {
       if (s.data.endpoint || s.data.observer) throw new RelayError("invalid_params", "hello was already called on this connection")
@@ -921,7 +978,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         return {
           endpoint,
           ...(subagent ? { subagent, ...(created ? { created } : {}) } : {}),
-          capabilities: BROKER_CAPABILITIES,
+          capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
           server_time: new Date().toISOString(),
           limits: LIMITS,
           preamble: PREAMBLE,
@@ -942,10 +999,11 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         }
         if (self) return bindLineage(s, self, params, true)
         s.data.observer = true
+        s.data.plainObserver = ["self", "lineage", "grant", "ticket", "claim"].every((key) => params[key] === undefined)
         if (params.lineage !== undefined) s.data.lineage = core.placeLineage(params.lineage, undefined, params.harness_session) ?? undefined
         return {
           endpoint: null,
-          capabilities: BROKER_CAPABILITIES,
+          capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
           server_time: new Date().toISOString(),
           limits: LIMITS,
           preamble: PREAMBLE,
@@ -994,7 +1052,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       return {
         endpoint,
         ...(token ? { token } : {}),
-        capabilities: BROKER_CAPABILITIES,
+        capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
         server_time: new Date().toISOString(),
         limits: LIMITS,
         preamble: PREAMBLE,
@@ -1002,6 +1060,15 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
     }
     if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
+    if (options.hook && (method === "hook" || method === "hook_commit")) {
+      if (!s.data.plainObserver) throw new RelayError("unauthorized", "hook requires a plain observer")
+      s.data.hookCalls ??= new HookCalls(
+        () => s.data.closed,
+        (ends) => write(s, { jsonrpc: "2.0", method: "hook_deadline", params: { ends } }),
+        internalHookClient,
+      )
+      return method === "hook" ? s.data.hookCalls.run(options.hook, validateHook(params)) : s.data.hookCalls.commit(params)
+    }
     if (s.data.ticket !== undefined && core.wakeTicketHolder(s.data.ticket) !== s.data.endpoint)
       throw new RelayError("unauthorized", "the wake ticket is spent: its run ended")
     if (s.data.observer && OBSERVER_METHODS.has(method)) return observe(s, method, params)

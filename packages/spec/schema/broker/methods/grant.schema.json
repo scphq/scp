@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "grant",
+  "title": "grant",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "under": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "../types.schema.json#/$defs/ScopePreset"
+        },
+        "in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ttl_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+        },
+        "bind_process": {
+          "type": "string"
+        },
+        "peek": {
+          "const": "local"
+        },
+        "spawn": {
+          "type": "boolean"
+        },
+        "no_push": {
+          "type": "boolean"
+        },
+        "prompt": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "steer": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "parent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "parent"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "token"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

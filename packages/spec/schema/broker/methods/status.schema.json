@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "status",
+  "title": "status",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "../types.schema.json#/$defs/StatusState"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 280
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/EndpointView"
+    }
+  }
+}

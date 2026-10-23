@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peek_turn",
+  "title": "peek_turn",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "stored": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stored"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

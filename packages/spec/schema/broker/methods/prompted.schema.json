@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "prompted",
+  "title": "prompted",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "tldr_every": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "prompted": {
+          "type": "boolean"
+        },
+        "tldr": {
+          "const": true
+        }
+      },
+      "required": [
+        "prompted"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

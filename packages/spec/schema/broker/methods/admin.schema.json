@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "admin",
+  "title": "admin",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "grant",
+            "revoke",
+            "ls"
+          ]
+        },
+        "subject": {
+          "type": "string"
+        },
+        "tree": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "array",
+      "items": {
+        "$ref": "../types.schema.json#/$defs/AdminView"
+      }
+    }
+  }
+}

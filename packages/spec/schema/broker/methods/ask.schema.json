@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ask",
+  "title": "ask",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 16
+            }
+          ]
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "The broker limits UTF-8 bytes to 65536; maxLength is only a character bound."
+        },
+        "kind": {
+          "enum": [
+            "message",
+            "request",
+            "reply",
+            "status"
+          ]
+        },
+        "thread": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "reply_to": {
+          "type": "string"
+        },
+        "data_class": {
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/Attachment"
+          },
+          "maxItems": 16
+        },
+        "client_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ttl_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2592000
+        },
+        "mime": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "require_reply": {
+          "type": "boolean"
+        },
+        "live": {
+          "type": "boolean"
+        },
+        "wait_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "to",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "thread": {
+          "type": "string"
+        },
+        "hop": {
+          "type": "integer"
+        },
+        "deliveries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer"
+              },
+              "offline": {
+                "type": "boolean"
+              },
+              "queued": {
+                "type": "boolean"
+              },
+              "last_seen": {
+                "anyOf": [
+                  {
+                    "$ref": "../types.schema.json#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "enum": [
+                  "offline",
+                  "running",
+                  "ended",
+                  "starting"
+                ]
+              },
+              "wake": {
+                "anyOf": [
+                  {
+                    "const": "channels"
+                  },
+                  {
+                    "const": "pi"
+                  },
+                  {
+                    "const": "opencode-plugin"
+                  },
+                  {
+                    "const": "codex-app-server"
+                  },
+                  {
+                    "const": "claude-inbox"
+                  },
+                  {
+                    "const": "agy-resume"
+                  },
+                  {
+                    "const": "grok-resume"
+                  },
+                  {
+                    "const": "muse-serve"
+                  },
+                  {
+                    "const": "t3code"
+                  },
+                  {
+                    "const": "spawn-resume"
+                  },
+                  {
+                    "const": "codex-queue"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^hook:"
+                  },
+                  {
+                    "const": "declined"
+                  }
+                ]
+              },
+              "idle": {
+                "const": true
+              },
+              "hibernated": {
+                "const": true
+              },
+              "wake_eta_s": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "endpoint",
+              "address",
+              "seq",
+              "offline",
+              "last_seen"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "held": {
+          "$ref": "../types.schema.json#/$defs/JudgeHeld"
+        },
+        "redacted": {
+          "$ref": "../types.schema.json#/$defs/JudgeRedacted"
+        },
+        "reply": {
+          "$ref": "../types.schema.json#/$defs/Envelope"
+        },
+        "pending": {
+          "type": "boolean"
+        },
+        "expired": {
+          "type": "boolean"
+        },
+        "ended": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "state": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "const": "working"
+                  },
+                  {
+                    "const": "waiting"
+                  },
+                  {
+                    "const": "blocked"
+                  },
+                  {
+                    "const": "done"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "address",
+              "state"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "id",
+        "thread",
+        "hop",
+        "deliveries"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

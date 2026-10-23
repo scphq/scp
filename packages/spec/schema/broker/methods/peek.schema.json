@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peek",
+  "title": "peek",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "full": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/PeekResult"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "log",
+  "title": "log",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "scope": {
+          "type": "boolean"
+        },
+        "judge": {
+          "type": "boolean"
+        },
+        "peek": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/AuditRow"
+          }
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

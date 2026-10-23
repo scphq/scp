@@ -422,6 +422,40 @@ describe("broker, framing and connection limits", () => {
     expect(closed).toBe(true)
   })
 
+  test("an oversized line arriving with earlier lines closes only after they are answered, too_large last", async () => {
+    const { broker } = await setup()
+    let received = ""
+    let closed = false
+    const raw = await Bun.connect({
+      unix: broker.socket,
+      socket: {
+        data: (_s, chunk) => {
+          received += chunk.toString()
+        },
+        close: () => {
+          closed = true
+        },
+      },
+    })
+    const hello = { jsonrpc: "2.0", id: 1, method: "hello", params: { protocol: "scp/1", capabilities: [], claim: { handle: "a", harness: "claude-code" } } }
+    const inbox = { jsonrpc: "2.0", id: 2, method: "inbox", params: { wait_s: 1 } }
+    let bytes = Buffer.from(`${JSON.stringify(hello)}\n${JSON.stringify(inbox)}\n${"x".repeat(256 * 1024 + 16)}\n`)
+    for (let i = 0; i < 500 && bytes.length && !closed; i++) {
+      const written = raw.write(bytes)
+      if (written > 0) bytes = bytes.subarray(written)
+      else await Bun.sleep(5)
+    }
+    for (let i = 0; i < 150 && !closed; i++) await Bun.sleep(20)
+    expect(closed).toBe(true)
+    const frames = received
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+    expect(frames.map((frame) => frame.id)).toEqual([1, 2, null])
+    expect(frames[1].result.messages).toEqual([])
+    expect(frames[2].error.data.code).toBe("too_large")
+  })
+
   test("a cwd of / or the home directory is no attachment root", async () => {
     const { root, broker } = await setup()
     writeFileSync(join(root, "file.md"), "x")

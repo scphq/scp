@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stop_wait",
+  "title": "stop_wait",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "wait_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "prompts": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/StopWaitResult"
+    }
+  }
+}

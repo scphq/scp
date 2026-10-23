@@ -95,3 +95,44 @@ SCP_CONFORMANCE_IMAGE=scp-relay:local SCP_CONFORMANCE_TARGETS=docker \
 
 `SCP_CONFORMANCE_TARGETS` is a comma-separated target filter. Without it, all available targets run.
 The Docker target binds random host ports on `127.0.0.1`. Its smoke test mints a native credential and reads the public dashboard API.
+
+## Broker wire conformance
+
+`src/broker` drives a local broker only over its socket protocol (SPEC sections 5 to 9,
+Appendices A to E), so any engine can be plugged in:
+
+```sh
+bun test packages/conformance/src/broker
+SCP_BROKER_NODE=node bun test packages/conformance/src/broker
+SCP_BROKER_BIN=./scp-broker bun test packages/conformance/src/broker
+```
+
+`ts` runs the built CLI's foreground broker under Bun and always runs. `ts-node` runs the
+same broker under Node when `SCP_BROKER_NODE` names a Node binary. `rust` runs the engine at
+`SCP_BROKER_BIN` and is explicitly skipped without it. `SCP_BROKER_TARGETS` is a
+comma-separated target filter.
+
+The launcher contract is a harness requirement separate from SPEC conformance.
+An engine is started as `<engine> daemon --idle <seconds> --policy <file>` in the
+foreground, with the relay directory in `SCP_DIR`, and serves the socket of Appendix E.1
+until SIGTERM. Each test gets a fresh home, configuration, state and policy under the
+system temporary directory; no test reads the caller's broker, policy or harness configs.
+
+Every frame either way is validated against the JSON Schemas in
+`packages/spec/schema/broker`: requests against the method's `Params`, results against its
+`Result`, errors and notifications against `frames.schema.json`. A violation fails
+the test. `schemas.test.ts` keeps the schemas inside a portable keyword subset, checks that
+every Appendix A method has one, and checks that the shared types agree with the TS
+protocol types on field names and optionality.
+
+Hook goldens run the CLI hook command against the target broker and compare its exact
+stdout per harness and event with the files in `src/broker/golden`. Every target builds
+the CLI first. Only empty output from a run lasting at least 3500 ms is retried, since
+a deadline fallback confirms nothing.
+
+The separate `broker reference waker binding` suite tests the reference waker binding
+described in `packages/spec/IMPLEMENTATION.md`, under "Wake hooks": `wakers.json`, the
+JSON stdin payload, `SCP_WAKE_*` environment and exit-77 declines. SPEC section 19 leaves
+configuration and invocation implementation-defined, so it runs on `ts` and `ts-node`,
+and on `rust` only when `SCP_BROKER_WAKERS=1` says the engine implements that binding.
+Wire-only wake tests remain in `broker wake and hibernation`.

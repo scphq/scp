@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inbox",
+  "title": "inbox",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "integer"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "wait_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "offer": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/Envelope"
+          }
+        },
+        "next": {
+          "type": "integer"
+        },
+        "hold": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "messages",
+        "next"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

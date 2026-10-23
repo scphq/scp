@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "send",
+  "title": "send",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 16
+            }
+          ]
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "The broker limits UTF-8 bytes to 65536; maxLength is only a character bound."
+        },
+        "kind": {
+          "enum": [
+            "message",
+            "request",
+            "reply",
+            "status"
+          ]
+        },
+        "thread": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "reply_to": {
+          "type": "string"
+        },
+        "data_class": {
+          "enum": [
+            "public",
+            "private"
+          ]
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/Attachment"
+          },
+          "maxItems": 16
+        },
+        "client_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "ttl_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2592000
+        },
+        "mime": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "require_reply": {
+          "type": "boolean"
+        },
+        "live": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "to",
+        "body"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/SendResult"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ack",
+  "title": "ack",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "seqs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "seqs"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "acked": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "acked"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

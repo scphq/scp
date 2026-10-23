@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join, dirname } from "node:path"
 import { randomUUID } from "node:crypto"
+import { readOwnedFile } from "@scp-dev/broker"
 import { CLI_NAME } from "@scp-dev/core"
 import { RelayUsage } from "./common"
 import { note } from "./term"
@@ -78,7 +79,7 @@ export type JoinMode = "auto" | "manual"
 /** how hooked sessions join: `auto` at session start, `manual` only once they run `swarm join`; auto when unset or unreadable */
 export function joinMode(env: Env = process.env): JoinMode {
   try {
-    return readObject<{ join?: unknown }>(join(configDir(env), "config.json"))?.join === "manual" ? "manual" : "auto"
+    return (JSON.parse(readOwnedFile(join(configDir(env), "config.json"))) as { join?: unknown })?.join === "manual" ? "manual" : "auto"
   } catch {
     return "auto"
   }

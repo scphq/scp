@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "event",
+  "title": "event",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "../types.schema.json#/$defs/ActivityKind"
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "transcript_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/ActivityRow"
+    }
+  }
+}

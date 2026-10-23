@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "holds",
+  "title": "holds",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "holds": {
+          "type": "array",
+          "items": {
+            "$ref": "../types.schema.json#/$defs/HoldView"
+          }
+        }
+      },
+      "required": [
+        "holds"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

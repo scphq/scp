@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "link_accept",
+  "title": "link_accept",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "$ref": "../types.schema.json#/$defs/EndpointView"
+        },
+        "parent": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint",
+        "parent"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hold_release",
+  "title": "hold_release",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "redacted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/SendResult"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import { privateDir, relayDir } from "@scp-dev/broker"
 import { spawn, spawnSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import {
@@ -14,7 +15,7 @@ import {
   type Stats,
   writeSync,
 } from "node:fs"
-import { constants, homedir, tmpdir } from "node:os"
+import { constants, homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { parseArgs } from "node:util"
 import {
@@ -1042,7 +1043,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   const idleS = spawnIdle(values, runner !== undefined)
   const harness = idleS > 0 ? resumable(command) : undefined
   const signals = harness ? watchSignals() : undefined
-  const agyDir = harness === "agy" ? mkdtempSync(join(tmpdir(), "scp-spawn-agy-")) : undefined
+  const agyDir = harness === "agy" ? mkdtempSync(join(privateDir(join(relayDir(env), "agy")), "spawn-")) : undefined
   if (agyDir) env.SCP_AGY_CONVERSATION_FILE = join(agyDir, "conversation")
   try {
     const opening = harness ? firstRun(command) : { command }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "watch",
+  "title": "watch",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "Result": {
+      "$ref": "../types.schema.json#/$defs/Snapshot"
+    }
+  }
+}
