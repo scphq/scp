@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/hub",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Swarm Communication Protocol federation and account hub: mirrored endpoints across machines, bridges, direct clients and cross-account delivery.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",

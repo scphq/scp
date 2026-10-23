@@ -1,5 +1,13 @@
 # @scp-dev/hub
 
+## 0.10.1
+
+### Patch Changes
+
+- Updated dependencies [936f194]
+- Updated dependencies [88edeea]
+  - @scp-dev/core@0.12.0
+
 ## 0.10.0
 
 ### Minor Changes

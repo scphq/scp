@@ -1,5 +1,18 @@
 # @scp-dev/mcp
 
+## 0.5.0
+
+### Minor Changes
+
+- 936f194: A hibernation whose ref is a revive record (harness, session, cwd, argv, via) makes the endpoint revivable: its view shows `revivable: true`, each waker run gets a one-time wake ticket, and the resumed session's claim with that ticket takes the same endpoint back with its mail, place, title and groups. A revivable endpoint is never renamed out of its handle or deleted while it sleeps. Durable spawns are revivable as they are, and the `claude-bg` waker now hibernates stopped and removed Claude Code background workers with a revive record, writes the ticket into the session's MCP config before `claude respawn` or `claude --bg --resume`, declines sessions `swarm claude --bg` did not start and declines `gone` when the transcript is gone. `swarm mcp` claims with `$SCP_WAKE_TICKET` and falls back to a plain claim when the ticket is spent.
+
+### Patch Changes
+
+- Updated dependencies [936f194]
+- Updated dependencies [88edeea]
+  - @scp-dev/broker@0.9.0
+  - @scp-dev/core@0.12.0
+
 ## 0.4.0
 
 ### Minor Changes
