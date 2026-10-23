@@ -23,6 +23,16 @@ swarm hibernate --human --all --wake vm-sleep --ref vm-7f3a --eta 45   # every l
 
 `swarm list` then shows the agent as `hibernated (wakeable)` with `hook:vm-sleep` in its WAKE column. A message to it queues and runs your waker. Once the resumed session claims its endpoint again (its MCP server or hooks reconnect), the hibernation clears and the session drains its queue. `swarm hibernate --wake none` (or `--gone`) clears it by hand.
 
+## Revivable sessions
+
+Give `--ref` a revive record instead of an opaque token, and the agent is revivable: a message brings back the same harness session on the same endpoint, with its name, place, groups, title and mail.
+
+```sh
+swarm hibernate --wake vm-sleep --ref '{"harness":"claude-code","session":"5f0c...","cwd":"/work/app","argv":["claude","--resume","5f0c..."]}'
+```
+
+The record names the harness, its own session id, the directory it runs in and the resumed run's words before its prompt, and optionally `via`, how the session was started. `swarm list --json` shows `revivable: true`. Each waker run for it gets a one-time ticket in `SCP_WAKE_TICKET`; hand it to the resumed session, and its shim (`swarm mcp` reads `SCP_WAKE_TICKET` from its environment) takes the endpoint back with it, whatever name it claims, even after the waker exited. The broker never runs `argv` itself, and keeps a revivable endpoint however long it sleeps. Durable spawns (`swarm spawn --durable`) and stopped Claude Code background workers are revivable this way out of the box.
+
 ## The waker
 
 Wakers live in `~/.config/scp/wakers.json`, beside the policy file. The broker reads it again when it changes:
@@ -41,7 +51,7 @@ A provider name is lowercase letters, digits and `-`, at most 32. `command` runs
 {"scp":1,"event":"wake","endpoint":"me/lane","handle":"lane","provider":"vm-sleep","ref":"vm-7f3a","machine":"laptop","message":{"id":"msg_...","from":"me/lead","kind":"request","thread":"thr_...","created_at":"2026-10-18T09:00:00.000Z"},"unread":2}
 ```
 
-The same fields are in the environment: `SCP_WAKE_ENDPOINT`, `SCP_WAKE_HANDLE`, `SCP_WAKE_REF`, `SCP_WAKE_PROVIDER`, `SCP_WAKE_MESSAGE_ID`, `SCP_WAKE_FROM`, `SCP_WAKE_KIND`, `SCP_WAKE_THREAD`, and `SCP_DIR`, so `swarm` commands the waker runs reach the same broker.
+The same fields are in the environment: `SCP_WAKE_ENDPOINT`, `SCP_WAKE_HANDLE`, `SCP_WAKE_REF`, `SCP_WAKE_PROVIDER`, `SCP_WAKE_MESSAGE_ID`, `SCP_WAKE_FROM`, `SCP_WAKE_KIND`, `SCP_WAKE_THREAD`, and `SCP_DIR`, so `swarm` commands the waker runs reach the same broker. `SCP_WAKE_SESSION` adds the harness session id the endpoint's hooks last reported, when known, so a waker can check that a ref names the endpoint's own session.
 
 **Exit codes.**
 

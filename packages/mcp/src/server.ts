@@ -280,6 +280,31 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     options.bound?.(claim)
   }
 
+  /**
+   * a claim's hello. A wake ticket is good once: the shim drops it once a claim took it, or the broker refused it (spent, or its endpoint no
+   * longer hibernated, as when a revived session's shim restarts) and the claim went on without it
+   */
+  async function claimHello(next: RelayClient, claim: Claim): Promise<HelloResult> {
+    const cwd = claim.cwd === undefined ? {} : { cwd: claim.cwd }
+    if (claim.ticket === undefined) return next.hello({ claim, ...cwd })
+    const { ticket: _, ...plain } = claim
+    const spend = () => {
+      if (bound?.ticket === undefined) return
+      const { ticket: _spent, ...rest } = bound
+      bound = rest
+    }
+    try {
+      const hello = await next.hello({ claim, ...cwd })
+      spend()
+      return hello
+    } catch (error) {
+      if (!(error instanceof RelayError) || error.code !== "unauthorized") throw error
+      log(`${CLI_NAME} mcp: the wake ticket was refused (${error.message}); claiming without it`)
+    }
+    spend()
+    return next.hello({ claim: plain, ...cwd })
+  }
+
   async function open(): Promise<RelayClient> {
     const claim = sessionClaim()
     const next = await options.connect()
@@ -292,7 +317,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
           if (!(error instanceof RelayError)) throw error
         }
       }
-      hello ??= await next.hello({ claim, ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }) })
+      hello ??= await claimHello(next, claim)
       if (hello.token) token = hello.token
       me = hello.endpoint
       if (!announced) {

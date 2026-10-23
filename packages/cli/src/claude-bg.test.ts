@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import * as fs from "node:fs"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -16,6 +17,8 @@ import {
   claudeWakeCommand,
   plan,
   readState,
+  refSession,
+  reviveRef,
 } from "./claude-bg"
 
 const id = "1a2b3c4d"
@@ -115,6 +118,10 @@ if (command === "stop") {
   entries = entries.filter(e => e.id !== id);
   console.log("removed " + id);
 } else if (command === "respawn") {
+  if (existsSync(root + "/respawn-fail")) {
+    console.error("cannot respawn " + id);
+    process.exit(1);
+  }
   Object.assign(entry, { pid: 4242, state: "working", status: "idle" });
   console.log("respawned " + id);
 } else if (command === "--bg") {
@@ -305,13 +312,30 @@ describe("background task", () => {
     const f = fixture()
     f.record()
     await f.run()
-    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([["hibernate", "worker-id", "claude-bg", sessionId, false]])
+    const ref = reviveRef(sessionId, f.home, "lane")
+    expect(JSON.parse(ref)).toEqual({
+      via: "claude-bg",
+      harness: "claude-code",
+      session: sessionId,
+      cwd: f.home,
+      argv: ["claude", "--bg", "--resume", sessionId, "--name", "lane"],
+    })
+    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([["hibernate", "worker-id", "claude-bg", ref, false]])
     expect(f.calls().map((call) => call.argv)).toEqual([
       ["agents", "--json", "--all"],
       ["stop", id],
     ])
     expect(readState(f.env, id)).toEqual({ sessionId, cwd: f.home, name: "lane", handle: "w1", stoppedAt: now })
     expect(f.events.some((event) => event[0] === "kick")).toBe(false)
+  })
+  test("saves wake identity before hibernating a worker", async () => {
+    const f = fixture()
+    f.record()
+    f.onHibernate = () => {
+      expect(readState(f.env, id)).toMatchObject({ sessionId, handle: "w1" })
+    }
+    await f.run()
+    expect(f.events.some((event) => event[0] === "hibernate")).toBe(true)
   })
   for (const race of ["work", "mail"] as const) {
     test(`cancels the stop when ${race} arrives after hibernation`, async () => {
@@ -337,20 +361,31 @@ describe("background task", () => {
     expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
     expect(f.events.filter((event) => event[0] === "hibernate").at(-1)?.[4]).toBe(true)
   })
-  test("respawns a worker whose shim took mail just before the stop", async () => {
-    const f = fixture()
-    f.record()
-    f.onAgents = () => {
-      if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.mail_at = new Date(now).toISOString()
-    }
-    await f.run()
-    expect(f.calls().map((call) => call.argv)).toEqual([
-      ["agents", "--json", "--all"],
-      ["stop", id],
-      ["respawn", id],
-    ])
-    expect(f.events.some((event) => event[0] === "kick")).toBe(false)
-  })
+  for (const fails of [false, true]) {
+    test(`respawns awake a worker whose shim took mail just before the stop, with respawn failing ${fails}`, async () => {
+      const f = fixture()
+      const record = f.record()
+      const config = JSON.parse(readFileSync(record, "utf8"))
+      config.mcpServers.scp.env.SCP_WAKE_TICKET = `kwt_${"cd".repeat(32)}`
+      writeFileSync(record, JSON.stringify(config))
+      if (fails) writeFileSync(join(f.home, "respawn-fail"), "")
+      f.onAgents = () => {
+        if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.mail_at = new Date(now).toISOString()
+      }
+      await f.run()
+      expect(f.calls().map((call) => call.argv)).toEqual([
+        ["agents", "--json", "--all"],
+        ["stop", id],
+        ["respawn", id],
+      ])
+      expect(f.events.some((event) => event[0] === "kick")).toBe(false)
+      expect(f.events.filter((event) => event[0] === "hibernate" || event[0] === "unhibernate").map((event) => event[0])).toEqual(
+        fails ? ["hibernate", "unhibernate", "hibernate"] : ["hibernate", "unhibernate"],
+      )
+      expect(f.facts.hibernate).toBe(fails ? "claude-bg" : null)
+      expect(JSON.parse(readFileSync(record, "utf8")).mcpServers.scp.env.SCP_WAKE_TICKET).toBeUndefined()
+    })
+  }
   test("records a refused removal and holds subsequent attempts", async () => {
     const f = fixture()
     f.record()
@@ -413,7 +448,148 @@ describe("acting on a changed worker", () => {
   })
 })
 
+describe("revive ref", () => {
+  test("is the revive record, or the bare session id when the record would not fit a ref", () => {
+    expect(refSession(reviveRef(sessionId, "/work", undefined))).toBe(sessionId)
+    expect(reviveRef(sessionId, `/${"d".repeat(500)}`, "lane")).toBe(sessionId)
+    expect(refSession(sessionId)).toBe(sessionId)
+  })
+})
+
 describe("wake command", () => {
+  const ticket = `kwt_${"ab".repeat(32)}`
+  const scpEnv = (file: string) => JSON.parse(readFileSync(file, "utf8")).mcpServers.scp.env
+  for (const scenario of ["stopped", "removed"] as const) {
+    test(`hands the ${scenario} session's shim the wake ticket through its MCP config, from a revive record ref`, async () => {
+      const f = fixture()
+      const record = f.record()
+      if (scenario === "stopped") f.save([stoppedEntry({ cwd: f.home })])
+      else {
+        f.save([])
+        f.state({ cwd: f.home })
+      }
+      f.state({ cwd: f.home })
+      const ref = reviveRef(sessionId, f.home, "lane")
+      expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: ref, SCP_WAKE_TICKET: ticket }, { stdout: () => {} })).toBe(0)
+      expect(scpEnv(record)).toEqual({ SCP_NAME: "w1", SCP_GRANT: "", SCP_WAKE_TICKET: ticket })
+      expect(f.calls().at(-1)?.argv[0]).toBe(scenario === "stopped" ? "respawn" : "--bg")
+      f.save([stoppedEntry({ cwd: f.home })])
+      expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: ref }, { stdout: () => {} })).toBe(0)
+      expect(scpEnv(record)).toEqual({ SCP_NAME: "w1", SCP_GRANT: "" })
+    })
+  }
+  test("arms and removes tickets for a live entry", async () => {
+    const f = fixture()
+    const record = f.record()
+    f.state()
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
+    expect(scpEnv(record).SCP_WAKE_TICKET).toBe(ticket)
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId })).toBe(0)
+    expect(scpEnv(record).SCP_WAKE_TICKET).toBeUndefined()
+  })
+  for (const mismatch of ["handle", "endpoint", "record", "harness", "session", "harness session"] as const) {
+    test(`declines a mismatched ${mismatch} before resuming`, async () => {
+      const f = fixture()
+      f.record(id, mismatch === "record" ? "other" : "w1")
+      if (mismatch !== "record" && mismatch !== "harness session")
+        f.state({ sessionId: mismatch === "session" ? `${id}-0000-4000-8000-000000000002` : sessionId })
+      f.save([stoppedEntry({ cwd: f.home })])
+      const ref = JSON.parse(reviveRef(sessionId, f.home, "lane"))
+      if (mismatch === "harness") ref.harness = "other"
+      const output: string[] = []
+      expect(
+        await claudeWakeCommand(
+          {
+            ...f.env,
+            SCP_WAKE_REF: JSON.stringify(ref),
+            ...(mismatch === "endpoint" ? { SCP_WAKE_ENDPOINT: "me/other" } : { SCP_WAKE_HANDLE: mismatch === "handle" ? "other" : "w1" }),
+            ...(mismatch === "harness session" ? { SCP_WAKE_SESSION: `${id}-0000-4000-8000-000000000002` } : {}),
+          },
+          { stdout: (text) => output.push(text) },
+        ),
+      ).toBe(77)
+      expect(output).toEqual(['{"declined":"unresumable"}\n'])
+      expect(f.calls().map((call) => call.argv[0])).not.toContain("respawn")
+    })
+  }
+  for (const proof of ["harness session", "record", "state"] as const) {
+    test(`wakes a stopped session with no saved stop state, owned by its ${proof}`, async () => {
+      const f = fixture()
+      const record = f.record(id, proof === "harness session" ? "renamed" : proof === "state" ? "old" : "w1")
+      if (proof === "state") f.state()
+      f.save([stoppedEntry({ cwd: f.home })])
+      const env = {
+        ...f.env,
+        SCP_WAKE_REF: reviveRef(sessionId, f.home, "lane"),
+        SCP_WAKE_HANDLE: "w1",
+        SCP_WAKE_ENDPOINT: "me/w1",
+        SCP_WAKE_TICKET: ticket,
+        ...(proof === "harness session" ? { SCP_WAKE_SESSION: sessionId } : {}),
+      }
+      expect(await claudeWakeCommand(env, { stdout: () => {} })).toBe(0)
+      expect(scpEnv(record).SCP_WAKE_TICKET).toBe(ticket)
+      expect(f.calls().at(-1)?.argv).toEqual(["respawn", id])
+    })
+  }
+  for (const removed of [false, true]) {
+    test(`fails closed when ticket arming fails with removed ${removed}`, async () => {
+      const f = fixture()
+      const record = f.record()
+      f.state()
+      f.save(removed ? [] : [stoppedEntry({ cwd: f.home })])
+      writeFileSync(record, JSON.stringify({ mcpServers: {} }))
+      expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(1)
+      expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+    })
+  }
+  test("removes a private temporary file when renaming fails", async () => {
+    const f = fixture()
+    const record = f.record()
+    f.state()
+    f.save([stoppedEntry({ cwd: f.home })])
+    const before = fs.readdirSync(bgDir(f.env))
+    const rename = spyOn(fs, "renameSync").mockImplementation((from) => {
+      expect(fs.statSync(from).mode & 0o777).toBe(0o600)
+      throw new Error("rename failed")
+    })
+    try {
+      expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(1)
+    } finally {
+      rename.mockRestore()
+    }
+    expect(fs.readdirSync(bgDir(f.env))).toEqual(before)
+    expect(scpEnv(record).SCP_WAKE_TICKET).toBeUndefined()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+  })
+  test("ignores a fixed temp symlink when arming a ticket", async () => {
+    const f = fixture()
+    const record = f.record()
+    f.state()
+    f.save([stoppedEntry({ cwd: f.home })])
+    const victim = join(f.home, "victim")
+    writeFileSync(victim, "untouched")
+    symlinkSync(victim, `${record}.tmp`)
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
+    expect(readFileSync(victim, "utf8")).toBe("untouched")
+  })
+  test("declines a session swarm did not start, and a removed one whose transcript is gone", async () => {
+    const f = fixture()
+    const output: string[] = []
+    f.save([stoppedEntry({ cwd: f.home })])
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId }, { stdout: (text) => output.push(text) })).toBe(77)
+    f.record()
+    f.save([])
+    f.state({ cwd: f.home })
+    const projects = join(f.home, "claude-config", "projects")
+    mkdirSync(join(projects, "-work"), { recursive: true })
+    const env = { ...f.env, CLAUDE_CONFIG_DIR: join(f.home, "claude-config"), SCP_WAKE_REF: sessionId }
+    expect(await claudeWakeCommand(env, { stdout: (text) => output.push(text) })).toBe(77)
+    expect(output).toEqual(['{"declined":"unresumable"}\n', '{"declined":"gone"}\n'])
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
+    writeFileSync(join(projects, "-work", `${sessionId}.jsonl`), "")
+    expect(await claudeWakeCommand(env, { stdout: (text) => output.push(text) })).toBe(0)
+    expect(f.calls().at(-1)?.argv.slice(0, 3)).toEqual(["--bg", "--resume", sessionId])
+  })
   for (const scenario of ["invalid", "live", "stopped", "removed", "gone", "missing"] as const) {
     test(`handles a ${scenario} session`, async () => {
       const f = fixture()
@@ -495,7 +671,7 @@ describe("broker commands", () => {
     const f = await brokerFixture()
     expect(await f.prune([])).toBe(0)
     expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
-    expect(f.broker.core.whoami(f.worker.endpoint.id)).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg" })
+    expect(f.broker.core.whoami(f.worker.endpoint.id)).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg", revivable: true })
   })
   test("never removes sessions with stop only", async () => {
     const f = await brokerFixture()

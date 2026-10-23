@@ -551,6 +551,28 @@ describe("relay MCP shim, in process", () => {
     }
   })
 
+  test("a revived session's shim takes its endpoint back with the wake ticket once, and claims without a spent one", async () => {
+    const sleeper = broker.core.claim({ handle: "revive-me", harness: "claude-code", session: "revive-old", process: "pid:999990:revive" }).endpoint
+    const sender = broker.core.claim({ handle: "revive-peer", harness: "cli" }).endpoint
+    const record = JSON.stringify({ via: "claude-bg", harness: "claude-code", session: "s-1", cwd: "/work", argv: ["claude", "--bg"] })
+    broker.core.brokerHibernate(sleeper.id, { wake: "claude-bg", ref: record })
+    broker.core.disconnect(sleeper.id)
+    broker.core.send(sender.id, { to: "revive-me", body: "come back" })
+    const ticket = broker.core.wakeDue(sleeper.id)!.ticket!
+    const revived = shim(broker, { handle: "revive-new", session: "revive-s2", claim: { ticket } })
+    const restarted = shim(broker, { handle: "revive-later", session: "revive-s3", claim: { ticket } })
+    try {
+      expect(textOf(await revived.call("relay_whoami"))).toContain("me/revive-me")
+      expect(broker.core.whoami(sleeper.id)).toMatchObject({ presence: "online", wake: null })
+      expect(textOf(await restarted.call("relay_whoami"))).toContain("me/revive-later")
+    } finally {
+      revived.close()
+      restarted.close()
+      await revived.done
+      await restarted.done
+    }
+  })
+
   test("status shows in the broker, bad input is an isError result, and the shim announces itself working", async () => {
     const a = shim(broker, { handle: "status-mcp" })
     try {
