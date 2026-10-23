@@ -390,6 +390,9 @@
         "wake_declined": {
           "type": "string"
         },
+        "revivable": {
+          "const": true
+        },
         "waking": {
           "const": true
         },

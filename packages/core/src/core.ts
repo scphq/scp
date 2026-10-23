@@ -25,6 +25,7 @@ import {
   type Reach,
   RelayError,
   SCOPE_PRESETS,
+  reviveRecord,
   SPAWN_PROVIDER,
   type ScopeActor,
   type ScopeCap,
@@ -303,8 +304,12 @@ export interface EndpointRow {
   hold_ref: string | null
   /** when a message was last queued into its inbox */
   mail_at: number | null
-  /** the hash of the wake ticket the last `spawn` waker run got: a claim with it takes the hibernated row back as its resumed session */
+  /** the hash of the wake ticket the last `spawn` or revive waker run got: a claim with it takes the hibernated row back as its resumed session */
   wake_ticket: string | null
+  /** hashes of outstanding tickets from earlier runs of this revivable hibernation */
+  wake_tickets: string | null
+  /** a revivable hibernation's `via`, how its session was started (its revive record's, else the provider); null when the ref is no revive record */
+  revive: string | null
 }
 
 /** a wake hook run that is due: the hibernated endpoint, its provider and ref, and the newest unread message's metadata (never a body) */
@@ -314,6 +319,8 @@ export interface WakeJob {
   handle: string
   provider: string
   ref: string | null
+  /** the harness session id the endpoint's hooks last reported, when hibernated: a waker checks a ref against it */
+  session?: string
   message: { id: string; from: string | null; kind: MessageKind; thread: string; created_at: string }
   unread: number
   /**
@@ -709,7 +716,9 @@ export class RelayCore {
       ["declined_from", "TEXT"],
       ["hold_ref", "TEXT"],
       ["wake_ticket", "TEXT"],
+      ["wake_tickets", "TEXT"],
       ["mail_at", "INTEGER"],
+      ["revive", "TEXT"],
     ] as const) {
       if (!endpointColumns.includes(column)) this.sql.all(`ALTER TABLE endpoints ADD COLUMN ${column} ${type}`)
     }
@@ -1042,6 +1051,7 @@ export class RelayCore {
             now - LIMITS.hookOnlineS * 1000,
           )
         : undefined
+    const reviving = row && revivable(row) && this.localRow(row) && row.connections === 0 ? row : undefined
     let session = fields.session
     let stopBlocks: number | null = null
     let moved: number[] = []
@@ -1055,6 +1065,7 @@ export class RelayCore {
       session = null
     } else if (
       row &&
+      !reviving &&
       !transient &&
       row.token_hash === null &&
       row.named === null &&
@@ -1069,13 +1080,24 @@ export class RelayCore {
         if (!held) {
           this.sql.all(`UPDATE endpoints SET handle = ? WHERE id = ?`, handle, hooks.id)
           settled = true
-        } else if (held.kind === "agent" && held.connections === 0 && presenceOf(held, now) === "offline" && harnessFits(held.harness, harness)) {
+        } else if (
+          held.kind === "agent" &&
+          !revivable(held) &&
+          held.connections === 0 &&
+          presenceOf(held, now) === "offline" &&
+          harnessFits(held.harness, harness)
+        ) {
           if (this.restarts(held, this.placement(scope, now).parent, fields.process) || this.redeems(held, scope, { harness, ...fields })) {
             ;({ moved, stopBlocks } = this.leaveHooks(hooks, held.id))
             row = undefined
             settled = true
           }
-        } else if (held.kind === "agent" && held.connections === 0 && (held.last_seen ?? held.created_at) < now - LIMITS.handleBoundS * 1000) {
+        } else if (
+          held.kind === "agent" &&
+          held.connections === 0 &&
+          !revivable(held) &&
+          (held.last_seen ?? held.created_at) < now - LIMITS.handleBoundS * 1000
+        ) {
           this.sql.all(`UPDATE endpoints SET handle = ? WHERE id = ?`, `${GONE_PREFIX}${held.id}`, held.id)
           this.dropPeek(held.id)
           n--
@@ -1088,10 +1110,14 @@ export class RelayCore {
     } else if (row && transient) session = row.session
     const resumed =
       ticketed ??
+      reviving ??
       (!row && open && !scope.exact && !scope.subagent && fields.harness_session
-        ? this.resumable(harness, fields.harness_session, scope, fields, now)
+        ? this.resumable(harness, fields.harness_session, scope, fields, now, transient)
         : undefined)
-    if (resumed) row = resumed
+    if (resumed) {
+      row = resumed
+      session = fields.session
+    }
     let joined = row !== undefined && !resumed
     const bySession =
       joined && row!.token_hash === null && (!transient || row!.process === null || (fields.process !== null && sameHarness(row!.process, fields.process)))
@@ -1108,6 +1134,7 @@ export class RelayCore {
         created = true
       } else if (
         held.kind === "agent" &&
+        !revivable(held) &&
         ((held.connections === 0 && presenceOf(held, now) === "offline") || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
         !otherSession(held, fields.harness_session, fields.process) &&
@@ -1124,6 +1151,7 @@ export class RelayCore {
       } else if (
         scope.exact &&
         held.kind === "agent" &&
+        !revivable(held) &&
         held.process === null &&
         held.session === null &&
         harnessFits(held.harness, harness) &&
@@ -1132,7 +1160,12 @@ export class RelayCore {
         row = held
         joined = true
         live = presenceOf(held, now) !== "offline"
-      } else if (held.kind === "agent" && held.connections === 0 && (held.last_seen ?? held.created_at) < now - LIMITS.handleBoundS * 1000) {
+      } else if (
+        held.kind === "agent" &&
+        held.connections === 0 &&
+        !revivable(held) &&
+        (held.last_seen ?? held.created_at) < now - LIMITS.handleBoundS * 1000
+      ) {
         this.sql.all(`UPDATE endpoints SET handle = ? WHERE id = ?`, `${GONE_PREFIX}${held.id}`, held.id)
         this.dropPeek(held.id)
         n--
@@ -1209,6 +1242,7 @@ export class RelayCore {
     scope: ClaimScope,
     fields: { cwd: string | null; process: string | null },
     now: number,
+    transient: boolean,
   ): EndpointRow | undefined {
     const rows = this.sql.all<EndpointRow>(
       `SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session, 1, 4) != 'sub:')
@@ -1222,8 +1256,8 @@ export class RelayCore {
         (spender === null || spender === row.id) &&
         this.localRow(row) &&
         (harnessFits(row.harness, harness) || sameProvider(row.harness, harness)) &&
-        presenceOf(row, now) === "offline" &&
-        (this.restarts(row, parent, fields.process) || this.redeems(row, scope, { harness, ...fields })),
+        ((transient && revivable(row)) ||
+          (presenceOf(row, now) === "offline" && (this.restarts(row, parent, fields.process) || this.redeems(row, scope, { harness, ...fields })))),
     )
   }
 
@@ -1399,11 +1433,17 @@ export class RelayCore {
   }
 
   /**
-   * the local row hibernated by {@link SPAWN_PROVIDER} whose current wake ticket hashes to `ticket`, connectionless and of a fitting harness:
-   * the waker run it was given to taking it back as its resumed session. An unknown or spent ticket is unauthorized
+   * the local row hibernated by {@link SPAWN_PROVIDER}, or revivable, whose outstanding wake ticket hashes to `ticket`, connectionless and of a
+   * fitting harness: the session its waker run resumed taking it back. An unknown or spent ticket is unauthorized
    */
   private ticketed(ticket: string, harness: string): EndpointRow {
-    const row = one<EndpointRow>(this.sql, `SELECT * FROM endpoints WHERE kind = 'agent' AND wake_ticket = ? AND hibernate = ?`, ticket, SPAWN_PROVIDER)
+    const row = one<EndpointRow>(
+      this.sql,
+      `SELECT * FROM endpoints WHERE kind = 'agent' AND (wake_ticket = ? OR EXISTS (SELECT 1 FROM json_each(wake_tickets) WHERE value = ?)) AND (hibernate = ? OR (hibernate IS NOT NULL AND revive IS NOT NULL))`,
+      ticket,
+      ticket,
+      SPAWN_PROVIDER,
+    )
     if (!row || !this.localRow(row) || !harnessFits(row.harness, harness)) throw new RelayError("unauthorized", "the wake ticket is unknown or spent")
     if (row.connections > 0) throw new RelayError("unavailable", "the endpoint is still held: try again once it lets go")
     return row
@@ -2432,13 +2472,18 @@ export class RelayCore {
       }
       return this.view(this.byId(target.id)!)
     }
+    if (revivable(target) && target.hibernate === set.wake && target.wake_ref === set.ref) {
+      this.sql.all(`UPDATE endpoints SET wake_tried = NULL WHERE id = ?`, target.id)
+      return this.view(this.byId(target.id)!)
+    }
     this.clearHibernation(target.id)
     this.sql.all(
-      `UPDATE endpoints SET hibernate = ?, wake_ref = ?, wake_eta = ?, hibernated_at = ?, hold_ref = NULL WHERE id = ?`,
+      `UPDATE endpoints SET hibernate = ?, wake_ref = ?, wake_eta = ?, hibernated_at = ?, hold_ref = NULL, revive = ? WHERE id = ?`,
       set.wake,
       set.ref,
       set.eta,
       this.now(),
+      reviveVia(set.ref, set.wake),
       target.id,
     )
     this.audit("hibernate", target.id, null, { by, target: address, provider: set.wake })
@@ -2462,9 +2507,10 @@ export class RelayCore {
         .map((row) => {
           this.clearHibernation(row.id)
           this.sql.all(
-            `UPDATE endpoints SET hibernate = ?, wake_ref = hold_ref, hold_ref = NULL, hibernated_at = ? WHERE id = ?`,
+            `UPDATE endpoints SET hibernate = ?, wake_ref = hold_ref, hold_ref = NULL, hibernated_at = ?, revive = ? WHERE id = ?`,
             SPAWN_PROVIDER,
             this.now(),
+            reviveVia(row.hold_ref, SPAWN_PROVIDER),
             row.id,
           )
           this.audit("hibernate", row.id, null, { by: "broker", target: this.address(row), provider: SPAWN_PROVIDER })
@@ -2480,6 +2526,7 @@ export class RelayCore {
    * wake for the newest unread message or for another from its sender. The newest unread message's metadata only, never its body
    */
   wakeDue(endpoint: string, now = this.now()): WakeJob | null {
+    this.settleRevived(now, endpoint)
     const row = this.byId(endpoint)
     if (!row || (!row.hibernate && !(brokerWake(row) && row.harness_session)) || row.kind !== "agent" || !this.localRow(row)) return null
     if (row.wake_tried !== null) {
@@ -2501,8 +2548,16 @@ export class RelayCore {
       endpoint,
       now,
     )!.n
-    const ticket = row.hibernate === SPAWN_PROVIDER || brokerWake(row) ? `kwt_${randomHex(32)}` : undefined
-    this.sql.all(`UPDATE endpoints SET wake_tried = ?, wake_ticket = ? WHERE id = ?`, now, ticket ? this.hash(ticket) : null, endpoint)
+    const ticket = row.hibernate === SPAWN_PROVIDER || (row.hibernate && row.revive) || brokerWake(row) ? `kwt_${randomHex(32)}` : undefined
+    const previous: string[] = revivable(row) ? JSON.parse(row.wake_tickets ?? "[]") : []
+    if (revivable(row) && row.wake_ticket) previous.push(row.wake_ticket)
+    this.sql.all(
+      `UPDATE endpoints SET wake_tried = ?, wake_ticket = ?, wake_tickets = ? WHERE id = ?`,
+      now,
+      ticket ? this.hash(ticket) : null,
+      previous.length ? JSON.stringify(previous.slice(-REVIVE_TICKETS_KEPT)) : null,
+      endpoint,
+    )
     const sender = this.byId(newest.from_ep)
     return {
       endpoint,
@@ -2510,6 +2565,7 @@ export class RelayCore {
       handle: row.handle,
       provider: row.hibernate ?? row.wake!,
       ref: row.hibernate ? row.wake_ref : row.harness_session,
+      ...(row.hibernate && row.harness_session ? { session: row.harness_session } : {}),
       message: { id: newest.id, from: sender ? this.address(sender) : null, kind: newest.kind, thread: newest.thread, created_at: iso(newest.created_at)! },
       unread,
       ...(ticket ? { ticket } : {}),
@@ -2568,6 +2624,26 @@ export class RelayCore {
     return row.hibernate !== null
   }
 
+  /** a revivable row a ticketed wake run resumed: its session's `session_start` leaves the tickets to the shim's ticketed claim */
+  private awaitsTicket(row: EndpointRow): boolean {
+    return revivable(row) && row.wake_ticket !== null
+  }
+
+  /**
+   * revivable rows whose resumed session's hooks have run for LIMITS.restartGraceS since its `session_start` with no ticketed claim landing:
+   * the session is back, so the hibernation clears
+   */
+  private settleRevived(now: number, endpoint?: string): void {
+    const rows = this.sql.all<{ id: string }>(
+      `SELECT id FROM endpoints WHERE kind = 'agent' AND hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL AND hook_ended IS NULL
+       AND hook_seen >= wake_tried AND wake_tried <= ? AND (? IS NULL OR id = ?)`,
+      now - LIMITS.restartGraceS * 1000,
+      endpoint ?? null,
+      endpoint ?? null,
+    )
+    for (const row of rows) this.wakeDone(row.id, "session_start")
+  }
+
   /** the hibernated session is back, or gone: its hibernation clears */
   private wakeDone(endpoint: string, how: string): void {
     const row = this.byId(endpoint)
@@ -2579,7 +2655,7 @@ export class RelayCore {
   private clearHibernation(endpoint: string): void {
     this.sql.all(
       `UPDATE endpoints SET hibernate = NULL, wake_ref = NULL, wake_eta = NULL, hibernated_at = NULL, wake_tried = NULL, wake_fails = 0, wake_note = NULL,
-       wake_declined = NULL, declined_message = NULL, declined_from = NULL, wake_ticket = NULL WHERE id = ?`,
+       wake_declined = NULL, declined_message = NULL, declined_from = NULL, wake_ticket = NULL, wake_tickets = NULL, revive = NULL WHERE id = ?`,
       endpoint,
     )
   }
@@ -3921,9 +3997,10 @@ export class RelayCore {
     this.sql.all(`DELETE FROM blocks WHERE until <= ?`, now)
     this.endExited(now)
     this.settleOffline(now)
+    this.settleRevived(now)
     this.retireEndpoints(now)
     this.sql.all(
-      `DELETE FROM endpoints WHERE kind = 'agent' AND connections = 0 AND COALESCE(last_seen, created_at) <= ?
+      `DELETE FROM endpoints WHERE kind = 'agent' AND connections = 0 AND COALESCE(last_seen, created_at) <= ? AND (hibernate IS NULL OR revive IS NULL)
        AND id NOT IN (SELECT endpoint FROM deliveries) AND id NOT IN (SELECT from_ep FROM messages) AND id NOT IN (SELECT parent_ep FROM endpoints WHERE parent_ep IS NOT NULL)`,
       now - LIMITS.handleBoundS * 1000,
     )
@@ -4100,7 +4177,8 @@ export class RelayCore {
           endpoint,
         )
     } else if (params.kind === "session_start") {
-      this.wakeDone(endpoint, "session_start")
+      if (this.awaitsTicket(this.mustEndpoint(endpoint))) this.sql.all(`UPDATE endpoints SET wake_tried = ? WHERE id = ?`, now, endpoint)
+      else this.wakeDone(endpoint, "session_start")
       if (own) this.turnRuns(endpoint)
       const fresh = own && summary !== "compact" && summary !== "resume"
       this.sql.all(
@@ -6390,6 +6468,7 @@ export class RelayCore {
         : {}),
       ...((row.hibernate || brokerWake(row)) && row.wake_note ? { wake_failed: row.wake_note.replace(/^wake_failed: /, "") } : {}),
       ...((row.hibernate || brokerWake(row)) && row.wake_declined ? { wake_declined: row.wake_declined } : {}),
+      ...(revivable(row) ? { revivable: true as const } : {}),
     }
   }
 
@@ -6643,6 +6722,20 @@ const BARE_PID_KEY = /^pid:\d+$/
 /** whether a row's stored wake is a broker wake ({@link BROKER_WAKES}), as SQL */
 const BROKER_WAKE_SQL = `COALESCE(wake IN (${BROKER_WAKES.map((wake) => `'${wake}'`).join(", ")}), 0)`
 const ANY_PROCESS_KEY = /^pid:\d+(:[A-Za-z0-9:-]{1,64})?$/
+
+/** how a hibernation's session was started, when its ref is a revive record: the record's `via`, else the provider */
+function reviveVia(ref: string | null, provider: string): string | null {
+  const record = reviveRecord(ref)
+  return record ? (record.via ?? provider) : null
+}
+
+/** a local agent hibernated with a revive record */
+/** how many earlier wake tickets a revivable hibernation keeps valid */
+const REVIVE_TICKETS_KEPT = 16
+
+function revivable(row: EndpointRow): boolean {
+  return row.kind === "agent" && row.hibernate !== null && row.revive !== null
+}
 
 /**
  * whether a connecting claim from the harness process `key` may join a session endpoint: no connection holds it, the harness process that last

@@ -5,7 +5,7 @@ import { TOOLS } from "@scp-dev/mcp"
 import { PREAMBLE } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { harnessPid, parsePsCommTable, processKey, readShimBinding, writeShimBinding } from "./identity"
-import { spawnWords } from "./mcp"
+import { spawnWords, wakeTicket } from "./mcp"
 
 setDefaultTimeout(30_000)
 
@@ -306,6 +306,13 @@ describe("swarm mcp", () => {
     expect(run(["--harness", "vim"]).code).toBe(125)
     expect(run(["--harness", "claude", "--as", "me"]).code).toBe(125)
   })
+})
+
+test("a shim claims with the wake ticket a reviving waker put in its environment, and only a well-formed one", () => {
+  const ticket = `kwt_${"0f".repeat(32)}`
+  expect(wakeTicket({ SCP_WAKE_TICKET: ticket })).toEqual({ ticket })
+  expect(wakeTicket({ SCP_WAKE_TICKET: "kwt_short" })).toEqual({})
+  expect(wakeTicket({})).toEqual({})
 })
 
 test("shim bindings are private, validate the process key and pid, and preserve a replacement on cleanup", () => {

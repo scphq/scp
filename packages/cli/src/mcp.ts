@@ -26,6 +26,14 @@ const ORPHAN_CHECK_MS = 5000
 
 type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean; "cowork-only"?: boolean }
 
+/** `$SCP_WAKE_TICKET` as a claim's `ticket`: a waker that revives a session hands it to the session's shim, which takes the endpoint back with it */
+export function wakeTicket(env: Record<string, string | undefined>): { ticket?: string } {
+  const ticket = env.SCP_WAKE_TICKET
+  return ticket && WAKE_TICKET.test(ticket) ? { ticket } : {}
+}
+
+const WAKE_TICKET = /^kwt_[0-9a-f]{64}$/
+
 /** `swarm mcp`: the stdio MCP shim for this harness session, or `mcp install` */
 export async function relayMcpCommand(values: Values, positionals: string[]): Promise<number> {
   if (positionals[0] === "install") {
@@ -53,7 +61,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
       return table.value
     },
   }
-  const claim = relayIdentity(input)
+  const claim = { ...relayIdentity(input), ...wakeTicket(process.env) }
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)
   const dir = relayDir(process.env)
   const threadClaim = threadClaims(input, claim)

@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process"
-import { readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type BrokerTask, type BrokerTaskContext, connectBroker, readOwnedFile, relayDir } from "@scp-dev/broker"
-import { CLI_NAME, type LocalAgent } from "@scp-dev/core"
+import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
 import { bgDir, LAUNCHER_IDENTITY } from "./claude"
 import { RelayUsage, terminalAttached } from "./common"
 import { configDir } from "./relay"
 import { whichOnPath } from "./setup"
+import { claudeTranscripts } from "./spawn"
 import { note, parseSeconds, printTable } from "./term"
 import { safeCwd } from "./cwd"
 
@@ -27,6 +28,28 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 /** a session name passed back to `claude --name`: never read as an option */
 const SAFE_NAME = /^[\w.@+ ][\w.@+ -]{0,99}$/
 const WAKE_PROMPT = "You were woken by an SCP message: read it with relay_inbox."
+const WAKE_TICKET = /^kwt_[0-9a-f]{64}$/
+
+/**
+ * the hibernation ref of a worker this policy stops or removes: its revive record (SPEC section 19.1), so the endpoint shows revivable, or
+ * the bare session id when the record would not fit a ref
+ */
+export function reviveRef(sessionId: string, cwd: string, name: string | undefined): string {
+  const record: ReviveRecord = {
+    via: CLAUDE_BG_PROVIDER,
+    harness: "claude-code",
+    session: sessionId,
+    cwd,
+    argv: ["claude", "--bg", "--resume", sessionId, ...(name && SAFE_NAME.test(name) ? ["--name", name] : [])],
+  }
+  const text = JSON.stringify(record)
+  return text.length <= LIMITS.wakeRefChars ? text : sessionId
+}
+
+/** the session id a `claude-bg` hibernation ref names: a revive record's session, or the bare id */
+export function refSession(ref: string): string {
+  return reviveRecord(ref)?.session ?? ref
+}
 
 /** one entry of `claude agents --json [--all]` */
 export interface ClaudeEntry {
@@ -387,55 +410,73 @@ async function moved(target: Target, port: BgPort, run: Run): Promise<string | n
 
 /**
  * hibernates the worker, checks nothing reached it, stops it, then brings it back at once when a message raced in: through its waker while
- * the message is unread, else by respawning it, since its shim may have handed the message to the session just before the stop
+ * the message is unread, else by respawning it awake, since its shim may have handed the message to the session just before the stop
  */
 async function stopWorker(target: Target, port: BgPort, run: Run): Promise<string | null> {
   const { id, entry, agent } = target
   const { claude } = run
-  const ref = entry.sessionId
-  if (!ref || !SESSION_ID.test(ref) || !entry.cwd) return "no session id or cwd"
+  const sessionId = entry.sessionId
+  if (!sessionId || !SESSION_ID.test(sessionId) || !entry.cwd) return "no session id or cwd"
+  const ref = reviveRef(sessionId, entry.cwd, entry.name)
+  const previous = readState(run.env, id)
+  const restore = () => {
+    if (previous) writeState(run.env, id, previous)
+    else unlinkSync(statePath(run.env, id))
+  }
+  writeState(run.env, id, { sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle })
   await port.hibernate(agent, ref)
   const why = await moved(target, port, run)
   if (why) {
     await port.unhibernate(agent)
+    restore()
     return why
   }
   const stopped = await claude.exec(claude.bin, ["stop", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
   if (stopped.code !== 0) {
     await port.unhibernate(agent)
+    restore()
     return `claude stop failed: ${firstLine(stopped.out) || `exit ${stopped.code}`}`
   }
-  writeState(run.env, id, { sessionId: ref, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle, stoppedAt: run.now() })
+  writeState(run.env, id, { sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle, stoppedAt: run.now() })
   const after = await current(port, agent)
   if (!after) return null
   if (after.unread) {
     await port.kick(agent, ref)
     return "mail raced the stop, so its waker brings it back"
   }
-  if (after.hibernate !== CLAUDE_BG_PROVIDER) await port.hibernate(agent, ref)
-  if (!later(after.mail_at, agent.mail_at)) return null
+  if (!later(after.mail_at, agent.mail_at)) {
+    if (after.hibernate !== CLAUDE_BG_PROVIDER) await port.hibernate(agent, ref)
+    return null
+  }
+  await port.unhibernate(agent)
+  armTicket(target.record.file, undefined)
   const respawned = await claude.exec(claude.bin, ["respawn", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
-  return respawned.code === 0
-    ? "mail raced the stop, so it was respawned"
-    : `mail raced the stop and claude respawn failed: ${firstLine(respawned.out) || `exit ${respawned.code}`}`
+  if (respawned.code === 0) return "mail raced the stop, so it was respawned"
+  await port.hibernate(agent, ref)
+  return `mail raced the stop and claude respawn failed: ${firstLine(respawned.out) || `exit ${respawned.code}`}`
 }
 
 async function removeWorker(target: Target & { live: boolean }, port: BgPort, run: Run): Promise<string | null> {
   const { id, entry, agent } = target
   const { claude, env, now } = run
-  const ref = entry.sessionId
-  if (!ref || !SESSION_ID.test(ref) || !entry.cwd) return "no session id or cwd"
+  const sessionId = entry.sessionId
+  if (!sessionId || !SESSION_ID.test(sessionId) || !entry.cwd) return "no session id or cwd"
+  const ref = reviveRef(sessionId, entry.cwd, entry.name)
   if (target.live) {
     const failed = await stopWorker(target, port, run)
     if (failed) return failed
-  } else if (agent.hibernate !== CLAUDE_BG_PROVIDER) await port.hibernate(agent, ref)
+  } else {
+    const previous = readState(env, id)
+    writeState(env, id, { ...previous, sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle })
+    if (agent.hibernate !== CLAUDE_BG_PROVIDER) await port.hibernate(agent, ref)
+  }
   const why = await moved(target, port, run)
   if (why) {
     await port.kick(agent, ref)
     return why
   }
   const { removedAt: _removed, rmRefused: _refused, ...earlier } = readState(env, id) ?? {}
-  const state: BgState = { ...earlier, sessionId: ref, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle }
+  const state: BgState = { ...earlier, sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle }
   writeState(env, id, state)
   const removed = await claude.exec(claude.bin, ["rm", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
   if (removed.code !== 0) {
@@ -691,14 +732,66 @@ const decline = (out: (text: string) => void, reason: string): number => {
 }
 
 /**
- * `swarm claude-wake`, the broker's built-in `claude-bg` waker: the ref is the session id of a worker the policy stopped or removed. A live
- * session needs nothing; a stopped one is respawned; a removed one is resumed in the background in its own directory with its MCP config
+ * puts the run's wake ticket in the scp server env of a session's MCP config, or takes a stale one out, so the revived session's shim takes
+ * its endpoint back with it (SPEC section 6.4 rule 6); false when the config cannot be read or written
+ */
+function armTicket(file: string, ticket: string | undefined): boolean {
+  let temp: string | undefined
+  try {
+    const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { env?: Record<string, string> } } }
+    const scp = config.mcpServers?.scp
+    if (!scp || typeof scp !== "object") return false
+    const vars = scp.env && typeof scp.env === "object" ? scp.env : {}
+    if (vars.SCP_WAKE_TICKET === ticket) return true
+    const { SCP_WAKE_TICKET: _, ...rest } = vars
+    scp.env = ticket ? { ...rest, SCP_WAKE_TICKET: ticket } : rest
+    const candidate = `${file}.${crypto.randomUUID()}.tmp`
+    const fd = openSync(candidate, "wx", 0o600)
+    temp = candidate
+    try {
+      writeFileSync(fd, `${JSON.stringify(config, null, 2)}\n`)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(temp, file)
+    return true
+  } catch {
+    if (temp) {
+      try {
+        unlinkSync(temp)
+      } catch {}
+    }
+    return false
+  }
+}
+
+/** whether Claude Code's transcripts are readable and none of them is the session's: its transcript is gone, so no resume can bring it back */
+function transcriptGone(env: Env, sessionId: string): boolean {
+  const root = claudeTranscripts(env)
+  let projects: string[]
+  try {
+    projects = readdirSync(root)
+  } catch {
+    return false
+  }
+  return !projects.some((project) => existsSync(join(root, project, `${sessionId}.jsonl`)))
+}
+
+/**
+ * `swarm claude-wake`, the broker's built-in `claude-bg` waker: the ref is the revive record (or the bare session id) of a worker the policy
+ * stopped or removed. A stopped session is respawned; a removed one is resumed in the background in its own
+ * directory with its MCP config. Either way the run's wake ticket goes into that config first, so the session's shim takes the same endpoint
+ * back with it. It wakes only the endpoint's own session: the handle its stop saved, else the harness session its hooks reported, else its
+ * launcher record's handle must match
  */
 export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDeps & { stdout?: (text: string) => void } = {}): Promise<number> {
   const out = deps.stdout ?? ((text: string) => void process.stdout.write(text))
-  const ref = env.SCP_WAKE_REF ?? ""
+  const revive = reviveRecord(env.SCP_WAKE_REF ?? "")
+  const ref = refSession(env.SCP_WAKE_REF ?? "")
   const id = ref.slice(0, 8)
   if (!SESSION_ID.test(ref) || !SHORT_ID.test(id)) return decline(out, "unresumable")
+  const ticket = env.SCP_WAKE_TICKET && WAKE_TICKET.test(env.SCP_WAKE_TICKET) ? env.SCP_WAKE_TICKET : undefined
+  if (env.SCP_WAKE_TICKET && !ticket) return 1
   const claude = claudeOf(env, deps)
   if (!claude) {
     note(`${CLI_NAME} claude-wake: claude is not on PATH`)
@@ -710,6 +803,28 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
     return 1
   }
   const entry = entries.find((one) => one.sessionId === ref || (one.id === id && one.kind === "background"))
+  const record = readRecords(env).get(id)
+  const state = readState(env, id)
+  const handles = [env.SCP_WAKE_HANDLE, env.SCP_WAKE_ENDPOINT?.slice(env.SCP_WAKE_ENDPOINT.lastIndexOf("/") + 1)].filter(
+    (handle): handle is string => handle !== undefined,
+  )
+  const owned =
+    state?.handle !== undefined
+      ? handles.every((handle) => handle === state.handle)
+      : env.SCP_WAKE_SESSION
+        ? env.SCP_WAKE_SESSION === ref
+        : handles.every((handle) => handle === record?.handle)
+  if (
+    !record ||
+    (entry?.sessionId !== undefined && entry.sessionId !== ref) ||
+    !owned ||
+    (revive && (revive.harness !== "claude-code" || (state !== undefined && state.sessionId !== revive.session)))
+  )
+    return decline(out, "unresumable")
+  if (!armTicket(record.file, ticket)) {
+    note(`${CLI_NAME} claude-wake: could not update the wake ticket`)
+    return 1
+  }
   if (entry && typeof entry.pid === "number") return 0
   if (entry) {
     const run = await claude.exec(claude.bin, ["respawn", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
@@ -717,14 +832,12 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
     note(`${CLI_NAME} claude-wake: claude respawn ${id} failed: ${firstLine(run.out) || `exit ${run.code}`}`)
     return 1
   }
-  const state = readState(env, id)
-  const record = readRecords(env).get(id)
-  if (!state || !record || state.sessionId !== ref) return decline(out, "unresumable")
+  if (!state || state.sessionId !== ref) return decline(out, "unresumable")
   let dir = false
   try {
     dir = statSync(state.cwd).isDirectory()
   } catch {}
-  if (!dir) return decline(out, "gone")
+  if (!dir || transcriptGone(env, ref)) return decline(out, "gone")
   const run = await claude.exec(
     claude.bin,
     ["--bg", "--resume", ref, ...(state.name && SAFE_NAME.test(state.name) ? ["--name", state.name] : []), WAKE_PROMPT, "--mcp-config", record.file],

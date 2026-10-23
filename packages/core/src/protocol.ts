@@ -198,6 +198,40 @@ export function validHandle(handle: string): boolean {
   return HANDLE.test(handle) && !RESERVED.has(handle)
 }
 
+/**
+ * a hibernation ref that makes the endpoint revivable: the harness, its own session id, the directory it runs in, the resumed run's words
+ * before its prompt, and how the session was started (`via`, a provider name; the hibernation's provider when absent). Other members are the
+ * provider's own
+ */
+export interface ReviveRecord {
+  harness: string
+  session: string
+  cwd: string
+  argv: string[]
+  via?: string
+}
+
+const REVIVE_SESSION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** the revive record a hibernation ref holds, or undefined when the ref is not one */
+export function reviveRecord(ref: string | null | undefined): ReviveRecord | undefined {
+  if (typeof ref !== "string" || !ref.startsWith("{")) return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(ref)
+  } catch {
+    return undefined
+  }
+  const record = value as Partial<ReviveRecord> | null
+  if (!record || typeof record !== "object" || Array.isArray(record)) return undefined
+  const { harness, session, cwd, argv, via } = record
+  if (typeof harness !== "string" || !HARNESS.test(harness) || typeof session !== "string" || !REVIVE_SESSION.test(session)) return undefined
+  if (typeof cwd !== "string" || !cwd.startsWith("/")) return undefined
+  if (!Array.isArray(argv) || !argv.length || !argv.every((word) => typeof word === "string")) return undefined
+  if (via !== undefined && (typeof via !== "string" || !HARNESS.test(via))) return undefined
+  return { harness, session, cwd, argv, ...(via !== undefined ? { via } : {}) }
+}
+
 export function validHarness(harness: string): boolean {
   return HARNESS.test(harness)
 }
@@ -348,6 +382,8 @@ export interface EndpointView {
   wake_failed?: string
   /** a hibernated agent's provider declined the last wake */
   wake_declined?: WakeDecline
+  /** a local agent hibernated with a revive record: a message brings back the same harness session on this endpoint */
+  revivable?: true
   /** a hub's hibernated row whose machine waker accepted a wake, until its session reclaims it or the wake times out */
   waking?: true
   /** an agent's last activity: its claim, a call, a hook, a read or a message to it */

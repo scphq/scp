@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { RelayCore } from "./core"
-import { RelayError, type ScopeActor } from "./protocol"
+import { LIMITS, RelayError, type ScopeActor } from "./protocol"
 import type { Sql, SqlValue } from "./sql"
 
 const key = (pid: number) => `pid:${pid}:Mon-Oct-19-10:00:00-2026`
@@ -175,7 +175,7 @@ describe("a held spawn", () => {
     expect(code(() => core.claim({ handle: "w1", harness: "codex", process: key(23), session: "env:again", ticket }))).toBe("unauthorized")
   })
 
-  test("a wake ticket waits while the endpoint is still held, and a newer run's ticket replaces it", () => {
+  test("a wake ticket waits while held and survives a later revivable run", () => {
     const { core, clock, main, worker, hold } = setup()
     hold(REF)
     core.hibernate({ kind: "endpoint", id: worker.id, auth: "session" }, { wake: "spawn", ref: REF })
@@ -187,8 +187,117 @@ describe("a held spawn", () => {
     clock.now += 61_000
     const second = core.wakeDue(worker.id)!.ticket!
     expect(second).not.toBe(first)
-    expect(code(() => core.claim({ handle: "w1", harness: "codex", process: key(25), session: "env:old", ticket: first }))).toBe("unauthorized")
-    expect(core.claim({ handle: "w1", harness: "codex", process: key(26), session: "env:new", ticket: second }).endpoint.id).toBe(worker.id)
+    expect(core.claim({ handle: "w1", harness: "codex", process: key(25), session: "env:old", ticket: first }).endpoint.id).toBe(worker.id)
+    core.disconnect(worker.id)
+    expect(code(() => core.claim({ handle: "w1", harness: "codex", ticket: second }))).toBe("unauthorized")
+  })
+
+  for (const hooks of [false, true]) {
+    test(`a new session skips a revivable handle with hooks ${hooks}`, () => {
+      const { core, db, main, worker } = setup()
+      core.disconnect(main.id)
+      core.brokerHibernate(main.id, { wake: "claude-bg", ref: REF })
+      core.send(worker.id, { to: "main", body: "waiting" })
+      const ticket = core.wakeDue(main.id)!.ticket!
+      if (hooks) core.claim({ handle: "hook", harness: "claude-code", process: key(70), session: key(70) }, { transient: true })
+      const next = core.claim({ handle: "main", harness: "claude-code", process: key(70), session: key(70) }).endpoint
+      expect(next.address).toBe("me/main-2")
+      expect(core.whoami(main.id)).toHaveProperty("revivable", true)
+      expect(core.inbox(main.id)).toHaveLength(1)
+      expect(db.query("SELECT wake_ticket FROM endpoints WHERE id = ?").get(main.id)).toEqual({
+        wake_ticket: new Bun.CryptoHasher("sha256").update(ticket).digest("hex"),
+      })
+    })
+  }
+
+  test("a revivable row's own session keeps its state from a new process", () => {
+    const { core, db, main, audit } = setup()
+    core.claim({ handle: "main", harness: "claude-code", session: key(1), process: key(1) }, { transient: true })
+    core.disconnect(main.id)
+    db.query("UPDATE endpoints SET peek = 'local' WHERE id = ?").run(main.id)
+    core.brokerHibernate(main.id, { wake: "claude-bg", ref: REF })
+    const back = core.claim({ handle: "other", harness: "claude-code", session: key(1), process: key(73) }).endpoint
+    expect(back.id).toBe(main.id)
+    expect(back.address).toBe("me/main")
+    expect(db.query("SELECT peek, session FROM endpoints WHERE id = ?").get(main.id)).toEqual({ peek: "local", session: key(1) })
+    expect(audit("scope_reset")).toEqual([])
+  })
+
+  test("revive tickets survive repeated kicks and runs until claimed", () => {
+    const { core, main, worker } = setup()
+    core.disconnect(main.id)
+    core.brokerHibernate(main.id, { wake: "claude-bg", ref: REF })
+    core.send(worker.id, { to: "main", body: "waiting" })
+    const first = core.wakeDue(main.id)!.ticket!
+    for (let n = 0; n < 3; n++) {
+      core.brokerHibernate(main.id, { wake: "claude-bg", ref: REF })
+      expect(core.wakeDue(main.id)?.ticket).toMatch(/^kwt_[0-9a-f]{64}$/)
+    }
+    expect(core.claim({ handle: "main", harness: "claude-code", session: "revived", process: key(71), ticket: first }).endpoint.id).toBe(main.id)
+    core.disconnect(main.id)
+    expect(code(() => core.claim({ handle: "main", harness: "claude-code", ticket: first }))).toBe("unauthorized")
+  })
+
+  test("a transient hook resumes a local revivable child by harness session before its ticketed claim", () => {
+    const { core, db, main, worker } = setup()
+    db.query("UPDATE endpoints SET harness_session = ? WHERE id = ?").run("019a-s", worker.id)
+    core.disconnect(worker.id)
+    core.brokerHibernate(worker.id, { wake: "claude-bg", ref: REF })
+    core.send(main.id, { to: "w1", body: "waiting" })
+    const ticket = core.wakeDue(worker.id)!.ticket!
+    for (const session of ["start", "prompt"]) {
+      const hook = core.claim({ handle: "root", harness: "codex", session, process: key(72), harness_session: "019a-s" }, { transient: true })
+      expect(hook.endpoint.id).toBe(worker.id)
+      expect(hook.endpoint.parent).toBe("me/main")
+      expect(hook.endpoint).toHaveProperty("revivable", true)
+    }
+    expect(core.claim({ handle: "w1", harness: "codex", session: "mcp", process: key(72), ticket }).endpoint.id).toBe(worker.id)
+    expect(core.inbox(worker.id)).toHaveLength(1)
+  })
+
+  for (const shim of [true, false]) {
+    test(`a revived session's session_start keeps its tickets for the shim, with the shim claiming ${shim}`, () => {
+      const { core, clock, db, main, worker, audit } = setup()
+      db.query("UPDATE endpoints SET harness_session = ? WHERE id = ?").run("019a-s", worker.id)
+      core.disconnect(worker.id)
+      core.brokerHibernate(worker.id, { wake: "claude-bg", ref: REF })
+      core.send(main.id, { to: "w1", body: "waiting" })
+      const ticket = core.wakeDue(worker.id)!.ticket!
+      clock.now += 5_000
+      const hook = core.claim({ handle: "root", harness: "codex", session: "start", process: key(74), harness_session: "019a-s" }, { transient: true })
+      expect(hook.endpoint.id).toBe(worker.id)
+      core.event(worker.id, { kind: "session_start", session_id: "019a-s" }, { transient: true, process: key(74) })
+      expect(core.whoami(worker.id)).toHaveProperty("revivable", true)
+      if (shim) {
+        clock.now += 2_000
+        const back = core.claim({ handle: "w1", harness: "codex", session: "mcp", process: key(74), ticket }).endpoint
+        expect([back.id, back.address]).toEqual([worker.id, "me/w1"])
+        expect(back).not.toHaveProperty("revivable")
+        expect(audit("wake_done").at(-1)).toMatchObject({ how: "claim" })
+        return
+      }
+      clock.now += (LIMITS.restartGraceS - 1) * 1000
+      core.event(worker.id, { kind: "tool", tool: "Read" }, { transient: true, process: key(74) })
+      core.sweep()
+      expect(core.wakeDue(worker.id)).toBeNull()
+      expect(core.whoami(worker.id)).toHaveProperty("revivable", true)
+      clock.now += 2_000
+      core.sweep()
+      expect(core.whoami(worker.id)).not.toHaveProperty("revivable")
+      expect(audit("wake_done").at(-1)).toMatchObject({ how: "session_start" })
+      expect(code(() => core.claim({ handle: "w1", harness: "codex", session: "mcp", process: key(74), ticket }))).toBe("unauthorized")
+    })
+  }
+
+  test("a session_start of a revivable row no wake ran for clears it at once", () => {
+    const { core, db, worker, audit } = setup()
+    db.query("UPDATE endpoints SET harness_session = ? WHERE id = ?").run("019a-s", worker.id)
+    core.disconnect(worker.id)
+    core.brokerHibernate(worker.id, { wake: "claude-bg", ref: REF })
+    core.claim({ handle: "root", harness: "codex", session: "start", process: key(75), harness_session: "019a-s" }, { transient: true })
+    core.event(worker.id, { kind: "session_start" }, { transient: true, process: key(75) })
+    expect(core.whoami(worker.id)).not.toHaveProperty("revivable")
+    expect(audit("wake_done").at(-1)).toMatchObject({ how: "session_start" })
   })
 
   test("provider spawn hibernates only a durably held worker with its own ref, whoever asks", () => {
@@ -201,11 +310,48 @@ describe("a held spawn", () => {
     expect(core.hibernate(human, { endpoint: "w1", wake: "spawn", ref: REF }).endpoint.id).toBe(worker.id)
   })
 
-  test("only a spawn hibernation mints a wake ticket", () => {
+  test("only a spawn or revivable hibernation mints a wake ticket", () => {
     const { core, main, worker } = setup()
     core.hibernate({ kind: "endpoint", id: worker.id, auth: "session" }, { wake: "vm", ref: "box" })
     core.send(main.id, { to: "w1", body: "wake" })
     expect(core.wakeDue(worker.id)?.ticket).toBeUndefined()
+  })
+
+  test("a durable spawn's hibernation is revivable, and so is any hibernation whose ref is a revive record", () => {
+    const { core, clock, db, main, worker, hold } = setup()
+    hold(REF)
+    core.waker(worker.id, false)
+    expect(core.hibernateHeld(worker.id)[0]).toMatchObject({ presence: "hibernated", revivable: true })
+    expect(db.query("SELECT revive FROM endpoints WHERE id = ?").get(worker.id)).toEqual({ revive: "spawn" })
+    const record = JSON.stringify({ via: "claude-bg", harness: "claude-code", session: "5f0c", cwd: "/w", argv: ["claude", "--bg"] })
+    const view = core.brokerHibernate(main.id, { wake: "claude-bg", ref: record })
+    expect(view).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg", revivable: true })
+    expect(db.query("SELECT revive FROM endpoints WHERE id = ?").get(main.id)).toEqual({ revive: "claude-bg" })
+    for (const ref of ["5f0c", "{}", JSON.stringify({ harness: "claude-code", session: "5f0c", cwd: "w", argv: ["claude"] })])
+      expect(core.brokerHibernate(main.id, { wake: "claude-bg", ref })).not.toHaveProperty("revivable")
+    core.brokerHibernate(main.id, { wake: "claude-bg", ref: record })
+    expect(core.brokerHibernate(main.id, { wake: "none" })).not.toHaveProperty("revivable")
+    expect(db.query("SELECT revive FROM endpoints WHERE id = ?").get(main.id)).toEqual({ revive: null })
+    core.brokerHibernate(main.id, { wake: "claude-bg", ref: record })
+    core.disconnect(main.id)
+    core.send(worker.id, { to: "main", body: "back?" })
+    clock.now += 61_000
+    const ticket = core.wakeDue(main.id)!.ticket!
+    expect(ticket).toMatch(/^kwt_[0-9a-f]{64}$/)
+    const back = core.claim({ handle: "other", harness: "claude-code", process: key(40), session: "env:revived", ticket }).endpoint
+    expect([back.id, back.address, back.presence]).toEqual([main.id, "me/main", "online"])
+    expect(back).not.toHaveProperty("revivable")
+  })
+
+  test("a revivable endpoint keeps its handle and row however long it sleeps", () => {
+    const { core, clock, db, worker } = setup()
+    const record = JSON.stringify({ harness: "codex", session: "5f0c", cwd: "/w", argv: ["codex", "exec"] })
+    core.brokerHibernate(worker.id, { wake: "claude-bg", ref: record })
+    core.disconnect(worker.id)
+    clock.now += 40 * 86_400_000
+    core.sweep()
+    expect(core.claim({ handle: "w1", harness: "codex", process: key(50), session: key(50) }).endpoint.address).toBe("me/w1-2")
+    expect(db.query("SELECT handle, hibernate FROM endpoints WHERE id = ?").get(worker.id)).toEqual({ handle: "w1", hibernate: "claude-bg" })
   })
 
   test("spawn_end lets the worker go: its wake, durable ref and spawn hibernation clear, for its spawner or an ancestor only", () => {

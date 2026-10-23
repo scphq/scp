@@ -207,6 +207,31 @@ brokerSuite(
       expect(await resumed.request("inbox")).toMatchObject({ messages: [] });
     });
 
+    test("a revive record makes a hibernation revivable, and its waker's ticket takes the same endpoint back once", async () => {
+      const broker = await start({ files: files(`cat > /dev/null; printf %s "$SCP_WAKE_TICKET" >> "$HOME/tickets"`) });
+      const lane = await broker.agent("lane", "claude-code", {}, { process: key, session: "before" });
+      const peer = await broker.agent("peer");
+      await lane.request("title", { text: "revive me" });
+      expect((await lane.request<{ endpoint: Record<string, unknown> }>("hibernate", { wake: "vm", ref: "box" })).endpoint).not.toHaveProperty("revivable");
+      const record = JSON.stringify({ via: "vm", harness: "claude-code", session: "s-42", cwd: "/work", argv: ["claude", "--resume", "s-42"] });
+      expect(await lane.request("hibernate", { wake: "vm", ref: record })).toMatchObject({ endpoint: { presence: "hibernated", revivable: true } });
+      await lane.close();
+      expect(await peer.request("list")).toMatchObject({
+        endpoints: expect.arrayContaining([expect.objectContaining({ address: "me/lane", revivable: true })]),
+      });
+      const sent = await peer.request<{ id: string }>("send", { to: "lane", body: "back?" });
+      const path = join(broker.target.home, "tickets");
+      await waitFor(() => existsSync(path) && readFileSync(path, "utf8").length > 0, "revive waker run", 3000);
+      const ticket = readFileSync(path, "utf8");
+      expect(ticket).toMatch(/^kwt_[0-9a-f]{64}$/);
+      const revived = await broker.agent("other", "claude-code", {}, { process: "pid:999993:conformance", session: "after", ticket });
+      expect(revived.id).toBe(lane.id);
+      expect(await revived.request("whoami")).toMatchObject({ address: "me/lane", title: "revive me", presence: "online", wake: null });
+      expect(await revived.request("inbox")).toMatchObject({ messages: [{ id: sent.id }] });
+      await revived.close();
+      expect(await refusal(broker.agent("later", "claude-code", {}, { process: "pid:999994:conformance", session: "later", ticket }))).toBe("unauthorized");
+    });
+
     test("broker wake tickets bind the waker and each later delivery runs it again without debounce", async () => {
       const script = `import { appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";

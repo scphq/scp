@@ -195,6 +195,7 @@ export function startWakers(options: {
       SCP_WAKE_ENDPOINT: job.address,
       SCP_WAKE_HANDLE: job.handle,
       SCP_WAKE_REF: job.ref ?? "",
+      ...(job.session ? { SCP_WAKE_SESSION: job.session } : {}),
       SCP_WAKE_PROVIDER: job.provider,
       SCP_WAKE_MESSAGE_ID: job.message.id,
       SCP_WAKE_FROM: job.message.from ?? "",
