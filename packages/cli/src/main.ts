@@ -562,6 +562,7 @@ function addressCell(e: EndpointView, me: EndpointView | null | undefined): stri
 
 /** the human inbox first, then the agents under a header per machine (this one first; an agent without a machine label is on this one) and per harness */
 export function printEndpoints(endpoints: EndpointView[], me?: EndpointView | null, host = shortHostname()): void {
+  const runner = endpoints.some((e) => e.runner)
   const peek = endpoints.some((e) => e.peekable)
   const row = (e: EndpointView, indent: string) => [
     `${indent}${addressCell(e, me)}`,
@@ -575,10 +576,11 @@ export function printEndpoints(endpoints: EndpointView[], me?: EndpointView | nu
       .join(","),
     shortCwd(e.cwd),
     ...(peek ? [e.peekable ?? ""] : []),
+    ...(runner ? [e.runner ? `${e.runner.name}${e.runner.attach ? `  attach: ${e.runner.attach}` : ""}` : ""] : []),
   ]
-  const blank = (first: string) => [first, "", "", "", "", "", "", ...(peek ? [""] : [])]
+  const blank = (first: string) => [first, "", "", "", "", "", "", ...(peek ? [""] : []), ...(runner ? [""] : [])]
   const rows = [
-    ["ADDRESS", "TITLE", "PRESENCE", "WAKE", "STATUS", "LABELS", "CWD", ...(peek ? ["PEEK"] : [])],
+    ["ADDRESS", "TITLE", "PRESENCE", "WAKE", "STATUS", "LABELS", "CWD", ...(peek ? ["PEEK"] : []), ...(runner ? ["RUNNER"] : [])],
     ...endpoints.filter((e) => e.kind === "human").map((e) => row(e, "")),
   ]
   const machines = new Map<string, Map<string, EndpointView[]>>()
@@ -1231,13 +1233,24 @@ async function runVerb(
     }
     case "end": {
       if (positionals.length !== 1) throw new RelayUsage(`${CLI_NAME} end takes the worker to let go: ${CLI_NAME} end <worker>`)
-      const result = await client.request<{ endpoint: EndpointView; held: boolean }>("spawn_end", { endpoint: positionals[0] })
+      const result = await client.request<{ endpoint?: EndpointView; held: boolean; runner?: { name: string; stop: string; code?: number; stderr?: string } }>(
+        "spawn_end",
+        { endpoint: positionals[0] },
+      )
+      if (result.runner) {
+        if (asJson) json(result)
+        else
+          out(
+            `${result.endpoint?.address ?? positionals[0]} runner ${result.runner.name}: ${result.runner.stop}${result.runner.code !== undefined ? ` (exit ${result.runner.code})` : ""}${result.runner.stderr ? `: ${result.runner.stderr.replace(/\s+/g, " ").trim()}` : ""}`,
+          )
+        return ["failed", "timeout"].includes(result.runner.stop) ? 1 : 0
+      }
       if (asJson) json(result)
       else
         out(
           result.held
-            ? `${result.endpoint.address} ended: no message resumes it now; messages to it queue as for any offline agent`
-            : `${result.endpoint.address} was not held for a resume; marked ended`,
+            ? `${result.endpoint!.address} ended: no message resumes it now; messages to it queue as for any offline agent`
+            : `${result.endpoint!.address} was not held for a resume; marked ended`,
         )
       return 0
     }
@@ -1504,7 +1517,8 @@ export function printTree(endpoints: EndpointView[], me?: EndpointView | null): 
     if (e.parent && byAddress.has(e.parent) && e.parent !== e.address) children.set(e.parent, [...(children.get(e.parent) ?? []), e])
     else roots.push(e)
   }
-  const rows = [["ADDRESS", "SCOPE", "TITLE", "PRESENCE", "WAKE", "STATUS", "LABELS", "CWD"]]
+  const runner = endpoints.some((e) => e.runner)
+  const rows = [["ADDRESS", "SCOPE", "TITLE", "PRESENCE", "WAKE", "STATUS", "LABELS", "CWD", ...(runner ? ["RUNNER"] : [])]]
   const seen = new Set<string>()
   const walk = (e: EndpointView, depth: number) => {
     if (seen.has(e.address)) return
@@ -1522,6 +1536,7 @@ export function printTree(endpoints: EndpointView[], me?: EndpointView | null): 
       e.status ? statusText(e.status) : e.kind === "human" ? "" : "-",
       labels,
       shortCwd(e.cwd),
+      ...(runner ? [e.runner ? `${e.runner.name}${e.runner.attach ? `  attach: ${e.runner.attach}` : ""}` : ""] : []),
     ])
     for (const child of children.get(e.address) ?? []) walk(child, depth + 1)
   }

@@ -1,6 +1,6 @@
 import { BrokerUnavailable, connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
-import { CLI_NAME, RelayError } from "@scp-dev/core"
-import { spawnEnvironment, terminalAttached, type Walk, walkNow } from "./common"
+import { CLI_NAME, RelayError, validHandle } from "@scp-dev/core"
+import { RelayUsage, spawnEnvironment, startDaemon, terminalAttached, type Walk, walkNow } from "./common"
 import { CODEX_THREAD, codexShell } from "./identity"
 
 type Env = Record<string, string | undefined>
@@ -23,23 +23,56 @@ export type AttributeDeps = {
 /** how long a launcher waits on the broker for attribution before it starts the session unlinked */
 export const ATTRIBUTE_TIMEOUT_MS = 5000
 
+const MACHINE_ADDRESS = /^me\/([a-z0-9][a-z0-9-]{0,31})\/([^/]+)$/
+
+/** an explicit parent address, checked before a harness starts */
+export function validateUnder(under: string | undefined, root?: boolean): void {
+  if (under === undefined) return
+  if (root) throw new RelayUsage("--under and --root cannot be used together")
+  const remote = MACHINE_ADDRESS.exec(under)
+  const handle = remote ? remote[2]! : under.replace(/^me\//, "")
+  if (!validHandle(handle)) throw new RelayUsage(`--under ${JSON.stringify(under)} is not a valid agent address`)
+}
+
 const ROOT: Attribution = { env: {} }
 
 /**
  * the grant `swarm spawn-env [--name N]` from this shell would mint, so the session a launcher starts links under the agent whose harness
  * runs this shell: bound as spawn-env binds (self attestation, lineage only at a terminal), with that agent's authority and no more. A
  * $SCP_GRANT is the caller's own when it binds this shell (a spawned agent's spent grant), and is replaced; any other applies as is.
+ * An explicit parent replaces caller attribution with a claim request, including on resume.
  * Nothing for a resumed session, on the cloud transport, or when no agent runs this shell, which stays silent. Once a harness or agent
  * is found, a failure warns and the session starts unlinked; with `root`, or once the caller is known, without the caller's identity
  */
 export async function attribute(
   launcher: string,
-  opts: { name?: string | undefined; root?: boolean | undefined; resume?: boolean | undefined; dir?: string | undefined },
+  opts: { name?: string | undefined; root?: boolean | undefined; under?: string | undefined; resume?: boolean | undefined; dir?: string | undefined },
   env: Env,
   cwd: string,
   warn: (line: string) => void,
   deps: AttributeDeps = {},
 ): Promise<Attribution | undefined> {
+  validateUnder(opts.under, opts.root)
+  if (opts.under !== undefined) {
+    let parent = opts.under
+    const remote = MACHINE_ADDRESS.exec(parent)
+    if (remote) {
+      const dir = opts.dir ?? relayDir(env as NodeJS.ProcessEnv)
+      const client = await (deps.connect ?? ((dir: string) => connectBroker(dir, () => startDaemon(dir))))(dir)
+      try {
+        await client.hello({ observe: true })
+        const bridge = await client.request<{ enabled: boolean; machine?: string }>("cloud_status")
+        if (!bridge.enabled || !bridge.machine)
+          throw new RelayUsage(
+            `--under ${parent} names an agent on machine ${remote[1]}, but this relay broker is not linked to a hub (${CLI_NAME} login, then ${CLI_NAME} cloud enable)`,
+          )
+        if (bridge.machine === remote[1]) parent = `me/${remote[2]}`
+      } finally {
+        client.close()
+      }
+    }
+    return { ...ROOT, env: { SCP_UNDER: parent }, parent }
+  }
   if (opts.resume || env.SCP_TRANSPORT === "cloud") return undefined
   if (opts.root) return ROOT
   let walk: Walk
@@ -131,5 +164,6 @@ export const hasFlag = (args: string[], flags: string[]): boolean => optionsBefo
 export const underText = (attribution: Attribution | undefined): string => (attribution?.parent ? ` under ${attribution.parent}` : "")
 
 /** the help line of a launcher's --root */
-export const ROOT_HELP = `  run from an agent's shell, it links under that agent by itself (as under env $(${CLI_NAME} spawn-env)); a $SCP_GRANT minted for it
+export const ROOT_HELP = `  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
+  run from an agent's shell, it links under that agent by itself (as under env $(${CLI_NAME} spawn-env)); a $SCP_GRANT minted for it
   applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.`

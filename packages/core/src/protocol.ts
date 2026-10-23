@@ -358,7 +358,15 @@ export interface WhyResult {
 /** who calls a scope method: the human (with or without a terminal), or an endpoint by its session or by a plain shell's lineage */
 export type ScopeActor = { kind: "human"; tty: boolean } | { kind: "endpoint"; id: string; auth: "session" | "self" | "lineage" }
 
+export interface RunnerView {
+  name: string
+  ref?: string
+  attach?: string
+  status?: { state: string; detail?: string; at: string }
+}
+
 export interface EndpointView {
+  runner?: RunnerView
   id: string
   address: string
   kind: EndpointKind
@@ -403,6 +411,7 @@ export interface PeekTurn {
 
 /** a short, redacted view of an endpoint's last turns; bodies are untrusted data */
 export interface PeekResult {
+  runner?: RunnerView
   endpoint: string
   at: string
   level: PeekLevel | null

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { LIMITS } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { type FakeHubServer, startFakeHubServer } from "@scp-dev/broker/testing"
@@ -60,6 +61,17 @@ describe("runner config", () => {
     expect(usage(() => parseRunners(JSON.stringify({ a: { command: ["x"], timeout_s: 0 } }), "r.json"))).toContain("timeout_s")
   })
 
+  test("stop and status argv and bounded status timeout are optional and validated", () => {
+    expect(
+      parseRunners(JSON.stringify({ vm: { command: ["start"], stop: ["stop", "fixed"], status: ["status"], status_timeout_s: 60 } }), "r.json").vm,
+    ).toEqual({ command: ["start"], timeout_s: 60, stop: ["stop", "fixed"], status: ["status"], status_timeout_s: 60 })
+    for (const key of ["stop", "status"])
+      for (const value of [null, "sh", [], [""], [1]])
+        expect(usage(() => parseRunners(JSON.stringify({ vm: { command: ["start"], [key]: value } }), "r.json"))).toContain(key)
+    for (const value of [null, 0, 61, 1.5, "5", false])
+      expect(usage(() => parseRunners(JSON.stringify({ vm: { command: ["start"], status_timeout_s: value } }), "r.json"))).toContain("status_timeout_s")
+  })
+
   test("an unknown runner is a usage error naming the configured ones", () => {
     const runners = parseRunners(JSON.stringify({ a: { command: ["x"] }, b: { command: ["y"] } }), "r.json")
     expect(usage(() => runnerFor("c", runners, "r.json"))).toBe('no runner "c" in r.json: configured: a, b')
@@ -80,7 +92,7 @@ describe("runner config", () => {
       labels: { role: "impl" },
       join: { under: "me/laptop/lead", name: "w1", mode: "account" },
     })
-    const root = mkdtempSync(join(process.env.HOME!, "runner-stdin-"))
+    const root = mkdtempSync(join(tmpdir(), "runner-stdin-"))
     const out = join(root, "stdin.json")
     const ran = await runRunner(
       { command: [process.execPath, "-e", `require("fs").writeFileSync(${JSON.stringify(out)}, require("fs").readFileSync(0))`], timeout_s: 10 },
@@ -156,7 +168,7 @@ describe("swarm spawn --via", () => {
   let laptop: Broker
   let vm: Broker
   let lead: RelayClient
-  const root = mkdtempSync(join(process.env.HOME!, "spawn-via-"))
+  const root = mkdtempSync(join(tmpdir(), "spawn-via-"))
   const laptopDir = join(root, "laptop")
   const vmDir = join(root, "vm")
   const runners = join(root, "runners.json")
@@ -167,6 +179,7 @@ describe("swarm spawn --via", () => {
     const broker = await startBroker({
       dir,
       policyPath: join(root, `${name}-policy.json`),
+      runnersPath: runners,
       idleMs: 0,
       log: () => {},
       bridge: { url: fake.url, token: TOKEN, machine: name, backoff: { minMs: 20, maxMs: 100 }, localFlushMs: 20 },
@@ -219,12 +232,64 @@ describe("swarm spawn --via", () => {
       async () => (await lead.request<Listed>("list", { all: true })).endpoints.find((e) => e.address === "me/vm/w1" && e.status?.state === "done"),
       "vm/w1 done on laptop",
     )
+    expect(laptop.core.viaRecords().find((r) => r.name === "w1")).toMatchObject({ runner: "local-ssh-like", address: "me/vm/w1" })
     expect(shown.parent).toBe("me/lead")
     expect(shown.status?.note).toBe("exited 0")
 
     const asJson = await swarm(["spawn", "--via", "local-ssh-like", "--name", "w2", "--json", "--", process.execPath, "--no-env-file", harness], env)
     expect(JSON.parse(asJson.stdout)).toEqual({ name: "w2", runner: "local-ssh-like", parent: "me/laptop/lead", address: "me/vm/w2", machine: "vm" })
     await until(async () => (await lead.request<Inbox>("inbox", { wait_s: 1 })).messages.find((m) => m.from.address === "me/vm/w2"), "w2's handback")
+  })
+
+  test("list and peek show runner metadata; end prints each outcome and fails only on failure or timeout", async () => {
+    const env = { SCP_DIR: laptopDir }
+    const stopLog = join(root, "stopped.json")
+    const fake = (code: number, timeout = false) => ({
+      command: ["true"],
+      timeout_s: 1,
+      stop: [
+        process.execPath,
+        "-e",
+        timeout ? "setInterval(()=>{},1000)" : `await Bun.write(${JSON.stringify(stopLog)}, await Bun.stdin.text()); process.exit(${code})`,
+      ],
+      status: [process.execPath, "-e", 'console.log(JSON.stringify({state:"running",attach:"ssh vm updated"}))'],
+    })
+    const original = await Bun.file(runners).text()
+    try {
+      writeFileSync(runners, JSON.stringify({ vm: fake(0) }))
+      laptop.core.mirror("vm", [{ address: "me/lifecycle", kind: "agent", harness: "cli", labels: {}, presence: "online", parent_addr: "laptop/lead" }])
+      await lead.request("spawn_via", { name: "lifecycle", runner: "vm", address: "me/vm/lifecycle", machine: "vm", attach: "ssh vm" })
+      const listed = await swarm(["list", "--json", "--all"], env)
+      expect(listed.code).toBe(0)
+      expect(JSON.parse(listed.stdout).endpoints.find((e: { address: string }) => e.address === "me/vm/lifecycle").runner).toMatchObject({
+        name: "vm",
+        attach: "ssh vm updated",
+        status: { state: "running" },
+      })
+      expect((await swarm(["list", "--all"], env)).stdout).toContain("vm  attach: ssh vm updated")
+      expect((await swarm(["list", "--all", "--tree"], env)).stdout).toContain("attach: ssh vm updated")
+      expect((await swarm(["peek", "me/vm/lifecycle"], env)).stdout).toContain("attach: ssh vm updated")
+      for (const [code, stop, exit] of [
+        [0, "stopped", 0],
+        [77, "declined", 0],
+        [2, "failed", 1],
+      ] as const) {
+        writeFileSync(runners, JSON.stringify({ vm: fake(code) }))
+        const ended = await swarm(["end", "me/vm/lifecycle"], env)
+        expect(ended.code).toBe(exit)
+        expect(ended.stdout).toBe(`me/vm/lifecycle runner vm: ${stop} (exit ${code})\n`)
+      }
+      expect(JSON.parse(await Bun.file(stopLog).text())).toMatchObject({ event: "stop", name: "lifecycle" })
+      writeFileSync(runners, JSON.stringify({ vm: fake(0, true) }))
+      const timeout = await swarm(["end", "lifecycle"], env)
+      expect(timeout.code).toBe(1)
+      expect(timeout.stdout).toContain("runner vm: timeout (exit 124)")
+      writeFileSync(runners, JSON.stringify({ vm: { command: ["true"] } }))
+      expect((await swarm(["end", "lifecycle"], env)).stdout).toContain("runner vm: none")
+      expect((await swarm(["end", "lifecycle", "--json"], env)).code).toBe(0)
+    } finally {
+      writeFileSync(runners, original)
+    }
   })
 
   test("a failed runner fails the spawn with its exit code and stderr; an unknown one names those configured", async () => {

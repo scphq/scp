@@ -47,6 +47,7 @@
     "spawn_end",
     "spawn_exit",
     "spawn_steers",
+    "spawn_via",
     "status",
     "stop_wait",
     "subagent_title",

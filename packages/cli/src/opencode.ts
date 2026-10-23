@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
-import { attribute, attributed, hasFlag, ROOT_HELP } from "./attribute"
+import { attribute, attributed, validateUnder, hasFlag, ROOT_HELP } from "./attribute"
 import { RelayUsage } from "./common"
 import { opencodePlugin } from "./hooks"
 import { gitToplevel } from "./identity"
@@ -12,15 +12,16 @@ import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
 
-export const OPENCODE_HELP = `${CLI_NAME} opencode [--name N | --as N] [--root] [--] [opencode args...]
+export const OPENCODE_HELP = `${CLI_NAME} opencode [--name N | --as N] [--root] [--under ADDR] [--] [opencode args...]
   runs OpenCode with your own config and arguments, wake on: the ${CLI_NAME} plugin wakes the session on a new message, and opens
   one when none is open yet. Refuses to start without the current plugin; ${CLI_NAME} setup --write installs it.
   $SCP_OPENCODE_BIN picks the opencode binary (default opencode on PATH).
 ${ROOT_HELP}`
 
 /** the opencode argv and the env it runs with: the name becomes $SCP_NAME, the harness opencode, wake on */
-export function opencodeLaunch(args: string[], env: Env, bin: string): { name?: string; root?: true; argv: string[]; env: Env } {
+export function opencodeLaunch(args: string[], env: Env, bin: string): { name?: string; root?: true; under?: string; argv: string[]; env: Env } {
   let name: string | undefined
+  let under: string | undefined
   let root = false
   const rest: string[] = []
   for (let i = 0; i < args.length; i++) {
@@ -33,14 +34,19 @@ export function opencodeLaunch(args: string[], env: Env, bin: string): { name?: 
       name = args[++i]
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} opencode ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
-    else if (arg === "--root") root = true
+    else if (arg === "--under" || arg.startsWith("--under=")) {
+      under = arg === "--under" ? args[++i] : arg.slice(8)
+      if (under === undefined) throw new RelayUsage("--under takes an address")
+    } else if (arg === "--root") root = true
     else rest.push(arg)
   }
+  validateUnder(under, root)
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
   return {
     ...(name !== undefined ? { name } : {}),
     ...(root ? { root: true as const } : {}),
+    ...(under !== undefined ? { under } : {}),
     argv: [bin, ...rest],
     env: { ...env, SCP_HARNESS: "opencode", SCP_WAKE: "1", ...(name !== undefined ? { SCP_NAME: name } : {}) },
   }

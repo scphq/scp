@@ -29,6 +29,7 @@ export class Machine {
       XDG_DATA_HOME: join(this.root, "data"),
       SCP_DIR: join(this.root, "broker"),
       SCP_MACHINE: name,
+      SCP_RUNNERS_FILE: join(this.root, "runners.json"),
       SCP_TOKEN: token,
       SCP_RELAY: target.url,
       SCP_HARNESS_DETECT: "0",

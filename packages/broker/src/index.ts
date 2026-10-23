@@ -21,3 +21,6 @@ export { readSessionMarker, type SessionMarker, writeSessionMarker } from "./ses
 
 export type { HookParams, HookProc, HookResult, HookContext, HookHandler } from "./hook"
 export { openOwnedFile, readOwnedFile } from "./owned-file"
+
+export { parseRunnerConfig, type Runner } from "./runners"
+export { runRunner } from "./runner-exec"
