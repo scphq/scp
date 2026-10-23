@@ -237,6 +237,15 @@ jobs:
         with:
           bun-version-file: package.json
 
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/scp-compat
+          key: scp-compat-${{ runner.os }}-${{ hashFiles('packages/conformance/src/compat.ts') }}
+
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -253,6 +262,8 @@ jobs:
       # ts always runs; the two variables add rust-sqlite and rust-pg.
       - name: Conformance against ts, rust-sqlite and rust-pg
         env:
+          SCP_CONFORMANCE_COMPAT: "1"
+          SCP_COMPAT_DIR: ${{ runner.temp }}/scp-compat
           SCP_RELAY_BIN: ${{ github.workspace }}/crates/target/debug/scp-relay
           SCP_CONFORMANCE_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: bun test packages/conformance/src/*.test.ts

@@ -136,3 +136,36 @@ JSON stdin payload, `SCP_WAKE_*` environment and exit-77 declines. SPEC section 
 configuration and invocation implementation-defined, so it runs on `ts` and `ts-node`,
 and on `rust` only when `SCP_BROKER_WAKERS=1` says the engine implements that binding.
 Wire-only wake tests remain in `broker wake and hibernation`.
+
+## Pinned broker compatibility
+
+```sh
+SCP_CONFORMANCE_COMPAT=1 SCP_COMPAT_DIR=/tmp/scp-compat-cache \
+  bun test packages/conformance/src/compat.test.ts
+```
+
+This suite runs real npm-installed brokers from the CLI version pinned in
+`src/compat.ts` under `node` from PATH (Node 22.13 or newer). Installation uses
+`--ignore-scripts`; no install scripts or optional native packages are needed.
+`SCP_COMPAT_DIR` holds the isolated npm installation, reused when its package
+version matches. It must be outside the workspace. Without it, the system temp
+directory holds the cache. The root preload captures both compatibility settings
+before CLI test isolation clears `SCP_*`.
+
+Compatibility is opt-in because a cold install requires network access and adds
+installation time. Plain `bun test` explicitly skips it without installing anything.
+The relay conformance CI job always enables it for `ts`, `rust-sqlite` and `rust-pg`,
+using Node 24 and a cached installation. The cache key hashes `src/compat.ts`, which
+contains the sole version pin.
+
+Both old/old and old/current pairs check bridge hello acceptance and connected
+status, mirrors on the peer and hub, bidirectional messages and threaded replies,
+hibernation mirrors and queued delivery through a fake metadata-only waker, claim
+resumption, and spawn-via parent views and handback through a fake runner and harness.
+The same `targets.ts` selection and teardown apply, including optional PostgreSQL.
+All machine homes, harness settings and scripts are isolated in temporary directories.
+
+The scenarios use only the section 19 behavior of the pinned release, not revive
+records or wake tickets. The pinned broker resolves its default policy directory from
+the account database, not HOME or XDG, so every fixture daemon gets an explicit
+`--policy` inside its temporary configuration, which also isolates `wakers.json`.

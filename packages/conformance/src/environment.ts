@@ -8,3 +8,5 @@ export const brokerBinary = process.env.SCP_BROKER_BIN;
 export const brokerNode = process.env.SCP_BROKER_NODE;
 export const selectedBrokerTargets = process.env.SCP_BROKER_TARGETS?.split(",").map((name) => name.trim());
 export const brokerReferenceWakers = process.env.SCP_BROKER_WAKERS === "1";
+export const compatConformance = process.env.SCP_CONFORMANCE_COMPAT === "1";
+export const compatDirectory = process.env.SCP_COMPAT_DIR;

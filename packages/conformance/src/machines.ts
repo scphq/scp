@@ -20,6 +20,7 @@ export class Machine {
     readonly name: string,
     readonly target: Target,
     token: string,
+    readonly program: readonly string[] = [process.execPath, "--no-env-file", cli],
   ) {
     this.env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("SCP_")));
     Object.assign(this.env, {
@@ -38,6 +39,7 @@ export class Machine {
     });
     this.assertIsolated();
     mkdirSync(this.env.SCP_DIR!, { recursive: true });
+    mkdirSync(join(this.env.XDG_CONFIG_HOME!, "scp"), { recursive: true });
   }
   assertIsolated() {
     for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "SCP_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME"]) {
@@ -50,14 +52,14 @@ export class Machine {
   async run(args: string[], extra: Record<string, string> = {}) {
     this.assertIsolated();
     this.env.SCP_RELAY = this.target.url;
-    return command([process.execPath, "--no-env-file", cli, ...args], { ...this.env, ...extra });
+    return command([...this.program, ...args], { ...this.env, ...extra });
   }
   async json<T>(args: string[], extra: Record<string, string> = {}): Promise<T> {
     return JSON.parse(await this.run([args[0]!, "--json", ...args.slice(1)], extra)) as T;
   }
   async start() {
     await this.run(["cloud", "enable", "--machine", this.name]);
-    const child = Bun.spawn([process.execPath, "--no-env-file", cli, "daemon", "--idle", "10m"], {
+    const child = Bun.spawn([...this.program, "daemon", "--idle", "10m", "--policy", join(this.env.XDG_CONFIG_HOME!, "scp/policy.json")], {
       env: this.env,
       stdin: "ignore",
       stdout: "ignore",
