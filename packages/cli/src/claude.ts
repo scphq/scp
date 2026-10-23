@@ -11,6 +11,7 @@ import { joinMode } from "./relay"
 import { entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF } from "./term"
 import { safeCwd } from "./cwd"
+import type { ClaudeBgDeps } from "./claude-bg"
 
 export const CHANNEL_FLAGS = ["--dangerously-load-development-channels", "server:scp"]
 
@@ -63,7 +64,7 @@ export function claudeLaunchArgs(args: string[], added: string[]): string[] {
 }
 
 /** a launcher's own identity, which claude's daemon must not keep for the sessions it starts later */
-const LAUNCHER_IDENTITY = [
+export const LAUNCHER_IDENTITY = [
   ...CLAUDE_SESSION_ENV,
   "SCP_NAME",
   "SCP_GRANT",
@@ -150,6 +151,7 @@ export type ClaudeDeps = {
   /** renames a local agent endpoint, as `swarm name --endpoint <from> <to>`; resolves with the exit code */
   rename?: (from: string, to: string) => Promise<number>
   attribute?: AttributeDeps
+  bg?: ClaudeBgDeps
 }
 
 const SHORT_ID = /^[0-9a-f]{8}$/
@@ -321,6 +323,7 @@ export async function claudeCommand(
     if (!bin) throw new RelayUsage("claude is not on PATH")
     return attachCommand(argv.slice(1), env, err, cwd, bin, deps)
   }
+  if (argv[0] === "ls" || argv[0] === "prune") return (await import("./claude-bg")).claudeBgCommand(argv[0], argv.slice(1), env, out, deps.bg)
   const { name, bg, root, args } = claudeArgv(argv)
   if (!bin) throw new RelayUsage("claude is not on PATH")
   if (bg) {
@@ -357,6 +360,15 @@ ${CLI_NAME} claude --bg [--name N] [--root] [--] [claude args...]   start it in 
   it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root
 ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first
   --resume <id> of a live background session attaches to it: it is already woken through claude-inbox
+${CLI_NAME} claude ls [--all] [--json]          the background sessions (--all: stopped ones too), orchestrators first, with their SCP role
+                                                 (orchestrator: a root or one with workers; worker; unknown: no endpoint), endpoint and cwd
+${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop, then remove, the workers ${CLI_NAME} claude --bg started
+                                                 that finished: never a root, an orchestrator, one with unread mail or one claude attach
+                                                 holds, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
+                                                 (30m, 2h, 1d) replaces the thresholds; --stop-only removes nothing. Needs the broker
+  The broker does the same on its own: a worker done (or handed back) and idle stops after $SCP_CLAUDE_BG_STOP_AFTER_S (600 s,
+  Infinity never) and is removed once historic unless $SCP_CLAUDE_BG_REMOVE=0; config.json claude_bg {stop_after_s, remove} sets both.
+  A stopped or removed worker keeps its endpoint and mail: a message respawns it, or resumes it in its directory after a removal
 `
 
 const SIGNALS: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 1, SIGINT: 2, SIGKILL: 9, SIGTERM: 15 }

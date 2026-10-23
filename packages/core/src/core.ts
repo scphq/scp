@@ -323,6 +323,33 @@ export interface WakeJob {
   ticket?: string
 }
 
+/** what the broker's own tasks read about a local agent: never a message body */
+export interface LocalAgent {
+  id: string
+  address: string
+  handle: string
+  harness: string | null
+  cwd: string | null
+  /** the parent's address; null for a root */
+  parent: string | null
+  /** the endpoints linked under it, in-process subagents aside */
+  children: number
+  harness_session: string | null
+  state: StatusState | null
+  presence: Presence
+  historic: boolean
+  /** its last work: its claim, a hook, a read or a message to it, never a connection's keepalive */
+  worked_at: string
+  /** when a message was last queued for it, or null */
+  mail_at: string | null
+  connections: number
+  /** the provider of its hibernation, or null */
+  hibernate: string | null
+  unread: boolean
+  /** a spawn grant it spent has a handback */
+  handed_back: boolean
+}
+
 export interface MessageRow {
   id: string
   thread: string
@@ -2344,12 +2371,64 @@ export class RelayCore {
     return value
   }
 
-  private setHibernation(me: EndpointRow, target: EndpointRow, set: { wake: string; ref: string | null; eta: number | null }): EndpointView {
+  /** the broker's own tasks mark a local agent hibernated by `wake` with `ref`, or clear it with `none`; audited `{by: "broker"}` */
+  brokerHibernate(endpoint: string, params: { wake: unknown; ref?: unknown }, options: { known?: (provider: string) => boolean } = {}): EndpointView {
+    const set = this.hibernation(params, options)
+    const target = this.byId(endpoint)
+    if (target?.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint hibernates")
+    if (set.wake === SPAWN_PROVIDER) throw new RelayError("invalid_params", `${SPAWN_PROVIDER} hibernates only a durably held worker, by its own ref`)
+    return this.setHibernation("broker", target, set)
+  }
+
+  /** the local agents, retired and in-process subagent rows aside, as the broker's own tasks read them */
+  localAgents(): LocalAgent[] {
+    const now = this.now()
+    const rows = this.sql
+      .all<EndpointRow>(
+        `SELECT * FROM endpoints WHERE kind = 'agent' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
+         AND (session IS NULL OR substr(session, 1, 4) != 'sub:') ORDER BY handle`,
+      )
+      .filter((row) => this.localRow(row))
+    const children = new Map<string, number>()
+    for (const { parent, n } of this.sql.all<{ parent: string; n: number }>(
+      `SELECT parent_ep AS parent, COUNT(*) AS n FROM endpoints WHERE parent_ep IS NOT NULL AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
+       AND (session IS NULL OR substr(session, 1, 4) != 'sub:') GROUP BY parent_ep`,
+    ))
+      children.set(parent, n)
+    const handedBack = new Set(
+      this.sql.all<{ used_by: string }>(`SELECT DISTINCT used_by FROM grants WHERE used_by IS NOT NULL AND handback IS NOT NULL`).map((row) => row.used_by),
+    )
+    return rows.map((row) => {
+      const parent = row.parent_ep ? this.byId(row.parent_ep) : undefined
+      return {
+        id: row.id,
+        address: this.address(row),
+        handle: row.handle,
+        harness: row.harness,
+        cwd: row.cwd,
+        parent: parent ? this.address(parent) : row.parent_addr,
+        children: children.get(row.id) ?? 0,
+        harness_session: row.harness_session,
+        state: row.status_state,
+        presence: this.presence(row, now),
+        historic: this.historic(row, now),
+        worked_at: iso(Math.max(row.created_at, row.hook_seen ?? 0, row.last_received_at ?? 0, row.mail_at ?? 0))!,
+        mail_at: iso(row.mail_at),
+        connections: row.connections,
+        hibernate: row.hibernate,
+        unread: this.hasUnread(row.id),
+        handed_back: handedBack.has(row.id),
+      }
+    })
+  }
+
+  private setHibernation(me: EndpointRow | "broker", target: EndpointRow, set: { wake: string; ref: string | null; eta: number | null }): EndpointView {
     const address = this.address(target)
+    const by = me === "broker" ? me : this.address(me)
     if (set.wake === "none") {
       if (target.hibernate !== null) {
         this.clearHibernation(target.id)
-        this.audit("unhibernate", target.id, null, { by: this.address(me), target: address })
+        this.audit("unhibernate", target.id, null, { by, target: address })
       }
       return this.view(this.byId(target.id)!)
     }
@@ -2362,7 +2441,7 @@ export class RelayCore {
       this.now(),
       target.id,
     )
-    this.audit("hibernate", target.id, null, { by: this.address(me), target: address, provider: set.wake })
+    this.audit("hibernate", target.id, null, { by, target: address, provider: set.wake })
     return this.view(this.byId(target.id)!)
   }
 

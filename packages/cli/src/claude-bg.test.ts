@@ -1,0 +1,549 @@
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { type BrokerTaskContext, RelayClient, startBroker } from "@scp-dev/broker"
+import type { LocalAgent } from "@scp-dev/core"
+import { bgDir } from "./claude"
+import {
+  type BgState,
+  type ClaudeEntry,
+  type PlanInput,
+  attachTargets,
+  bgConfig,
+  claudeBgCommand,
+  claudeBgTask,
+  claudeWakeCommand,
+  plan,
+  readState,
+} from "./claude-bg"
+
+const id = "1a2b3c4d"
+const sessionId = `${id}-0000-4000-8000-000000000001`
+const now = Date.parse("2030-01-02T00:00:00Z")
+const cleanups: (() => void | Promise<void>)[] = []
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+})
+
+function agent(overrides: Partial<LocalAgent> = {}): LocalAgent {
+  return {
+    id: "worker-id",
+    address: "me/w1",
+    handle: "w1",
+    harness: null,
+    cwd: null,
+    parent: "me/lead",
+    children: 0,
+    harness_session: sessionId,
+    state: "done",
+    presence: "online",
+    historic: false,
+    worked_at: new Date(now - 3_600_000).toISOString(),
+    mail_at: null,
+    connections: 1,
+    hibernate: null,
+    unread: false,
+    handed_back: false,
+    ...overrides,
+  }
+}
+const entry = (overrides: Partial<ClaudeEntry> = {}): ClaudeEntry => ({
+  id,
+  sessionId,
+  cwd: "/work",
+  kind: "background",
+  name: "lane",
+  state: "working",
+  pid: 4242,
+  status: "idle",
+  ...overrides,
+})
+function stoppedEntry(overrides: Partial<ClaudeEntry> = {}): ClaudeEntry {
+  const value = entry({ state: "stopped", ...overrides })
+  delete value.pid
+  return value
+}
+function input(overrides: Partial<PlanInput> = {}): PlanInput {
+  return {
+    entries: [entry()],
+    agents: [agent()],
+    records: new Map([[id, { file: "/record.json", handle: "w1" }]]),
+    states: new Map(),
+    attached: new Set(),
+    now,
+    config: { stopAfterS: 600, remove: true },
+    ...overrides,
+  }
+}
+
+function fixture() {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "bg-test-")))
+  cleanups.push(() => rmSync(home, { recursive: true, force: true }))
+  const bin = join(home, "bin")
+  mkdirSync(bin)
+  const env = { HOME: home, SCP_DIR: join(home, "state"), XDG_CONFIG_HOME: join(home, "config"), PATH: `${bin}:/usr/bin:/bin` }
+  mkdirSync(bgDir(env), { recursive: true })
+  const stateFile = join(home, "claude-state.json")
+  const callsFile = join(home, "calls.log")
+  const save = (entries: ClaudeEntry[]) => writeFileSync(stateFile, JSON.stringify(entries))
+  save([entry({ cwd: home })])
+  writeFileSync(
+    join(bin, "claude"),
+    `#!${process.execPath}
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+const root = process.env.HOME;
+const file = root + "/claude-state.json";
+const argv = process.argv.slice(2);
+appendFileSync(root + "/calls.log", JSON.stringify({ argv, cwd: process.cwd() }) + "\\n");
+let entries = JSON.parse(readFileSync(file, "utf8"));
+const [command, id] = argv;
+if (command === "agents") {
+  console.log(JSON.stringify(argv.includes("--all") ? entries : entries.filter(e => e.pid !== undefined)));
+  process.exit(0);
+}
+const entry = entries.find(e => e.id === id);
+if (command === "stop") {
+  delete entry.pid;
+  entry.state = "stopped";
+  console.log("stopped " + id);
+} else if (command === "rm") {
+  if (existsSync(root + "/rm-refuse")) {
+    console.error("cannot remove " + id + ": unpushed commits; pass --discard-unpushed abc123@wt-1 to discard them");
+    process.exit(1);
+  }
+  entries = entries.filter(e => e.id !== id);
+  console.log("removed " + id);
+} else if (command === "respawn") {
+  Object.assign(entry, { pid: 4242, state: "working", status: "idle" });
+  console.log("respawned " + id);
+} else if (command === "--bg") {
+  const sessionId = argv[argv.indexOf("--resume") + 1];
+  const id = sessionId.slice(0, 8);
+  entries.push({ id, sessionId, kind: "background", cwd: process.cwd(), name: argv[argv.indexOf("--name") + 1], pid: 4242, state: "working", status: "idle" });
+  console.log("backgrounded · " + id);
+} else process.exit(2);
+writeFileSync(file, JSON.stringify(entries));
+`,
+    { mode: 0o755 },
+  )
+  const calls = (): { argv: string[]; cwd: string }[] =>
+    existsSync(callsFile)
+      ? readFileSync(callsFile, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+      : []
+  const record = (short = id, handle = "w1") => {
+    const file = join(bgDir(env), `${crypto.randomUUID()}.json`)
+    writeFileSync(file, JSON.stringify({ mcpServers: { scp: { env: { SCP_NAME: handle, SCP_GRANT: "" } } } }), { mode: 0o600 })
+    symlinkSync(file, join(bgDir(env), `${short}.json`))
+    return file
+  }
+  const state = (overrides: Partial<BgState> = {}) => {
+    const value = { sessionId, cwd: home, name: "lane", handle: "w1", ...overrides }
+    writeFileSync(join(bgDir(env), `${id}.state.json`), JSON.stringify(value))
+    return value
+  }
+  let facts = agent()
+  const events: unknown[][] = []
+  let onHibernate = () => {}
+  let onAgents = () => {}
+  const context: BrokerTaskContext = {
+    agents() {
+      events.push(["agents"])
+      onAgents()
+      return [{ ...facts }]
+    },
+    hibernate(endpoint, provider, ref) {
+      events.push(["hibernate", endpoint, provider, ref, calls().some((call) => call.argv[0] === "stop")])
+      facts.hibernate = provider
+      onHibernate()
+    },
+    unhibernate(endpoint) {
+      events.push(["unhibernate", endpoint])
+      facts.hibernate = null
+    },
+    kick(endpoint) {
+      events.push(["kick", endpoint])
+    },
+    log(line) {
+      events.push(["log", line])
+    },
+  }
+  const deps = { ps: async () => "", now: () => now }
+  return {
+    home,
+    env,
+    callsFile,
+    save,
+    calls,
+    record,
+    state,
+    context,
+    events,
+    deps,
+    get facts() {
+      return facts
+    },
+    set facts(value: LocalAgent) {
+      facts = value
+    },
+    set onHibernate(fn: () => void) {
+      onHibernate = fn
+    },
+    set onAgents(fn: () => void) {
+      onAgents = fn
+    },
+    run: () => claudeBgTask(env, deps).run(context),
+  }
+}
+
+describe("planning", () => {
+  test("stops a finished idle worker", () => {
+    expect(plan(input())).toMatchObject([{ kind: "stop", id }])
+  })
+  const guards: [string, Partial<PlanInput>][] = [
+    ["not started by swarm claude --bg", { records: new Map() }],
+    ["no endpoint", { agents: [] }],
+    ["a root", { agents: [agent({ parent: null })] }],
+    ["an orchestrator", { agents: [agent({ children: 1 })] }],
+    ["unread mail", { agents: [agent({ unread: true })] }],
+    ["attached", { attached: new Set([id]) }],
+    ["attached", { attached: new Set(["lane"]) }],
+    ["busy", { entries: [entry({ status: "busy" })] }],
+    ["not done", { agents: [agent({ state: "working" })] }],
+    ["recently active", { agents: [agent({ worked_at: new Date(now - 1000).toISOString() })] }],
+    ["recently active", { config: { stopAfterS: Infinity, remove: true } }],
+  ]
+  for (const [index, [reason, overrides]] of guards.entries()) {
+    test(`keeps a guarded worker in case ${index + 1}`, () => {
+      expect(plan(input(overrides))).toMatchObject([{ kind: "keep", reason }])
+    })
+  }
+  test("treats handed back work as finished", () => {
+    expect(plan(input({ agents: [agent({ state: "working", handed_back: true })] }))[0]?.kind).toBe("stop")
+  })
+  test("ignores interactive sessions and invalid short ids", () => {
+    const unnamed = entry()
+    delete unnamed.id
+    const entries = [unnamed, entry({ kind: "interactive" }), ...["ABCDEF12", "123", "1234567g"].map((id) => entry({ id }))]
+    expect(plan(input({ entries }))).toEqual([])
+  })
+  test("prefers the session over the recorded handle", () => {
+    const matched = agent({ id: "session-worker", handle: "w2" })
+    const wrong = agent({ harness_session: "another-session", parent: null })
+    expect(plan(input({ agents: [wrong, matched] }))).toMatchObject([{ kind: "stop", agent: { id: matched.id } }])
+    expect(plan(input({ agents: [wrong] }))).toMatchObject([{ kind: "keep", reason: "no endpoint" }])
+    expect(plan(input({ agents: [agent({ harness_session: null })] }))[0]?.kind).toBe("stop")
+  })
+  test("removes historic stopped workers when enabled", () => {
+    const stopped = input({ entries: [stoppedEntry()], agents: [agent({ historic: true })] })
+    expect(plan(stopped)).toMatchObject([{ kind: "remove", live: false }])
+    expect(plan({ ...stopped, config: { stopAfterS: 600, remove: false } })).toMatchObject([{ kind: "keep", reason: "stopped" }])
+    expect(plan({ ...stopped, stopOnly: true })).toMatchObject([{ kind: "keep", reason: "stopped" }])
+  })
+  test("uses an explicit age instead of finish and configured thresholds", () => {
+    const aged = input({ agents: [agent({ state: "working" })], olderThanS: 1800, config: { stopAfterS: Infinity, remove: false } })
+    expect(plan({ ...aged, stopOnly: true })[0]?.kind).toBe("stop")
+    expect(plan(aged)).toMatchObject([{ kind: "remove", live: true }])
+    expect(plan({ ...aged, olderThanS: 7200 })).toMatchObject([{ kind: "keep", reason: "recently active" }])
+  })
+  test("removes a live historic worker only once it is finished and idle past the stop threshold", () => {
+    const live = input({ agents: [agent({ historic: true })] })
+    expect(plan(live)).toMatchObject([{ kind: "remove", live: true }])
+    expect(plan({ ...live, agents: [agent({ historic: true, state: "working" })] })).toMatchObject([{ kind: "keep", reason: "not done" }])
+    expect(plan({ ...live, config: { stopAfterS: Infinity, remove: true } })).toMatchObject([{ kind: "keep", reason: "recently active" }])
+  })
+  test("holds a refused removal for one day unless retried", () => {
+    const held = input({
+      entries: [stoppedEntry()],
+      agents: [agent({ historic: true })],
+      states: new Map([[id, { sessionId, cwd: "/work", rmRefused: { at: now - 1000, reason: "unpushed" } }]]),
+    })
+    expect(plan(held)).toMatchObject([{ kind: "keep", reason: "claude rm refused: unpushed" }])
+    expect(plan({ ...held, retryRefused: true })[0]?.kind).toBe("remove")
+    expect(plan({ ...held, now: now + 86_400_000 })[0]?.kind).toBe("remove")
+  })
+  test("unhibernates a connected live session", () => {
+    expect(plan(input({ agents: [agent({ hibernate: "claude-bg" })] }))[0]).toMatchObject({ kind: "unhibernate", id })
+  })
+})
+
+test("finds attach targets only after a word with claude in its path", () => {
+  expect([...attachTargets("/opt/bin/claude attach 1a2b3c4d\nbun /x/cli.js claude attach w1\nnode /x/claude/cli.js attach lane\ngit attach x")]).toEqual([
+    id,
+    "w1",
+    "lane",
+  ])
+})
+
+test("reads defaults and file settings with environment precedence", () => {
+  const f = fixture()
+  expect(bgConfig(f.env)).toEqual({ stopAfterS: 600, remove: true })
+  for (const [value, seconds] of [
+    ["900", 900],
+    ["10m", 600],
+    ["Infinity", Infinity],
+  ] as const)
+    expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: value, SCP_CLAUDE_BG_REMOVE: "0" })).toEqual({ stopAfterS: seconds, remove: false })
+  const dir = join(f.env.XDG_CONFIG_HOME, "scp")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ claude_bg: { stop_after_s: "Infinity", remove: false } }), { mode: 0o600 })
+  expect(bgConfig(f.env)).toEqual({ stopAfterS: Infinity, remove: false })
+  expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: "900", SCP_CLAUDE_BG_REMOVE: "1" })).toEqual({ stopAfterS: 900, remove: true })
+})
+
+describe("background task", () => {
+  test("does nothing without launcher records", async () => {
+    const f = fixture()
+    await f.run()
+    expect(existsSync(f.callsFile)).toBe(false)
+    expect(f.events).toEqual([])
+  })
+  test("hibernates before stopping and saves resumable state", async () => {
+    const f = fixture()
+    f.record()
+    await f.run()
+    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([["hibernate", "worker-id", "claude-bg", sessionId, false]])
+    expect(f.calls().map((call) => call.argv)).toEqual([
+      ["agents", "--json", "--all"],
+      ["stop", id],
+    ])
+    expect(readState(f.env, id)).toEqual({ sessionId, cwd: f.home, name: "lane", handle: "w1", stoppedAt: now })
+    expect(f.events.some((event) => event[0] === "kick")).toBe(false)
+  })
+  for (const race of ["work", "mail"] as const) {
+    test(`cancels the stop when ${race} arrives after hibernation`, async () => {
+      const f = fixture()
+      f.record()
+      f.onHibernate = () => {
+        if (race === "work") f.facts.worked_at = new Date(now).toISOString()
+        else f.facts.unread = true
+      }
+      await f.run()
+      expect(f.events).toContainEqual(["unhibernate", "worker-id"])
+      expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+      expect(readState(f.env, id)).toBeUndefined()
+    })
+  }
+  test("kicks a worker when mail arrives after the stop", async () => {
+    const f = fixture()
+    f.record()
+    f.onAgents = () => {
+      if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.unread = true
+    }
+    await f.run()
+    expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+    expect(f.events.filter((event) => event[0] === "hibernate").at(-1)?.[4]).toBe(true)
+  })
+  test("respawns a worker whose shim took mail just before the stop", async () => {
+    const f = fixture()
+    f.record()
+    f.onAgents = () => {
+      if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.mail_at = new Date(now).toISOString()
+    }
+    await f.run()
+    expect(f.calls().map((call) => call.argv)).toEqual([
+      ["agents", "--json", "--all"],
+      ["stop", id],
+      ["respawn", id],
+    ])
+    expect(f.events.some((event) => event[0] === "kick")).toBe(false)
+  })
+  test("records a refused removal and holds subsequent attempts", async () => {
+    const f = fixture()
+    f.record()
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ historic: true, hibernate: "claude-bg", connections: 0 })
+    writeFileSync(join(f.home, "rm-refuse"), "")
+    await f.run()
+    const reason = `cannot remove ${id}: unpushed commits; pass --discard-unpushed abc123@wt-1 to discard them`
+    expect(readState(f.env, id)?.rmRefused).toEqual({ at: now, reason })
+    expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): claude rm refused: ${reason}`])
+    await f.run()
+    expect(f.calls().filter((call) => call.argv[0] === "rm")).toHaveLength(1)
+    expect(f.calls().flatMap((call) => call.argv)).not.toContain("--discard-unpushed")
+    expect(f.calls().flatMap((call) => call.argv)).not.toContain("--force-remove-worktree")
+  })
+  test("records successful removal and keeps the endpoint hibernated", async () => {
+    const f = fixture()
+    f.record()
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ historic: true, hibernate: "claude-bg", connections: 0 })
+    await f.run()
+    expect(f.calls().at(-1)?.argv).toEqual(["rm", id])
+    expect(readState(f.env, id)).toMatchObject({ sessionId, removedAt: now })
+    expect(f.facts.hibernate).toBe("claude-bg")
+    expect(f.events.some((event) => event[0] === "unhibernate")).toBe(false)
+  })
+})
+
+describe("acting on a changed worker", () => {
+  test("never removes a live worker when mail races its stop", async () => {
+    const f = fixture()
+    f.record()
+    f.facts = agent({ historic: true })
+    f.onAgents = () => {
+      if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.unread = true
+    }
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).not.toContain("rm")
+  })
+  test("keeps a worker a claude attach took after the plan", async () => {
+    const f = fixture()
+    f.record()
+    let reads = 0
+    f.deps.ps = async () => (reads++ ? `/usr/bin/claude attach ${id}` : "")
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+    expect(f.facts.hibernate).toBeNull()
+  })
+  test("wakes a removed worker whose mail arrived during the removal", async () => {
+    const f = fixture()
+    f.record()
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ historic: true, hibernate: "claude-bg", connections: 0 })
+    f.onAgents = () => {
+      if (f.calls().some((call) => call.argv[0] === "rm")) f.facts.unread = true
+    }
+    await f.run()
+    expect(f.calls().at(-1)?.argv).toEqual(["rm", id])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+  })
+})
+
+describe("wake command", () => {
+  for (const scenario of ["invalid", "live", "stopped", "removed", "gone", "missing"] as const) {
+    test(`handles a ${scenario} session`, async () => {
+      const f = fixture()
+      const output: string[] = []
+      const record = f.record()
+      if (scenario === "stopped") f.save([stoppedEntry({ cwd: f.home })])
+      if (["removed", "gone", "missing"].includes(scenario)) f.save([])
+      const cwd = join(f.home, "workspace")
+      if (scenario === "removed") mkdirSync(cwd)
+      if (scenario === "removed" || scenario === "gone") f.state({ cwd, removedAt: now })
+      const code = await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: scenario === "invalid" ? id : sessionId }, { stdout: (text) => output.push(text) })
+      expect(code).toBe(["invalid", "gone", "missing"].includes(scenario) ? 77 : 0)
+      expect(output.join("")).toBe(
+        scenario === "gone" ? '{"declined":"gone"}\n' : ["invalid", "missing"].includes(scenario) ? '{"declined":"unresumable"}\n' : "",
+      )
+      const calls = f.calls()
+      if (scenario === "invalid") expect(existsSync(f.callsFile)).toBe(false)
+      else {
+        expect(calls[0]?.argv).toEqual(["agents", "--json", "--all"])
+        expect(calls).toHaveLength(["stopped", "removed"].includes(scenario) ? 2 : 1)
+      }
+      if (scenario === "stopped") expect(calls[1]?.argv).toEqual(["respawn", id])
+      if (scenario === "removed") expect(readState(f.env, id)?.removedAt).toBeUndefined()
+      if (scenario === "removed")
+        expect(calls[1]).toEqual({
+          argv: ["--bg", "--resume", sessionId, "--name", "lane", "You were woken by an SCP message: read it with relay_inbox.", "--mcp-config", record],
+          cwd,
+        })
+    })
+  }
+})
+
+test("drops a resumed session name that would read as an option", async () => {
+  const f = fixture()
+  f.record()
+  f.save([])
+  const cwd = join(f.home, "workspace")
+  mkdirSync(cwd)
+  f.state({ cwd, name: "--dangerously-skip-permissions", removedAt: now })
+  expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId }, { stdout: () => {} })).toBe(0)
+  expect(f.calls()[1]?.argv).not.toContain("--name")
+})
+
+async function brokerFixture() {
+  const f = fixture()
+  f.record()
+  const broker = await startBroker({
+    dir: f.env.SCP_DIR,
+    policyPath: join(f.home, "policy.json"),
+    idleMs: 0,
+    builtinWakers: { "claude-bg": { command: [process.execPath, "-e", "process.exit(0)"], timeout_s: 5 } },
+  })
+  cleanups.push(() => broker.stop())
+  const connect = async (hello: Parameters<RelayClient["hello"]>[0]) => {
+    const client = await RelayClient.connect(broker.socket)
+    cleanups.push(() => client.close())
+    const result = await client.hello(hello)
+    return { client, endpoint: result.endpoint! }
+  }
+  const lead = await connect({ claim: { handle: "lead" } })
+  const worker = await connect({ claim: { handle: "w1", session: sessionId } })
+  const human = await connect({ human: true, tty: true })
+  await human.client.request("adopt", { endpoint: "w1", parent: "lead" })
+  await worker.client.request("status", { state: "done" })
+  const lines: string[] = []
+  const prune = (args: string[]) => claudeBgCommand("prune", args, f.env, (line) => lines.push(line), f.deps)
+  return { ...f, broker, lead, worker, lines, prune }
+}
+
+describe("broker commands", () => {
+  test("prints a dry run without stopping the worker", async () => {
+    const f = await brokerFixture()
+    expect(await f.prune(["--dry-run"])).toBe(0)
+    expect(f.lines).toContain(`would stop ${id} me/w1`)
+    expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+    expect(f.broker.core.whoami(f.worker.endpoint.id).presence).not.toBe("hibernated")
+  })
+  test("prunes a worker into hibernation with its wake hook", async () => {
+    const f = await brokerFixture()
+    expect(await f.prune([])).toBe(0)
+    expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+    expect(f.broker.core.whoami(f.worker.endpoint.id)).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg" })
+  })
+  test("never removes sessions with stop only", async () => {
+    const f = await brokerFixture()
+    expect(await f.prune(["--stop-only"])).toBe(0)
+    expect(await f.prune(["--stop-only", "--older-than", "30m"])).toBe(0)
+    expect(f.calls().some((call) => call.argv[0] === "stop")).toBe(true)
+    expect(f.calls().some((call) => call.argv[0] === "rm")).toBe(false)
+  })
+  test("stops unfinished workers past an explicit age", async () => {
+    const f = await brokerFixture()
+    await f.worker.client.request("status", { state: "working" })
+    expect(await f.prune(["--older-than", "30m", "--stop-only"])).toBe(0)
+    expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+  })
+  test("names the missing broker when pruning cannot connect", async () => {
+    const f = fixture()
+    await expect(claudeBgCommand("prune", [], f.env, () => {}, f.deps)).rejects.toThrow("needs the relay broker")
+    expect(existsSync(f.callsFile)).toBe(false)
+  })
+  test("lists orchestrators first and includes worker and unknown roles", async () => {
+    const f = await brokerFixture()
+    const leadId = "2a2b3c4d"
+    const unknownId = "3a2b3c4d"
+    f.record(leadId, "lead")
+    f.save([
+      entry({ cwd: f.home }),
+      entry({ id: unknownId, sessionId: `${unknownId}-0000-4000-8000-000000000001`, name: "stray", cwd: f.home }),
+      entry({ id: leadId, sessionId: `${leadId}-0000-4000-8000-000000000001`, name: "lead", cwd: f.home }),
+    ])
+    const rows: string[] = []
+    expect(await claudeBgCommand("ls", ["--json"], f.env, (line) => rows.push(line), f.deps)).toBe(0)
+    expect(JSON.parse(rows[0]!)).toMatchObject([
+      { id: leadId, name: "lead", state: "working", role: "orchestrator", endpoint: "me/lead", cwd: f.home },
+      { id, name: "lane", state: "working", role: "worker", endpoint: "me/w1", cwd: f.home },
+      { id: unknownId, name: "stray", state: "working", role: "unknown", endpoint: null, cwd: f.home },
+    ])
+    const printed: string[] = []
+    const log = spyOn(console, "log").mockImplementation((line) => {
+      printed.push(String(line))
+    })
+    try {
+      expect(await claudeBgCommand("ls", [], f.env, () => {}, f.deps)).toBe(0)
+    } finally {
+      log.mockRestore()
+    }
+    expect(printed[1]).toContain(leadId)
+    expect(printed[1]).toContain("orchestrator")
+    expect(printed[2]).toContain("worker")
+    expect(printed[3]).toContain("unknown")
+  })
+})

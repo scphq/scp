@@ -293,6 +293,9 @@ agent sessions:
   ${CLI_NAME} claude --bg [--name N] [--root] [--] [claude args...]   the same in the background (claude --bg): an scp mount claims N
                                                  and a grant, so from your shell it links under you; prints its short id, address and parent
   ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first; --resume of a live bg session attaches
+  ${CLI_NAME} claude ls [--all] [--json]          the background sessions, orchestrators first, with their role and endpoint
+  ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop and remove finished workers now; the broker
+                                                 also stops one done and idle 600 s and removes it once historic, keeping it wakeable
   ${CLI_NAME} join [<handle>]                    put the session that runs this shell on the relay (it then shows in list,
                                                  peers can message it, and its hooks hand it new messages), named <handle>
                                                  when given; on a joined session it renames it in place. Works for a session
@@ -664,6 +667,7 @@ export async function relayMain(argv: string[], cwd = safeCwd()): Promise<number
   if (verb === "mesh") return (await import("./mesh")).meshCommand(rest)
   if (verb === "spawn-wake") return (await import("./hold")).spawnWakeCommand(rest)
   if (verb === "codex-wake") return (await import("./codex-queue")).codexWakeCommand()
+  if (verb === "claude-wake") return (await import("./claude-bg")).claudeWakeCommand()
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
@@ -1699,6 +1703,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
   let broker: Broker
   try {
     const { daemonBridge } = await import("./remote")
+    const { CLAUDE_BG_PROVIDER, CLAUDE_WAKE_TIMEOUT_S, claudeBgTask } = await import("./claude-bg")
     const bridge = await daemonBridge()
     broker = await startBroker({
       dir: relayDir(),
@@ -1710,7 +1715,9 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
       builtinWakers: {
         [SPAWN_PROVIDER]: { command: [...SELF, "spawn-wake"], timeout_s: SPAWN_WAKE_TIMEOUT_S },
         "codex-queue": { command: [...SELF, "codex-wake"], timeout_s: CODEX_WAKE_TIMEOUT_S },
+        [CLAUDE_BG_PROVIDER]: { command: [...SELF, "claude-wake"], timeout_s: CLAUDE_WAKE_TIMEOUT_S },
       },
+      tasks: [claudeBgTask()],
     })
   } catch (error) {
     if (error instanceof BrokerRunning) {

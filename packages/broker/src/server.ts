@@ -41,6 +41,7 @@ import { writeSessionMarker } from "./sessions"
 import { Conn } from "./socket"
 import { HookCalls, type HookHandler, type HookParams, validateHook } from "./hook"
 import { type Database, openDatabase } from "./sqlite"
+import { type BrokerTask, startTasks, type Tasks } from "./tasks"
 import { startWakers, type Wakers } from "./wakers"
 
 export interface BrokerOptions {
@@ -88,6 +89,8 @@ export interface BrokerOptions {
   wakers?: Record<string, unknown> | undefined
   /** wake hooks this broker has built in, by provider (the reference CLI's `spawn`), configured even without a wakers file; a configured provider of the same name replaces one */
   builtinWakers?: Record<string, unknown> | undefined
+  /** in-process tasks run on an interval with the broker's view of its local agents */
+  tasks?: BrokerTask[] | undefined
 }
 
 /** what a link gets from the broker: its core, the remote hooks a bridge gets, and a send as a local endpoint or a mirrored one through the judge */
@@ -428,6 +431,21 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     changed: (endpoint) => presenceChanged(core.whoami(endpoint)),
   })
   for (const view of localViews()) if (wakeable(view)) wakers.kick(view.id)
+  const configured = { known: (provider: string) => wakers?.known(provider) ?? false }
+  const tasks: Tasks = startTasks(options.tasks ?? [], {
+    agents: () => core.localAgents(),
+    hibernate(endpoint, provider, ref) {
+      if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
+      presenceChanged(core.brokerHibernate(endpoint, { wake: provider, ref }, configured))
+      wakers?.kick(endpoint)
+    },
+    unhibernate(endpoint) {
+      if (closing) throw new RelayError("unauthorized", "the relay broker is stopping")
+      presenceChanged(core.brokerHibernate(endpoint, { wake: "none" }))
+    },
+    kick: (endpoint) => wakers?.kick(endpoint),
+    log,
+  })
 
   /** links the bridge again with the credential on disk; a configuration this broker cannot take without a restart stops it */
   async function relink(): Promise<object> {
@@ -1205,6 +1223,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         bridge?.resync()
         return unlinked
       }
+      case "agents":
+        if (actorOf(s).kind !== "human") throw new RelayError("unauthorized", "only the human lists the local agents' facts")
+        return { agents: core.localAgents() }
       case "hibernate": {
         const known = { known: (provider: string) => wakers?.known(provider) ?? false }
         const set = { wake: params.wake, ref: params.ref, eta_s: params.eta_s }
@@ -1543,6 +1564,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       clearInterval(sweeper)
       clearInterval(presenceTimer)
       clearInterval(ownership)
+      tasks.stop()
       wakers?.stop()
       await bridge?.stop()
       if (idleTimer) clearTimeout(idleTimer)

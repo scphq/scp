@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agents",
+  "title": "agents",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "handle": {
+                "type": "string"
+              },
+              "harness": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cwd": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "children": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "harness_session": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "anyOf": [
+                  {
+                    "$ref": "../types.schema.json#/$defs/StatusState"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "presence": {
+                "$ref": "../types.schema.json#/$defs/Presence"
+              },
+              "historic": {
+                "type": "boolean"
+              },
+              "worked_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "mail_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "connections": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "hibernate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "unread": {
+                "type": "boolean"
+              },
+              "handed_back": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "address",
+              "handle",
+              "harness",
+              "cwd",
+              "parent",
+              "children",
+              "harness_session",
+              "state",
+              "presence",
+              "historic",
+              "worked_at",
+              "mail_at",
+              "connections",
+              "hibernate",
+              "unread",
+              "handed_back"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "agents"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

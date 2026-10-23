@@ -15,6 +15,7 @@ export {
   WAKE_PROVIDER,
   type CoreOptions,
   type EndpointRow,
+  type LocalAgent,
   type MessageRow,
   type WakeJob,
 } from "./core"
