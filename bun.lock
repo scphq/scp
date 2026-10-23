@@ -49,7 +49,7 @@
     },
     "crates": {
       "name": "scp-relay",
-      "version": "0.1.0",
+      "version": "0.2.0",
     },
     "packages/broker": {
       "name": "@scp-dev/broker",
@@ -107,7 +107,7 @@
     },
     "packages/dashboard": {
       "name": "@scp-dev/dashboard",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "bin": {
         "scp-dashboard": "dist/server.js",
       },
