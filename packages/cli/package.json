@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/cli",
-  "version": "0.12.3",
+  "version": "0.13.0",
   "description": "The swarm command line tool.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",
@@ -41,10 +41,10 @@
     "provenance": true
   },
   "optionalDependencies": {
-    "@scp-dev/native-darwin-arm64": "0.12.3",
-    "@scp-dev/native-darwin-x64": "0.12.3",
-    "@scp-dev/native-linux-x64-gnu": "0.12.3",
-    "@scp-dev/native-linux-arm64-gnu": "0.12.3",
-    "@scp-dev/native-linux-x64-musl": "0.12.3"
+    "@scp-dev/native-darwin-arm64": "0.13.0",
+    "@scp-dev/native-darwin-x64": "0.13.0",
+    "@scp-dev/native-linux-x64-gnu": "0.13.0",
+    "@scp-dev/native-linux-arm64-gnu": "0.13.0",
+    "@scp-dev/native-linux-x64-musl": "0.13.0"
   }
 }
