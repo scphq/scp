@@ -2,15 +2,19 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SendResult } from "@scp-dev/core";
-import { compatProgram, COMPAT_VERSION } from "./compat";
+import { COMPAT_FIXTURE, compatProgram, COMPAT_VERSION } from "./compat";
 import { compatConformance } from "./environment";
 import { ensureBuilt, Machine } from "./machines";
 import { enabled, ProcessTarget, targetNames, waitFor } from "./targets";
 import { Wire } from "./wire";
 
-for (const name of targetNames.filter((name) => name !== "docker")) {
-  for (const mixed of [false, true]) {
-    describe(`${name} CLI ${COMPAT_VERSION} ${mixed ? "mixed" : "old pair"} compatibility`, () => {
+for (const name of targetNames) {
+  for (const variant of ["old pair", "old laptop", "old desk"] as const) {
+    describe(`${name} CLI ${COMPAT_VERSION} ${variant} compatibility`, () => {
+      if (name === "docker") {
+        test.skip("pinned broker compatibility does not support docker");
+        return;
+      }
       if (!compatConformance || !enabled(name)) {
         test.skip(!compatConformance ? "requires SCP_CONFORMANCE_COMPAT=1" : "requires SCP_RELAY_BIN");
         return;
@@ -21,13 +25,17 @@ for (const name of targetNames.filter((name) => name !== "docker")) {
       let laptop: Machine;
       let desk: Machine;
       let observer: Wire;
+      let hello: Record<string, unknown>;
+      let cleanupInstall: (() => void) | undefined;
       beforeAll(async () => {
+        const install = await compatProgram();
+        cleanupInstall = install.cleanup;
+        const program = install.program;
         ensureBuilt();
-        const program = await compatProgram();
         await target.start();
         const { token } = await target.mint("acme", "ada", { device: true });
-        laptop = new Machine("laptop", target, token, program);
-        desk = new Machine("desk", target, token, mixed ? undefined : program);
+        laptop = new Machine("laptop", target, token, variant === "old desk" ? undefined : program);
+        desk = new Machine("desk", target, token, variant === "old laptop" ? undefined : program);
         machines.push(laptop, desk);
         const config = join(laptop.env.XDG_CONFIG_HOME!, "scp");
         mkdirSync(config, { recursive: true });
@@ -40,19 +48,33 @@ for (const name of targetNames.filter((name) => name !== "docker")) {
         await Promise.all([laptop.claim("ada"), desk.claim("bob")]);
         observer = await Wire.connect(target.url, token);
         sockets.push(observer);
-        await observer.hello({ machine: "observer", bridge: true });
+        hello = await observer.hello({ machine: "observer", bridge: true });
       }, 180000);
       afterAll(async () => {
         const results = await Promise.allSettled([...sockets.map((s) => s.close()), ...machines.map((m) => m.stop())]);
-        await target.stop();
+        try {
+          await target.stop();
+        } finally {
+          cleanupInstall?.();
+        }
         const errors = results.filter((r) => r.status === "rejected").map((r) => r.reason);
         if (errors.length) throw new AggregateError(errors, "fixture cleanup failed");
       });
       const hubList = async () =>
         (await observer.result<{ endpoints: { address: string; presence: string; wake?: string | null }[] }>("list", { all: true })).endpoints;
+      test("version pin matches the fixture manifest", () => {
+        const manifest = JSON.parse(readFileSync(join(COMPAT_FIXTURE, "package.json"), "utf8"));
+        expect(manifest.dependencies["@scp-dev/cli"]).toBe(COMPAT_VERSION);
+      });
       test("hello metadata and bridge link", async () => {
         await Promise.all(machines.map((m) => m.linked()));
         for (const m of machines) m.assertIsolated();
+        expect(hello.endpoints).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ address: "acme/laptop/ada", machine: "laptop", presence: "online" }),
+            expect.objectContaining({ address: "acme/desk/bob", machine: "desk", presence: "online" }),
+          ]),
+        );
       });
       test("mirror reaches the peer and hub", async () => {
         await waitFor(async () => (await desk.list()).some((e) => e.address === "me/laptop/ada"), "old mirror on peer");

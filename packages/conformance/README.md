@@ -144,26 +144,28 @@ SCP_CONFORMANCE_COMPAT=1 SCP_COMPAT_DIR=/tmp/scp-compat-cache \
   bun test packages/conformance/src/compat.test.ts
 ```
 
-This suite runs real npm-installed brokers from the CLI version pinned in
-`src/compat.ts` under `node` from PATH (Node 22.13 or newer). Installation uses
-`--ignore-scripts`; no install scripts or optional native packages are needed.
-`SCP_COMPAT_DIR` holds the isolated npm installation, reused when its package
-version matches. It must be outside the workspace. Without it, the system temp
-directory holds the cache. The root preload captures both compatibility settings
-before CLI test isolation clears `SCP_*`.
+This opt-in suite runs the pinned CLI under Node 22.13 or newer from PATH, checked
+before installation. `compat/package.json` and `compat/package-lock.json` pin the
+fixture and its integrity hashes. Installation copies both files and runs
+`npm ci --ignore-scripts --no-audit --no-fund`. A test checks the manifest against
+`COMPAT_VERSION` in `src/compat.ts`.
 
-Compatibility is opt-in because a cold install requires network access and adds
-installation time. Plain `bun test` explicitly skips it without installing anything.
-The relay conformance CI job always enables it for `ts`, `rust-sqlite` and `rust-pg`,
-using Node 24 and a cached installation. The cache key hashes `src/compat.ts`, which
-contains the sole version pin.
+Without `SCP_COMPAT_DIR`, each run uses a fresh private temporary directory removed
+on teardown. An explicit cache directory must be outside the workspace, owned by
+the current user and not group/world writable; it is created with mode 0700 if
+missing. Reuse requires a byte-identical lockfile and the pinned installed version.
+The root preload captures both compatibility settings before CLI test isolation.
 
-Both old/old and old/current pairs check bridge hello acceptance and connected
-status, mirrors on the peer and hub, bidirectional messages and threaded replies,
-hibernation mirrors and queued delivery through a fake metadata-only waker, claim
-resumption, and spawn-via parent views and handback through a fake runner and harness.
-The same `targets.ts` selection and teardown apply, including optional PostgreSQL.
-All machine homes, harness settings and scripts are isolated in temporary directories.
+Plain `bun test` explicitly skips compatibility without installing anything. CI
+runs `ts`, `rust-sqlite` and `rust-pg` with Node 24 and a cache keyed by the fixture
+lockfile. Docker is explicitly skipped.
+
+Three variants (old pair, old laptop, old desk) check both machines' hub metadata,
+bridge links, peer and hub mirrors, messages and threaded replies, hibernation and
+queued delivery through a metadata-only waker, claim resumption, and spawn-via
+parent views and handback. This covers both mixed runner and wake directions.
+The same target selection and teardown apply, including optional PostgreSQL.
+All machine homes, harness settings and scripts use isolated temporary directories.
 
 The scenarios use only the section 19 behavior of the pinned release, not revive
 records or wake tickets. The pinned broker resolves its default policy directory from
