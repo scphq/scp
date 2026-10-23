@@ -3,6 +3,7 @@
     "ack",
     "admin",
     "adopt",
+    "agents",
     "ask",
     "ask_wait",
     "bridge_relink",

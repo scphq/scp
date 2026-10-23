@@ -155,3 +155,34 @@ describe("hibernate", () => {
     expect(core.whoami(peer.id).presence).toBe("online")
   })
 })
+
+describe("the broker's own tasks", () => {
+  test("the broker hibernates a local agent and clears it, audited by broker; spawn, unknown providers and the human are refused", () => {
+    const { core, lane, audit } = setup()
+    expect(core.brokerHibernate(lane.id, { wake: "claude-bg", ref: "s-1" })).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg" })
+    expect(audit("hibernate")).toEqual([{ by: "broker", target: "me/lane", provider: "claude-bg" }])
+    expect(core.brokerHibernate(lane.id, { wake: "none" }).presence).toBe("online")
+    expect(audit("unhibernate")).toEqual([{ by: "broker", target: "me/lane" }])
+    expect(code(() => core.brokerHibernate(lane.id, { wake: "spawn", ref: "x" }))).toBe("invalid_params")
+    expect(code(() => core.brokerHibernate(lane.id, { wake: "claude-bg" }, { known: () => false }))).toBe("invalid_params")
+    expect(code(() => core.brokerHibernate(core.humanId(), { wake: "claude-bg" }))).toBe("invalid_params")
+  })
+
+  test("local agents carry their parent, children, unread mail and last work, which a keepalive never moves", () => {
+    const { core, clock, lane } = setup()
+    const token = core.grant(self(lane.id), { name: "w1", ttl_s: 3600 }).token
+    const worker = core.claim({ handle: "w1", harness: "claude-code", grant: token, session: key(9), process: key(9) }).endpoint
+    const facts = (id: string) => core.localAgents().find((agent) => agent.id === id)!
+    expect(facts(lane.id)).toMatchObject({ parent: null, children: 1, unread: false, handed_back: false })
+    expect(facts(worker.id)).toMatchObject({ address: "me/w1", handle: "w1", parent: "me/lane", children: 0, hibernate: null })
+    const worked = facts(worker.id).worked_at
+    clock.now += 60_000
+    core.touch(worker.id)
+    expect(facts(worker.id).worked_at).toBe(worked)
+    core.send(lane.id, { to: "w1", body: "hi" })
+    expect(facts(worker.id)).toMatchObject({ unread: true })
+    expect(facts(worker.id).worked_at).not.toBe(worked)
+    core.status(worker.id, "done", "")
+    expect(facts(worker.id).state).toBe("done")
+  })
+})

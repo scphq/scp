@@ -16,6 +16,7 @@ export { MAX_LINE } from "./ndjson"
 export { accountHome, localHostName, policyPath, privateDir, relayDir, shortHostname, socketPath, systemHostname, thisHostname } from "./paths"
 export type { Deliver } from "./judge-gate"
 export { startBroker, type Broker, type BrokerOptions, type LinkContext, type LinkFactory } from "./server"
+export type { BrokerTask, BrokerTaskContext } from "./tasks"
 export { readSessionMarker, type SessionMarker, writeSessionMarker } from "./sessions"
 
 export type { HookParams, HookProc, HookResult, HookContext, HookHandler } from "./hook"
