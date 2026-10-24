@@ -298,6 +298,8 @@ agent sessions:
   ${CLI_NAME} claude ls [--all] [--json]          the background sessions, orchestrators first, with their role and endpoint
   ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop and remove finished workers now; the broker
                                                  also stops one done and idle 600 s and removes it once historic, keeping it wakeable
+  ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of background sessions
+                                                 ${CLI_NAME} claude --bg did not start; stops nothing
   ${CLI_NAME} join [<handle>]                    put the session that runs this shell on the relay (it then shows in list,
                                                  peers can message it, and its hooks hand it new messages), named <handle>
                                                  when given; on a joined session it renames it in place. Works for a session

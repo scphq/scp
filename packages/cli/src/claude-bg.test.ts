@@ -836,7 +836,7 @@ async function brokerFixture() {
   await worker.client.request("status", { state: "done" })
   const lines: string[] = []
   const prune = (args: string[]) => claudeBgCommand("prune", args, f.env, (line) => lines.push(line), f.deps)
-  return { ...f, broker, lead, worker, lines, prune }
+  return { ...f, broker, lead, worker, human, lines, prune, connect }
 }
 
 describe("broker commands", () => {
@@ -865,6 +865,32 @@ describe("broker commands", () => {
     await f.worker.client.request("status", { state: "working" })
     expect(await f.prune(["--older-than", "30m", "--stop-only"])).toBe(0)
     expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+  })
+  test("clears only the claude-bg hibernation of sessions swarm did not start, and stops nothing", async () => {
+    const f = await brokerFixture()
+    const strayId = "4a2b3c4d"
+    const straySession = `${strayId}-0000-4000-8000-000000000001`
+    const stray = await f.connect({
+      transient: true,
+      claim: { handle: "w2", harness: "claude-code", session: "s-w2", process: "pid:999998:x" },
+    })
+    await stray.client.request("event", { kind: "stop", session_id: straySession })
+    f.save([entry({ cwd: f.home }), entry({ id: strayId, sessionId: straySession, name: "stray", cwd: f.home })])
+    for (const endpoint of ["w1", "w2"]) await f.human.client.request("hibernate", { endpoint, wake: "claude-bg" })
+    const presence = (id: string) => f.broker.core.whoami(id).presence
+    expect(await f.prune(["--unhibernate-unrecorded", "--dry-run"])).toBe(0)
+    expect(f.lines).toEqual([`would unhibernate ${strayId} me/w2`])
+    expect(presence(stray.endpoint.id)).toBe("hibernated")
+    expect(await f.prune(["--unhibernate-unrecorded"])).toBe(0)
+    expect(f.lines.at(-1)).toBe(`unhibernated ${strayId} me/w2`)
+    expect(presence(stray.endpoint.id)).not.toBe("hibernated")
+    expect(presence(f.worker.endpoint.id)).toBe("hibernated")
+    expect(f.calls().map((call) => call.argv)).toEqual([
+      ["agents", "--json", "--all"],
+      ["agents", "--json", "--all"],
+    ])
+    for (const flag of [["--stop-only"], ["--older-than", "1h"]])
+      await expect(f.prune(["--unhibernate-unrecorded", ...flag])).rejects.toThrow("does not go with --stop-only or --older-than")
   })
   test("names the missing broker when pruning cannot connect", async () => {
     const f = fixture()

@@ -381,6 +381,8 @@ ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop t
                                                  workers or subagents, unread mail, or one claude attach holds or that is not exactly
                                                  idle, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
                                                  (30m, 2h, 1d) replaces the thresholds; --stop-only removes nothing. Needs the broker
+${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of the endpoints of the
+                                                 sessions ${CLI_NAME} claude --bg did not start; stops, removes and respawns nothing
   The broker does the same on its own, for the workers ${CLI_NAME} claude --bg started: idle without work one stops after
   $SCP_IDLE_AFTER_S (config.json lifecycle.idle_after_s; 600 s, Infinity never), a done (or handed back) one after
   $SCP_CLAUDE_BG_STOP_AFTER_S when sooner, and it is removed once historic unless

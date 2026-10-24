@@ -822,15 +822,20 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
   return 0
 }
 
-/** `swarm claude prune [--dry-run] [--stop-only] [--older-than <dur>]`: stops and removes finished workers now, with the policy's guards */
+/**
+ * `swarm claude prune [--dry-run] [--stop-only] [--older-than <dur>]`: stops and removes finished workers now, with the policy's guards;
+ * `--unhibernate-unrecorded` only clears the `claude-bg` hibernation of sessions `swarm claude --bg` did not start
+ */
 async function pruneCommand(argv: string[], env: Env, out: (line: string) => void, deps: ClaudeBgDeps): Promise<number> {
   let dryRun = false
   let stopOnly = false
+  let unrecorded = false
   let olderThanS: number | undefined
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     if (arg === "--dry-run") dryRun = true
     else if (arg === "--stop-only") stopOnly = true
+    else if (arg === "--unhibernate-unrecorded") unrecorded = true
     else if (arg === "--older-than" || arg.startsWith("--older-than=")) {
       const value = arg === "--older-than" ? argv[++i] : arg.slice("--older-than=".length)
       if (value === undefined) throw new RelayUsage(`${CLI_NAME} claude prune --older-than takes a duration such as 30m, 2h or 1d`)
@@ -839,8 +844,10 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
       } catch (error) {
         throw new RelayUsage(error instanceof Error ? error.message : String(error))
       }
-    } else throw new RelayUsage(`${CLI_NAME} claude prune takes --dry-run, --stop-only and --older-than <duration>, not ${arg}`)
+    } else throw new RelayUsage(`${CLI_NAME} claude prune takes --dry-run, --stop-only, --older-than <duration> and --unhibernate-unrecorded, not ${arg}`)
   }
+  if (unrecorded && (stopOnly || olderThanS !== undefined))
+    throw new RelayUsage(`${CLI_NAME} claude prune --unhibernate-unrecorded stops nothing: it does not go with --stop-only or --older-than`)
   const claude = claudeOf(env, deps)
   if (!claude) throw new RelayUsage("claude is not on PATH")
   let opened: Awaited<ReturnType<typeof socketPort>>
@@ -854,6 +861,7 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
   try {
     const entries = await listEntries(claude, true)
     if (!entries) throw new Error(`${CLI_NAME} claude: claude agents --json --all failed`)
+    if (unrecorded) return await unhibernateUnrecorded(entries, readRecords(env), opened.port, dryRun, out)
     const ps = deps.ps ?? psTable(claude.env, claude.exec)
     const table = await ps()
     const selfPids = await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()
@@ -889,6 +897,38 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
   } finally {
     opened.close()
   }
+}
+
+/** clears the `claude-bg` hibernation of every endpoint whose listed session has no launcher record; stops, removes and respawns nothing */
+async function unhibernateUnrecorded(
+  entries: ClaudeEntry[],
+  records: Map<string, BgRecord>,
+  port: BgPort,
+  dryRun: boolean,
+  out: (line: string) => void,
+): Promise<number> {
+  const ids = new Map(
+    entries.flatMap((entry) =>
+      entry.id && SHORT_ID.test(entry.id) && entry.sessionId && !records.has(entry.id) ? [[entry.sessionId, entry.id] as const] : [],
+    ),
+  )
+  let failed = 0
+  for (const agent of await port.agents()) {
+    const id = agent.hibernate === CLAUDE_BG_PROVIDER && agent.harness_session !== null ? ids.get(agent.harness_session) : undefined
+    if (id === undefined) continue
+    if (dryRun) {
+      out(`would unhibernate ${id} ${agent.address}`)
+      continue
+    }
+    try {
+      await port.unhibernate(agent)
+      out(`unhibernated ${id} ${agent.address}`)
+    } catch (error) {
+      failed++
+      out(`kept ${id} ${agent.address}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return failed ? 1 : 0
 }
 
 /** `swarm claude ls` and `swarm claude prune` */
