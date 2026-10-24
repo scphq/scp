@@ -863,6 +863,28 @@ describe("the human inbox and rendering", () => {
     expect(code(() => core.send(human, { to: "b", body: "over" }))).toBe("rate_limited")
   })
 
+  test("userPerDay overrides the daily budget, and Infinity lifts it", () => {
+    const db = new Database(":memory:")
+    const now = 1_800_000_000_000
+    const seed = (core: RelayCore) => {
+      core.migrate()
+      const a = core.claim({ handle: "a" }).endpoint.id
+      core.claim({ handle: "b" })
+      const insert = db.prepare(
+        "INSERT INTO messages (id, thread, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at) VALUES (?, 't', 'message', ?, 'me/b', 'x', 'text/plain', 'public', '[]', 0, ?, ?)",
+      )
+      for (let i = 0; i < 3; i++) insert.run(`m${i}`, a, now - 1000, now + 3_600_000)
+      return a
+    }
+    const capped = new RelayCore(bunSql(db), { now: () => now, hash: (value) => value, userPerDay: 3 })
+    expect(code(() => capped.send(seed(capped), { to: "b", body: "over" }))).toBe("rate_limited")
+    const open = new RelayCore(bunSql(new Database(":memory:")), { now: () => now, hash: (value) => value, userPerDay: Infinity })
+    open.migrate()
+    const a = open.claim({ handle: "a" }).endpoint.id
+    open.claim({ handle: "b" })
+    expect(code(() => open.send(a, { to: "b", body: "through" }))).toBeUndefined()
+  })
+
   test("control characters, C1 codes and bidi overrides are stripped from rendered text", () => {
     const text = "a‮b‪c⁦d⁩e\u0085f\u009bg\u0007h\ni"
     expect(stripControl(text)).toBe("abcdefgh\ni")

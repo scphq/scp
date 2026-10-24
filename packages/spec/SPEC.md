@@ -1194,7 +1194,7 @@ A broker MAY load a policy document with the schema below. Where the document li
 
 | Guard | Scope | Limit | Error |
 | --- | --- | --- | --- |
-| Daily cap | All agent and terminal-less human senders of a broker together; on a hub, every sender but the relay | `LIMITS.userPerDay` (2000) per 24 h | `rate_limited`, `retry_after` 3600 |
+| Daily cap | All agent and terminal-less human senders of a broker together; on a hub, every sender but the relay | `LIMITS.userPerDay` (2000) per 24 h on a hub; none on a broker unless `SCP_DAILY_CAP` sets one | `rate_limited`, `retry_after` 3600 |
 | Pair burst | Both directions of a pair | `LIMITS.pairBurst` (20) per `LIMITS.pairBurstWindowS` (10 s) | `rate_limited` |
 | Pair rate | One direction of a pair | `LIMITS.pairPerMinute` (30), `LIMITS.pairPerHour` (300) | `rate_limited` |
 | Ping-pong | A pair | `LIMITS.pingPongAlternations` (100) sender alternations within `LIMITS.pingPongWindowS` (600 s) | pause `LIMITS.pingPongBlockS` (600 s), then `loop_guard` |

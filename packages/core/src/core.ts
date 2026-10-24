@@ -422,6 +422,8 @@ export interface CoreOptions {
   machine?: string
   /** the short hostname, matched by `machine:` selectors when `machine` is not set */
   hostname?: string
+  /** overrides LIMITS.userPerDay; `Infinity` lifts the daily cap */
+  userPerDay?: number
   /** overrides LIMITS.endpointRetireS; `Infinity` keeps every endpoint row */
   endpointRetireS?: number
   /** overrides LIMITS.endpointRetireMax; `Infinity` retires every eligible row in one sweep */
@@ -595,6 +597,7 @@ export class RelayCore {
   protected readonly hash: (value: string) => string
   protected readonly tx: <T>(fn: () => T) => T
   private readonly capEverySender: boolean
+  private readonly userPerDay: number
   private readonly alive: (pid: number) => boolean
   private readonly startOf: ((pid: number, expected: string) => string | undefined) | undefined
   private readonly hostMachine: string | null
@@ -638,6 +641,7 @@ export class RelayCore {
       }
     }
     this.capEverySender = options.capEverySender === true
+    this.userPerDay = options.userPerDay ?? LIMITS.userPerDay
     this.alive = options.alive ?? (() => true)
     this.startOf = options.startOf
     this.hostMachine = options.machine ?? options.hostname ?? null
@@ -2814,25 +2818,27 @@ export class RelayCore {
         limit: LIMITS.threadMax,
         thread,
       })
-    const today = this.capEverySender
-      ? sender.kind === "system"
-        ? 0
-        : one<{ n: number }>(
-            this.sql,
-            `SELECT COUNT(*) AS n FROM messages WHERE created_at >= ? AND from_ep IN (SELECT id FROM endpoints WHERE kind != 'system')`,
-            now - 86_400_000,
-          )!.n
-      : senderTty === 1
-        ? 0
-        : one<{ n: number }>(
-            this.sql,
-            `SELECT COUNT(*) AS n FROM messages WHERE created_at >= ? AND (from_ep IN (SELECT id FROM endpoints WHERE kind = 'agent') OR sender_tty = 0)`,
-            now - 86_400_000,
-          )!.n
-    if (today >= LIMITS.userPerDay)
-      throw this.refuse(from, "rate_limited", `${LIMITS.userPerDay} messages in the last day`, 3600, {
+    const today = !Number.isFinite(this.userPerDay)
+      ? 0
+      : this.capEverySender
+        ? sender.kind === "system"
+          ? 0
+          : one<{ n: number }>(
+              this.sql,
+              `SELECT COUNT(*) AS n FROM messages WHERE created_at >= ? AND from_ep IN (SELECT id FROM endpoints WHERE kind != 'system')`,
+              now - 86_400_000,
+            )!.n
+        : senderTty === 1
+          ? 0
+          : one<{ n: number }>(
+              this.sql,
+              `SELECT COUNT(*) AS n FROM messages WHERE created_at >= ? AND (from_ep IN (SELECT id FROM endpoints WHERE kind = 'agent') OR sender_tty = 0)`,
+              now - 86_400_000,
+            )!.n
+    if (today >= this.userPerDay)
+      throw this.refuse(from, "rate_limited", `${this.userPerDay} messages in the last day`, 3600, {
         to: addressed,
-        limit: LIMITS.userPerDay,
+        limit: this.userPerDay,
         window_s: 86_400,
       })
 
