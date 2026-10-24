@@ -1047,7 +1047,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
     handshake && ((failed?: { message: string; code: number }) => handshake(failed ? { error: failed.message, code: failed.code } : { name, pid: process.pid }))
   const launch = (argv: string[], extra: Parameters<typeof runHarness>[2] = {}, runEnv: Record<string, string> = env) =>
     runHarness(harnessArgv(argv, runEnv), runEnv, { group: runner !== undefined, ...(closedStdin(argv) ? { stdin: "ignore" as const } : {}), ...extra })
-  const idleS = spawnIdle(values, runner !== undefined)
+  const idleS = spawnIdle(values, runner !== undefined, (await import("./claude-bg")).idleAfterS(process.env))
   const harness = idleS > 0 ? resumable(command) : undefined
   const signals = harness ? watchSignals() : undefined
   const agyDir = harness === "agy" ? mkdtempSync(join(privateDir(join(relayDir(env), "agy")), "spawn-")) : undefined
@@ -1085,7 +1085,19 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
           )
         : undefined
     const held = session
-      ? await holdWorker({ command, harness: harness!, session, name, cwd, walk, grant: grant.SCP_GRANT!, env, idleS, durable: values.durable === true })
+      ? await holdWorker({
+          command,
+          harness: harness!,
+          session,
+          name,
+          cwd,
+          walk,
+          grant: grant.SCP_GRANT!,
+          env,
+          idleS,
+          durable: values["no-durable"] !== true,
+          explicit: values.durable === true,
+        })
       : undefined
     await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, replies || harnessOutput(run, bytes), walk, unapplied, exits, true, stderrOutput(run))
     if (held && signals) {
@@ -1110,10 +1122,13 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   }
 }
 
-/** how long spawn holds a worker it can resume: --idle, else ${SPAWN_IDLE_S} s when detached or --durable, else (in the foreground) not at all */
-function spawnIdle(values: Values, detached: boolean): number {
+/**
+ * how long spawn holds a worker it can resume: --idle, else `lifecycle.idle_after_s` (default ${SPAWN_IDLE_S} s) when detached or --durable,
+ * else (in the foreground) not at all
+ */
+export function spawnIdle(values: Values, detached: boolean, idleAfter: number): number {
   if (typeof values.idle === "string") return idleSeconds(values.idle)
-  return detached || values.durable === true ? SPAWN_IDLE_S : 0
+  return detached || values.durable === true ? idleAfter : 0
 }
 
 /** holds a worker's endpoint for resumed runs of its harness session, durably with `durable`: the held connection, the resume's words and environment */
@@ -1127,7 +1142,9 @@ async function holdWorker(options: {
   grant: string
   env: Record<string, string>
   idleS: number
+  /** hibernate the worker with a revive record as the hold lets go; `explicit` (`--durable`) says why one cannot */
   durable: boolean
+  explicit: boolean
 }): Promise<{ held: Held; base: string[]; env: Record<string, string> } | undefined> {
   const base = resumeBase(options.command, options.session)
   if (!base) return undefined
@@ -1136,7 +1153,7 @@ async function holdWorker(options: {
     if (!options.durable || !endpoint.parent) return undefined
     const ref = durableRef(options.harness, options.session, cwd, base, options.idleS, endpoint.parent, options.env)
     const problem = refProblem(ref)
-    if (problem) note(`${CLI_NAME} spawn: ${options.name} is held, not durably: ${problem}`)
+    if (problem && options.explicit) note(`${CLI_NAME} spawn: ${options.name} is held, not durably: ${problem}`)
     return problem ? undefined : ref
   }
   const key = randomBytes(16).toString("hex")
@@ -1149,7 +1166,7 @@ async function holdWorker(options: {
     grant: options.grant,
     env: options.env,
   })
-  const held = await holdEndpoint(claim, durable, note)
+  const held = await holdEndpoint(claim, durable, (line) => (options.explicit || !line.includes("not durably") ? note(line) : undefined))
   return held ? { held, base, env: { ...options.env, SCP_SESSION: key, SCP_HARNESS_PID: String(process.pid) } } : undefined
 }
 
@@ -1172,6 +1189,7 @@ function durableRef(
 /** `--durable`: a command spawn can resume whose resume fits a hibernation ref, and an idle timeout that holds it at all */
 function durableCheck(values: Values, command: string[], cwd: string): void {
   if (typeof values.idle === "string") idleSeconds(values.idle)
+  if (values.durable === true && values["no-durable"] === true) throw new RelayUsage("--durable and --no-durable conflict")
   if (values.durable !== true) return
   if (typeof values.idle === "string" && idleSeconds(values.idle) === 0) throw new RelayUsage("--durable holds the worker: it does not go with --idle 0")
   const harness = resumable(command)

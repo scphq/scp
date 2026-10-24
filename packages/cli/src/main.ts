@@ -160,7 +160,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  that places the spawned agent under you (or EP) with those rules;
                                                  --title is its title until it sets its own; --peek local makes it
                                                  peekable from its start
-  ${CLI_NAME} spawn [spawn-env's flags] [--labels K=V,...] [--handback-bytes N] [--no-push] [--bg|--fg] [--idle S] [--durable]
+  ${CLI_NAME} spawn [spawn-env's flags] [--labels K=V,...] [--handback-bytes N] [--no-push] [--bg|--fg] [--idle S] [--durable|--no-durable]
         [--] <harness cmd...>
                                                  runs the harness with that grant (never printed); the command starts after -- or
                                                  at the first word that is not one of these flags.
@@ -208,11 +208,13 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  id its hooks report), at most twice, before the handback.
                                                  A codex exec, agy -p, grok -p or muse exec worker stays resumable after it exits (wake
                                                  spawn-resume): spawn holds its endpoint, and each message to it resumes the same
-                                                 session, every run handing back again as a reply. --idle S (default 1800 s when
-                                                 detached, none in the foreground; Infinity: until ended; 0: never held) lets it go
-                                                 after S quiet seconds; ${CLI_NAME} end <worker> lets it go now. --durable hibernates
-                                                 it instead of letting go, even when spawn dies: a message then resumes it through
-                                                 the broker's built-in spawn waker.
+                                                 session, every run handing back again as a reply. --idle S (default
+                                                 lifecycle.idle_after_s or $SCP_IDLE_AFTER_S, 600 s, when detached, none in the
+                                                 foreground; Infinity: until ended; 0: never held) lets it go after S quiet seconds;
+                                                 ${CLI_NAME} end <worker> lets it go now. A held worker with a parent hibernates
+                                                 instead of letting go, even when spawn dies: a message then resumes it through the
+                                                 broker's built-in spawn waker. --no-durable lets it go for good; --durable also
+                                                 fails the spawn when it cannot be kept, and holds it in the foreground too.
                                                  With --peek local, a claude -p or codex exec prompt is its first peek turn.
                                                  A claude -p or codex exec prompt gets a note naming you and the key your
                                                  messages to the worker carry, so it applies your steers.

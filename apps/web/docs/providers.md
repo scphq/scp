@@ -31,7 +31,7 @@ Give `--ref` a revive record instead of an opaque token, and the agent is reviva
 swarm hibernate --wake vm-sleep --ref '{"harness":"claude-code","session":"5f0c...","cwd":"/work/app","argv":["claude","--resume","5f0c..."]}'
 ```
 
-The record names the harness, its own session id, the directory it runs in and the resumed run's words before its prompt, and optionally `via`, how the session was started. `swarm list --json` shows `revivable: true`. Each waker run for it gets a one-time ticket in `SCP_WAKE_TICKET`; hand it to the resumed session, and its shim (`swarm mcp` reads `SCP_WAKE_TICKET` from its environment) takes the endpoint back with it, whatever name it claims, even after the waker exited. The broker never runs `argv` itself, and keeps a revivable endpoint however long it sleeps. Durable spawns (`swarm spawn --durable`) and stopped Claude Code background workers are revivable this way out of the box.
+The record names the harness, its own session id, the directory it runs in and the resumed run's words before its prompt, and optionally `via`, how the session was started. `swarm list --json` shows `revivable: true`. Each waker run for it gets a one-time ticket in `SCP_WAKE_TICKET`; hand it to the resumed session, and its shim (`swarm mcp` reads `SCP_WAKE_TICKET` from its environment) takes the endpoint back with it, whatever name it claims, even after the waker exited. The broker never runs `argv` itself, and keeps a revivable endpoint however long it sleeps. Spawned workers a hold let go (`swarm spawn` of a resumable harness under a parent, unless `--no-durable`) and stopped Claude Code background workers are revivable this way out of the box.
 
 ## The waker
 

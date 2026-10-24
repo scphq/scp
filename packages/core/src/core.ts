@@ -347,7 +347,7 @@ export interface LocalAgent {
   parent: string | null
   /** the endpoints linked under it, in-process subagents aside */
   children: number
-  /** its in-process subagents that are neither done nor historic */
+  /** its in-process subagents of its current session that are not done, however long ago they were active */
   subagents: number
   harness_session: string | null
   state: StatusState | null
@@ -2439,6 +2439,15 @@ export class RelayCore {
     return this.setHibernation("broker", target, set)
   }
 
+  /** an in-process subagent row of its root's current session (`sub:<id>:<root session>`), however long ago it was active */
+  private currentSubagent(row: EndpointRow): boolean {
+    const root = row.parent_ep ? this.byId(row.parent_ep) : undefined
+    if (!root || !row.session) return false
+    const owner = row.session.slice(row.session.indexOf(":", 4) + 1)
+    const key = root.session ?? root.id
+    return owner === key || (row.session.length === 128 && key.startsWith(owner))
+  }
+
   /** the local agents, retired and in-process subagent rows aside, as the broker's own tasks read them */
   localAgents(): LocalAgent[] {
     const now = this.now()
@@ -2459,7 +2468,7 @@ export class RelayCore {
       `SELECT * FROM endpoints WHERE kind = 'agent' AND parent_ep IS NOT NULL AND substr(session, 1, 4) = 'sub:' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
        AND (status_state IS NULL OR status_state != 'done')`,
     ))
-      if (!this.historic(row, now)) subagents.set(row.parent_ep!, (subagents.get(row.parent_ep!) ?? 0) + 1)
+      if (this.currentSubagent(row)) subagents.set(row.parent_ep!, (subagents.get(row.parent_ep!) ?? 0) + 1)
     const handedBack = new Set(
       this.sql.all<{ used_by: string }>(`SELECT DISTINCT used_by FROM grants WHERE used_by IS NOT NULL AND handback IS NOT NULL`).map((row) => row.used_by),
     )

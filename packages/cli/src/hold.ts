@@ -26,8 +26,8 @@ import { note, parseSeconds, SELF } from "./term"
 
 type Env = Record<string, string | undefined>
 
-/** how long a spawn holds a worker it can resume while no message comes, in seconds; `swarm spawn --idle` overrides it */
-export const SPAWN_IDLE_S = 1800
+/** how long a spawn holds a worker it can resume while no message comes, in seconds, unless `lifecycle.idle_after_s` or `swarm spawn --idle` sets it */
+export const SPAWN_IDLE_S = 600
 
 /** the harnesses whose headless session spawn resumes */
 export type Resumable = "codex" | "agy" | "grok" | "muse"
