@@ -378,8 +378,8 @@ ${CLI_NAME} claude ls [--all] [--json]          the background sessions (--all: 
                                                  (kept: why, or due: stop or remove) and cwd
 ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop the idle workers ${CLI_NAME} claude --bg started
                                                  now, then remove the historic ones: never a root, the caller's own session, one with live
-                                                 workers or subagents, unread mail, or one claude attach holds or that is not exactly
-                                                 idle, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
+                                                 workers or subagents, unread mail unless done, or one claude attach holds or that is
+                                                 not exactly idle, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
                                                  (30m, 2h, 1d) replaces the thresholds; --stop-only removes nothing. Needs the broker
 ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of the endpoints of the
                                                  sessions ${CLI_NAME} claude --bg did not start; stops, removes and respawns nothing
