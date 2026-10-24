@@ -1,0 +1,7 @@
+{
+  "name": "scp-compat-fixture",
+  "private": true,
+  "dependencies": {
+    "@scp-dev/cli": "0.11.3"
+  }
+}

@@ -46,8 +46,8 @@ export async function terminate(child: Subprocess) {
     clearTimeout(timer);
   }
 }
-export async function command(args: string[], env: Record<string, string | undefined> = process.env, timeoutMs = 10000) {
-  const child = Bun.spawn(args, { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+export async function command(args: string[], env: Record<string, string | undefined> = process.env, timeoutMs = 10000, cwd?: string) {
+  const child = Bun.spawn(args, { env, ...(cwd === undefined ? {} : { cwd }), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
   try {
     const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);

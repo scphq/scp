@@ -136,3 +136,38 @@ JSON stdin payload, `SCP_WAKE_*` environment and exit-77 declines. SPEC section 
 configuration and invocation implementation-defined, so it runs on `ts` and `ts-node`,
 and on `rust` only when `SCP_BROKER_WAKERS=1` says the engine implements that binding.
 Wire-only wake tests remain in `broker wake and hibernation`.
+
+## Pinned broker compatibility
+
+```sh
+SCP_CONFORMANCE_COMPAT=1 SCP_COMPAT_DIR=/tmp/scp-compat-cache \
+  bun test packages/conformance/src/compat.test.ts
+```
+
+This opt-in suite runs the pinned CLI under Node 22.13 or newer from PATH, checked
+before installation. `compat/package.json` and `compat/package-lock.json` pin the
+fixture and its integrity hashes. Installation copies both files and runs
+`npm ci --ignore-scripts --no-audit --no-fund`. A test checks the manifest against
+`COMPAT_VERSION` in `src/compat.ts`.
+
+Without `SCP_COMPAT_DIR`, each run uses a fresh private temporary directory removed
+on teardown. An explicit cache directory must be outside the workspace, owned by
+the current user and not group/world writable; it is created with mode 0700 if
+missing. Reuse requires a byte-identical lockfile and the pinned installed version.
+The root preload captures both compatibility settings before CLI test isolation.
+
+Plain `bun test` explicitly skips compatibility without installing anything. CI
+runs `ts`, `rust-sqlite` and `rust-pg` with Node 24 and a cache keyed by the fixture
+lockfile. Docker is explicitly skipped.
+
+Three variants (old pair, old laptop, old desk) check both machines' hub metadata,
+bridge links, peer and hub mirrors, messages and threaded replies, hibernation and
+queued delivery through a metadata-only waker, claim resumption, and spawn-via
+parent views and handback. This covers both mixed runner and wake directions.
+The same target selection and teardown apply, including optional PostgreSQL.
+All machine homes, harness settings and scripts use isolated temporary directories.
+
+The scenarios use only the section 19 behavior of the pinned release, not revive
+records or wake tickets. The pinned broker resolves its default policy directory from
+the account database, not HOME or XDG, so every fixture daemon gets an explicit
+`--policy` inside its temporary configuration, which also isolates `wakers.json`.
