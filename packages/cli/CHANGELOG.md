@@ -1,5 +1,22 @@
 # @scp-dev/cli
 
+## 0.16.0
+
+### Minor Changes
+
+- b43ec2c: An idle Claude Code background worker `swarm claude --bg` started stops after `lifecycle.idle_after_s` (default 10 minutes) and stays wakeable; `SCP_HISTORIC_AFTER_S` or `historic_after_s` sets when an agent turns historic, and `agents` reports live `subagents`.
+
+### Patch Changes
+
+- ddec3dd: The idle stop leaves alone background sessions `swarm claude --bg` did not start, whose revival could not take their endpoint back, and creates its state directory before writing to it.
+- 309edd6: A shell keeps its identity when the process table is large or slow: the ps read takes output past 1 MiB, shell commands wait up to 5 s for it (hooks keep 1.5 s), a failed read no longer crashes the walk with a second read, and the shell is told the table could not be read instead of that no harness runs it.
+- Updated dependencies [1538046]
+- Updated dependencies [b43ec2c]
+  - @scp-dev/core@0.14.0
+  - @scp-dev/broker@0.11.0
+  - @scp-dev/hub@0.11.0
+  - @scp-dev/mcp@0.5.3
+
 ## 0.15.1
 
 ### Patch Changes

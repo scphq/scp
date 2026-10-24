@@ -1,5 +1,11 @@
 # scp-relay
 
+## 0.3.0
+
+### Minor Changes
+
+- 1538046: Make relay send and contact rates configurable and off by default.
+
 ## 0.2.0
 
 ### Minor Changes
