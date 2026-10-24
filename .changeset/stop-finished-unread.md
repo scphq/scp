@@ -2,4 +2,4 @@
 "@scp-dev/cli": patch
 ---
 
-The idle stop also stops a finished Claude background worker with unread mail; its waker runs at once, so the revived session reads it.
+The idle stop no longer keeps a Claude background worker for unread mail: its waker runs right after the stop, so the revived session reads it.
