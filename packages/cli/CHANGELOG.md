@@ -1,5 +1,20 @@
 # @scp-dev/cli
 
+## 0.17.0
+
+### Minor Changes
+
+- 6adf46a: A detached `swarm spawn` of a resumable harness holds its worker for `lifecycle.idle_after_s` (default 10 minutes) and then hibernates it, revivable, when it has a parent (`--no-durable` opts out); `agents` counts the not-done `subagents` of the root's current session.
+- 6adf46a: `swarm claude prune --unhibernate-unrecorded` clears a `claude-bg` hibernation left on a background session `swarm claude --bg` did not start, and stops nothing.
+
+### Patch Changes
+
+- Updated dependencies [6adf46a]
+  - @scp-dev/core@0.15.0
+  - @scp-dev/broker@0.11.1
+  - @scp-dev/hub@0.11.1
+  - @scp-dev/mcp@0.5.4
+
 ## 0.16.0
 
 ### Minor Changes

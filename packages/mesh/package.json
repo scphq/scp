@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/mesh",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "description": "Swarm Communication Protocol experimental mesh: brokers of one account linked peer to peer, with no hub.",
   "license": "Apache-2.0",
