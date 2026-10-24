@@ -314,6 +314,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       hostname: shortHostname(),
       hash: (value) => createHash("sha256").update(value).digest("hex"),
       transaction: (fn) => db.transaction(fn),
+      userPerDay: dailyCap((options.env ?? process.env).SCP_DAILY_CAP),
       alive: running,
       startOf: (pid, expected) => {
         const supplied = hookProcesses.getStore()
@@ -1651,4 +1652,10 @@ function selectors(params: Record<string, unknown>, key: string): string[] | und
   if (value === undefined || value === null) return undefined
   if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) throw new RelayError("invalid_params", `${key} must be a list of selectors`)
   return value as string[]
+}
+
+/** the broker's daily send cap: off unless SCP_DAILY_CAP names a positive count */
+export function dailyCap(raw: string | undefined): number {
+  const n = Number(raw)
+  return Number.isInteger(n) && n > 0 ? n : Infinity
 }
