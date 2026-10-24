@@ -8,14 +8,17 @@ export const FAILED = 125
 /** this CLI as a command line, to start the broker or a child under the same runtime */
 export const SELF: string[] = [process.execPath, ...(process.versions.bun ? ["--no-env-file", "--config=/dev/null"] : []), process.argv[1]!]
 
-/** a short command's stdout, or undefined when it cannot run or exits non-zero */
-/** a command's stdout when it exits 0, else undefined; with `timeoutMs`, a command still running then is killed and counts as failed */
-export function capture(argv: string[], env?: NodeJS.ProcessEnv, timeoutMs?: number): string | undefined {
+/**
+ * a command's stdout when it exits 0, else undefined; with `timeoutMs`, a command still running then is killed and counts as failed, and
+ * output past `maxBuffer` bytes (Node's default 1 MiB) kills it too
+ */
+export function capture(argv: string[], env?: NodeJS.ProcessEnv, timeoutMs?: number, maxBuffer?: number): string | undefined {
   const result = spawnSync(argv[0]!, argv.slice(1), {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
     ...(env ? { env } : {}),
     ...(timeoutMs ? { timeout: timeoutMs, killSignal: "SIGKILL" as const } : {}),
+    ...(maxBuffer ? { maxBuffer } : {}),
   })
   return result.status === 0 ? result.stdout : undefined
 }

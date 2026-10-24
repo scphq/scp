@@ -42,6 +42,7 @@ import {
   grantParams,
   localClient,
   open,
+  PS_UNREAD,
   RelayUsage,
   SPAWN_RUNNER,
   spawnEnvironment,
@@ -66,7 +67,7 @@ import {
   wokeBy,
 } from "./hold"
 import { steerPrompt } from "./hooks"
-import { CODEX_VALUED, detectHarness, type MuseLaunch, processKey, spawnerKey, writeMuseLaunch } from "./identity"
+import { CODEX_VALUED, detectHarness, type MuseLaunch, processKey, writeMuseLaunch } from "./identity"
 import { readConversation } from "./resume"
 import { agyRules, agySettingsFile, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF, note } from "./term"
@@ -1012,13 +1013,18 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
       return remote.linkedSpawn(plan, command, cwd, { group: runner !== undefined, ...(started ? { started } : {}), ...(bytes !== undefined ? { bytes } : {}) })
     }
   }
-  const bound = spawnerKey()
+  const own = processKey(process.pid)
+  const bound = own.startsWith(`pid:${process.pid}:`) ? own : undefined
   const prompt = values.peek === undefined ? undefined : spawnPrompt(command)?.slice(0, PEEK.rawChars)
   const walk = runner === undefined ? walkNow() : (JSON.parse(runner) as Walk)
   let grant: Record<string, string>
   let steer: { key?: unknown; parent?: unknown } | undefined
   try {
     const opened = await open("spawn", values as Identity, cwd, false, walk)
+    if (!opened.bound && walk.unread) {
+      opened.client.close()
+      throw new RelayUsage(`${CLI_NAME} spawn: ${PS_UNREAD}, or pass --as HANDLE or --human`)
+    }
     const client = localClient(opened.client, opened.broker, "spawn")
     try {
       values = spawnDefaults(values, command)
