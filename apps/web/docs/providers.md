@@ -123,11 +123,11 @@ Runners live in `~/.config/scp/runners.json`, beside the policy file (`$SCP_RUNN
 
 ```json
 {
-  "vm": { "command": ["/usr/local/bin/start-on-vm"], "timeout_s": 60 }
+  "vm": { "command": ["/usr/local/bin/worker-on-vm"], "stop": ["/usr/local/bin/worker-on-vm"], "status": ["/usr/local/bin/worker-on-vm"], "timeout_s": 60, "status_timeout_s": 5 }
 }
 ```
 
-A name is lowercase letters, digits and `-`, at most 32. `command` runs without a shell. `timeout_s` defaults to 60 and is at most 3600. Other fields are ignored.
+A name is lowercase letters, digits and `-`, at most 32. `command`, optional `stop` and optional `status` are non-empty argv arrays of non-empty strings. Each runs exactly its configured argv, without a shell: no request data is put in argv or a shell string. `timeout_s` is whole seconds, defaults to 60 and is at most 3600; it bounds spawn and stop. `status_timeout_s` is whole seconds, defaults to 5 and is at most 60. An invalid field invalidates the file. Other fields are ignored. Configure the same file for the CLI and the broker, including when using `$SCP_RUNNERS_FILE`.
 
 **Input.** One JSON line on stdin, then end of input. It carries no grant, token or other credential:
 
@@ -139,10 +139,11 @@ A name is lowercase letters, digits and `-`, at most 32. `command` runs without 
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | The worker started. `swarm spawn` returns at once. |
-| 124 | The runner was still running after `timeout_s` and was stopped. |
+| 0 | Done: spawn started the worker, stop stopped it, or status returned its reply. |
+| 77 | Declined: stop reports `declined`, status reports `unknown`; spawn returns 77. |
+| 124 | Timeout: spawn sends `SIGTERM` to the process group; stop and status kill the group with `SIGKILL`. Stop reports `timeout`, status reports `error` with detail `timeout`. |
 | 127, 126 | The runner could not start (not found, or another reason). |
-| anything else | The spawn fails with that code and the runner's stderr. |
+| anything else | Failure: spawn returns that code, stop reports `failed`, status reports `error` with detail `exit N`. |
 
 **Output.** On exit 0 the runner may print where the worker runs, as one JSON object on stdout:
 
@@ -150,7 +151,27 @@ A name is lowercase letters, digits and `-`, at most 32. `command` runs without 
 {"address": "me/vm/rev", "machine": "vm", "ref": "i-0abc123", "attach": "ssh vm -t tmux attach -t rev"}
 ```
 
-`ref` is your own opaque reference, at most 256 printable characters. `attach` is a command line or URL that opens the worker's terminal: one line of at most 1024 characters. Either is dropped when it looks like a credential. `swarm spawn --via` then names the machine and address and prints `attach: <attach>` on its own line; `--json` prints `{name, runner, parent, address?, machine?, ref?, attach?}`. A reply that is malformed or names another worker or machine is ignored. `swarm list` and `swarm peek` do not show `attach` yet.
+`ref` is your own opaque reference, at most 256 printable characters. `attach` is a command line or URL that opens the worker's terminal: one line of at most 1024 characters. Either is dropped when it looks like a credential. `swarm spawn --via` then names the machine and address and prints `attach: <attach>` on its own line; `--json` prints `{name, runner, parent, address?, machine?, ref?, attach?}`. A reply that is malformed or names another worker or machine is ignored. `swarm list` and `swarm peek` show the recorded attach line; `swarm list --json` includes `runner: {name, ref?, attach?, status?}` for a worker matched by its address.
+
+**Stop and status.** After a successful spawn the spawner's broker records the runner, worker name, reply and creation time. A later spawn with the same spawner and name replaces it. `swarm end <worker>` marks that record ended, audits the runner and calls `stop` when configured. It accepts the full address, or the recorded name when the worker never joined. Only the spawner, an ancestor of the spawner or the human at a terminal may end it. A joined worker must still sit under that spawner across machines; a record cannot authorize stopping someone else's worker.
+
+Stop and status read one JSON line on stdin, then EOF:
+
+```json
+{"scp":1,"event":"stop","name":"rev","runner":"vm","parent":"me/laptop/lead","address":"me/vm/rev","machine":"vm","ref":"i-0abc123"}
+```
+
+Status uses the same fields with `"event":"status"`. `address`, `machine` and `ref` are optional, as recorded. Neither input carries a credential, message body or grant. Both run in the user's home directory with the broker's environment without SCP variables other than `SCP_DIR`. Spawn keeps its spawner environment and requested working directory. Stdout is capped at 4096 bytes and cleaned, redacted stderr at 2048 bytes, with a bounded pipe drain.
+
+Stop needs no stdout. `swarm end` prints the runner and one of `stopped`, `declined`, `failed`, `timeout` or `none` (no configured stop), and exits 1 on `failed` or `timeout`. Its JSON result is `{endpoint?, held: false, runner: {name, stop, code?, stderr?}}`. Ending a via record stops future status checks even if stop fails; another end retries stop.
+
+Status prints one JSON object on exit 0:
+
+```json
+{"state":"running","detail":"session ready","attach":"ssh vm -t tmux attach -t rev"}
+```
+
+`state` matches `^[a-z][a-z0-9-]{0,31}$`. Optional `detail` is printable, at most 200 characters. Optional `attach` follows the spawn reply's rules and replaces the recorded attach for display. Malformed output or exit 77 yields `unknown`; other non-zero exits yield `error` with `exit N`, and a timeout yields `error` with `timeout`. Secret-looking fields are dropped. The view's `runner.status` is `{state, detail?, at}`, with an ISO timestamp. Only list and peek trigger status, for records that have not ended. Runs happen in parallel, each within its status timeout, and results are cached per record for 15 seconds. Nothing polls in the background. Peek of a via worker shows status and runner metadata, without fetching remote turns. A spawn without an address can still be ended by name but adds no endpoint view metadata.
 
 **What the runner does.** Everything that starts the worker: pick or boot the machine, provision the harness's credentials there from your account, and start the harness. The machine must be logged in to the same account (`swarm login`) with its broker linked to the hub (`swarm cloud enable`). There the runner runs:
 
@@ -166,13 +187,23 @@ A runner over ssh that keeps the worker in `tmux` can be a few lines:
 #!/bin/sh
 request=$(cat)
 q() { printf '%s' "$request" | jq -r "$1"; }
-name=$(q .join.name)
+name=$(q .name)
+case $(q .event) in
+  stop) ssh vm "tmux kill-session -t $(q '.name | @sh')"; exit $? ;;
+  status)
+    if ssh vm "tmux has-session -t $(q '.name | @sh')"; then
+      printf '{"state":"running"}\n'
+    else
+      printf '{"state":"gone"}\n'
+    fi
+    exit 0 ;;
+esac
 spawn="cd $(q '.cwd | @sh') && swarm spawn --fg --name $name --under $(q .join.under) -- $(q '.cmd | @sh')"
 ssh vm "tmux new-session -d -s $name $(printf '%s' "$spawn" | jq -Rr @sh)" || exit $?
 printf '{"address":"me/vm/%s","machine":"vm","attach":"ssh vm -t tmux attach -t %s"}\n' "$name" "$name"
 ```
 
-The handback is an ordinary message from the worker through the hub, subject to scope and the judge. A worker on another machine has no steer key, no stop push and no resume with late steers, and the spawner's grant caps do not reach it. Planned: a one-time join grant, so the remote machine needs no standing login; runner `stop` and `status` commands; `attach` in `swarm list` and `swarm peek`.
+The handback is an ordinary message from the worker through the hub, subject to scope and the judge. A worker on another machine has no steer key, no stop push and no resume with late steers, and the spawner's grant caps do not reach it. Planned: a one-time join grant, so the remote machine needs no standing login.
 
 ## What SCP never does
 

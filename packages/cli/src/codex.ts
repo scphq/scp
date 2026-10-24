@@ -10,7 +10,7 @@ import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { type Claim, CLI_NAME, RelayError, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { parse } from "smol-toml"
-import { attribute, attributed, optionsBefore, ROOT_HELP } from "./attribute"
+import { attribute, attributed, validateUnder, optionsBefore, ROOT_HELP } from "./attribute"
 import { codexOwner, codexThread, heldThreadText } from "./codex-queue"
 import { RelayUsage, startDaemon } from "./common"
 import { CODEX_VALUED, readPsTable, relayIdentity } from "./identity"
@@ -23,7 +23,7 @@ type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 type Transport = { request(method: string, params: Json): Promise<Json> }
 
-export const CODEX_HELP = `${CLI_NAME} codex [--name N | --as N] [--root] [--headless] [--resume THREAD] [--] [codex args...]
+export const CODEX_HELP = `${CLI_NAME} codex [--name N | --as N] [--root] [--under ADDR] [--headless] [--resume THREAD] [--] [codex args...]
   every codex argument, profile and config value is honoured; a -- after codex arguments is passed through.
   runs codex with relay messages waking an idle thread or steering a running turn; approvals stay with the TUI.
   --headless runs an ambient worker without a TUI; --resume THREAD reopens its thread.
@@ -35,10 +35,11 @@ export function codexLaunch(
   args: string[],
   env: Env,
   _self: string[],
-): { name?: string; headless: boolean; root?: true; resume?: string; codexArgs: string[]; env: Env } {
+): { name?: string; headless: boolean; root?: true; under?: string; resume?: string; codexArgs: string[]; env: Env } {
   let name: string | undefined
   let resume: string | undefined
   let headless = false
+  let under: string | undefined
   let root = false
   const codexArgs: string[] = []
   for (let i = 0; i < args.length; i++) {
@@ -52,13 +53,17 @@ export function codexLaunch(
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} codex ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
     else if (arg === "--headless") headless = true
-    else if (arg === "--root") root = true
+    else if (arg === "--under" || arg.startsWith("--under=")) {
+      under = arg === "--under" ? args[++i] : arg.slice(8)
+      if (under === undefined) throw new RelayUsage("--under takes an address")
+    } else if (arg === "--root") root = true
     else if (arg === "--resume") {
       resume = args[++i]
       if (resume === undefined) throw new RelayUsage(`${CLI_NAME} codex --resume takes a thread`)
     } else if (arg.startsWith("--resume=")) resume = arg.slice("--resume=".length)
     else codexArgs.push(arg)
   }
+  validateUnder(under, root)
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
   const { SCP_SESSION: _session, SCP_PARENT: _parent, SCP_CODEX_THREAD: _thread, ...clean } = env
@@ -67,6 +72,7 @@ export function codexLaunch(
     ...(name !== undefined ? { name } : {}),
     headless,
     ...(root ? { root: true as const } : {}),
+    ...(under !== undefined ? { under } : {}),
     ...(resume !== undefined ? { resume } : {}),
     codexArgs: resume !== undefined && !headless ? ["resume", resume, ...codexArgs] : codexArgs,
     env: {

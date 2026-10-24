@@ -6,6 +6,7 @@ import { RelayError } from "@scp-dev/core"
 import { attribute, attributed } from "./attribute"
 import { claudeCommand } from "./claude"
 import { processKey } from "./identity"
+import { RelayUsage } from "./common"
 
 setDefaultTimeout(30_000)
 
@@ -287,3 +288,25 @@ describe("attribute", () => {
     expect(lines).toEqual([expect.stringContaining("is me/w2 on SCP; messages")])
   })
 })
+
+for (const stage of ["connect", "hello", "cloud_status"]) {
+  test(`explicit cross-machine placement times out when ${stage} never answers`, async () => {
+    let closed = false
+    const client = {
+      hello: () => (stage === "hello" ? new Promise(() => {}) : Promise.resolve({})),
+      request: () => new Promise(() => {}),
+      close: () => {
+        closed = true
+      },
+    } as unknown as RelayClient
+    const start = Date.now()
+    const result = attribute("pi", { under: "me/vm/lead", dir: "/tmp/silent-broker" }, {}, project, () => {}, {
+      timeoutMs: 25,
+      connect: () => (stage === "connect" ? new Promise(() => {}) : Promise.resolve(client)),
+    })
+    await expect(result).rejects.toBeInstanceOf(RelayUsage)
+    await expect(result).rejects.toMatchObject({ message: "no answer from the relay broker at /tmp/silent-broker within 25 ms" })
+    expect(Date.now() - start).toBeLessThan(1000)
+    expect(closed).toBe(stage !== "connect")
+  })
+}

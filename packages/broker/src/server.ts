@@ -37,6 +37,7 @@ import { type Deliver, type JudgeClientFactory, JudgeGate } from "./judge-gate"
 import { releaseBrokerLock, takeBrokerLock } from "./lock"
 import { encodeLine, LineReader, LineWriter, MAX_LINE } from "./ndjson"
 import { accountHome, accountHomeVerified, policyPath as defaultPolicyPath, privateDir, shortHostname, socketPath } from "./paths"
+import { runnerService } from "./runners"
 import { writeSessionMarker } from "./sessions"
 import { Conn } from "./socket"
 import { HookCalls, type HookHandler, type HookParams, validateHook } from "./hook"
@@ -83,6 +84,8 @@ export interface BrokerOptions {
   env?: Record<string, string | undefined> | undefined
   /** the judge model client for a policy's `judge.model` (default the provider's HTTP API) */
   judgeClient?: JudgeClientFactory | undefined
+  /** runner configuration, default runners.json beside the policy file */
+  runnersPath?: string | undefined
   /** the wake hooks' configuration file (default wakers.json beside the policy file), read again when it changes */
   wakersPath?: string | undefined
   /** the wake hooks by provider, in place of the file */
@@ -182,6 +185,7 @@ const SCOPE_METHODS = new Set([
   "spawn_exit",
   "spawn_steers",
   "spawn_end",
+  "spawn_via",
   "peek",
   "peek_set",
   "peek_who",
@@ -533,6 +537,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   function flush(s: Conn<Connection>) {
     if (!s.data.closed) s.data.writer.flush((bytes) => s.write(bytes))
   }
+
+  const runners = runnerService(core, options.runnersPath ?? process.env.SCP_RUNNERS_FILE ?? join(dirname(policyFile), "runners.json"))
 
   /** a fleet event to every watcher; a watcher that falls more than the cap behind gets one lagged notice and is unsubscribed */
   /** this host's own endpoints, mirrored rows of other machines left out */
@@ -1384,7 +1390,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           if (!bridge) throw new RelayError("unavailable", `this broker is not linked to a hub (${CLI_NAME} cloud enable), so it reaches no contacts`)
           return bridge.contacts().then((contacts) => ({ contacts }))
         }
-        return { endpoints: core.list({ ...(params as Parameters<FederatedCore["list"]>[0]), viewer, peekable: viewer === undefined }) }
+        return runners
+          .enrich(core.list({ ...(params as Parameters<FederatedCore["list"]>[0]), viewer, peekable: viewer === undefined }))
+          .then((endpoints) => ({ endpoints }))
       case "snapshot":
         return {
           ...core.snapshot({
@@ -1469,8 +1477,26 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         }
       case "why":
         return core.why(actor, required(params, "from"), required(params, "to"))
-      case "peek":
+      case "peek": {
+        const via = core.viaPeek(actor, params.endpoint)
+        if (via)
+          return runners.enrich([via]).then(([view]) => ({
+            endpoint: via.address,
+            at: new Date().toISOString(),
+            level: null,
+            source: "status",
+            turns: [],
+            recent_tools: [],
+            status: via.status,
+            title: via.title,
+            unread: 0,
+            truncated: false,
+            runner: view!.runner,
+          }))
         return core.peek(actor, { endpoint: params.endpoint, turns: params.turns, full: params.full })
+      }
+      case "spawn_via":
+        return core.spawnVia(s.data.endpoint!, params)
       case "peek_set":
         return core.peekSet(actor, { ...compact({ endpoint: optional(params, "endpoint") }), level: params.level })
       case "peek_who":
@@ -1478,6 +1504,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       case "spawn_steers":
         return core.spawnSteers(actor, { grant: params.grant as string, take: params.take === true })
       case "spawn_end": {
+        const via = core.endVia(actor, { endpoint: params.endpoint })
+        if (via) return runners.stop(via.record).then((runner) => ({ ...(via.endpoint ? { endpoint: via.endpoint } : {}), held: false, runner }))
         const ended = core.spawnEnd(actor, { endpoint: params.endpoint })
         for (const c of connections) if (c.data.waker === ended.endpoint.id) c.end()
         if (!presenceMoved(ended.endpoint.id)) bridge?.changed(ended.endpoint.id)

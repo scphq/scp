@@ -145,16 +145,16 @@ test("a headless session declines approvals and refuses other server requests", 
   expect(lines[0]).toContain("declined rm -rf /")
 })
 
-test("a muse shim and hook take the name, grant, session and launcher a launcher left for their harness process", () => {
+test("a muse shim and hook take the name, grant, under, session and launcher a launcher left for their harness process", () => {
   const dir = mkdtempSync(join(tmpdir(), "scp-muse-launch-"))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const env = { SCP_DIR: dir }
   const key = `pid:${process.pid}:Mon-Oct-19-00:00:00-2026`
   const grant = `krt_${"a".repeat(64)}`
-  const remove = writeMuseLaunch(key, { name: "kid", grant }, env)
+  const remove = writeMuseLaunch(key, { name: "kid", grant, under: "me/lead" }, env)
   const file = join(dir, "launch", `muse-${process.pid}.json`)
   expect(statSync(file).mode & 0o777).toBe(0o600)
-  expect(readMuseLaunch(key, env)).toEqual({ name: "kid", grant })
+  expect(readMuseLaunch(key, env)).toEqual({ name: "kid", grant, under: "me/lead" })
   expect(readMuseLaunch(`pid:${process.pid}:another-start`, env)).toBeUndefined()
   const claim = (harness: string, extra: Record<string, string> = {}) =>
     relayIdentity({
@@ -166,7 +166,8 @@ test("a muse shim and hook take the name, grant, session and launcher a launcher
       startOf: () => "Mon-Oct-19-00:00:00-2026",
       lineageOf: () => [],
     })
-  expect(claim("muse")).toMatchObject({ handle: "kid", grant })
+  expect(claim("muse")).toMatchObject({ handle: "kid", grant, under: "me/lead" })
+  expect(claim("muse", { SCP_UNDER: "me/other" }).under).toBe("me/other")
   expect(claim("muse", { SCP_NAME: "own" })).toMatchObject({ handle: "own" })
   expect(claim("muse", { SCP_NAME: "own" }).grant).toBeUndefined()
   expect(claim("codex").handle).not.toBe("kid")
@@ -178,6 +179,9 @@ test("a muse shim and hook take the name, grant, session and launcher a launcher
   expect(claim("muse")).toMatchObject({ handle: "kid", session: "env:abc123", process: launcher })
   expect(claim("muse").grant).toBeUndefined()
   resumed()
+  const underOnly = writeMuseLaunch(key, { under: "me/lead" }, env)
+  expect(claim("muse").under).toBe("me/lead")
+  underOnly()
   const odd = writeMuseLaunch(key, { name: "kid", session: "a b", launcher: "4242" }, env)
   expect(readMuseLaunch(key, env)).toEqual({ name: "kid" })
   odd()

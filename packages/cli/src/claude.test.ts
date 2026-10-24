@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { bgDir, CHANNEL_FLAGS, claudeArgv, claudeCommand, claudeLaunchArgs, mountHint, resumeTarget } from "./claude"
+import { bgMount, bgDir, CHANNEL_FLAGS, claudeArgv, claudeCommand, claudeLaunchArgs, mountHint, resumeTarget } from "./claude"
 import { setJoinMode } from "./relay"
 import { CHANNELS_ENV } from "./common"
 import { launchedWithChannels } from "./mcp"
@@ -118,7 +118,9 @@ describe("swarm claude", () => {
     const file = args.at(-1)!
     expect(statSync(file).mode & 0o777).toBe(0o600)
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
-      mcpServers: { scp: { type: "stdio", command: "swarm", args: mount, env: { SCP_LABELS: "lane=x", SCP_NAME: "bgkid", SCP_GRANT: "krt_grant" } } },
+      mcpServers: {
+        scp: { type: "stdio", command: "swarm", args: mount, env: { SCP_LABELS: "lane=x", SCP_NAME: "bgkid", SCP_GRANT: "krt_grant", SCP_UNDER: "" } },
+      },
     })
     const link = join(bgDir(env), "1a2b3c4d.json")
     expect(lstatSync(link).isSymbolicLink() && join(bgDir(env), readlinkSync(link))).toBe(file)
@@ -132,7 +134,7 @@ describe("swarm claude", () => {
     expect(args.slice(0, -1)).toEqual(["fix it", "--bg", "--name", "lead", "--mcp-config"])
     const scp = JSON.parse(readFileSync(args.at(-1)!, "utf8")).mcpServers.scp
     expect([scp.command, ...scp.args]).toEqual([...SELF, "mcp", "--harness", "claude", "--channels"])
-    expect(scp.env).toEqual({ SCP_NAME: "lead", SCP_GRANT: "" })
+    expect(scp.env).toEqual({ SCP_NAME: "lead", SCP_GRANT: "", SCP_UNDER: "" })
     expect(claudeArgv(["--", "--model", "opus", "--bg"])).toEqual({ bg: true, args: ["--model", "opus", "--bg"] })
     expect(claudeArgv(["--bg", "--name", "x", "--", "-p", "--", "--bg"])).toEqual({ name: "x", bg: true, args: ["-p", "--", "--bg"] })
     expect(claudeArgv(["--", "-p", "--", "--bg"])).toEqual({ args: ["-p", "--", "--bg"] })
@@ -150,7 +152,7 @@ describe("swarm claude", () => {
     }
     expect(await claudeCommand(["attach", "1a2b3c4d", "--name", "lead"], env, () => {}, f.home, { rename })).toBe(7)
     expect(f.args()).toBe("attach\n1a2b3c4d\n")
-    expect(JSON.parse(readFileSync(link, "utf8")).mcpServers.scp.env).toEqual({ SCP_NAME: "lead", SCP_GRANT: "krt_grant" })
+    expect(JSON.parse(readFileSync(link, "utf8")).mcpServers.scp.env).toEqual({ SCP_NAME: "lead", SCP_GRANT: "krt_grant", SCP_UNDER: "" })
     writeFileSync(join(f.home, "agents.json"), JSON.stringify([{ id: "1a2b3c4d", name: "lead", state: "working" }]))
     const lines: string[] = []
     expect(await claudeCommand(["attach", "lead", "--name=taken"], env, (line) => lines.push(line), f.home, { rename })).toBe(7)
@@ -206,4 +208,19 @@ test("Claude foreground and background launches clear inherited desktop and Cowo
     await claudeCommand(args, env, () => {}, f.home, { out: () => {} })
     for (const key of Object.keys(session)) expect(f.allEnv()).not.toContain(`${key}=`)
   }
+})
+
+test("explicit parent stays in the background mount and resume arguments stay with claude", () => {
+  const f = fixture()
+  expect(bgMount({ ...f.env, SCP_UNDER: "me/vm/lead", SCP_GRANT: "" }, "worker").env).toMatchObject({
+    SCP_NAME: "worker",
+    SCP_UNDER: "me/vm/lead",
+    SCP_GRANT: "",
+  })
+  expect(claudeArgv(["--under=me/vm/lead", "--bg", "--", "--resume", "session"])).toEqual({
+    under: "me/vm/lead",
+    bg: true,
+    args: ["--resume", "session"],
+  })
+  expect(claudeArgv(["--", "--under", "prompt"])).toEqual({ args: ["--under", "prompt"] })
 })
