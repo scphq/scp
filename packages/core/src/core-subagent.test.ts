@@ -118,7 +118,7 @@ describe("subagent endpoints", () => {
     expect(core.whoami(sub.id).status?.state).toBe("working")
   })
 
-  test("local agents count the root's subagents that are neither done nor historic", () => {
+  test("local agents count the not-done subagents of the root's current session, however old", () => {
     const { core, clock, hook } = setup()
     const root = hook(9).endpoint
     const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
@@ -127,7 +127,9 @@ describe("subagent endpoints", () => {
     expect(facts()).toMatchObject({ children: 0, subagents: 2 })
     core.status(sub.id, "done", undefined)
     expect(facts().subagents).toBe(1)
-    clock.now += LIMITS.historicAfterS * 1000
+    clock.now += LIMITS.historicAfterS * 1000 * 2
+    expect(facts().subagents).toBe(1)
+    expect(hook(9, { session: key(10) }).endpoint.id).toBe(root.id)
     expect(facts().subagents).toBe(0)
   })
 

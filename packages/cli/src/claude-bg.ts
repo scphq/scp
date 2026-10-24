@@ -136,6 +136,8 @@ export interface PlanInput {
   retryRefused?: boolean
   /** the session ids of the sessions the caller runs in, never stopped or removed */
   self?: Set<string>
+  /** the caller's own process and its ancestors: a session whose process is one of them is never stopped or removed */
+  selfPids?: Set<number>
 }
 
 /**
@@ -154,7 +156,7 @@ const attachedTo = (entry: ClaudeEntry, attached: Set<string>): boolean =>
 
 /**
  * the workers under an endpoint that still run: a local child not historic and online or working, any child the broker's local agents do not
- * list, and its in-process subagents neither done nor historic
+ * list, and its in-process subagents of its current session not done
  */
 export function liveChildren(agent: AgentFacts, agents: AgentFacts[]): number {
   const local = agents.filter((one) => one.parent === agent.address)
@@ -210,7 +212,10 @@ export function plan(input: PlanInput): Action[] {
       keep("attached", agent)
       continue
     }
-    if ([entry.sessionId, agent.harness_session].some((key) => typeof key === "string" && input.self?.has(key))) {
+    if (
+      [entry.sessionId, agent.harness_session].some((key) => typeof key === "string" && input.self?.has(key)) ||
+      (typeof entry.pid === "number" && input.selfPids?.has(entry.pid))
+    ) {
       keep("the caller's own session", agent)
       continue
     }
@@ -280,6 +285,9 @@ const section = (file: Record<string, unknown>, key: string): Record<string, unk
   const value = file[key]
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {}
 }
+
+/** `$SCP_IDLE_AFTER_S` (alias `$SCP_CLAUDE_BG_IDLE_AFTER_S`), else `lifecycle.idle_after_s` (alias `claude_bg.idle_after_s`), else 600 s */
+export const idleAfterS = (env: Env): number => bgConfig(env).idleAfterS
 
 /**
  * `$SCP_CLAUDE_BG_STOP_AFTER_S`, `$SCP_IDLE_AFTER_S` (alias `$SCP_CLAUDE_BG_IDLE_AFTER_S`) and `$SCP_CLAUDE_BG_REMOVE`, else
@@ -391,6 +399,8 @@ export interface ClaudeBgDeps {
   exec?: Exec
   /** the process table's command lines, `ps -Ao args=`; null when it cannot be read */
   ps?: () => Promise<string | null>
+  /** this process and its ancestors; null when the process table cannot be read */
+  ancestors?: () => Promise<Set<number> | null>
   now?: () => number
   log?: (line: string) => void
 }
@@ -423,6 +433,23 @@ export function attachTargets(table: string): Set<string> {
     if (at > 0 && words[at + 1] && words.slice(0, at).some((word) => word.split("/").some((part) => part.includes("claude")))) targets.add(words[at + 1]!)
   }
   return targets
+}
+
+/** `pid` and its ancestors in a `ps -Ao pid=,ppid=` table */
+export function ancestorsOf(table: string, pid: number): Set<number> {
+  const parents = new Map<number, number>()
+  for (const line of table.split("\n")) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number)
+    if (Number.isInteger(child) && Number.isInteger(parent)) parents.set(child!, parent!)
+  }
+  const chain = new Set<number>()
+  for (let at: number | undefined = pid; at !== undefined && at > 1 && !chain.has(at); at = parents.get(at)) chain.add(at)
+  return chain
+}
+
+const psAncestors = (env: Env, exec: Exec) => async (): Promise<Set<number> | null> => {
+  const run = await exec("ps", ["-Ao", "pid=,ppid="], { timeoutMs: LIST_TIMEOUT_MS, env })
+  return run.code === 0 ? ancestorsOf(run.out, process.pid) : null
 }
 
 const psTable = (env: Env, exec: Exec) => async (): Promise<string | null> => {
@@ -506,10 +533,7 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
   }
   writeState(run.env, id, { sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle })
   await port.hibernate(agent, ref)
-  const listed = (await listEntries(claude, true))?.find((one) => one.id === id)
-  const why =
-    (await moved(target, port, run)) ??
-    (listed?.status === "idle" && listed.pid === entry.pid ? null : `claude shows it ${listed ? (listed.status ?? "busy") : "unlisted"}`)
+  const why = (await moved(target, port, run)) ?? (await stillIdle(claude, id, entry))
   if (why) {
     await port.unhibernate(agent)
     restore()
@@ -540,6 +564,22 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
   return `mail raced the stop and claude respawn failed: ${firstLine(respawned.out) || `exit ${respawned.code}`}`
 }
 
+/**
+ * null while `claude agents` still shows the session idle with the planned pid, read right before `claude stop`; a turn that starts in the
+ * moment between this read and the stop is not caught
+ */
+async function stillIdle(claude: Claude, id: string, entry: ClaudeEntry): Promise<string | null> {
+  const listed = (await listEntries(claude, true))?.find((one) => one.id === id)
+  return listed?.status === "idle" && listed.pid === entry.pid ? null : `claude shows it ${listed ? (listed.status ?? "busy") : "unlisted"}`
+}
+
+/** null while `claude agents` lists the session with no process, read right before `claude rm` */
+async function stillStopped(claude: Claude, id: string): Promise<string | null> {
+  const listed = (await listEntries(claude, true))?.find((one) => one.id === id)
+  if (!listed) return "claude agents failed or no longer lists it"
+  return typeof listed.pid === "number" ? `claude shows it running again (${listed.status ?? "busy"})` : null
+}
+
 async function removeWorker(target: Target & { live: boolean }, port: BgPort, run: Run): Promise<string | null> {
   const { id, entry, agent } = target
   const { claude, env, now } = run
@@ -554,7 +594,7 @@ async function removeWorker(target: Target & { live: boolean }, port: BgPort, ru
     writeState(env, id, { ...previous, sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle })
     if (agent.hibernate !== CLAUDE_BG_PROVIDER) await port.hibernate(agent, ref)
   }
-  const why = await moved(target, port, run)
+  const why = (await moved(target, port, run)) ?? (await stillStopped(claude, id))
   if (why) {
     await port.kick(agent, ref)
     return why
@@ -656,7 +696,8 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
       if (!isDue()) return
       const ps = deps.ps ?? psTable(claude.env, claude.exec)
       const table = await ps()
-      if (table === null) return
+      const selfPids = await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()
+      if (table === null || selfPids === null) return
       const actions = plan({
         entries,
         agents: context.agents(),
@@ -665,6 +706,7 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         attached: attachTargets(table),
         now: now(),
         config,
+        selfPids,
       })
       const log = deps.log ?? context.log
       for (const { action, ok, note } of await apply(acts(actions), taskPort(context), runOf(claude, env, now, ps)))
@@ -741,6 +783,7 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
       now: (deps.now ?? Date.now)(),
       config,
       self: selfSessions(env),
+      selfPids: (await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()) ?? new Set(),
     }))
       if (action.kind !== "unhibernate")
         policy.set(action.id, action.kind === "keep" ? `kept: ${action.reason}` : table === null ? "ps failed, so attached is unknown" : `due: ${action.kind}`)
@@ -782,15 +825,20 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
   return 0
 }
 
-/** `swarm claude prune [--dry-run] [--stop-only] [--older-than <dur>]`: stops and removes finished workers now, with the policy's guards */
+/**
+ * `swarm claude prune [--dry-run] [--stop-only] [--older-than <dur>]`: stops and removes finished workers now, with the policy's guards;
+ * `--unhibernate-unrecorded` only clears the `claude-bg` hibernation of sessions `swarm claude --bg` did not start
+ */
 async function pruneCommand(argv: string[], env: Env, out: (line: string) => void, deps: ClaudeBgDeps): Promise<number> {
   let dryRun = false
   let stopOnly = false
+  let unrecorded = false
   let olderThanS: number | undefined
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     if (arg === "--dry-run") dryRun = true
     else if (arg === "--stop-only") stopOnly = true
+    else if (arg === "--unhibernate-unrecorded") unrecorded = true
     else if (arg === "--older-than" || arg.startsWith("--older-than=")) {
       const value = arg === "--older-than" ? argv[++i] : arg.slice("--older-than=".length)
       if (value === undefined) throw new RelayUsage(`${CLI_NAME} claude prune --older-than takes a duration such as 30m, 2h or 1d`)
@@ -799,8 +847,10 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
       } catch (error) {
         throw new RelayUsage(error instanceof Error ? error.message : String(error))
       }
-    } else throw new RelayUsage(`${CLI_NAME} claude prune takes --dry-run, --stop-only and --older-than <duration>, not ${arg}`)
+    } else throw new RelayUsage(`${CLI_NAME} claude prune takes --dry-run, --stop-only, --older-than <duration> and --unhibernate-unrecorded, not ${arg}`)
   }
+  if (unrecorded && (stopOnly || olderThanS !== undefined))
+    throw new RelayUsage(`${CLI_NAME} claude prune --unhibernate-unrecorded stops nothing: it does not go with --stop-only or --older-than`)
   const claude = claudeOf(env, deps)
   if (!claude) throw new RelayUsage("claude is not on PATH")
   let opened: Awaited<ReturnType<typeof socketPort>>
@@ -814,9 +864,11 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
   try {
     const entries = await listEntries(claude, true)
     if (!entries) throw new Error(`${CLI_NAME} claude: claude agents --json --all failed`)
+    if (unrecorded) return await unhibernateUnrecorded(entries, readRecords(env), opened.port, dryRun, out)
     const ps = deps.ps ?? psTable(claude.env, claude.exec)
     const table = await ps()
-    if (table === null) throw new Error(`${CLI_NAME} claude: ps failed, so attached sessions are unknown`)
+    const selfPids = await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()
+    if (table === null || selfPids === null) throw new Error(`${CLI_NAME} claude: ps failed, so attached sessions are unknown`)
     const records = readRecords(env)
     const now = deps.now ?? Date.now
     const actions = plan({
@@ -831,6 +883,7 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
       stopOnly,
       retryRefused: true,
       self: selfSessions(env),
+      selfPids,
     })
     for (const action of actions) if (action.kind === "keep") out(`keep ${action.id}${action.agent ? ` ${action.agent.address}` : ""}: ${action.reason}`)
     const acting = acts(actions).filter((action) => action.kind !== "unhibernate")
@@ -847,6 +900,40 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
   } finally {
     opened.close()
   }
+}
+
+/** clears the `claude-bg` hibernation of every endpoint whose listed session has no launcher record; stops, removes and respawns nothing */
+async function unhibernateUnrecorded(
+  entries: ClaudeEntry[],
+  records: Map<string, BgRecord>,
+  port: BgPort,
+  dryRun: boolean,
+  out: (line: string) => void,
+): Promise<number> {
+  const ids = new Map(
+    entries.flatMap((entry) =>
+      entry.id && SHORT_ID.test(entry.id) && entry.sessionId && !records.has(entry.id) ? [[entry.sessionId, entry.id] as const] : [],
+    ),
+  )
+  let failed = 0
+  for (const agent of await port.agents()) {
+    const id = agent.hibernate === CLAUDE_BG_PROVIDER && agent.harness_session !== null ? ids.get(agent.harness_session) : undefined
+    if (id === undefined) continue
+    const stopped = entries.some((entry) => entry.id === id && typeof entry.pid !== "number")
+    const after = stopped ? ": it stays stopped, and a message waits in its mailbox" : ""
+    if (dryRun) {
+      out(`would unhibernate ${id} ${agent.address}${after}`)
+      continue
+    }
+    try {
+      await port.unhibernate(agent)
+      out(`unhibernated ${id} ${agent.address}${after}`)
+    } catch (error) {
+      failed++
+      out(`kept ${id} ${agent.address}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return failed ? 1 : 0
 }
 
 /** `swarm claude ls` and `swarm claude prune` */

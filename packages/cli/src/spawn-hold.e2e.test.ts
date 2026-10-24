@@ -247,9 +247,9 @@ test("a held codex exec worker resumes its session for each batch of messages, h
   expect(f.runs()).toHaveLength(3)
 })
 
-test("an idle held worker is let go after --idle seconds; one ended during a run hands that run back, then is let go", async () => {
+test("an idle --no-durable worker is let go after --idle seconds; one ended during a run hands that run back, then is let go; one too long to keep durably is held plainly", async () => {
   const f = await fixture()
-  const idle = f.spawn("--idle", "2", "--name", "hi", "--", "codex", "exec", "go")
+  const idle = f.spawn("--no-durable", "--idle", "2", "--name", "hi", "--", "codex", "exec", "go")
   await f.next("hi")
   await waitFor(() => !alive(idle), 15_000, "the idle runner to exit")
   const gone = await f.view("hi")
@@ -269,11 +269,18 @@ test("an idle held worker is let go after --idle seconds; one ended during a run
   await f.lead.request("send", { to: "hb", body: "too late" })
   await Bun.sleep(500)
   expect(f.runs()).toHaveLength(3)
+
+  f.go(4)
+  const plain = f.spawn("--idle", "1", "--name", "hl", "--", "codex", "exec", "--model", "x".repeat(600), "go")
+  expect((await f.next("hl")).body.text).toContain("stays resumable")
+  await waitFor(() => !alive(plain), 15_000, "the plainly held runner to exit")
+  expect((await f.view("hl"))?.presence).toBe("offline")
 })
 
-test("a durable worker hibernates when let go; a message wakes it through the built-in spawn waker, which resumes its session and hands back", async () => {
+test("a worker with a parent is durable by default: after $SCP_IDLE_AFTER_S it hibernates, and a message wakes it through the built-in spawn waker", async () => {
   const f = await fixture()
-  const runner = f.spawn("--durable", "--idle", "2", "--name", "hd", "--", "codex", "exec", "go")
+  f.env.SCP_IDLE_AFTER_S = "2"
+  const runner = f.spawn("--name", "hd", "--", "codex", "exec", "go")
   await f.next("hd")
   await waitFor(() => !alive(runner), 15_000, "the runner to hibernate and exit")
   const asleep = await f.view("hd")
@@ -344,7 +351,8 @@ test("--durable refuses a command it cannot resume, and --idle takes seconds, du
   for (const [args, text] of [
     [["--durable", "--", "sh", "-c", "true"], "--durable resumes a headless session"],
     [["--durable", "--", "codex", "exec", "--ephemeral", "go"], "--durable resumes a headless session"],
-    [["--durable", "--idle", "0", "--", "codex", "exec", "go"], "does not go with --idle 0"],
+    [["--durable", "--idle", "0", "--", "codex", "exec", "go"], "does not go with an idle time of 0"],
+    [["--durable", "--no-durable", "--", "codex", "exec", "go"], "--durable and --no-durable conflict"],
     [["--idle", "soon", "--", "codex", "exec", "go"], "or Infinity"],
     [["--durable", "--", "codex", "exec", "--model", "x".repeat(600), "go"], "over 512"],
   ] as const) {

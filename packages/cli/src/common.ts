@@ -74,6 +74,7 @@ export const OPTIONS = {
   "handback-bytes": { type: "string" },
   "no-push": { type: "boolean" },
   durable: { type: "boolean" },
+  "no-durable": { type: "boolean" },
   bg: { type: "boolean" },
   fg: { type: "boolean" },
   name: { type: "string" },
@@ -123,6 +124,7 @@ export const SPAWN_OPTIONS: Option[] = [
   "via",
   "idle",
   "durable",
+  "no-durable",
 ]
 
 export const OBSERVE = new Set([

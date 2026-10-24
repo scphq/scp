@@ -10,12 +10,14 @@ import {
   type BgState,
   type ClaudeEntry,
   type PlanInput,
+  ancestorsOf,
   attachTargets,
   bgConfig,
   claudeBgCommand,
   claudeBgTask,
   claudeWakeCommand,
   historicAfterS,
+  idleAfterS,
   plan,
   readState,
   refSession,
@@ -180,7 +182,11 @@ writeFileSync(file, JSON.stringify(entries));
       events.push(["log", line])
     },
   }
-  const deps = { ps: async () => "", now: () => now }
+  const deps: { ps: () => Promise<string | null>; ancestors: () => Promise<Set<number> | null>; now: () => number } = {
+    ps: async () => "",
+    ancestors: async () => new Set([process.pid]),
+    now: () => now,
+  }
   return {
     home,
     env,
@@ -230,6 +236,7 @@ describe("planning", () => {
     ["attached", { attached: new Set([id]) }],
     ["attached", { attached: new Set(["lane"]) }],
     ["the caller's own session", { self: new Set([sessionId]) }],
+    ["the caller's own session", { selfPids: new Set([1, 4242]) }],
     ["busy", { entries: [entry({ status: "busy" })] }],
     ["blocked", { entries: [entry({ status: "blocked" })] }],
     ["waiting", { entries: [entry({ status: "waiting" })] }],
@@ -327,6 +334,12 @@ describe("planning", () => {
   })
 })
 
+test("walks a process's ancestors, stopping at pid 1 and on a cycle", () => {
+  expect(ancestorsOf("  10     1\n  20    10\n  30    20\n  40    99\n\n", 30)).toEqual(new Set([30, 20, 10]))
+  expect(ancestorsOf("5 6\n6 5\n", 5)).toEqual(new Set([5, 6]))
+  expect(ancestorsOf("bad line\n", 77)).toEqual(new Set([77]))
+})
+
 test("finds attach targets only after a word with claude in its path", () => {
   expect([...attachTargets("/opt/bin/claude attach 1a2b3c4d\nbun /x/cli.js claude attach w1\nnode /x/claude/cli.js attach lane\ngit attach x")]).toEqual([
     id,
@@ -361,12 +374,13 @@ describe("configuration", () => {
   test("reads the idle threshold from its primary names before their claude_bg aliases, the environment first", () => {
     const f = fixture()
     const idle = (env: Record<string, string>) => bgConfig({ ...f.env, ...env }).idleAfterS
+    expect([idle({}), idleAfterS(f.env)]).toEqual([600, 600])
     expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(1200)
     expect(idle({ SCP_IDLE_AFTER_S: "Infinity", SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(Infinity)
     configure(f.env, { claude_bg: { idle_after_s: "1h" } })
     expect(idle({})).toBe(3600)
     configure(f.env, { claude_bg: { idle_after_s: "1h" }, lifecycle: { idle_after_s: 300 } })
-    expect(idle({})).toBe(300)
+    expect([idle({}), idleAfterS(f.env)]).toEqual([300, 300])
     expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "90" })).toBe(90)
     expect(idle({ SCP_IDLE_AFTER_S: "bogus" })).toBe(300)
   })
@@ -421,6 +435,24 @@ describe("background task", () => {
     expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): claude shows it busy`])
     expect(readState(f.env, id)).toBeUndefined()
   })
+  test("relists claude after the broker rechecks, so a session busy by then is kept", async () => {
+    const f = fixture()
+    f.record()
+    f.onAgents = () => {
+      if (f.facts.hibernate === "claude-bg") f.save([entry({ cwd: f.home, status: "busy" })])
+    }
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
+    expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): claude shows it busy`])
+  })
+  test("skips the run when its own process ancestry cannot be read", async () => {
+    const f = fixture()
+    f.record()
+    f.deps.ancestors = async () => null
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([])
+  })
   test("hibernates before stopping and saves resumable state", async () => {
     const f = fixture()
     f.record()
@@ -461,7 +493,7 @@ describe("background task", () => {
       }
       await f.run()
       expect(f.events).toContainEqual(["unhibernate", "worker-id"])
-      expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
+      expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
       expect(readState(f.env, id)).toBeUndefined()
     })
   }
@@ -546,7 +578,7 @@ describe("acting on a changed worker", () => {
     let reads = 0
     f.deps.ps = async () => (reads++ ? `/usr/bin/claude attach ${id}` : "")
     await f.run()
-    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
     expect(f.facts.hibernate).toBeNull()
   })
   test("wakes a removed worker whose mail arrived during the removal", async () => {
@@ -560,6 +592,19 @@ describe("acting on a changed worker", () => {
     await f.run()
     expect(f.calls().at(-1)?.argv).toEqual(["rm", id])
     expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+  })
+  test("keeps and kicks a stopped worker that claude shows running again right before the removal", async () => {
+    const f = fixture()
+    f.record()
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ historic: true, hibernate: "claude-bg", connections: 0 })
+    f.onAgents = () => {
+      if (f.calls().length) f.save([entry({ cwd: f.home })])
+    }
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+    expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): claude shows it running again (idle)`])
   })
 })
 
@@ -791,7 +836,7 @@ async function brokerFixture() {
   await worker.client.request("status", { state: "done" })
   const lines: string[] = []
   const prune = (args: string[]) => claudeBgCommand("prune", args, f.env, (line) => lines.push(line), f.deps)
-  return { ...f, broker, lead, worker, lines, prune }
+  return { ...f, broker, lead, worker, human, lines, prune, connect }
 }
 
 describe("broker commands", () => {
@@ -820,6 +865,32 @@ describe("broker commands", () => {
     await f.worker.client.request("status", { state: "working" })
     expect(await f.prune(["--older-than", "30m", "--stop-only"])).toBe(0)
     expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+  })
+  test("clears only the claude-bg hibernation of sessions swarm did not start, and stops nothing", async () => {
+    const f = await brokerFixture()
+    const strayId = "4a2b3c4d"
+    const straySession = `${strayId}-0000-4000-8000-000000000001`
+    const stray = await f.connect({
+      transient: true,
+      claim: { handle: "w2", harness: "claude-code", session: "s-w2", process: "pid:999998:x" },
+    })
+    await stray.client.request("event", { kind: "stop", session_id: straySession })
+    f.save([entry({ cwd: f.home }), entry({ id: strayId, sessionId: straySession, name: "stray", cwd: f.home })])
+    for (const endpoint of ["w1", "w2"]) await f.human.client.request("hibernate", { endpoint, wake: "claude-bg" })
+    const presence = (id: string) => f.broker.core.whoami(id).presence
+    expect(await f.prune(["--unhibernate-unrecorded", "--dry-run"])).toBe(0)
+    expect(f.lines).toEqual([`would unhibernate ${strayId} me/w2`])
+    expect(presence(stray.endpoint.id)).toBe("hibernated")
+    expect(await f.prune(["--unhibernate-unrecorded"])).toBe(0)
+    expect(f.lines.at(-1)).toBe(`unhibernated ${strayId} me/w2`)
+    expect(presence(stray.endpoint.id)).not.toBe("hibernated")
+    expect(presence(f.worker.endpoint.id)).toBe("hibernated")
+    expect(f.calls().map((call) => call.argv)).toEqual([
+      ["agents", "--json", "--all"],
+      ["agents", "--json", "--all"],
+    ])
+    for (const flag of [["--stop-only"], ["--older-than", "1h"]])
+      await expect(f.prune(["--unhibernate-unrecorded", ...flag])).rejects.toThrow("does not go with --stop-only or --older-than")
   })
   test("names the missing broker when pruning cannot connect", async () => {
     const f = fixture()

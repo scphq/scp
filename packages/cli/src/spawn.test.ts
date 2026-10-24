@@ -27,7 +27,7 @@ import {
   transcriptReplies,
   workerName,
 } from "./spawn"
-import { agentShell, spawnDefaults, splitSpawn } from "./spawn"
+import { agentShell, spawnDefaults, spawnIdle, splitSpawn } from "./spawn"
 import { grantParams } from "./common"
 import { RELAY_HELP, verbHelp } from "./main"
 import { SPAWN_HELP } from "./help-spawn"
@@ -1370,6 +1370,11 @@ describe("harness argv and environment", () => {
     ])
       expect(resumeArgv(command, "s-1", "steer")).toBeUndefined()
     expect(codexOverrideAt(["exec", "--skip-git-repo-check", "-m", "m1", "resume", "s-1", "p"])).toEqual([0, 1, 5])
+  })
+
+  test("a resumable worker is held for idle_after_s when detached or --durable, none in the foreground; --idle wins", () => {
+    expect([spawnIdle({}, true, 600), spawnIdle({}, false, 600), spawnIdle({ durable: true }, false, 90)]).toEqual([600, 0, 90])
+    expect([spawnIdle({ idle: "30m" }, true, 600), spawnIdle({ idle: "0" }, true, 600), spawnIdle({ idle: "5" }, false, 600)]).toEqual([1800, 0, 5])
   })
 
   test("the child environment drops the spawner's identity and never names the grant in argv", () => {
