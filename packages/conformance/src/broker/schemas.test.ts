@@ -121,9 +121,10 @@ describe("broker wire schemas", () => {
     expect(validate(result, { held: false, runner: { name: "vm", stop: "invalid" } }).length).toBeGreaterThan(0);
   });
 
-  test("limits require exactly the Appendix D broker defaults and allow extensions", () => {
+  test("limits require Appendix D safety guards, allow optional rates and extensions", () => {
     const table = spec.slice(spec.indexOf("**Broker (`LIMITS`).**"), spec.indexOf("**Other local values.**"));
     const limits = Object.fromEntries([...table.matchAll(/`(\w+)` \| (\d+)/g)].map((match) => [match[1]!, Number(match[2])]));
+    const rates = [...table.matchAll(/`(\w+)` \| null/g)].map((match) => match[1]!);
     const configurable = [...table.slice(0, table.indexOf("| Name |")).matchAll(/`(\w+)`/g)].map((match) => match[1]!).filter((key) => key in limits);
     expect(configurable.sort()).toEqual(["endpointRetireMax", "endpointRetireS", "historicAfterS"]);
     const schema = JSON.parse(readFileSync(join(schemaDir, "types.schema.json"), "utf8")).$defs.Limits;
@@ -134,11 +135,19 @@ describe("broker wire schemas", () => {
       delete missing[key];
       expect(validate("types.schema.json#/$defs/Limits", missing).length, key).toBeGreaterThan(0);
       const changed = validate("types.schema.json#/$defs/Limits", { ...limits, [key]: limits[key]! + 1 });
-      if (configurable.includes(key)) {
+      if (configurable.includes(key) || key === "treePauseS") {
         expect(changed, key).toEqual([]);
-        expect(validate("types.schema.json#/$defs/Limits", { ...limits, [key]: null }), key).toEqual([]);
+        const nullable = validate("types.schema.json#/$defs/Limits", { ...limits, [key]: null });
+        if (key === "treePauseS") expect(nullable.length, key).toBeGreaterThan(0);
+        else expect(nullable, key).toEqual([]);
         expect(validate("types.schema.json#/$defs/Limits", { ...limits, [key]: 0 }).length, key).toBeGreaterThan(0);
       } else expect(changed.length, key).toBeGreaterThan(0);
+    }
+    expect(rates.length).toBe(9);
+    for (const key of rates) {
+      expect(schema.required).not.toContain(key);
+      for (const value of [null, 1, 42]) expect(validate("types.schema.json#/$defs/Limits", { ...limits, [key]: value }), key).toEqual([]);
+      for (const value of [0, -1, 1.5, "1"]) expect(validate("types.schema.json#/$defs/Limits", { ...limits, [key]: value }).length, key).toBeGreaterThan(0);
     }
   });
 

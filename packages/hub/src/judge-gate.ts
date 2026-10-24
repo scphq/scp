@@ -62,10 +62,10 @@ export interface JudgeLimits {
 
 /** held sends never reach the send's rate limits, so they are capped here */
 export const JUDGE_LIMITS: Readonly<JudgeLimits> = {
-  endpointPerMinute: LIMITS.pairPerMinute,
-  endpointPerHour: LIMITS.pairPerHour,
-  treePerMinute: LIMITS.pairPerMinute * 2,
-  treePerHour: LIMITS.pairPerHour * 2,
+  endpointPerMinute: Infinity,
+  endpointPerHour: Infinity,
+  treePerMinute: Infinity,
+  treePerHour: Infinity,
   heldPerSender: 100,
 }
 

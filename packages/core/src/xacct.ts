@@ -155,10 +155,10 @@ export const XLIMITS: Readonly<XLimitConfig> = {
   bodyBytes: 16 * 1024,
   hopMax: 8,
   threadMax: 50,
-  pairPerMinute: 10,
-  pairPerHour: 100,
-  accountPerDay: 200,
-  accountPerDayMax: 2000,
+  pairPerMinute: Infinity,
+  pairPerHour: Infinity,
+  accountPerDay: Infinity,
+  accountPerDayMax: Infinity,
   reserveMax: 20,
   trueUpMs: 5 * 60_000,
 }
@@ -235,7 +235,12 @@ export function xlimits(
   return {
     perMinute: lower(Math.min(caps.pairPerMinute, positive(limits.per_minute) ?? caps.pairPerMinute), declared?.per_minute),
     perHour: lower(Math.min(caps.pairPerHour, positive(limits.per_hour) ?? caps.pairPerHour), declared?.per_hour),
-    perDay: lower(Math.max(caps.accountPerDay, Math.min(positive(limits.per_day) ?? 0, caps.accountPerDayMax)), declared?.per_day),
+    perDay: lower(
+      Number.isFinite(caps.accountPerDay)
+        ? Math.max(caps.accountPerDay, Math.min(positive(limits.per_day) ?? 0, caps.accountPerDayMax))
+        : (positive(limits.per_day) ?? Infinity),
+      declared?.per_day,
+    ),
   }
 }
 
@@ -368,7 +373,8 @@ export class XCounters {
       throw new RelayError("rate_limited", `${perMinute} messages to ${target} a minute`, Math.max(1, Math.ceil((pair.minute.at + 60_000 - now) / 1000)))
     if (pair.hour.n >= perHour)
       throw new RelayError("rate_limited", `${perHour} messages to ${target} an hour`, Math.max(1, Math.ceil((pair.hour.at + 3_600_000 - now) / 1000)))
-    if (this.today(contact.peerId, now) >= perDay) throw new RelayError("rate_limited", `${perDay} messages to ${contact.peerHandle} today`, untilTomorrow(now))
+    if (Number.isFinite(perDay) && this.today(contact.peerId, now) >= perDay)
+      throw new RelayError("rate_limited", `${perDay} messages to ${contact.peerHandle} today`, untilTomorrow(now))
     const inThread = this.window(this.threads, thread, now, 86_400_000)
     if (inThread.n >= this.caps.threadMax) throw new RelayError("loop_guard", `thread ${thread} reached ${this.caps.threadMax} messages across accounts`)
   }

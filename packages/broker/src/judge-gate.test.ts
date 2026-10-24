@@ -311,9 +311,11 @@ describe("judge gate", () => {
   })
 
   test("judged sends are rate limited per sender before the model is asked", async () => {
-    const { broker, fake } = await setup({ mode: "enforce", model: MODEL, boundaries: [{}] }, [
-      answer({ verdict: "refuse", categories: ["spam"], reason: "spam" }),
-    ])
+    const { broker, fake } = await setup(
+      { mode: "enforce", model: MODEL, boundaries: [{}] },
+      [answer({ verdict: "refuse", categories: ["spam"], reason: "spam" })],
+      { judgeLimits: { endpointPerMinute: 30 } },
+    )
     const a = await agent(broker, "a")
     await agent(broker, "b")
     for (let i = 0; i < 30; i++) expect((await failure(a.client.request("send", { to: "b", body: `offer ${i}` }))).code).toBe("judge_refused")

@@ -41,13 +41,17 @@ impl AccountHub {
         if history.len() >= 200 {
             return Err(Error::new("loop_guard", "thread reached 200 messages"));
         }
-        if self
-            .store
-            .sent_count(&self.account_id, now - 86400000)
-            .await?
-            >= 2000
+        if let Some(limit) = self.limits.cap("userPerDay")
+            && self
+                .store
+                .sent_count(&self.account_id, now - 86400000)
+                .await?
+                >= i64::try_from(limit).unwrap_or(i64::MAX)
         {
-            return Err(Error::rate("2000 messages in the last day", 3600));
+            return Err(Error::rate(
+                &format!("{limit} messages in the last day"),
+                3600,
+            ));
         }
         let received_parent = if let Some(parent) = parent {
             self.store
@@ -58,10 +62,20 @@ impl AccountHub {
         } else {
             false
         };
-        let all = self
-            .store
-            .pairs(&self.account_id, None, None, now - 3600000, false)
-            .await?;
+        let rate_keys = [
+            "pairBurst",
+            "pairPerMinute",
+            "pairPerHour",
+            "treePerMinute",
+            "treePerHour",
+        ];
+        let all = if rate_keys.iter().any(|key| self.limits.cap(key).is_some()) {
+            self.store
+                .pairs(&self.account_id, None, None, now - 3600000, false)
+                .await?
+        } else {
+            Vec::new()
+        };
         for e in recipients {
             if let Some(retry) = self.paused(&pair_key(&sender.id, &e.id), now).await? {
                 return Err(Error {
@@ -71,7 +85,14 @@ impl AccountHub {
                     retry: Some(retry),
                 });
             }
-            for (limit, seconds, both) in [(20, 10, true), (30, 60, false), (300, 3600, false)] {
+            for (key, seconds, both) in [
+                ("pairBurst", 10, true),
+                ("pairPerMinute", 60, false),
+                ("pairPerHour", 3600, false),
+            ] {
+                let Some(limit) = self.limits.cap(key) else {
+                    continue;
+                };
                 let events: Vec<_> = all
                     .iter()
                     .filter(|p| {
@@ -80,7 +101,7 @@ impl AccountHub {
                                 || (both && p.from_ep == e.id && p.to_ep == sender.id))
                     })
                     .collect();
-                if events.len() >= limit {
+                if events.len() as u64 >= limit {
                     return Err(Error::rate(
                         "pair rate limit",
                         events
@@ -121,6 +142,11 @@ impl AccountHub {
                     retry: Some(retry),
                 });
             }
+            if self.limits.cap("treePerMinute").is_none()
+                && self.limits.cap("treePerHour").is_none()
+            {
+                return Ok(());
+            }
             let rows = self.endpoints().await?;
             let root = fields(sender)["tree"]
                 .as_str()
@@ -134,7 +160,10 @@ impl AccountHub {
                 })
                 .map(|e| e.id.as_str())
                 .collect();
-            for (limit, seconds) in [(120, 60), (1200, 3600)] {
+            for (rate_key, seconds) in [("treePerMinute", 60), ("treePerHour", 3600)] {
+                let Some(limit) = self.limits.cap(rate_key) else {
+                    continue;
+                };
                 let count = all
                     .iter()
                     .filter(|p| {
@@ -143,21 +172,30 @@ impl AccountHub {
                             && rows.iter().any(|e| e.id == p.to_ep && e.kind != "human")
                     })
                     .count();
-                if count + sends > limit {
+                if (count + sends) as u64 > limit {
+                    let pause = self.limits.duration("treePauseS", 600);
                     let change = HubWrite {
-                        states: vec![(key, Some(json!(now + 600000).to_string()))],
+                        states: vec![(
+                            key,
+                            Some(
+                                json!(now.saturating_add(
+                                    i64::try_from(pause.saturating_mul(1000)).unwrap_or(i64::MAX)
+                                ))
+                                .to_string(),
+                            ),
+                        )],
                         ..HubWrite::default()
                     };
                     let root = rows
                         .iter()
                         .find(|e| e.machine == sender.machine && e.handle == root)
                         .cloned();
-                    self.post_notice(root.as_ref(),true,"relay paused this tree for 10 minutes because it sent too many messages. Messages to the human still pass.",change).await?;
+                    self.post_notice(root.as_ref(), true, &format!("relay paused this tree for {} minutes because it sent too many messages. Messages to the human still pass.", pause as f64 / 60.0), change).await?;
                     return Err(Error {
                         details: None,
                         code: "loop_guard".into(),
                         message: "tree rate limit".into(),
-                        retry: Some(600),
+                        retry: Some(i64::try_from(pause).unwrap_or(i64::MAX)),
                     });
                 }
             }

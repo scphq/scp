@@ -463,6 +463,7 @@ impl AccountHub {
         }
         self.xcounters
             .check(
+                &self.limits,
                 self.store.as_ref(),
                 &self.account_id,
                 &contact,
@@ -595,6 +596,7 @@ impl AccountHub {
         let now = crate::now_ms();
         self.xcounters
             .check(
+                &self.limits,
                 self.store.as_ref(),
                 &self.account_id,
                 &contact,
@@ -827,9 +829,13 @@ impl AccountHub {
     ) -> Result<()> {
         let now = crate::now_ms();
         let inbox = self.store.xinbox(&self.account_id).await?;
-        let (minute, hour, day) = xcounters::caps(c.config.limits.as_ref(), msg.limits.as_ref());
+        let (minute, hour, day) =
+            xcounters::caps(&self.limits, c.config.limits.as_ref(), msg.limits.as_ref());
         let to = remote(target);
         for (cap, ms, unit) in [(minute, 60_000, "minute"), (hour, 3_600_000, "hour")] {
+            if cap == i64::MAX {
+                continue;
+            }
             let times: Vec<_> = inbox
                 .iter()
                 .filter(|x| {
@@ -850,11 +856,12 @@ impl AccountHub {
                 ));
             }
         }
-        if inbox
-            .iter()
-            .filter(|x| x.from_account == peer && x.at >= xcounters::day_start(now))
-            .count() as i64
-            >= day
+        if day != i64::MAX
+            && inbox
+                .iter()
+                .filter(|x| x.from_account == peer && x.at >= xcounters::day_start(now))
+                .count() as i64
+                >= day
         {
             return Err(Error::rate(
                 &format!("{day} messages from {} today", c.peer_handle),

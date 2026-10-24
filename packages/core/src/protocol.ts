@@ -20,11 +20,7 @@ export const LIMITS = {
   hopMax: 64,
   threadMax: 200,
   causalWindowS: 120,
-  pairBurst: 20,
   pairBurstWindowS: 10,
-  pairPerMinute: 30,
-  pairPerHour: 300,
-  userPerDay: 2000,
   pingPongAlternations: 100,
   pingPongWindowS: 600,
   pingPongBlockS: 600,
@@ -72,10 +68,6 @@ export const LIMITS = {
   depthMax: 32,
   fanOutMax: 32,
   fanOutTotal: 64,
-  treePerMinute: 120,
-  treePerHour: 1200,
-  treePauseS: 600,
-  groupPerMinute: 60,
   grantTtlS: 7 * 86_400,
   groupIdleS: 86_400,
   policyLoadsKept: 8,
@@ -90,6 +82,39 @@ export const LIMITS = {
   /** the longest wake time a provider may announce with a hibernation */
   wakeEtaMaxS: 3600,
 } as const
+
+export const RATE_LIMITS = {
+  userPerDay: Infinity,
+  pairBurst: Infinity,
+  pairPerMinute: Infinity,
+  pairPerHour: Infinity,
+  treePerMinute: Infinity,
+  treePerHour: Infinity,
+  treePauseS: 600,
+  groupPerMinute: Infinity,
+  peekPairPerMinute: Infinity,
+  peekTargetPerHour: Infinity,
+} as const
+
+export type RateLimits = { [K in keyof typeof RATE_LIMITS]: number }
+
+export function parseLimits(raw: unknown, keys: readonly string[], source: string, durations: readonly string[] = ["treePauseS"]): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${source}: limits must be a JSON object`)
+  const parsed: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (!keys.includes(key)) throw new Error(`${source}: unknown limit ${key}`)
+    if (value === null || value === 0) {
+      if (!durations.includes(key)) parsed[key] = Infinity
+    } else if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+      parsed[key] = value
+    } else throw new Error(`${source}: ${key} must be a positive integer, null or 0`)
+  }
+  return parsed
+}
+
+export function wireLimits(limits: Readonly<Record<string, number>>): Record<string, number | null> {
+  return Object.fromEntries(Object.entries(limits).map(([key, value]) => [key, Number.isFinite(value) ? value : null]))
+}
 
 export type ErrorCode =
   | "not_found"

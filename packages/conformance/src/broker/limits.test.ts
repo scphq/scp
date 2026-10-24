@@ -55,7 +55,20 @@ brokerSuite("broker limits and hardening", (start) => {
   });
 
   test("pair burst counts both directions, returns a retry hint and is explained by why and log", async () => {
-    const broker = await start();
+    const broker = await start({
+      limits: {
+        pairBurst: 20,
+        pairPerMinute: 30,
+        pairPerHour: 300,
+        userPerDay: 2000,
+        treePerMinute: 120,
+        treePerHour: 1200,
+        treePauseS: 600,
+        groupPerMinute: 60,
+        peekPairPerMinute: 6,
+        peekTargetPerHour: 60,
+      },
+    });
     const a = await broker.agent("a");
     const b = await broker.agent("b");
     for (let i = 0; i < 20; i++) await (i % 4 ? a : b).request("send", { to: i % 4 ? "b" : "a", body: String(i) });
@@ -72,7 +85,20 @@ brokerSuite("broker limits and hardening", (start) => {
   });
 
   test("auto-replies are stopped at the twenty-first message and retries bypass the full burst", async () => {
-    const broker = await start();
+    const broker = await start({
+      limits: {
+        pairBurst: 20,
+        pairPerMinute: 30,
+        pairPerHour: 300,
+        userPerDay: 2000,
+        treePerMinute: 120,
+        treePerHour: 1200,
+        treePauseS: 600,
+        groupPerMinute: 60,
+        peekPairPerMinute: 6,
+        peekTargetPerHour: 60,
+      },
+    });
     const a = await broker.agent("a");
     const b = await broker.agent("b");
     const first = await a.request<{ id: string }>("send", { to: "b", body: "go", client_id: "first" });

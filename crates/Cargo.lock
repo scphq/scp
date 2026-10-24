@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "rand 0.8.5",

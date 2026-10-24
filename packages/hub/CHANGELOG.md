@@ -1,5 +1,17 @@
 # @scp-dev/hub
 
+## 0.11.0
+
+### Minor Changes
+
+- 1538046: Make send, peek, request and contact rates configurable and off by default. Report disabled caps as null and accept broker configuration and SCP_LIMITS overrides.
+
+### Patch Changes
+
+- Updated dependencies [1538046]
+- Updated dependencies [b43ec2c]
+  - @scp-dev/core@0.14.0
+
 ## 0.10.3
 
 ### Patch Changes

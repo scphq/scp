@@ -1,3 +1,4 @@
+import { RATE_LIMITS, type RateLimits } from "./protocol"
 import { RUNNER_NAME, runnerReply, type ViaRecord } from "./runner"
 import { canonicalPolicy, GROUP_NAME, matches, type Policy, policyRefusal, type PolicySubject, type ScopeSubject, validSelector } from "./policy"
 import {
@@ -414,7 +415,7 @@ export interface CoreOptions {
   hash: (value: string) => string
   /** runs `fn` atomically: a local SQLite transaction, a Durable Object's transactionSync */
   transaction?: <T>(fn: () => T) => T
-  /** count every sender but the relay itself, humans included, against LIMITS.userPerDay, and trust no client's terminal claim for a hop reset (default: agents and non-terminal humans count) */
+  /** count every sender but the relay itself, humans included, against the daily cap, and trust no client's terminal claim for a hop reset (default: agents and non-terminal humans count) */
   capEverySender?: boolean
   /** whether a process is running; without it every process holding an endpoint counts as running */
   alive?: (pid: number) => boolean
@@ -424,7 +425,8 @@ export interface CoreOptions {
   machine?: string
   /** the short hostname, matched by `machine:` selectors when `machine` is not set */
   hostname?: string
-  /** overrides LIMITS.userPerDay; `Infinity` lifts the daily cap */
+  limits?: Partial<RateLimits>
+  /** @deprecated use limits.userPerDay */
   userPerDay?: number
   /** overrides LIMITS.endpointRetireS; `Infinity` keeps every endpoint row */
   endpointRetireS?: number
@@ -599,7 +601,7 @@ export class RelayCore {
   protected readonly hash: (value: string) => string
   protected readonly tx: <T>(fn: () => T) => T
   private readonly capEverySender: boolean
-  private readonly userPerDay: number
+  readonly rates: Readonly<RateLimits>
   private readonly alive: (pid: number) => boolean
   private readonly startOf: ((pid: number, expected: string) => string | undefined) | undefined
   private readonly hostMachine: string | null
@@ -643,7 +645,12 @@ export class RelayCore {
       }
     }
     this.capEverySender = options.capEverySender === true
-    this.userPerDay = options.userPerDay ?? LIMITS.userPerDay
+    const rates = { ...RATE_LIMITS, ...(options.userPerDay !== undefined ? { userPerDay: options.userPerDay } : {}), ...options.limits }
+    for (const key of Object.keys(RATE_LIMITS) as (keyof RateLimits)[]) {
+      if (rates[key] == null || rates[key] === 0) rates[key] = RATE_LIMITS[key]
+    }
+    if (!Number.isFinite(rates.treePauseS) || rates.treePauseS <= 0) throw new RangeError("treePauseS must be a positive duration")
+    this.rates = rates
     this.alive = options.alive ?? (() => true)
     this.startOf = options.startOf
     this.hostMachine = options.machine ?? options.hostname ?? null
@@ -2836,7 +2843,7 @@ export class RelayCore {
         limit: LIMITS.threadMax,
         thread,
       })
-    const today = !Number.isFinite(this.userPerDay)
+    const today = !Number.isFinite(this.rates.userPerDay)
       ? 0
       : this.capEverySender
         ? sender.kind === "system"
@@ -2853,10 +2860,10 @@ export class RelayCore {
               `SELECT COUNT(*) AS n FROM messages WHERE created_at >= ? AND (from_ep IN (SELECT id FROM endpoints WHERE kind = 'agent') OR sender_tty = 0)`,
               now - 86_400_000,
             )!.n
-    if (today >= this.userPerDay)
-      throw this.refuse(from, "rate_limited", `${this.userPerDay} messages in the last day`, 3600, {
+    if (today >= this.rates.userPerDay)
+      throw this.refuse(from, "rate_limited", `${this.rates.userPerDay} messages in the last day`, 3600, {
         to: addressed,
-        limit: this.userPerDay,
+        limit: this.rates.userPerDay,
         window_s: 86_400,
       })
 
@@ -2876,21 +2883,22 @@ export class RelayCore {
         )
       }
       const retry = (first: number | null, windowS: number) => Math.max(1, Math.ceil(((first ?? now) + windowS * 1000 - now) / 1000))
-      const burst = this.pairBurst(from, recipient.id, now)
-      if (burst.n >= LIMITS.pairBurst) {
+      const burst = Number.isFinite(this.rates.pairBurst) ? this.pairBurst(from, recipient.id, now) : { n: 0, first: null }
+      if (burst.n >= this.rates.pairBurst) {
         const after = retry(burst.first, LIMITS.pairBurstWindowS)
         throw this.refuse(
           from,
           "rate_limited",
-          `${burst.n + 1} messages between ${pair[0]} and ${pair[1]} in ${LIMITS.pairBurstWindowS} s (limit ${LIMITS.pairBurst}): pausing this pair; retry after ${after} s`,
+          `${burst.n + 1} messages between ${pair[0]} and ${pair[1]} in ${LIMITS.pairBurstWindowS} s (limit ${this.rates.pairBurst}): pausing this pair; retry after ${after} s`,
           after,
-          { to: [pair[1]], limit: LIMITS.pairBurst, window_s: LIMITS.pairBurstWindowS },
+          { to: [pair[1]], limit: this.rates.pairBurst, window_s: LIMITS.pairBurstWindowS },
         )
       }
       for (const [limit, windowS] of [
-        [LIMITS.pairPerMinute, 60],
-        [LIMITS.pairPerHour, 3600],
+        [this.rates.pairPerMinute, 60],
+        [this.rates.pairPerHour, 3600],
       ] as const) {
+        if (!Number.isFinite(limit)) continue
         const recent = one<{ n: number; first: number | null }>(
           this.sql,
           `SELECT COUNT(*) AS n, MIN(at) AS first FROM pair_events WHERE from_ep = ? AND to_ep = ? AND at > ?`,
@@ -2940,21 +2948,22 @@ export class RelayCore {
     const tree = sender.tree ?? sender.id
     if (treeSends) this.treeGuard(sender, tree, treeSends, now, addressed)
     for (const name of fanOut) {
+      if (!Number.isFinite(this.rates.groupPerMinute)) continue
       const recent = one<{ n: number; first: number | null }>(
         this.sql,
         `SELECT COUNT(*) AS n, MIN(at) AS first FROM tree_events WHERE tree = ? AND at > ?`,
         `group:${name}`,
         now - 60_000,
       )!
-      if (recent.n >= LIMITS.groupPerMinute) {
+      if (recent.n >= this.rates.groupPerMinute) {
         throw this.refuse(
           from,
           "rate_limited",
-          `${LIMITS.groupPerMinute} messages to group:${name} in 60 s`,
+          `${this.rates.groupPerMinute} messages to group:${name} in 60 s`,
           Math.max(1, Math.ceil(((recent.first ?? now) + 60_000 - now) / 1000)),
           {
             to: [`group:${name}`],
-            limit: LIMITS.groupPerMinute,
+            limit: this.rates.groupPerMinute,
             window_s: 60,
           },
         )
@@ -4409,9 +4418,10 @@ export class RelayCore {
     const now = this.now()
     if (!tty) {
       for (const [limit, windowS, pair] of [
-        [PEEK.pairPerMinute, 60, true],
-        [PEEK.targetPerHour, 3600, false],
+        [this.rates.peekPairPerMinute, 60, true],
+        [this.rates.peekTargetPerHour, 3600, false],
       ] as const) {
+        if (!Number.isFinite(limit)) continue
         const recent = one<{ n: number; first: number | null }>(
           this.sql,
           `SELECT COUNT(*) AS n, MIN(at) AS first FROM audit WHERE event = 'peek' AND endpoint = ? AND at > ? ${pair ? "AND ref = ?" : ""} AND json_extract(detail, '$.auth') != 'tty'`,
@@ -6333,25 +6343,25 @@ export class RelayCore {
     }
     const count = (windowS: number) =>
       one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM tree_events WHERE tree = ? AND at > ?`, tree, now - windowS * 1000)!.n
-    const minute = count(60)
-    const hour = count(3600)
-    if (minute + sends <= LIMITS.treePerMinute && hour + sends <= LIMITS.treePerHour) return
-    const until = now + LIMITS.treePauseS * 1000
+    const minute = Number.isFinite(this.rates.treePerMinute) ? count(60) : 0
+    const hour = Number.isFinite(this.rates.treePerHour) ? count(3600) : 0
+    if (minute + sends <= this.rates.treePerMinute && hour + sends <= this.rates.treePerHour) return
+    const until = now + this.rates.treePauseS * 1000
     this.sql.all(`INSERT OR REPLACE INTO blocks (pair, until) VALUES (?, ?)`, pair, until)
     this.audit("loop_guard", sender.id, null, { tree: name, minute, hour, until: iso(until) })
-    const text = `relay paused the tree of ${name} for ${LIMITS.treePauseS / 60} minutes: ${minute} messages in the last minute, ${hour} in the last hour. Messages to the human still pass.`
+    const text = `relay paused the tree of ${name} for ${this.rates.treePauseS / 60} minutes: ${minute} messages in the last minute, ${hour} in the last hour. Messages to the human still pass.`
     this.notice(text)
     if (root && root.kind === "agent" && !root.handle.startsWith(GONE_PREFIX)) this.notice(text, root)
     throw this.refuse(
       sender.id,
       "loop_guard",
-      `the tree of ${name} sent too many messages and is paused for ${LIMITS.treePauseS / 60} minutes`,
-      LIMITS.treePauseS,
+      `the tree of ${name} sent too many messages and is paused for ${this.rates.treePauseS / 60} minutes`,
+      this.rates.treePauseS,
       {
         to,
         tree: name,
-        limit: minute + sends > LIMITS.treePerMinute ? LIMITS.treePerMinute : LIMITS.treePerHour,
-        window_s: minute + sends > LIMITS.treePerMinute ? 60 : 3600,
+        limit: minute + sends > this.rates.treePerMinute ? this.rates.treePerMinute : this.rates.treePerHour,
+        window_s: minute + sends > this.rates.treePerMinute ? 60 : 3600,
       },
     )
   }
@@ -6405,10 +6415,10 @@ export class RelayCore {
       pair.paused_until = iso(blocked.until)!
       lines.push(`paused until ${pair.paused_until}: ${first} and ${second} went back and forth too often`)
     }
-    const burst = this.pairBurst(a.id, b.id, now)
-    if (burst.n >= LIMITS.pairBurst) {
-      pair.burst = { n: burst.n, limit: LIMITS.pairBurst, window_s: LIMITS.pairBurstWindowS }
-      lines.push(`burst: ${burst.n} messages between ${first} and ${second} in ${LIMITS.pairBurstWindowS} s (limit ${LIMITS.pairBurst})`)
+    const burst = Number.isFinite(this.rates.pairBurst) ? this.pairBurst(a.id, b.id, now) : { n: 0, first: null }
+    if (burst.n >= this.rates.pairBurst) {
+      pair.burst = { n: burst.n, limit: this.rates.pairBurst, window_s: LIMITS.pairBurstWindowS }
+      lines.push(`burst: ${burst.n} messages between ${first} and ${second} in ${LIMITS.pairBurstWindowS} s (limit ${this.rates.pairBurst})`)
     }
     const rows = this.sql.all<{ at: number; endpoint: string; detail: string }>(
       `SELECT at, endpoint, detail FROM audit WHERE event = 'refuse' AND endpoint IN (?, ?) ORDER BY id DESC LIMIT 500`,

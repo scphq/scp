@@ -225,7 +225,8 @@ describe("planning", () => {
     ["no SCP endpoint, so nothing could wake it", { records: new Map(), agents: [agent({ harness_session: null })] }],
     ["no endpoint", { agents: [] }],
     ["a root", { agents: [agent({ parent: null })] }],
-    ["a root", { agents: [agent({ parent: null, state: "working" })], records: new Map() }],
+    ["a root", { agents: [agent({ parent: null, state: "working" })] }],
+    ["not started by swarm claude --bg, so no wake ticket would take its endpoint back", { records: new Map() }],
     ["1 live worker", { agents: [agent({ children: 1 })] }],
     ["1 live worker", { agents: [agent({ children: 1 }), child()] }],
     ["1 live worker", { agents: [agent({ children: 1 }), child({ presence: "offline", state: "working" })] }],
@@ -271,14 +272,11 @@ describe("planning", () => {
     const historic = plan(input({ agents: [agent({ children: 2, historic: true }), ...children] }))
     expect(historic).toMatchObject([{ kind: "stop", id }])
   })
-  test("stops a session swarm did not start by its endpoint, and never removes it", () => {
+  test("never stops or removes a session swarm did not start, but clears a stale hibernation once it runs again", () => {
     const unrecorded = input({ records: new Map(), agents: [agent({ state: "working" })] })
-    const [stop] = plan(unrecorded)
-    expect(stop).toMatchObject({ kind: "stop", id })
-    expect(stop && "record" in stop).toBe(false)
-    expect(plan({ ...unrecorded, agents: [agent({ historic: true })] })[0]?.kind).toBe("stop")
-    expect(plan({ ...unrecorded, entries: [stoppedEntry()], agents: [agent({ historic: true })] })).toMatchObject([{ kind: "keep", reason: "stopped" }])
-    expect(plan({ ...unrecorded, agents: [agent({ historic: true })], olderThanS: 60 })[0]?.kind).toBe("stop")
+    for (const overrides of [{}, { agents: [agent({ historic: true })] }, { agents: [agent({ historic: true })], olderThanS: 60 }])
+      expect(plan({ ...unrecorded, ...overrides }).map((action) => action.kind)).toEqual(["keep"])
+    expect(plan({ ...unrecorded, agents: [agent({ hibernate: "claude-bg", connections: 1 })] }).map((action) => action.kind)).toEqual(["unhibernate", "keep"])
     expect(plan({ ...unrecorded, agents: [agent({ harness_session: null, handle: "w1" })] })).toMatchObject([{ kind: "keep" }])
   })
   test("ignores interactive sessions and invalid short ids", () => {
@@ -407,21 +405,13 @@ describe("background task", () => {
     expect(existsSync(f.callsFile)).toBe(false)
     expect(f.events.filter((event) => event[0] !== "agents")).toEqual([])
   })
-  test("stops an idle worker swarm did not start through its endpoint, saving state so its waker can bring it back", async () => {
+  test("never stops an idle worker swarm did not start", async () => {
     const f = fixture()
     f.facts = agent({ harness: "claude-code", state: "working" })
     await f.run()
-    const ref = reviveRef(sessionId, f.home, "lane")
-    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([["hibernate", "worker-id", "claude-bg", ref, false]])
-    expect(f.calls().map((call) => call.argv)).toEqual([
-      ["agents", "--json", "--all"],
-      ["agents", "--json", "--all"],
-      ["stop", id],
-    ])
-    expect(readState(f.env, id)).toEqual({ sessionId, cwd: f.home, name: "lane", handle: "w1", stoppedAt: now })
-    f.facts = agent({ harness: "claude-code", historic: true, hibernate: "claude-bg", connections: 0 })
-    await f.run()
-    expect(f.calls().some((call) => call.argv[0] === "rm")).toBe(false)
+    expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([])
+    expect(readState(f.env, id)).toBeUndefined()
   })
   test("lists claude once for a Claude Code root, then not again until a worker may be due", async () => {
     const f = fixture()
@@ -433,7 +423,7 @@ describe("background task", () => {
     f.facts = agent({ harness: "claude-code", harness_session: `${id}-0000-4000-8000-000000000009` })
     await task.run(f.context)
     await task.run(f.context)
-    expect(f.calls()).toHaveLength(2)
+    expect(f.calls()).toHaveLength(1)
   })
   test("aborts the stop when claude shows the session busy right before it", async () => {
     const f = fixture()
@@ -462,14 +452,6 @@ describe("background task", () => {
     await f.run()
     expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
     expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([])
-  })
-  test("creates the state directory for a session swarm did not start", async () => {
-    const f = fixture()
-    rmSync(bgDir(f.env), { recursive: true, force: true })
-    f.facts = agent({ harness: "claude-code" })
-    await f.run()
-    expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
-    expect(readState(f.env, id)).toMatchObject({ sessionId, stoppedAt: now })
   })
   test("hibernates before stopping and saves resumable state", async () => {
     const f = fixture()
