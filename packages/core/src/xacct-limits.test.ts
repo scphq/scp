@@ -14,7 +14,15 @@ function counters(limits: ConstructorParameters<typeof XCounters>[2] = {}) {
 describe("cross-account limits", () => {
   test("the defaults, lowered by a contact's own and the declared limits", () => {
     expect(xlimits(null)).toEqual({ perMinute: XLIMITS.pairPerMinute, perHour: XLIMITS.pairPerHour, perDay: XLIMITS.accountPerDay })
-    expect(xlimits({ per_minute: 3, per_day: 5000 }, { per_hour: 7 })).toEqual({ perMinute: 3, perHour: 7, perDay: XLIMITS.accountPerDayMax })
+    expect(xlimits({ per_minute: 3, per_day: 5000 }, { per_hour: 7 })).toEqual({ perMinute: 3, perHour: 7, perDay: 5000 })
+  })
+
+  test("finite daily caps retain the floor and ceiling", () => {
+    const caps = { ...XLIMITS, accountPerDay: 200, accountPerDayMax: 2000 }
+    expect(xlimits({ per_day: 1 }, undefined, caps).perDay).toBe(200)
+    expect(xlimits({ per_day: 5000 }, undefined, caps).perDay).toBe(2000)
+    expect(xlimits({ per_day: 5000 }, { per_day: 30 }, caps).perDay).toBe(30)
+    expect(xlimits(null, { per_day: 7 }).perDay).toBe(7)
   })
 
   test("a deployment's caps replace the defaults", () => {

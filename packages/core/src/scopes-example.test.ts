@@ -4,6 +4,19 @@ import { RelayCore } from "./core"
 import { LIMITS, RelayError, type ScopeActor } from "./protocol"
 import type { Sql, SqlValue } from "./sql"
 
+const TEST_RATES = {
+  pairBurst: 20,
+  pairPerMinute: 30,
+  pairPerHour: 300,
+  userPerDay: 2000,
+  treePerMinute: 120,
+  treePerHour: 1200,
+  treePauseS: 600,
+  groupPerMinute: 60,
+  peekPairPerMinute: 6,
+  peekTargetPerHour: 60,
+}
+
 function bunSql(db: Database): Sql {
   return { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
 }
@@ -12,6 +25,7 @@ function setup() {
   const clock = { now: 1_800_000_000_000 }
   const db = new Database(":memory:")
   const core = new RelayCore(bunSql(db), {
+    limits: TEST_RATES,
     now: () => clock.now,
     hash: (value) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
     transaction: (fn) => db.transaction(fn)(),
@@ -194,7 +208,7 @@ test("the widening steps apply in order, each with its audit row", () => {
   clock.now += 61 * 1000
   const pairs = ["a1", "a2", "a3", "a4"].flatMap((from) => ["a1", "a2", "a3", "a4"].filter((to) => to !== from).map((to) => [from, to] as const))
   const open = pairs.filter(([from, to]) => !(["a2", "a3"].includes(from) && ["a2", "a3"].includes(to)))
-  expect(open.length * 12).toBe(LIMITS.treePerMinute)
+  expect(open.length * 12).toBe(TEST_RATES.treePerMinute)
   for (const [k, [from, to]] of open.entries()) {
     if (k) clock.now += 6000
     for (let i = 0; i < 12; i++) expect(send(from, to)).toBeUndefined()
@@ -212,6 +226,6 @@ test("the widening steps apply in order, each with its audit row", () => {
       .filter((row) => row.event === "loop_guard")
       .map((row) => Object.keys(row.detail).includes("tree")),
   ).toEqual([false, true])
-  clock.now += LIMITS.treePauseS * 1000 + 1000
+  clock.now += TEST_RATES.treePauseS * 1000 + 1000
   expect(send("a1", "a4")).toBeUndefined()
 })

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import type { Server, ServerWebSocket } from "bun"
 import { type CrossAccountLink, PASS_GATE, sha256Hex, type Sql, type SqlValue, type XContact } from "@scp-dev/core"
-import { type DashboardEvent, type HubGrant, type HubSocket, RelayHub } from "@scp-dev/hub"
+import { type DashboardEvent, type HubGrant, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub"
 
 export interface FakeToken {
   tokenId: string
@@ -38,6 +38,7 @@ interface Account {
  */
 export function startFakeHubServer(options: {
   tokens: Record<string, FakeToken>
+  limits?: Partial<HubLimits> | undefined
   now?: (() => number) | undefined
   contacts?: [string, string][] | undefined
   /** receives every account's dashboard events */
@@ -73,6 +74,7 @@ export function startFakeHubServer(options: {
     const sockets = new Map<ServerWebSocket<Data>, HubSocket>()
     const hub = new RelayHub({
       sql,
+      ...(options.limits ? { limits: options.limits } : {}),
       hash: sha256Hex,
       transaction: (fn) => db.transaction(fn)(),
       ...(options.now ? { now: options.now } : {}),

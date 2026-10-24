@@ -20,7 +20,7 @@ User values are matched first, then email values. Unknown users reject unless `d
 
 Embedders can implement the public async `RelayAuth::authenticate(&self, &AuthRequest) -> AuthOutcome` trait, then call `AppState::with_auth(AuthChain(vec![...]))` before `http::router(state)`. `AuthRequest` includes method, path, headers, TCP peer and optional TLS client certificate DER. Serve with `into_make_service_with_connect_info::<SocketAddr>()` to supply the peer; a missing peer cannot authenticate trusted headers. TLS listeners may supply `http::TlsClientCertDer` through request extensions. Open sockets rerun the chain against their original metadata and reject changed identities. JWT/JWKS and mTLS verification are deferred; their extension requirements are sketched on the trait.
 
-Self-host defaults remove account caps and rates. Override each hub key with `--limit key=value` or comma-separated `SCP_RELAY_LIMIT` values. `Infinity` disables a cap. Operational durations must remain finite and positive. `historicAfterS` also accepts `Infinity` to disable historic filtering.
+Self-host defaults remove account caps and send, request and contact rates. Set `SCP_LIMITS` to a JSON object of hub keys, then override it with `--limit key=value` or comma-separated `SCP_RELAY_LIMIT` values. Positive integers enable caps; zero disables them. JSON also accepts `null` for off; CLI values also accept `Infinity`. Invalid configuration fails startup. JSON duration values of zero or `null` retain the configured default. Operational durations must remain finite and positive. `historicAfterS` also accepts `Infinity` to disable historic filtering.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -33,6 +33,17 @@ Self-host defaults remove account caps and rates. Override each hub key with `--
 | accountCallsPerMinute | Infinity | Calls per account |
 | acksPerMinute | Infinity | Acknowledgements per token |
 | accountAcksPerMinute | Infinity | Acknowledgements per account |
+| userPerDay | Infinity | Messages sent per account per day |
+| pairBurst | Infinity | Pair messages in 10 seconds, both directions |
+| pairPerMinute | Infinity | Messages per directed pair per minute |
+| pairPerHour | Infinity | Messages per directed pair per hour |
+| treePerMinute | Infinity | Tree messages to agents per minute |
+| treePerHour | Infinity | Tree messages to agents per hour |
+| treePauseS | 600 | Tree pause duration in seconds |
+| contactPerMinute | Infinity | Cross-account messages per directed pair per minute |
+| contactPerHour | Infinity | Cross-account messages per directed pair per hour |
+| contactPerDay | Infinity | Cross-account daily floor per contact |
+| contactPerDayMax | Infinity | Maximum contact-raised daily cap when the floor is set |
 | storedBytes | Infinity | Retained message bytes per account |
 | refusalsPerMinute | Infinity | Stored refusal events per code |
 | clientMachineIdleS | 1209600 | Idle client machine retention, 14 days |

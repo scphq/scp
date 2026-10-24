@@ -2291,24 +2291,36 @@
           "const": 120
         },
         "pairBurst": {
-          "type": "integer",
-          "const": 20
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "pairBurstWindowS": {
           "type": "integer",
           "const": 10
         },
         "pairPerMinute": {
-          "type": "integer",
-          "const": 30
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "pairPerHour": {
-          "type": "integer",
-          "const": 300
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "userPerDay": {
-          "type": "integer",
-          "const": 2000
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "pingPongAlternations": {
           "type": "integer",
@@ -2464,20 +2476,29 @@
           "const": 64
         },
         "treePerMinute": {
-          "type": "integer",
-          "const": 120
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "treePerHour": {
-          "type": "integer",
-          "const": 1200
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "treePauseS": {
           "type": "integer",
-          "const": 600
+          "minimum": 1
         },
         "groupPerMinute": {
-          "type": "integer",
-          "const": 60
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "grantTtlS": {
           "type": "integer",
@@ -2514,6 +2535,20 @@
         "wakeEtaMaxS": {
           "type": "integer",
           "const": 3600
+        },
+        "peekPairPerMinute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "peekTargetPerHour": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         }
       },
       "required": [
@@ -2529,11 +2564,7 @@
         "hopMax",
         "threadMax",
         "causalWindowS",
-        "pairBurst",
         "pairBurstWindowS",
-        "pairPerMinute",
-        "pairPerHour",
-        "userPerDay",
         "pingPongAlternations",
         "pingPongWindowS",
         "pingPongBlockS",
@@ -2571,10 +2602,7 @@
         "depthMax",
         "fanOutMax",
         "fanOutTotal",
-        "treePerMinute",
-        "treePerHour",
         "treePauseS",
-        "groupPerMinute",
         "grantTtlS",
         "groupIdleS",
         "policyLoadsKept",

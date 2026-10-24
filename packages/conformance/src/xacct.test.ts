@@ -87,29 +87,33 @@ describe.each(targetNames)("%s cross-account conformance", (name) => {
     });
   });
   test("cross-account size, data class, attachment and pair quotas have wire errors", async () => {
-    await scenario(name, async ({ target, bridge }) => {
-      const a = await bridge("a", "alpha", [view("source")]);
-      const b = await bridge("b", "beta", [view("target")]);
-      await target.contact("invite", "a", "b");
-      await target.contact("accept", "b", "a");
-      for (const [extra, code] of [
-        [{ body: "é".repeat(8193) }, "too_large"],
-        [{ attachments: [{ name: "file" }] }, "data_class_refused"],
-        [{ data_class: "private" }, "data_class_refused"],
-      ] as const) {
-        expect(
-          (await a.call("forward", { from: "source", params: { to: "b/beta/target", ...Object.assign({ body: "refuse" }, extra) } })).error?.data.code,
-        ).toBe(code);
-      }
-      expect(b.notifications("deliver")).toHaveLength(0);
-      for (let i = 0; i < 10; i++) {
-        const sent = await forward(a, "b/beta/target", { body: i === 0 ? "é".repeat(8192) : `message ${i}` });
-        await delivered(b, sent.id);
-      }
-      const eleventh = await a.call("forward", { from: "source", params: { to: "b/beta/target", body: "quota" } });
-      expect(eleventh.error?.data.code).toBe("rate_limited");
-      expect(eleventh.error?.data.retry_after).toBeGreaterThan(0);
-      expect(b.notifications("deliver")).toHaveLength(10);
-    });
+    await scenario(
+      name,
+      async ({ target, bridge }) => {
+        const a = await bridge("a", "alpha", [view("source")]);
+        const b = await bridge("b", "beta", [view("target")]);
+        await target.contact("invite", "a", "b");
+        await target.contact("accept", "b", "a");
+        for (const [extra, code] of [
+          [{ body: "é".repeat(8193) }, "too_large"],
+          [{ attachments: [{ name: "file" }] }, "data_class_refused"],
+          [{ data_class: "private" }, "data_class_refused"],
+        ] as const) {
+          expect(
+            (await a.call("forward", { from: "source", params: { to: "b/beta/target", ...Object.assign({ body: "refuse" }, extra) } })).error?.data.code,
+          ).toBe(code);
+        }
+        expect(b.notifications("deliver")).toHaveLength(0);
+        for (let i = 0; i < 10; i++) {
+          const sent = await forward(a, "b/beta/target", { body: i === 0 ? "é".repeat(8192) : `message ${i}` });
+          await delivered(b, sent.id);
+        }
+        const eleventh = await a.call("forward", { from: "source", params: { to: "b/beta/target", body: "quota" } });
+        expect(eleventh.error?.data.code).toBe("rate_limited");
+        expect(eleventh.error?.data.retry_after).toBeGreaterThan(0);
+        expect(b.notifications("deliver")).toHaveLength(10);
+      },
+      { contactPerMinute: 10 },
+    );
   });
 });

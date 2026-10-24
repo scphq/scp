@@ -22,6 +22,7 @@ export const brokerTargetNames = ["ts", "ts-node", "rust"].filter((name) => !sel
 export const brokerTargetEnabled = (name: string) => (name === "ts" ? true : name === "ts-node" ? !!brokerNode : !!brokerBinary);
 
 export type BrokerFiles = {
+  limits?: Record<string, number | null>;
   /** written to the policy path the broker is started with */
   policy?: unknown;
   /** written relative to the isolated home */
@@ -56,6 +57,7 @@ export class BrokerTarget {
       CLAUDE_CONFIG_DIR: join(this.home, "claude"),
       GEMINI_CLI_HOME: this.home,
     });
+    if (files.limits !== undefined) this.env.SCP_LIMITS = JSON.stringify(files.limits);
     if (files.policy !== undefined) this.write(this.policyPath, typeof files.policy === "string" ? files.policy : JSON.stringify(files.policy));
     for (const [path, text] of Object.entries(files.files ?? {})) this.write(join(this.home, path), text);
   }

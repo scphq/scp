@@ -34,6 +34,17 @@ impl Default for Limits {
                 ("accountCallsPerMinute", None),
                 ("acksPerMinute", None),
                 ("accountAcksPerMinute", None),
+                ("userPerDay", None),
+                ("pairBurst", None),
+                ("pairPerMinute", None),
+                ("pairPerHour", None),
+                ("treePerMinute", None),
+                ("treePerHour", None),
+                ("contactPerMinute", None),
+                ("contactPerHour", None),
+                ("contactPerDay", None),
+                ("contactPerDayMax", None),
+                ("treePauseS", Some(600)),
                 ("storedBytes", None),
                 ("refusalsPerMinute", None),
                 ("clientMachineIdleS", Some(14 * 86400)),
@@ -51,13 +62,29 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    /// Apply key=value or key=Infinity, rejecting unknown keys and infinite operational durations.
+    /// Apply key=value; zero or Infinity disables caps. Durations must be positive.
     pub fn apply(&mut self, raw: &str) -> std::result::Result<(), String> {
         let (key, value) = raw.split_once('=').ok_or("limit must be key=value")?;
         if !self.0.contains_key(key) {
             return Err(format!("unknown limit: {key}"));
         }
-        let duration = matches!(
+        let duration = Self::is_duration(key);
+        let parsed = if value == "Infinity" && !duration {
+            None
+        } else {
+            let n = value
+                .parse::<u64>()
+                .map_err(|_| "limit must be a nonnegative integer, or Infinity for caps")?;
+            if duration && n == 0 {
+                return Err("duration must be positive".into());
+            }
+            (n > 0).then_some(n)
+        };
+        self.0.insert(key.into(), parsed);
+        Ok(())
+    }
+    fn is_duration(key: &str) -> bool {
+        matches!(
             key,
             "clientMachineIdleS"
                 | "idlePurgeS"
@@ -65,20 +92,33 @@ impl Limits {
                 | "mcpWaitS"
                 | "revalidateMs"
                 | "deniedS"
-        );
-        let parsed = if value == "Infinity" && !duration {
-            None
-        } else {
-            Some(
-                value
-                    .parse::<u64>()
-                    .map_err(|_| "limit must be a nonnegative integer, or Infinity for caps")?,
-            )
-        };
-        if duration && parsed == Some(0) {
-            return Err("duration must be positive".into());
+                | "treePauseS"
+        )
+    }
+    /// Apply an SCP_LIMITS JSON object, rejecting unknown keys and invalid values.
+    pub fn apply_json(&mut self, raw: &str) -> std::result::Result<(), String> {
+        let value: Value = serde_json::from_str(raw).map_err(|e| format!("SCP_LIMITS: {e}"))?;
+        let object = value
+            .as_object()
+            .ok_or("SCP_LIMITS must be a JSON object")?;
+        let mut configured = self.clone();
+        for (key, value) in object {
+            if !configured.0.contains_key(key) {
+                return Err(format!("SCP_LIMITS: unknown limit: {key}"));
+            }
+            let cap = if value.is_null() {
+                None
+            } else {
+                let n = value.as_u64().ok_or_else(|| {
+                    format!("SCP_LIMITS: {key} must be a nonnegative integer or null")
+                })?;
+                (n > 0).then_some(n)
+            };
+            if !Self::is_duration(key) || cap.is_some() {
+                configured.0.insert(key.clone(), cap);
+            }
         }
-        self.0.insert(key.into(), parsed);
+        *self = configured;
         Ok(())
     }
     /// Read a finite configured duration in seconds or milliseconds.
@@ -568,10 +608,62 @@ mod default_tests {
         ] {
             assert_eq!(limits.cap(key), None, "{key}");
         }
+        for key in [
+            "userPerDay",
+            "pairBurst",
+            "pairPerMinute",
+            "pairPerHour",
+            "treePerMinute",
+            "treePerHour",
+            "contactPerMinute",
+            "contactPerHour",
+            "contactPerDay",
+            "contactPerDayMax",
+        ] {
+            assert_eq!(limits.cap(key), None, "{key}");
+        }
+        assert_eq!(limits.duration("treePauseS", 0), 600);
         assert_eq!(limits.frame_bytes(), 16777216);
         limits.apply("frameBytes=Infinity").unwrap();
         assert_eq!(limits.frame_bytes(), 16777216);
         limits.apply("machines=4").unwrap();
         assert_eq!(limits.cap("machines"), Some(4));
+    }
+    #[test]
+    fn json_limits_validate_and_merge_atomically() {
+        let mut limits = Limits::default();
+        limits
+            .apply_json(r#"{"pairBurst":7,"userPerDay":9,"treePauseS":90}"#)
+            .unwrap();
+        assert_eq!(limits.cap("pairBurst"), Some(7));
+        limits
+            .apply_json(r#"{"pairBurst":null,"userPerDay":0,"treePauseS":null,"httpWaitS":0}"#)
+            .unwrap();
+        assert_eq!(limits.cap("pairBurst"), None);
+        assert_eq!(limits.cap("userPerDay"), None);
+        assert_eq!(limits.duration("treePauseS", 0), 90);
+        assert_eq!(limits.duration("httpWaitS", 0), 25);
+        for raw in [
+            "[]",
+            "null",
+            "1",
+            "bad",
+            r#"{"unknown":1}"#,
+            r#"{"pairBurst":-1}"#,
+            r#"{"pairBurst":1.5}"#,
+            r#"{"pairBurst":true}"#,
+            r#"{"pairBurst":"Infinity"}"#,
+            r#"{"pairBurst":18446744073709551616}"#,
+            r#"{"treePauseS":false}"#,
+        ] {
+            assert!(limits.apply_json(raw).is_err(), "{raw}");
+        }
+        assert!(limits.apply_json(r#"{"pairBurst":3,"unknown":1}"#).is_err());
+        assert_eq!(limits.cap("pairBurst"), None);
+        limits.apply("userPerDay=3").unwrap();
+        limits.apply("userPerDay=0").unwrap();
+        assert_eq!(limits.cap("userPerDay"), None);
+        assert!(limits.apply("treePauseS=0").is_err());
+        assert!(limits.apply("treePauseS=Infinity").is_err());
     }
 }

@@ -6,7 +6,7 @@ import {
   type DashboardEvent,
   GRAPH_MINUTES,
   GRAPH_MINUTES_MAX,
-  HUB_LIMITS,
+  HUB_LIMITS as DEFAULT_HUB_LIMITS,
   type HubConn,
   type HubGrant,
   type HubLimits,
@@ -14,6 +14,28 @@ import {
   RelayHub,
   type HubSocket,
 } from "./hub"
+
+const TEST_RATES = {
+  pairBurst: 20,
+  pairPerMinute: 30,
+  pairPerHour: 300,
+  userPerDay: 2000,
+  treePerMinute: 120,
+  treePerHour: 1200,
+  treePauseS: 600,
+  groupPerMinute: 60,
+  peekPairPerMinute: 6,
+  peekTargetPerHour: 60,
+}
+const HUB_LIMITS = {
+  ...DEFAULT_HUB_LIMITS,
+  callsPerMinute: 120,
+  bridgeCallsPerMinute: 600,
+  accountCallsPerMinute: 1200,
+  acksPerMinute: 1200,
+  accountAcksPerMinute: 4800,
+  ...TEST_RATES,
+}
 
 const START = 1_800_000_000_000
 
@@ -75,7 +97,7 @@ function setup(
     sockets: () => [...live],
     save: () => {},
     log: (event, fields) => logs.push({ event, fields }),
-    ...(options.limits ? { limits: options.limits } : {}),
+    limits: { ...HUB_LIMITS, ...options.limits },
     ...(options.dashboard ? { dashboard: options.dashboard } : {}),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.machineWake ? { machineWake: options.machineWake } : {}),
@@ -626,7 +648,7 @@ describe("auth and lifecycle", () => {
     for (let i = 0; i <= HUB_LIMITS.endpoints; i++) await ok(connect(), "hello", { protocol: PROTOCOL, machine: "ci", claim: { handle: `w${i}` } })
     const busy = connect("tok_busy")
     await ok(busy, "hello", { protocol: PROTOCOL, machine: "desk", human: true, tty: true })
-    for (let i = 0; i <= HUB_LIMITS.callsPerMinute; i++) await ok(busy, "whoami")
+    for (let i = 0; i <= 120; i++) await ok(busy, "whoami")
     expect(() => setup({ limits: { revalidateMs: Infinity } })).toThrow(RangeError)
   })
 
@@ -976,9 +998,9 @@ describe("quotas", () => {
     const insert = db.prepare(
       `INSERT INTO messages (id, thread, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at) VALUES (?, 't', 'message', ?, 'x', 'x', 'text/plain', 'public', '[]', 0, ?, ?)`,
     )
-    for (let i = 0; i < LIMITS.userPerDay; i++) insert.run(`msg_seed${String(i).padStart(8, "0")}`, me, START, START + 86_400_000)
+    for (let i = 0; i < TEST_RATES.userPerDay; i++) insert.run(`msg_seed${String(i).padStart(8, "0")}`, me, START, START + 86_400_000)
     const refused = await rpc(human, "send", { to: "laptop/impl", body: "one more" })
-    expect([refused.error?.data?.code, refused.error?.message]).toEqual(["rate_limited", `${LIMITS.userPerDay} messages in the last day`])
+    expect([refused.error?.data?.code, refused.error?.message]).toEqual(["rate_limited", `${TEST_RATES.userPerDay} messages in the last day`])
   })
 
   test("a human's terminal claim resets no hop on the hub", async () => {

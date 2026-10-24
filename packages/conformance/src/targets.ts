@@ -74,8 +74,12 @@ export class ProcessTarget implements Target {
     if (name === "docker") this.docker = new DockerTarget();
   }
   async start(limits: Record<string, number> = {}, wake: Partial<HubWakeOptions> = {}, extraServeArgs: string[] = []) {
-    const rustLimits = { ...HUB_LIMITS, ...limits };
-    const rustWake = { senderAccountPerHour: 6, targetPerHour: 12, ...wake };
+    const rustLimits = Object.fromEntries(
+      Object.entries({ ...HUB_LIMITS, ...limits }).filter(
+        ([key, value]) => (Number.isFinite(value) || key in limits) && !["groupPerMinute", "peekPairPerMinute", "peekTargetPerHour"].includes(key),
+      ),
+    );
+    const rustWake = Object.fromEntries(Object.entries(wake).filter(([, value]) => typeof value !== "number" || Number.isFinite(value)));
     if (this.docker) {
       const result = await this.docker.start(rustLimits, rustWake, extraServeArgs);
       this.url = result.url;
@@ -103,7 +107,8 @@ export class ProcessTarget implements Target {
         : [resolve(relayBinary!), "serve", "--listen", listen, "--store", this.store];
     args.push(...this.extraServeArgs);
     for (const [key, value] of Object.entries(this.limits)) args.push("--limit", `${key}=${value}`);
-    for (const [key, value] of Object.entries(this.wake)) args.push("--wake", `${key}=${value}`);
+    for (const [key, value] of Object.entries(this.wake).filter(([, value]) => typeof value !== "number" || Number.isFinite(value)))
+      args.push("--wake", `${key}=${value}`);
     const child = Bun.spawn(args, { env: { ...process.env, SCP_CONFORMANCE_ADMIN: this.secret }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     this.child = child;
     let listening = "";

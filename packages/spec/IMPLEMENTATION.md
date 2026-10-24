@@ -248,8 +248,8 @@ Before delivering to a hibernated local agent the broker runs its provider's wak
   | Option | Default | Meaning |
   | --- | --- | --- |
   | `crossAccount` | `false` | a message from another account's contact calls the waker too |
-  | `senderAccountPerHour` | `6` | calls messages from one other account may cause, an hour |
-  | `targetPerHour` | `12` | calls messages from other accounts may cause for one endpoint, an hour |
+  | `senderAccountPerHour` | `Infinity` | calls messages from one other account may cause, an hour |
+  | `targetPerHour` | `Infinity` | calls messages from other accounts may cause for one endpoint, an hour |
   | `debounceS` | `60` | the least time between two calls for one machine |
   | `backoffMaxS` | `900` | the longest backoff after failed calls |
   | `wakingTimeoutS` | `debounceS` | how long a row shows `waking` after an accepted call before it falls back to hibernated |
@@ -281,7 +281,7 @@ A runner starts a spawn on another machine of the same account (`swarm spawn --v
 - A spawn holds a resumable worker for 1800 s without a message when detached or `--durable`, and not at all in the foreground unless `--idle` is given (`SPAWN_IDLE_S`). The built-in spawn waker times out after 60 s and its runner tries to take the endpoint back for 10 s.
 - The push wait defaults to 600 s (0 to 3600).
 - The broker stops a finished Claude Code background worker after 600 s without work (`Infinity` never) and removes it once historic, both overridable ("Claude Code background sessions").
-- The hosted relay removes every cap, count, rate and size limit here (durations keep their defaults) and the judge's budgets and hold cap; its only throttle is Turnstile on the sign-in form that emails a code.
+- Send, peek, request, contact and hub wake rates default to off. The hosted relay additionally lifts its configured capacity caps. `SCP_LIMITS` supplies a JSON object of overrides; positive integers enable caps, null or zero disables them. Durations keep their defaults. The broker merges the config file limits, a positive `SCP_DAILY_CAP`, then `SCP_LIMITS`. Invalid limits fail startup. Hello and status report disabled caps as null.
 
 ## CLI verbs
 

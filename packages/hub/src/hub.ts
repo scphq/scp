@@ -1,3 +1,4 @@
+import { RATE_LIMITS, wireLimits } from "@scp-dev/core"
 import { MCP_PROTOCOLS, REMOTE_TOOLS, type ToolResult, ToolInputError, str as mcpString, text as mcpText, validHandle } from "@scp-dev/core"
 import { remoteTool, type McpCall } from "./mcp-tools"
 import {
@@ -247,8 +248,8 @@ export interface HubWakeOptions {
 
 export const HUB_WAKE: HubWakeOptions = {
   crossAccount: false,
-  senderAccountPerHour: 6,
-  targetPerHour: 12,
+  senderAccountPerHour: Infinity,
+  targetPerHour: Infinity,
   debounceS: LIMITS.wakeDebounceS,
   backoffMaxS: LIMITS.wakeBackoffMaxS,
   wakingTimeoutS: LIMITS.wakeDebounceS,
@@ -269,15 +270,20 @@ export interface HubJudgeOptions {
 }
 
 export const HUB_LIMITS = {
+  ...RATE_LIMITS,
+  contactPerMinute: Infinity,
+  contactPerHour: Infinity,
+  contactPerDay: Infinity,
+  contactPerDayMax: Infinity,
   machines: 16,
   endpoints: 512,
   sockets: 64,
   frameBytes: 262_144,
-  callsPerMinute: 120,
-  bridgeCallsPerMinute: 600,
-  accountCallsPerMinute: 1200,
-  acksPerMinute: 1200,
-  accountAcksPerMinute: 4800,
+  callsPerMinute: Infinity,
+  bridgeCallsPerMinute: Infinity,
+  accountCallsPerMinute: Infinity,
+  acksPerMinute: Infinity,
+  accountAcksPerMinute: Infinity,
   storedBytes: 256 * 1024 * 1024,
   clientMachineIdleS: 14 * 86_400,
   idlePurgeS: 30 * 86_400,
@@ -291,7 +297,15 @@ export const HUB_LIMITS = {
 
 export type HubLimits = { [K in keyof typeof HUB_LIMITS]: number }
 
-const DURATIONS = ["clientMachineIdleS", "idlePurgeS", "httpWaitS", "mcpWaitS", "revalidateMs", "deniedS"] as const satisfies readonly (keyof HubLimits)[]
+export const HUB_DURATIONS = [
+  "clientMachineIdleS",
+  "idlePurgeS",
+  "httpWaitS",
+  "mcpWaitS",
+  "revalidateMs",
+  "deniedS",
+  "treePauseS",
+] as const satisfies readonly (keyof HubLimits)[]
 
 const SWEEP_MS = 10 * 60_000
 const DAY_MS = 86_400_000
@@ -449,8 +463,14 @@ export class RelayHub {
 
   constructor(private readonly deps: HubDeps) {
     this.now = deps.now ?? Date.now
-    this.limits = { ...HUB_LIMITS, ...deps.limits }
-    for (const key of DURATIONS) if (!Number.isFinite(this.limits[key])) throw new RangeError(`hub limit ${key} must be finite`)
+    const limits = { ...HUB_LIMITS, ...deps.limits }
+    for (const key of Object.keys(limits) as (keyof HubLimits)[]) {
+      if (limits[key] == null || limits[key] === 0) {
+        limits[key] = HUB_DURATIONS.some((duration) => duration === key) ? HUB_LIMITS[key] : Infinity
+      }
+    }
+    this.limits = limits
+    for (const key of HUB_DURATIONS) if (!Number.isFinite(this.limits[key])) throw new RangeError(`hub limit ${key} must be finite`)
     const debounceS = deps.wake?.debounceS ?? HUB_WAKE.debounceS
     this.wakeOptions = { ...HUB_WAKE, debounceS, wakingTimeoutS: debounceS, ...deps.wake }
     for (const key of WAKE_DURATIONS) {
@@ -476,6 +496,7 @@ export class RelayHub {
     if (!wakeColumns.includes("retry_at")) this.deps.sql.all(`ALTER TABLE machine_wakes ADD COLUMN retry_at INTEGER`)
     const core = new FederatedCore(this.deps.sql, {
       user: account.user,
+      limits: this.limits,
       now: this.now,
       hash: this.deps.hash,
       ...(this.deps.transaction ? { transaction: this.deps.transaction } : {}),
@@ -493,7 +514,17 @@ export class RelayHub {
     this.account = account.user
     if (this.deps.crossAccount) {
       this.xkey = core.xstate("key", () => randomHex(32))
-      this.xcounters = new XCounters(this.deps.sql, this.now)
+      this.xcounters = new XCounters(this.deps.sql, this.now, this.contactCaps())
+    }
+  }
+
+  private contactCaps() {
+    return {
+      ...XLIMITS,
+      pairPerMinute: this.limits.contactPerMinute,
+      pairPerHour: this.limits.contactPerHour,
+      accountPerDay: this.limits.contactPerDay,
+      accountPerDayMax: this.limits.contactPerDayMax,
     }
   }
 
@@ -1132,7 +1163,12 @@ export class RelayHub {
     const bridge = params.bridge === true
     const human = params.human === true
     this.deps.sql.all(`DELETE FROM hub_state WHERE key = 'idle_since'`)
-    const info = { account: this.account, capabilities: CAPABILITIES, server_time: new Date(this.now()).toISOString(), limits: { ...LIMITS, ...this.limits } }
+    const info = {
+      account: this.account,
+      capabilities: CAPABILITIES,
+      server_time: new Date(this.now()).toISOString(),
+      limits: wireLimits({ ...LIMITS, ...this.limits }),
+    }
     if (observe) {
       if (bridge || human || params.claim !== undefined || params.resume !== undefined)
         throw new RelayError("invalid_params", "an observer hello has no bridge, human, claim or resume")
@@ -1701,8 +1737,10 @@ export class RelayHub {
   private xadmit(fromAccountId: string, contact: XContact, msg: XMessage, target: XEndpoint, bytes: number): void {
     const core = this.relay
     const now = this.now()
-    const { perMinute, perHour, perDay } = xlimits(contact.limits, msg.limits)
-    const counts = core.xcounts(fromAccountId, msg.from.address, target.remote, dayStart(now))
+    const { perMinute, perHour, perDay } = xlimits(contact.limits, msg.limits, this.contactCaps())
+    const counts = [perMinute, perHour, perDay].some(Number.isFinite)
+      ? core.xcounts(fromAccountId, msg.from.address, target.remote, dayStart(now))
+      : { minute: 0, minuteAt: null, hour: 0, hourAt: null, day: 0 }
     const retry = (since: number | null, ms: number) => Math.max(1, Math.ceil(((since ?? now) + ms - now) / 1000))
     if (counts.minute >= perMinute)
       throw new RelayError("rate_limited", `${perMinute} messages from ${msg.from.address} to ${msg.to} a minute`, retry(counts.minuteAt, 60_000))
@@ -1773,7 +1811,13 @@ export class RelayHub {
       now: this.now,
       env: options.env,
       client: options.client,
-      limits: options.limits,
+      limits: {
+        endpointPerMinute: this.limits.pairPerMinute,
+        endpointPerHour: this.limits.pairPerHour,
+        treePerMinute: this.limits.treePerMinute,
+        treePerHour: this.limits.treePerHour,
+        ...options.limits,
+      },
       log: (line) => this.deps.log?.("relay_judge", { account: this.account, line }),
       wake: (endpoint) => this.wake(endpoint),
       notice: (endpoint, text) => this.xnotice(endpoint, text),
