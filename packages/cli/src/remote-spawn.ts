@@ -1,9 +1,7 @@
-import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { constants } from "node:os"
-import { CLI_NAME, findSecret, handbackOutput, LIMITS, validHandle } from "@scp-dev/core"
-import { connectBroker, policyPath, relayDir } from "@scp-dev/broker"
+import { CLI_NAME, handbackOutput, LIMITS, runnerReply, type RunnerReply, validHandle } from "@scp-dev/core"
+import { connectBroker, policyPath, relayDir, parseRunnerConfig, runRunner as executeRunner, type Runner } from "@scp-dev/broker"
 import { type Identity, localClient, type Option, open, RelayUsage, startDaemon, type Values } from "./common"
 import { labelsFor, normalizeHarness, parseLabels } from "./identity"
 import {
@@ -25,10 +23,10 @@ import { note } from "./term"
 
 type Env = Record<string, string | undefined>
 
-export interface Runner {
-  command: string[]
-  timeout_s: number
-}
+export type { Runner } from "@scp-dev/broker"
+export const RUNNER_TIMEOUT_S = 60
+export { RUNNER_NAME } from "@scp-dev/core"
+export { runnerReply } from "@scp-dev/core"
 
 /** what a runner reads on stdin: one JSON line */
 export interface SpawnRequest {
@@ -43,19 +41,6 @@ export interface SpawnRequest {
   join: { under: string; name: string; mode: "account" }
 }
 
-export const RUNNER_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
-export const RUNNER_TIMEOUT_S = 60
-const RUNNER_TIMEOUT_MAX_S = 3600
-/** how much of a failed runner's stderr spawn shows */
-const RUNNER_STDERR_BYTES = 2048
-/** how much of a runner's stdout spawn reads for its reply */
-const RUNNER_STDOUT_BYTES = 4096
-/** a runner's opaque reference to the worker it started */
-const RUNNER_REF = /^[\x21-\x7e]{1,256}$/
-/** a command line or URL that opens the worker's terminal: one line without control characters */
-const RUNNER_ATTACH = /^[^\u0000-\u001f\u007f-\u009f]{1,1024}$/
-/** how long a runner's stderr may still drain after it exits */
-const RUNNER_DRAIN_MS = 500
 const TITLE_CHARS = 64
 const MACHINE = "[a-z0-9][a-z0-9-]{0,31}"
 /** an agent on a named machine of this account */
@@ -72,30 +57,16 @@ export function runnersPath(env: Env = process.env): string {
   return env.SCP_RUNNERS_FILE || join(dirname(policyPath()), "runners.json")
 }
 
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
-
-/** `{"<runner>": {"command": [argv...], "timeout_s"?: N}}` */
 export function parseRunners(text: string, path: string): Record<string, Runner> {
-  let value: unknown
   try {
-    value = JSON.parse(text)
-  } catch {
-    throw new RelayUsage(`${path} is not JSON`)
+    return parseRunnerConfig(text, path)
+  } catch (error) {
+    throw new RelayUsage(error instanceof Error ? error.message : String(error))
   }
-  if (!isObject(value)) throw new RelayUsage(`${path} maps runner names to {command, timeout_s?}`)
-  const runners: Record<string, Runner> = {}
-  for (const [name, entry] of Object.entries(value)) {
-    if (!RUNNER_NAME.test(name))
-      throw new RelayUsage(`${path}: runner ${JSON.stringify(name)} is not a valid name: lowercase letters, digits and -, at most 32`)
-    const command = isObject(entry) ? entry.command : undefined
-    if (!Array.isArray(command) || !command.length || !command.every((word) => typeof word === "string" && word.length > 0))
-      throw new RelayUsage(`${path}: runner ${name} needs command, a non-empty list of words`)
-    const timeout = (entry as Record<string, unknown>).timeout_s ?? RUNNER_TIMEOUT_S
-    if (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 1 || timeout > RUNNER_TIMEOUT_MAX_S)
-      throw new RelayUsage(`${path}: runner ${name}'s timeout_s is whole seconds, 1 to ${RUNNER_TIMEOUT_MAX_S}`)
-    runners[name] = { command: [...(command as string[])], timeout_s: timeout }
-  }
-  return runners
+}
+
+export function runRunner(runner: Runner, request: SpawnRequest, env: Record<string, string>) {
+  return executeRunner(runner, request, env, request.cwd)
 }
 
 /** the configured runners, none when the file is missing */
@@ -129,93 +100,6 @@ export function spawnRequest(o: {
     labels: o.labels,
     join: { under: o.parent, name: o.name, mode: "account" },
   }
-}
-
-/** a pipe's last `bytes` bytes, and whether earlier ones were dropped */
-function tail(from: NodeJS.ReadableStream, bytes: number): { text: () => string; cut: () => boolean } {
-  let kept = Buffer.alloc(0)
-  let cut = false
-  from.on("data", (chunk: Buffer) => {
-    kept = Buffer.concat([kept, chunk])
-    if (kept.length > bytes) {
-      kept = kept.subarray(kept.length - bytes)
-      cut = true
-    }
-  })
-  return { text: () => kept.toString("utf8"), cut: () => cut }
-}
-
-/** Run a runner detached with the request on stdin; its exit code (124 on timeout), its stdout and its cleaned stderr tail. */
-export function runRunner(
-  runner: Runner,
-  request: SpawnRequest,
-  env: Record<string, string>,
-): Promise<{ code: number; timedOut: boolean; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(runner.command[0]!, runner.command.slice(1), { detached: true, stdio: ["pipe", "pipe", "pipe"], env, cwd: request.cwd })
-    const out = tail(child.stdout!, RUNNER_STDOUT_BYTES)
-    const err = tail(child.stderr!, RUNNER_STDERR_BYTES)
-    const pipes = [child.stdout!, child.stderr!]
-    let settled = false
-    const finish = (code: number, timedOut = false, message?: string) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      const done = () => {
-        for (const pipe of pipes) pipe.destroy()
-        child.unref()
-        const stderr = message ?? handbackOutput(err.text(), err.cut(), RUNNER_STDERR_BYTES)
-        resolve({ code, timedOut, stdout: out.cut() ? "" : out.text(), stderr })
-      }
-      const open = pipes.filter((pipe) => !pipe.readableEnded)
-      if (!open.length || message) return done()
-      const drain = setTimeout(done, RUNNER_DRAIN_MS)
-      let left = open.length
-      for (const pipe of open)
-        pipe.once("end", () => {
-          if (--left > 0) return
-          clearTimeout(drain)
-          done()
-        })
-    }
-    const timer = setTimeout(() => {
-      try {
-        process.kill(-child.pid!, "SIGTERM")
-      } catch {}
-      finish(124, true)
-    }, runner.timeout_s * 1000)
-    child.once("error", (error: NodeJS.ErrnoException) =>
-      finish(error.code === "ENOENT" ? 127 : 126, false, `${runner.command[0]}: ${error.code === "ENOENT" ? "command not found" : error.message}`),
-    )
-    child.once("exit", (code, signal) => finish(code ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0)))
-    child.stdin!.on("error", () => {})
-    child.stdin!.end(`${JSON.stringify(request)}\n`)
-  })
-}
-
-export interface RunnerReply {
-  address: string
-  machine: string
-  ref?: string
-  attach?: string
-}
-
-/** the runner's optional stdout object `{address, machine, ref?, attach?}`; undefined when absent or invalid, a field that looks like a credential dropped */
-export function runnerReply(stdout: string, name: string): RunnerReply | undefined {
-  let value: unknown
-  try {
-    value = JSON.parse(stdout.trim())
-  } catch {
-    return undefined
-  }
-  if (!isObject(value) || typeof value.machine !== "string" || typeof value.address !== "string") return undefined
-  const address = MACHINE_ADDRESS.exec(value.address)
-  if (!address || address[1] !== value.machine || address[2] !== name) return undefined
-  if (value.ref !== undefined && (typeof value.ref !== "string" || !RUNNER_REF.test(value.ref))) return undefined
-  if (value.attach !== undefined && (typeof value.attach !== "string" || !RUNNER_ATTACH.test(value.attach))) return undefined
-  const ref = typeof value.ref === "string" && !findSecret(value.ref) ? value.ref : undefined
-  const attach = typeof value.attach === "string" && !findSecret(value.attach) ? value.attach : undefined
-  return { address: value.address, machine: value.machine, ...(ref ? { ref } : {}), ...(attach ? { attach } : {}) }
 }
 
 /** what `spawn --via` prints once the runner started the worker */
@@ -260,24 +144,30 @@ export async function viaSpawn(values: Values, command: string[], cwd: string, o
   if (title !== null && title.length > TITLE_CHARS) throw new RelayUsage(`--title is longer than ${TITLE_CHARS} characters`)
   const opened = await open("spawn", values as Identity, cwd, false)
   const client = localClient(opened.client, opened.broker, "spawn")
-  let parent: string
   try {
     const me = opened.me
     if (me?.kind !== "agent" || !me.address.startsWith("me/"))
       throw new RelayUsage(`${CLI_NAME} spawn --via starts a worker under you: run it from an agent's session, or name the agent with --as`)
-    parent = `me/${await hubMachine(client, `${CLI_NAME} spawn --via shows the worker under you through the hub`)}/${me.address.slice(3)}`
+    const parent = `me/${await hubMachine(client, `${CLI_NAME} spawn --via shows the worker under you through the hub`)}/${me.address.slice(3)}`
+    const request = spawnRequest({ name, title, command, cwd, parent, labels: parseLabels(values.labels as string | undefined) })
+    const result = await runRunner(runner, request, spawnEnvironment(process.env, {}))
+    if (result.code === 0) {
+      const reply = runnerReply(result.stdout, name)
+      try {
+        await client.request("spawn_via", { name, runner: via, ...reply })
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        process.stderr.write(`${name} started, but the broker did not record it: swarm end cannot stop it through the runner (${reason})\n`)
+      }
+      for (const line of viaStarted({ name, runner: via, parent, reply, json: values.json === true })) out(line)
+      return 0
+    }
+    const failed = result.timedOut ? `did not finish within ${runner.timeout_s} s` : `failed (exit ${result.code})`
+    note(`${CLI_NAME} spawn: runner ${via} ${failed}${result.stderr ? `:\n${result.stderr}` : ""}`)
+    return result.code
   } finally {
     client.close()
   }
-  const request = spawnRequest({ name, title, command, cwd, parent, labels: parseLabels(values.labels as string | undefined) })
-  const result = await runRunner(runner, request, spawnEnvironment(process.env, {}))
-  if (result.code === 0) {
-    for (const line of viaStarted({ name, runner: via, parent, reply: runnerReply(result.stdout, name), json: values.json === true })) out(line)
-    return 0
-  }
-  const failed = result.timedOut ? `did not finish within ${runner.timeout_s} s` : `failed (exit ${result.code})`
-  note(`${CLI_NAME} spawn: runner ${via} ${failed}${result.stderr ? `:\n${result.stderr}` : ""}`)
-  return result.code
 }
 
 export interface LinkedPlan {

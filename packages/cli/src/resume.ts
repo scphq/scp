@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream"
 import { connectBroker, privateDir, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
-import { attribute, attributed, ROOT_HELP } from "./attribute"
+import { attribute, attributed, validateUnder, ROOT_HELP } from "./attribute"
 import { RelayUsage, startDaemon } from "./common"
 import { AGY_CONVERSATION, AGY_HOOK_SET } from "./hooks"
 import { relayIdentity } from "./identity"
@@ -35,7 +35,7 @@ const SPECS: Record<ResumeHarness, { bin: string; refused: string[]; prompt: str
   },
 }
 
-export const AGY_HELP = `${CLI_NAME} agy [--name N | --as N] [--root] [--] [agy args...]
+export const AGY_HELP = `${CLI_NAME} agy [--name N | --as N] [--root] [--under ADDR] [--] [agy args...]
   runs agy headless, wake on: a -p prompt is its first turn, and each new message resumes the same conversation as a
   turn (agy --conversation <id> -p <message>); without a prompt the first message starts it. Refuses -i, -c,
   --input-format and --remote-control: nothing local starts a turn in an interactive agy, so run plain agy for that
@@ -44,7 +44,7 @@ export const AGY_HELP = `${CLI_NAME} agy [--name N | --as N] [--root] [--] [agy 
   $SCP_AGY_BIN picks the agy binary (default agy on PATH).
 ${ROOT_HELP}`
 
-export const GROK_HELP = `${CLI_NAME} grok [--name N | --as N] [--root] [--] [grok args...]
+export const GROK_HELP = `${CLI_NAME} grok [--name N | --as N] [--root] [--under ADDR] [--] [grok args...]
   runs grok headless, wake on: a -p prompt is its first turn, and each new message resumes the same session as a turn
   (grok --resume <id> -p <message>); without a prompt the first message starts it. The session id is yours (-s, -r)
   or a new one. Refuses -c and --fork-session: nothing local starts a turn in an interactive grok, so run plain grok
@@ -56,6 +56,7 @@ export interface ResumeLaunch {
   harness: ResumeHarness
   name?: string
   root?: true
+  under?: string
   /** the first turn's arguments when they hold a prompt: the user's as given */
   first?: string[]
   /** the user's arguments without prompt and conversation flags, which every other turn starts from */
@@ -78,6 +79,7 @@ function insert(args: string[], extra: string[]): string[] {
 /** the launch of `swarm agy` or `swarm grok`: leading launcher flags, then the harness's own arguments */
 export function resumeLaunch(harness: ResumeHarness, args: string[], env: Env, uuid: () => string = randomUUID): ResumeLaunch {
   let name: string | undefined
+  let under: string | undefined
   let root = false
   let i = 0
   for (; i < args.length; i++) {
@@ -86,11 +88,15 @@ export function resumeLaunch(harness: ResumeHarness, args: string[], env: Env, u
       name = args[++i]
       if (name === undefined) throw new RelayUsage(`${CLI_NAME} ${harness} ${arg} takes a name`)
     } else if (arg.startsWith("--name=") || arg.startsWith("--as=")) name = arg.slice(arg.indexOf("=") + 1)
-    else if (arg === "--root") root = true
+    else if (arg === "--under" || arg.startsWith("--under=")) {
+      under = arg === "--under" ? args[++i] : arg.slice(8)
+      if (under === undefined) throw new RelayUsage("--under takes an address")
+    } else if (arg === "--root") root = true
     else break
   }
   if (args[i] === "--") i++
   const rest = args.slice(i)
+  validateUnder(under, root)
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
   const spec = SPECS[harness]
@@ -122,7 +128,7 @@ export function resumeLaunch(harness: ResumeHarness, args: string[], env: Env, u
   }
   const { SCP_SESSION: _session, SCP_PARENT: _parent, SCP_HARNESS_PID: _pid, ...clean } = env
   const launchEnv: Env = { ...clean, SCP_HARNESS: harness, SCP_SESSION: randomBytes(16).toString("hex"), ...(name !== undefined ? { SCP_NAME: name } : {}) }
-  const named = { ...(name !== undefined ? { name } : {}), ...(root ? { root: true as const } : {}) }
+  const named = { ...(name !== undefined ? { name } : {}), ...(root ? { root: true as const } : {}), ...(under !== undefined ? { under } : {}) }
   if (harness === "agy") {
     const id = ids.get("--conversation")
     return {

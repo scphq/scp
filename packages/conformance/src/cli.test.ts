@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Envelope, SendResult } from "@scp-dev/core";
+import type { EndpointView, Envelope, SendResult } from "@scp-dev/core";
 import { enabled, ProcessTarget, targetNames, waitFor } from "./targets";
 import { ensureBuilt, Machine } from "./machines";
 import { Wire } from "./wire";
@@ -105,7 +105,14 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     writeFileSync(runnerEnv, JSON.stringify(desk.env));
     writeFileSync(
       runners,
-      JSON.stringify({ desk: { command: [process.execPath, "--no-env-file", join(import.meta.dir, "runner.ts"), runnerEnv], timeout_s: 10 } }),
+      JSON.stringify({
+        desk: {
+          command: [process.execPath, "--no-env-file", join(import.meta.dir, "runner.ts"), runnerEnv],
+          stop: [process.execPath, "--no-env-file", join(import.meta.dir, "runner.ts"), runnerEnv],
+          status: [process.execPath, "--no-env-file", join(import.meta.dir, "runner.ts"), runnerEnv],
+          timeout_s: 10,
+        },
+      }),
     );
     writeFileSync(
       harness,
@@ -141,6 +148,21 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     const handback = await waitFor(async () => (await laptop.inbox("ada", true)).find((m) => m.from.address === "me/desk/worker"), "handback");
     expect(handback.kind).toBe("message");
     expect(handback.body.text).toContain("worker done");
+    const listed = await laptop.json<{ endpoints: EndpointView[] }>(["list", "--all", "--as", "ada"]);
+    expect(listed.endpoints.find((e) => e.address === "me/desk/worker")?.runner).toMatchObject({
+      name: "desk",
+      attach: "ssh desk -t tmux attach -t worker",
+      status: { state: "stopped" },
+    });
+    expect(await laptop.json(["end", "me/desk/worker", "--as", "ada"])).toMatchObject({ held: false, runner: { name: "desk", stop: "stopped" } });
+    expect(await Bun.file(join(laptop.root, "runner-stop.json")).json()).toMatchObject({
+      scp: 1,
+      event: "stop",
+      name: "worker",
+      runner: "desk",
+      parent: "me/laptop/ada",
+      address: "me/desk/worker",
+    });
     await laptop.inbox("ada");
   }, 60000);
   test("direct cloud clients send, receive and list both bridged machines without a broker", async () => {

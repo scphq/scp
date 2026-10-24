@@ -713,11 +713,12 @@ function tee(from: NodeJS.ReadableStream, to: NodeJS.WritableStream): { bytes: (
 /** for a muse process `pid`, whose shim and hooks Muse starts without SCP_* variables: a launch file with the run's identity, and its remover */
 function museLaunchFile(argv: string[], env: Record<string, string>, pid: number | undefined): () => void {
   const program = argv[programAt(argv)]
-  if (!pid || program === undefined || basename(program) !== "muse" || (!env.SCP_NAME && !env.SCP_GRANT)) return () => {}
+  if (!pid || program === undefined || basename(program) !== "muse" || (!env.SCP_NAME && !env.SCP_GRANT && !env.SCP_UNDER)) return () => {}
   const launcher = Number(env.SCP_HARNESS_PID)
   const launch: MuseLaunch = {
     ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}),
     ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}),
+    ...(env.SCP_UNDER ? { under: env.SCP_UNDER } : {}),
     ...(env.SCP_SESSION ? { session: env.SCP_SESSION } : {}),
     ...(Number.isInteger(launcher) && launcher > 1 ? { launcher: processKey(launcher) } : {}),
   }

@@ -226,6 +226,7 @@ export function wrapPeek(result: PeekResult): string {
   }
   if (result.recent_tools.length) lines.push(`[tools since: ${escapeBody(collapseTools(result.recent_tools).join(", "))}]`)
   if (result.status) lines.push(`[status: ${result.status.state}${result.status.note ? `, ${escapeBody(result.status.note)}` : ""}]`)
+  if (result.runner?.attach) lines.push(`attach: ${escapeBody(result.runner.attach)}`)
   if (result.title) lines.push(`[title: ${escapeBody(result.title)}]`)
   if (result.unread) lines.push(`[unread: ${result.unread}]`)
   if (!lines.length) lines.push("[nothing to show]")

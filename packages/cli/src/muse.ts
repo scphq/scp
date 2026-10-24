@@ -6,7 +6,7 @@ import { connectBroker, type RelayClient, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { MCP_PROTOCOLS, runRelayMcp } from "@scp-dev/mcp"
 import { connectCodexChannel } from "./codex"
-import { attribute, attributed, ROOT_HELP } from "./attribute"
+import { attribute, attributed, validateUnder, ROOT_HELP } from "./attribute"
 import { RelayUsage, startDaemon } from "./common"
 import { processKey, relayIdentity, writeMuseLaunch } from "./identity"
 import { mcpFile, mountedEntry } from "./setup"
@@ -17,7 +17,7 @@ type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 type Transport = { request(method: string, params: Json): Promise<Json> }
 
-export const MUSE_HELP = `${CLI_NAME} muse [--name N | --as N] [--root] [--resume SESSION] [--approval-mode never|on-request|untrusted] [--] [muse serve args...]
+export const MUSE_HELP = `${CLI_NAME} muse [--name N | --as N] [--root] [--under ADDR] [--resume SESSION] [--approval-mode never|on-request|untrusted] [--] [muse serve args...]
   runs a headless Muse session (muse serve) that relay messages wake: a message starts a turn on the idle session or steers a running one.
   every other argument goes to muse serve (--provider, --model, -c, sandbox flags); it runs with --contributor-mode off unless you pass on.
   prints the agent's messages; approvals the mode leaves to a human are declined. --resume SESSION reopens a stored session.
@@ -29,8 +29,12 @@ const APPROVAL: Record<string, string> = { never: "allowAll", "on-request": "onR
 const NO_USER_INPUT = "--disable-request-user-input"
 
 /** the muse serve arguments and environment, without the launching session's identity */
-export function museLaunch(args: string[], env: Env): { name?: string; root?: true; resume?: string; approvalMode: string; serveArgs: string[]; env: Env } {
+export function museLaunch(
+  args: string[],
+  env: Env,
+): { name?: string; root?: true; under?: string; resume?: string; approvalMode: string; serveArgs: string[]; env: Env } {
   let name: string | undefined
+  let under: string | undefined
   let root = false
   let resume: string | undefined
   let approval = "on-request"
@@ -49,11 +53,15 @@ export function museLaunch(args: string[], env: Env): { name?: string; root?: tr
     const flag = eq > 0 ? arg.slice(0, eq) : arg
     const take = () => (eq > 0 ? arg.slice(eq + 1) : value(flag, args[++i]))
     if (flag === "--name" || flag === "--as") name = take()
-    else if (arg === "--root") root = true
+    else if (arg === "--under" || arg.startsWith("--under=")) {
+      under = arg === "--under" ? args[++i] : arg.slice(8)
+      if (under === undefined) throw new RelayUsage("--under takes an address")
+    } else if (arg === "--root") root = true
     else if (flag === "--resume") resume = take()
     else if (flag === "--approval-mode") approval = take()
     else serveArgs.push(arg)
   }
+  validateUnder(under, root)
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`${JSON.stringify(name)} is not a valid agent handle`)
   const approvalMode = APPROVAL[approval]
@@ -67,6 +75,7 @@ export function museLaunch(args: string[], env: Env): { name?: string; root?: tr
   return {
     ...(name !== undefined ? { name } : {}),
     ...(root ? { root: true as const } : {}),
+    ...(under !== undefined ? { under } : {}),
     ...(resume !== undefined ? { resume } : {}),
     approvalMode,
     serveArgs: [...(modes.length ? [] : [MUSE_MODE, "off"]), ...(serveArgs.includes(NO_USER_INPUT) ? [] : [NO_USER_INPUT]), ...serveArgs],
@@ -336,7 +345,15 @@ export async function museCommand(args: string[]): Promise<number> {
     if (!server.pid) await new Promise((resolve) => setImmediate(resolve))
     if (died || !server.pid) throw failure()
     const key = processKey(server.pid)
-    unlaunch = writeMuseLaunch(key, { ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}), ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}) }, env)
+    unlaunch = writeMuseLaunch(
+      key,
+      {
+        ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}),
+        ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}),
+        ...(env.SCP_UNDER ? { under: env.SCP_UNDER } : {}),
+      },
+      env,
+    )
     const started = await Promise.race([
       (async () => {
         await host.request("initialize", { clientInfo: { name: "scp_waker", version: "0.1.0" } })

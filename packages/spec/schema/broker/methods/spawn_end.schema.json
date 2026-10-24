@@ -16,20 +16,68 @@
       "additionalProperties": false
     },
     "Result": {
-      "type": "object",
-      "properties": {
-        "endpoint": {
-          "$ref": "../types.schema.json#/$defs/EndpointView"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "$ref": "../types.schema.json#/$defs/EndpointView"
+            },
+            "held": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "endpoint",
+            "held"
+          ],
+          "additionalProperties": false
         },
-        "held": {
-          "type": "boolean"
+        {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "$ref": "../types.schema.json#/$defs/EndpointView"
+            },
+            "held": {
+              "const": false
+            },
+            "runner": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "stop": {
+                  "enum": [
+                    "stopped",
+                    "declined",
+                    "failed",
+                    "timeout",
+                    "none"
+                  ]
+                },
+                "code": {
+                  "type": "integer"
+                },
+                "stderr": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "stop"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "held",
+            "runner"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "endpoint",
-        "held"
-      ],
-      "additionalProperties": false
+      ]
     }
   }
 }

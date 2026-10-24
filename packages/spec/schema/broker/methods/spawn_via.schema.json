@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spawn_via",
+  "title": "spawn_via",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "runner": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "attach": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "runner"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "recorded": {
+          "const": true
+        }
+      },
+      "required": [
+        "recorded"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

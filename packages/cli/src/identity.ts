@@ -68,7 +68,7 @@ export function writeShimBinding(claim: ShimBinding, env: Env): () => void {
 }
 
 /** what a launcher hands a muse process's shim and hooks in place of SCP_NAME, SCP_GRANT, SCP_SESSION and SCP_HARNESS_PID (its process key) */
-export type MuseLaunch = { name?: string; grant?: string; session?: string; launcher?: string }
+export type MuseLaunch = { name?: string; grant?: string; under?: string; session?: string; launcher?: string }
 
 /** the file where a launcher (`swarm muse`, `swarm spawn`) leaves a muse process's {@link MuseLaunch}: Muse starts its shim and hooks without SCP_* variables */
 function museLaunchFile(key: string, env: Env, dir?: string): string | undefined {
@@ -103,6 +103,7 @@ export function readMuseLaunch(key: string, env: Env, dir?: string): MuseLaunch 
     return {
       ...(typeof launch.name === "string" && validHandle(launch.name) ? { name: launch.name } : {}),
       ...(typeof launch.grant === "string" && launch.grant ? { grant: launch.grant } : {}),
+      ...(typeof launch.under === "string" && launch.under ? { under: launch.under } : {}),
       ...(typeof launch.session === "string" && LAUNCH_SESSION.test(launch.session) ? { session: launch.session } : {}),
       ...(typeof launch.launcher === "string" && BINDING_PROCESS.test(launch.launcher) ? { launcher: launch.launcher } : {}),
     }
@@ -709,6 +710,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env, input.stateDir) : undefined
   const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? (harness === "claude-cowork" ? coworkHandle(input.env) : deriveHandle(harness, cwd))
   const grant = input.env.SCP_GRANT || launched?.grant
+  const under = input.env.SCP_UNDER || launched?.under
   const harnessProcess = launched?.launcher ?? own
   const claimed = launched?.launcher ? Number(BINDING_PROCESS.exec(launched.launcher)![1]) : pid
   const env = launched?.session ? { ...input.env, SCP_SESSION: launched.session } : input.env
@@ -734,7 +736,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     process: harnessProcess,
     labels: labelsFor(input.env),
     ...(input.env.SCP_PARENT ? { parent: input.env.SCP_PARENT } : {}),
-    ...(input.env.SCP_UNDER ? { under: input.env.SCP_UNDER } : {}),
+    ...(under ? { under } : {}),
     ...(threaded ? { lineage: keys.filter((key) => key !== own && key !== `pid:${pid}`) } : keys.length ? { lineage: keys } : {}),
     ...(grant ? { grant } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),

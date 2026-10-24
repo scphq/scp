@@ -4,7 +4,7 @@ import { existsSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from
 import { basename, join } from "node:path"
 import { privateDir, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, validHandle } from "@scp-dev/core"
-import { type AttributeDeps, attribute, attributed, underText, type Attribution } from "./attribute"
+import { type AttributeDeps, attribute, attributed, validateUnder, underText, type Attribution } from "./attribute"
 import { CHANNELS_ENV, CLAUDE_SESSION_ENV, RelayUsage } from "./common"
 import { deriveHandle } from "./identity"
 import { joinMode } from "./relay"
@@ -17,16 +17,21 @@ export const CHANNEL_FLAGS = ["--dangerously-load-development-channels", "server
 
 type Env = Record<string, string | undefined>
 
-/** `swarm claude [--bg] [--name N | --as N] [--root] [--] [claude args...]`: the handle, whether it runs in the background or as a root, and the arguments passed through to claude */
-export function claudeArgv(argv: string[]): { name?: string; bg?: true; root?: true; args: string[] } {
+/** `swarm claude [--bg] [--name N | --as N] [--root] [--under ADDR] [--] [claude args...]`: the handle, whether it runs in the background or as a root, and the arguments passed through to claude */
+export function claudeArgv(argv: string[]): { name?: string; bg?: true; root?: true; under?: string; args: string[] } {
   let name: string | undefined
   let bg = false
+  let under: string | undefined
   let root = false
   let i = 0
   for (;;) {
     const arg = argv[i]
     if (arg === "--bg" || arg === "--background") {
       bg = true
+      i++
+    } else if (arg === "--under" || arg?.startsWith("--under=")) {
+      under = arg === "--under" ? argv[++i] : arg.slice(8)
+      if (under === undefined) throw new RelayUsage("--under takes an address")
       i++
     } else if (arg === "--root") {
       root = true
@@ -41,11 +46,18 @@ export function claudeArgv(argv: string[]): { name?: string; bg?: true; root?: t
     } else break
   }
   if (argv[i] === "--") i++
+  validateUnder(under, root)
   name = name?.replace(/^me\//, "")
   if (name !== undefined && !validHandle(name)) throw new RelayUsage(`--name ${JSON.stringify(name)} is not a valid agent handle`)
   const args = argv.slice(i)
   if (!bg) bg = optionsOf(args).some((arg) => arg === "--bg" || arg === "--background")
-  return { ...(name !== undefined ? { name } : {}), ...(bg ? { bg: true as const } : {}), ...(root ? { root: true as const } : {}), args }
+  return {
+    ...(under !== undefined ? { under } : {}),
+    ...(name !== undefined ? { name } : {}),
+    ...(bg ? { bg: true as const } : {}),
+    ...(root ? { root: true as const } : {}),
+    args,
+  }
 }
 
 /** claude's options: its arguments before any `--` */
@@ -83,7 +95,7 @@ const SHIM_VARS = ["SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME"]
 export const bgDir = (env: Env): string => join(relayDir(env as NodeJS.ProcessEnv), "claude-bg")
 
 /**
- * the scp server of a background session: the user's mount with `--channels`, else this CLI's, with the name and grant in its env. It has the
+ * the scp server of a background session: the user's mount with `--channels`, else this CLI's, with the name, parent request and grant in its env. It has the
  * mount's name, so it replaces the mount for that session; the grant is set even when empty, so one in the daemon's environment never applies
  */
 export function bgMount(env: Env, name: string | undefined): Record<string, unknown> {
@@ -99,7 +111,7 @@ export function bgMount(env: Env, name: string | undefined): Record<string, unkn
     type: "stdio",
     command: argv[0],
     args: argv.slice(1),
-    env: { ...base, ...vars, ...(name !== undefined ? { SCP_NAME: name } : {}), SCP_GRANT: env.SCP_GRANT ?? "" },
+    env: { ...base, ...vars, ...(name !== undefined ? { SCP_NAME: name } : {}), SCP_UNDER: env.SCP_UNDER ?? "", SCP_GRANT: env.SCP_GRANT ?? "" },
   }
 }
 
@@ -324,10 +336,10 @@ export async function claudeCommand(
     return attachCommand(argv.slice(1), env, err, cwd, bin, deps)
   }
   if (argv[0] === "ls" || argv[0] === "prune") return (await import("./claude-bg")).claudeBgCommand(argv[0], argv.slice(1), env, out, deps.bg)
-  const { name, bg, root, args } = claudeArgv(argv)
+  const { name, bg, root, under, args } = claudeArgv(argv)
   if (!bin) throw new RelayUsage("claude is not on PATH")
   if (bg) {
-    const attribution = await attribute("claude", { name, root, resume: resumes(args) }, env, cwd, err, deps.attribute)
+    const attribution = await attribute("claude", { name, root, under, resume: resumes(args) }, env, cwd, err, deps.attribute)
     return backgroundCommand(name, args, attributed(env, attribution), cwd, bin, out, attribution)
   }
   const resume = resumeTarget(args)
@@ -340,7 +352,7 @@ export async function claudeCommand(
   const hint = external ? undefined : args.includes("--strict-mcp-config") ? STRICT_HINT : mountHint(env, cwd)
   if (hint) throw new RelayUsage(hint)
   if (external) err(`${CLI_NAME} claude: using your --mcp-config; it needs the scp server with --channels for messages to wake this session`)
-  const launchEnv = attributed(env, await attribute("claude", { name, root, resume: resumes(args) }, env, cwd, err, deps.attribute))
+  const launchEnv = attributed(env, await attribute("claude", { name, root, under, resume: resumes(args) }, env, cwd, err, deps.attribute))
   return runClaude(
     bin,
     claudeLaunchArgs(args, namePrompt(name, args, launchEnv, cwd)),
@@ -353,9 +365,10 @@ export async function claudeCommand(
   )
 }
 
-const CLAUDE_HELP = `${CLI_NAME} claude [--name N | --as N] [--root] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake it
-${CLI_NAME} claude --bg [--name N] [--root] [--] [claude args...]   start it in the background (claude --bg) with an scp mount that claims N and
+const CLAUDE_HELP = `${CLI_NAME} claude [--name N | --as N] [--root] [--under ADDR] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake it
+${CLI_NAME} claude --bg [--name N] [--root] [--under ADDR] [--] [claude args...]   start it in the background (claude --bg) with an scp mount that claims N and
                                                  a grant, so it links under you; messages wake it through its inbox. Prints its short id and address
+  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
   Run from an agent's shell, it links under that agent by itself, as under env $(${CLI_NAME} spawn-env --name N); a grant minted for
   it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root
 ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first

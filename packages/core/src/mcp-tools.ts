@@ -429,6 +429,8 @@ export function listLine(e: EndpointView, me?: EndpointView | null, home?: strin
     e.title ? `title ${quote(e.title)}` : "",
     status,
     cwd ? quote(cwd) : "",
+    e.runner ? `runner ${e.runner.name}` : "",
+    e.runner?.attach ? `attach: ${e.runner.attach}` : "",
     e.peekable ? "peekable" : "",
     e.historic ? "historic" : "",
   ]

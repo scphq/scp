@@ -1,3 +1,4 @@
+import { RUNNER_NAME, runnerReply, type ViaRecord } from "./runner"
 import { canonicalPolicy, GROUP_NAME, matches, type Policy, policyRefusal, type PolicySubject, type ScopeSubject, validSelector } from "./policy"
 import {
   ACTIVITY_KINDS,
@@ -195,6 +196,11 @@ const MIGRATION = [
   `CREATE TABLE IF NOT EXISTS admins (subject TEXT NOT NULL, scope_kind TEXT NOT NULL, scope TEXT NOT NULL, scope_id TEXT, granted_at INTEGER NOT NULL, revoked_at INTEGER)`,
   `CREATE TABLE IF NOT EXISTS tree_events (tree TEXT NOT NULL, at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS tree_events_tree ON tree_events (tree, at)`,
+  `CREATE TABLE IF NOT EXISTS spawn_via (
+    spawner TEXT NOT NULL, name TEXT NOT NULL, runner TEXT NOT NULL, address TEXT, machine TEXT, ref TEXT, attach TEXT,
+    created_at INTEGER NOT NULL, ended_at INTEGER, PRIMARY KEY (spawner, name)
+  )`,
+  `CREATE INDEX IF NOT EXISTS spawn_via_address ON spawn_via(address)`,
   `CREATE TABLE IF NOT EXISTS relay_migrations (name TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2285,6 +2291,13 @@ export class RelayCore {
     this.sql.all(`UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL`, row.id, held.id)
     this.sql.all(`UPDATE grants SET issuer = ? WHERE issuer = ?`, row.id, held.id)
     this.sql.all(`UPDATE grants SET under = ? WHERE under = ?`, row.id, held.id)
+    this.sql.all(
+      `DELETE FROM spawn_via AS old WHERE spawner = ? AND EXISTS (SELECT 1 FROM spawn_via AS newer WHERE newer.spawner = ? AND newer.name = old.name AND newer.created_at > old.created_at)`,
+      held.id,
+      row.id,
+    )
+    this.sql.all(`DELETE FROM spawn_via WHERE spawner = ? AND name IN (SELECT name FROM spawn_via WHERE spawner = ?)`, row.id, held.id)
+    this.sql.all(`UPDATE spawn_via SET spawner = ? WHERE spawner = ?`, row.id, held.id)
     this.sql.all(`UPDATE groups SET owner = ? WHERE owner = ?`, row.id, held.id)
     this.sql.all(
       `INSERT OR IGNORE INTO group_members (name, endpoint, added_by, at) SELECT name, ?, added_by, at FROM group_members WHERE endpoint = ?`,
@@ -4001,7 +4014,8 @@ export class RelayCore {
     this.retireEndpoints(now)
     this.sql.all(
       `DELETE FROM endpoints WHERE kind = 'agent' AND connections = 0 AND COALESCE(last_seen, created_at) <= ? AND (hibernate IS NULL OR revive IS NULL)
-       AND id NOT IN (SELECT endpoint FROM deliveries) AND id NOT IN (SELECT from_ep FROM messages) AND id NOT IN (SELECT parent_ep FROM endpoints WHERE parent_ep IS NOT NULL)`,
+       AND id NOT IN (SELECT endpoint FROM deliveries) AND id NOT IN (SELECT from_ep FROM messages) AND id NOT IN (SELECT parent_ep FROM endpoints WHERE parent_ep IS NOT NULL)
+       AND id NOT IN (SELECT spawner FROM spawn_via)`,
       now - LIMITS.handleBoundS * 1000,
     )
     this.sql.all(`DELETE FROM audit WHERE at <= CAST(strftime('%s', 'now') AS INTEGER) * 1000 - ${LIMITS.auditKeepS * 1000}`)
@@ -4079,6 +4093,7 @@ export class RelayCore {
          AND COALESCE(last_seen, created_at) <= ? AND COALESCE(hook_seen, 0) <= ? AND COALESCE(hook_ended, 0) <= ?
          AND hibernate IS NULL AND wake IS NULL AND wakers = 0 AND wake_ticket IS NULL AND hold_ref IS NULL
          AND id NOT IN (SELECT parent_ep FROM endpoints WHERE parent_ep IS NOT NULL)
+         AND id NOT IN (SELECT spawner FROM spawn_via)
          AND id NOT IN (SELECT tree FROM endpoints WHERE tree IS NOT NULL AND tree != id)
          AND id NOT IN (SELECT endpoint FROM deliveries WHERE acked_at IS NULL AND expires_at > ?)
          AND id NOT IN (SELECT from_ep FROM messages WHERE expires_at > ?)
@@ -5018,6 +5033,120 @@ export class RelayCore {
       }
       return { session: spender.harness_session, steers, transcript: spender.harness_session ? spender.harness_transcript : null, joined: true }
     })
+  }
+
+  spawnVia(
+    endpoint: string,
+    params: { name?: unknown; runner?: unknown; address?: unknown; machine?: unknown; ref?: unknown; attach?: unknown },
+  ): { recorded: true } {
+    const me = this.mustEndpoint(endpoint)
+    if (me.kind !== "agent" || !this.localRow(me)) throw new RelayError("unauthorized", "only the spawning agent records a runner")
+    if (typeof params.name !== "string" || !validHandle(params.name) || typeof params.runner !== "string" || !RUNNER_NAME.test(params.runner))
+      throw new RelayError("invalid_params", "a via record needs a worker name and runner name")
+    const hasAddress = params.address !== undefined || params.machine !== undefined
+    const reply = runnerReply(JSON.stringify({ ...params, ...(hasAddress ? {} : { address: `me/unknown/${params.name}`, machine: "unknown" }) }), params.name)
+    if (!reply) throw new RelayError("invalid_params", "invalid runner reply")
+    const previous = one<ViaRecord>(this.sql, `SELECT * FROM spawn_via WHERE spawner = ? AND name = ?`, me.id, params.name)
+    this.sql.all(
+      `INSERT OR REPLACE INTO spawn_via (spawner, name, runner, address, machine, ref, attach, created_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      me.id,
+      params.name,
+      params.runner,
+      hasAddress ? reply.address : null,
+      hasAddress ? reply.machine : null,
+      reply.ref ?? null,
+      reply.attach ?? null,
+      Math.max(this.now(), (previous?.created_at ?? 0) + 1),
+    )
+    return { recorded: true }
+  }
+
+  viaRecords(): ViaRecord[] {
+    return this.sql.all<ViaRecord>(`SELECT * FROM spawn_via ORDER BY created_at DESC`)
+  }
+
+  private viaOwned(row: EndpointRow, record: ViaRecord): boolean {
+    const parent = this.linkedParent(row)
+    return !this.localRow(row) && parent !== null && this.lookup(parent)?.id === record.spawner
+  }
+
+  private viaFor(row: EndpointRow): ViaRecord | undefined {
+    return this.sql.all<ViaRecord>(`SELECT * FROM spawn_via WHERE address = ? ORDER BY created_at DESC`, this.address(row)).find((r) => this.viaOwned(row, r))
+  }
+
+  viaRecordFor(address: string): ViaRecord | undefined {
+    const row = this.lookup(address)
+    return row ? this.viaFor(row) : undefined
+  }
+
+  private viaAuthority(actor: ScopeActor, me: EndpointRow, record: ViaRecord): boolean {
+    const spawner = this.byId(record.spawner)
+    return (actor.kind === "human" && actor.tty) || me.id === record.spawner || !!(spawner && this.ancestorsOf(spawner).includes(me.id))
+  }
+
+  endVia(actor: ScopeActor, params: { endpoint: unknown }): { record: ViaRecord; endpoint?: EndpointView } | undefined {
+    const me = this.actorRow(actor)
+    if (typeof params.endpoint !== "string") throw new RelayError("invalid_params", "endpoint is an address or worker name")
+    const target = this.lookup(params.endpoint)
+    if (target && this.localRow(target)) return undefined
+    const matches = this.viaRecords().filter(
+      (r) =>
+        r.address === params.endpoint || r.address === (target && this.address(target)) || r.name === params.endpoint || `me/${r.name}` === params.endpoint,
+    )
+    if (!matches.length) return undefined
+    const allowed = matches.filter((r) => this.viaAuthority(actor, me, r))
+    if (!allowed.length) {
+      const visible = matches.some((record) => {
+        const worker = record.address ? this.lookup(record.address) : target
+        return worker && this.discovers(me, worker)
+      })
+      if (me.kind === "agent" && !visible) throw unreachable(params.endpoint)
+      throw new RelayError("unauthorized", "only the spawner, its ancestor or the human at a terminal ends a via worker")
+    }
+    const workers = (record: ViaRecord): EndpointRow[] => {
+      const resolved = record.address ? this.lookup(record.address) : target
+      if (record.address || target) return resolved ? [resolved] : []
+      return this.sql
+        .all<EndpointRow>(`SELECT * FROM endpoints WHERE kind = 'agent'`)
+        .filter(
+          (row) =>
+            this.viaOwned(row, record) && this.discovers(me, row) && this.address(row).startsWith("me/") && this.address(row).split("/").at(-1) === record.name,
+        )
+    }
+    const tied = allowed.filter((record) => workers(record).some((worker) => this.viaOwned(worker, record)))
+    const remaining = tied.length ? tied : allowed
+    if (remaining.length !== 1) throw new RelayError("invalid_params", "ambiguous via worker: name its full address")
+    const record = remaining[0]!
+    const candidates = workers(record)
+    if (candidates.length > 1) throw new RelayError("invalid_params", "ambiguous via worker: record its full address")
+    const named = (row: EndpointRow) => !this.localRow(row) && this.address(row).startsWith("me/") && this.address(row).split("/").at(-1) === record.name
+    const elsewhere =
+      record.address || target || candidates.length
+        ? undefined
+        : this.sql.all<EndpointRow>(`SELECT * FROM endpoints WHERE kind = 'agent'`).find((row) => named(row) && !this.viaOwned(row, record))
+    const worker = candidates[0] ?? elsewhere
+    if (worker && !this.viaOwned(worker, record)) {
+      if (me.kind === "agent" && !this.discovers(me, worker)) throw unreachable(params.endpoint)
+      throw new RelayError("unauthorized", "the worker is not under this runner's spawner")
+    }
+    return this.tx(() => {
+      this.sql.all(`UPDATE spawn_via SET ended_at = COALESCE(ended_at, ?) WHERE spawner = ? AND name = ?`, this.now(), record.spawner, record.name)
+      this.audit("spawn_end", worker?.id ?? record.spawner, null, {
+        by: this.address(me),
+        target: record.address ?? record.name,
+        held: false,
+        runner: record.runner,
+      })
+      return { record, ...(worker ? { endpoint: this.view(worker) } : {}) }
+    })
+  }
+
+  viaPeek(actor: ScopeActor, endpoint: unknown): EndpointView | undefined {
+    const me = this.actorRow(actor)
+    const row = typeof endpoint === "string" ? this.lookup(endpoint) : undefined
+    if (!row || !this.viaFor(row)) return undefined
+    if (!(actor.kind === "human" && actor.tty) && !this.discovers(me, row)) throw unreachable(endpoint)
+    return this.view(row)
   }
 
   /**
@@ -6446,8 +6575,10 @@ export class RelayCore {
   protected view(row: EndpointRow, shown?: Shown): EndpointView {
     const now = this.now()
     const presence = this.presence(row, now)
+    const via = this.viaFor(row)
     return {
       id: row.id,
+      ...(via ? { runner: { name: via.runner, ...(via.ref ? { ref: via.ref } : {}), ...(via.attach ? { attach: via.attach } : {}) } } : {}),
       address: this.address(row),
       kind: row.kind,
       harness: row.harness,

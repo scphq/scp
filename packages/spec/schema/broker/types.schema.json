@@ -408,6 +408,43 @@
         },
         "historic": {
           "const": true
+        },
+        "runner": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "string"
+            },
+            "attach": {
+              "type": "string"
+            },
+            "status": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "at": {
+                  "$ref": "#/$defs/Timestamp"
+                }
+              },
+              "required": [
+                "state",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -862,6 +899,43 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "runner": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "string"
+            },
+            "attach": {
+              "type": "string"
+            },
+            "status": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "at": {
+                  "$ref": "#/$defs/Timestamp"
+                }
+              },
+              "required": [
+                "state",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

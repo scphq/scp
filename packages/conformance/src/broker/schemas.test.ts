@@ -102,6 +102,25 @@ describe("broker wire schemas", () => {
     }
   });
 
+  test("runner records, views and end results validate their wire shapes", () => {
+    expect(validate("methods/spawn_via.schema.json#/$defs/Params", { name: "w", runner: "vm", address: "me/vm/w", machine: "vm" })).toEqual([]);
+    expect(validate("methods/spawn_via.schema.json#/$defs/Params", { name: "w" }).length).toBeGreaterThan(0);
+    expect(validate("methods/spawn_via.schema.json#/$defs/Result", { recorded: true })).toEqual([]);
+    expect(validate("methods/spawn_via.schema.json#/$defs/Result", { recorded: false }).length).toBeGreaterThan(0);
+    for (const name of ["EndpointView", "PeekResult"]) {
+      const ref = `types.schema.json#/$defs/${name}/properties/runner`;
+      expect(validate(ref, { name: "vm", ref: "job-1", attach: "ssh vm", status: { state: "running", detail: "ready", at: "2026-10-24T12:00:00Z" } })).toEqual(
+        [],
+      );
+      expect(validate(ref, { name: "vm" })).toEqual([]);
+      expect(validate(ref, { name: "vm", status: { state: "running" } }).length).toBeGreaterThan(0);
+    }
+    const result = "methods/spawn_end.schema.json#/$defs/Result";
+    expect(validate(result, { held: false, runner: { name: "vm", stop: "failed", code: 2, stderr: "reason" } })).toEqual([]);
+    expect(validate(result, { held: true, runner: { name: "vm", stop: "stopped" } }).length).toBeGreaterThan(0);
+    expect(validate(result, { held: false, runner: { name: "vm", stop: "invalid" } }).length).toBeGreaterThan(0);
+  });
+
   test("limits require exactly the Appendix D broker defaults and allow extensions", () => {
     const table = spec.slice(spec.indexOf("**Broker (`LIMITS`).**"), spec.indexOf("**Other local values.**"));
     const limits = Object.fromEntries([...table.matchAll(/`(\w+)` \| (\d+)/g)].map((match) => [match[1]!, Number(match[2])]));
