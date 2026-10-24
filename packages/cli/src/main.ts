@@ -1718,7 +1718,8 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
   let broker: Broker
   try {
     const { daemonBridge } = await import("./remote")
-    const { CLAUDE_BG_PROVIDER, CLAUDE_WAKE_TIMEOUT_S, claudeBgTask } = await import("./claude-bg")
+    const { CLAUDE_BG_PROVIDER, CLAUDE_WAKE_TIMEOUT_S, claudeBgTask, historicAfterS } = await import("./claude-bg")
+    const historic = historicAfterS(process.env)
     const bridge = await daemonBridge()
     broker = await startBroker({
       dir: relayDir(),
@@ -1733,6 +1734,7 @@ async function daemon(idle: string | undefined, policyFile: string | undefined):
         [CLAUDE_BG_PROVIDER]: { command: [...SELF, "claude-wake"], timeout_s: CLAUDE_WAKE_TIMEOUT_S },
       },
       tasks: [claudeBgTask()],
+      ...(historic !== undefined ? { historicAfterS: historic } : {}),
     })
   } catch (error) {
     if (error instanceof BrokerRunning) {

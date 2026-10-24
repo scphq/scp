@@ -15,6 +15,7 @@ import {
   claudeBgCommand,
   claudeBgTask,
   claudeWakeCommand,
+  historicAfterS,
   plan,
   readState,
   refSession,
@@ -38,6 +39,7 @@ function agent(overrides: Partial<LocalAgent> = {}): LocalAgent {
     cwd: null,
     parent: "me/lead",
     children: 0,
+    subagents: 0,
     harness_session: sessionId,
     state: "done",
     presence: "online",
@@ -75,7 +77,7 @@ function input(overrides: Partial<PlanInput> = {}): PlanInput {
     states: new Map(),
     attached: new Set(),
     now,
-    config: { stopAfterS: 600, remove: true },
+    config: { stopAfterS: 600, idleAfterS: 600, remove: true },
     ...overrides,
   }
 }
@@ -210,18 +212,31 @@ describe("planning", () => {
   test("stops a finished idle worker", () => {
     expect(plan(input())).toMatchObject([{ kind: "stop", id }])
   })
+  const child = (overrides: Partial<LocalAgent> = {}) =>
+    agent({ id: "child-id", address: "me/c1", handle: "c1", parent: "me/w1", harness_session: "child-session", state: "working", ...overrides })
   const guards: [string, Partial<PlanInput>][] = [
-    ["not started by swarm claude --bg", { records: new Map() }],
+    ["no SCP endpoint, so nothing could wake it", { records: new Map(), agents: [] }],
+    ["no SCP endpoint, so nothing could wake it", { records: new Map(), agents: [agent({ harness_session: null })] }],
     ["no endpoint", { agents: [] }],
     ["a root", { agents: [agent({ parent: null })] }],
-    ["an orchestrator", { agents: [agent({ children: 1 })] }],
+    ["a root", { agents: [agent({ parent: null, state: "working" })], records: new Map() }],
+    ["1 live worker", { agents: [agent({ children: 1 })] }],
+    ["1 live worker", { agents: [agent({ children: 1 }), child()] }],
+    ["1 live worker", { agents: [agent({ children: 1 }), child({ presence: "offline", state: "working" })] }],
+    ["1 live worker", { agents: [agent({ children: 2 }), child({ presence: "offline", state: "done" })] }],
+    ["2 live workers", { agents: [agent({ subagents: 2 })] }],
     ["unread mail", { agents: [agent({ unread: true })] }],
     ["attached", { attached: new Set([id]) }],
     ["attached", { attached: new Set(["lane"]) }],
+    ["the caller's own session", { self: new Set([sessionId]) }],
     ["busy", { entries: [entry({ status: "busy" })] }],
-    ["not done", { agents: [agent({ state: "working" })] }],
-    ["recently active", { agents: [agent({ worked_at: new Date(now - 1000).toISOString() })] }],
-    ["recently active", { config: { stopAfterS: Infinity, remove: true } }],
+    ["blocked", { entries: [entry({ status: "blocked" })] }],
+    ["waiting", { entries: [entry({ status: "waiting" })] }],
+    ["idle 1 s of 600 s", { agents: [agent({ worked_at: new Date(now - 1000).toISOString() })] }],
+    ["idle 1 s of 600 s", { agents: [agent({ state: "working", worked_at: new Date(now - 1000).toISOString() })] }],
+    ["not done, and idle_after_s is Infinity", { agents: [agent({ state: "working" })], config: { stopAfterS: 600, idleAfterS: Infinity, remove: true } }],
+    ["stop_after_s and idle_after_s are Infinity", { config: { stopAfterS: Infinity, idleAfterS: Infinity, remove: true } }],
+    ["idle 3600 s of 7200 s", { config: { stopAfterS: 7200, idleAfterS: 7200, remove: true } }],
   ]
   for (const [index, [reason, overrides]] of guards.entries()) {
     test(`keeps a guarded worker in case ${index + 1}`, () => {
@@ -229,7 +244,35 @@ describe("planning", () => {
     })
   }
   test("treats handed back work as finished", () => {
-    expect(plan(input({ agents: [agent({ state: "working", handed_back: true })] }))[0]?.kind).toBe("stop")
+    const handedBack = { agents: [agent({ state: "working", handed_back: true })] }
+    expect(plan(input({ ...handedBack, config: { stopAfterS: 600, idleAfterS: Infinity, remove: true } }))[0]?.kind).toBe("stop")
+  })
+  test("stops an unfinished idle worker after idle_after_s, and a finished one after the sooner threshold", () => {
+    expect(plan(input({ agents: [agent({ state: "working" })] }))).toMatchObject([{ kind: "stop", id }])
+    for (const [stopAfterS, idleAfterS] of [
+      [7200, 1800],
+      [1800, 7200],
+    ] as const)
+      expect(plan(input({ config: { stopAfterS, idleAfterS, remove: true } }))[0]?.kind).toBe("stop")
+    expect(plan(input({ agents: [agent({ state: "working" })], config: { stopAfterS: 1800, idleAfterS: 7200, remove: true } }))).toMatchObject([
+      { kind: "keep", reason: "idle 3600 s of 7200 s" },
+    ])
+  })
+  test("stops a worker whose children are historic or offline and not working", () => {
+    const children = [child({ historic: true }), child({ id: "c2", address: "me/c2", presence: "offline", state: "done" })]
+    expect(plan(input({ agents: [agent({ children: 2 }), ...children] }))).toMatchObject([{ kind: "stop", id }])
+    const historic = plan(input({ agents: [agent({ children: 2, historic: true }), ...children] }))
+    expect(historic).toMatchObject([{ kind: "stop", id }])
+  })
+  test("stops a session swarm did not start by its endpoint, and never removes it", () => {
+    const unrecorded = input({ records: new Map(), agents: [agent({ state: "working" })] })
+    const [stop] = plan(unrecorded)
+    expect(stop).toMatchObject({ kind: "stop", id })
+    expect(stop && "record" in stop).toBe(false)
+    expect(plan({ ...unrecorded, agents: [agent({ historic: true })] })[0]?.kind).toBe("stop")
+    expect(plan({ ...unrecorded, entries: [stoppedEntry()], agents: [agent({ historic: true })] })).toMatchObject([{ kind: "keep", reason: "stopped" }])
+    expect(plan({ ...unrecorded, agents: [agent({ historic: true })], olderThanS: 60 })[0]?.kind).toBe("stop")
+    expect(plan({ ...unrecorded, agents: [agent({ harness_session: null, handle: "w1" })] })).toMatchObject([{ kind: "keep" }])
   })
   test("ignores interactive sessions and invalid short ids", () => {
     const unnamed = entry()
@@ -242,25 +285,34 @@ describe("planning", () => {
     const wrong = agent({ harness_session: "another-session", parent: null })
     expect(plan(input({ agents: [wrong, matched] }))).toMatchObject([{ kind: "stop", agent: { id: matched.id } }])
     expect(plan(input({ agents: [wrong] }))).toMatchObject([{ kind: "keep", reason: "no endpoint" }])
+    expect(plan(input({ agents: [wrong], records: new Map() }))).toMatchObject([{ kind: "keep", reason: "no SCP endpoint, so nothing could wake it" }])
     expect(plan(input({ agents: [agent({ harness_session: null })] }))[0]?.kind).toBe("stop")
   })
   test("removes historic stopped workers when enabled", () => {
     const stopped = input({ entries: [stoppedEntry()], agents: [agent({ historic: true })] })
     expect(plan(stopped)).toMatchObject([{ kind: "remove", live: false }])
-    expect(plan({ ...stopped, config: { stopAfterS: 600, remove: false } })).toMatchObject([{ kind: "keep", reason: "stopped" }])
+    expect(plan({ ...stopped, config: { stopAfterS: 600, idleAfterS: 600, remove: false } })).toMatchObject([{ kind: "keep", reason: "stopped" }])
     expect(plan({ ...stopped, stopOnly: true })).toMatchObject([{ kind: "keep", reason: "stopped" }])
   })
   test("uses an explicit age instead of finish and configured thresholds", () => {
-    const aged = input({ agents: [agent({ state: "working" })], olderThanS: 1800, config: { stopAfterS: Infinity, remove: false } })
+    const aged = input({ agents: [agent({ state: "working" })], olderThanS: 1800, config: { stopAfterS: Infinity, idleAfterS: Infinity, remove: false } })
     expect(plan({ ...aged, stopOnly: true })[0]?.kind).toBe("stop")
     expect(plan(aged)).toMatchObject([{ kind: "remove", live: true }])
-    expect(plan({ ...aged, olderThanS: 7200 })).toMatchObject([{ kind: "keep", reason: "recently active" }])
+    expect(plan({ ...aged, olderThanS: 7200 })).toMatchObject([{ kind: "keep", reason: "idle 3600 s of 7200 s" }])
   })
-  test("removes a live historic worker only once it is finished and idle past the stop threshold", () => {
+  test("removes a live historic leaf worker only once it is idle past its stop threshold", () => {
     const live = input({ agents: [agent({ historic: true })] })
     expect(plan(live)).toMatchObject([{ kind: "remove", live: true }])
-    expect(plan({ ...live, agents: [agent({ historic: true, state: "working" })] })).toMatchObject([{ kind: "keep", reason: "not done" }])
-    expect(plan({ ...live, config: { stopAfterS: Infinity, remove: true } })).toMatchObject([{ kind: "keep", reason: "recently active" }])
+    expect(plan({ ...live, agents: [agent({ historic: true, state: "working" })] })).toMatchObject([{ kind: "remove", live: true }])
+    const never = { stopAfterS: 600, idleAfterS: Infinity, remove: true }
+    expect(plan({ ...live, agents: [agent({ historic: true, state: "working" })], config: never })).toMatchObject([
+      { kind: "keep", reason: "not done, and idle_after_s is Infinity" },
+    ])
+    expect(plan({ ...live, config: { ...never, stopAfterS: Infinity } })).toMatchObject([
+      { kind: "keep", reason: "stop_after_s and idle_after_s are Infinity" },
+    ])
+    expect(plan({ ...live, agents: [agent({ historic: true, children: 1 }), child({ historic: true })] })).toMatchObject([{ kind: "stop", id }])
+    expect(plan({ ...live, agents: [agent({ historic: true, parent: null })] })).toMatchObject([{ kind: "keep", reason: "a root" }])
   })
   test("holds a refused removal for one day unless retried", () => {
     const held = input({
@@ -285,28 +337,99 @@ test("finds attach targets only after a word with claude in its path", () => {
   ])
 })
 
-test("reads defaults and file settings with environment precedence", () => {
-  const f = fixture()
-  expect(bgConfig(f.env)).toEqual({ stopAfterS: 600, remove: true })
-  for (const [value, seconds] of [
-    ["900", 900],
-    ["10m", 600],
-    ["Infinity", Infinity],
-  ] as const)
-    expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: value, SCP_CLAUDE_BG_REMOVE: "0" })).toEqual({ stopAfterS: seconds, remove: false })
-  const dir = join(f.env.XDG_CONFIG_HOME, "scp")
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, "config.json"), JSON.stringify({ claude_bg: { stop_after_s: "Infinity", remove: false } }), { mode: 0o600 })
-  expect(bgConfig(f.env)).toEqual({ stopAfterS: Infinity, remove: false })
-  expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: "900", SCP_CLAUDE_BG_REMOVE: "1" })).toEqual({ stopAfterS: 900, remove: true })
+describe("configuration", () => {
+  const configure = (env: { XDG_CONFIG_HOME: string }, value: unknown) => {
+    const dir = join(env.XDG_CONFIG_HOME, "scp")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "config.json"), JSON.stringify(value), { mode: 0o600 })
+  }
+  test("reads defaults and file settings with environment precedence", () => {
+    const f = fixture()
+    expect(bgConfig(f.env)).toEqual({ stopAfterS: 600, idleAfterS: 600, remove: true })
+    for (const [value, seconds] of [
+      ["900", 900],
+      ["10m", 600],
+      ["Infinity", Infinity],
+    ] as const)
+      expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: value, SCP_CLAUDE_BG_REMOVE: "0" })).toEqual({
+        stopAfterS: seconds,
+        idleAfterS: 600,
+        remove: false,
+      })
+    configure(f.env, { claude_bg: { stop_after_s: "Infinity", remove: false } })
+    expect(bgConfig(f.env)).toEqual({ stopAfterS: Infinity, idleAfterS: 600, remove: false })
+    expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: "900", SCP_CLAUDE_BG_REMOVE: "1" })).toEqual({ stopAfterS: 900, idleAfterS: 600, remove: true })
+  })
+  test("reads the idle threshold from its primary names before their claude_bg aliases, the environment first", () => {
+    const f = fixture()
+    const idle = (env: Record<string, string>) => bgConfig({ ...f.env, ...env }).idleAfterS
+    expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(1200)
+    expect(idle({ SCP_IDLE_AFTER_S: "Infinity", SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(Infinity)
+    configure(f.env, { claude_bg: { idle_after_s: "1h" } })
+    expect(idle({})).toBe(3600)
+    configure(f.env, { claude_bg: { idle_after_s: "1h" }, lifecycle: { idle_after_s: 300 } })
+    expect(idle({})).toBe(300)
+    expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "90" })).toBe(90)
+    expect(idle({ SCP_IDLE_AFTER_S: "bogus" })).toBe(300)
+  })
+  test("reads the historic threshold from the environment, else config.json", () => {
+    const f = fixture()
+    expect(historicAfterS(f.env)).toBeUndefined()
+    expect(historicAfterS({ ...f.env, SCP_HISTORIC_AFTER_S: "2h" })).toBe(7200)
+    expect(historicAfterS({ ...f.env, SCP_HISTORIC_AFTER_S: "Infinity" })).toBe(Infinity)
+    expect(historicAfterS({ ...f.env, SCP_HISTORIC_AFTER_S: "0" })).toBeUndefined()
+    configure(f.env, { lifecycle: { historic_after_s: "30m" } })
+    expect(historicAfterS(f.env)).toBe(1800)
+    configure(f.env, { historic_after_s: 900, lifecycle: { historic_after_s: "30m" } })
+    expect(historicAfterS(f.env)).toBe(900)
+    expect(historicAfterS({ ...f.env, SCP_HISTORIC_AFTER_S: "120" })).toBe(120)
+  })
 })
 
 describe("background task", () => {
-  test("does nothing without launcher records", async () => {
+  test("never runs claude without launcher records or Claude Code endpoints", async () => {
     const f = fixture()
     await f.run()
     expect(existsSync(f.callsFile)).toBe(false)
-    expect(f.events).toEqual([])
+    expect(f.events.filter((event) => event[0] !== "agents")).toEqual([])
+  })
+  test("stops an idle worker swarm did not start through its endpoint, saving state so its waker can bring it back", async () => {
+    const f = fixture()
+    f.facts = agent({ harness: "claude-code", state: "working" })
+    await f.run()
+    const ref = reviveRef(sessionId, f.home, "lane")
+    expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([["hibernate", "worker-id", "claude-bg", ref, false]])
+    expect(f.calls().map((call) => call.argv)).toEqual([
+      ["agents", "--json", "--all"],
+      ["agents", "--json", "--all"],
+      ["stop", id],
+    ])
+    expect(readState(f.env, id)).toEqual({ sessionId, cwd: f.home, name: "lane", handle: "w1", stoppedAt: now })
+    f.facts = agent({ harness: "claude-code", historic: true, hibernate: "claude-bg", connections: 0 })
+    await f.run()
+    expect(f.calls().some((call) => call.argv[0] === "rm")).toBe(false)
+  })
+  test("lists claude once for a Claude Code root, then not again until a worker may be due", async () => {
+    const f = fixture()
+    const task = claudeBgTask(f.env, f.deps)
+    f.facts = agent({ harness: "claude-code", parent: null })
+    await task.run(f.context)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+    f.facts = agent({ harness: "claude-code", harness_session: `${id}-0000-4000-8000-000000000009` })
+    await task.run(f.context)
+    await task.run(f.context)
+    expect(f.calls()).toHaveLength(2)
+  })
+  test("aborts the stop when claude shows the session busy right before it", async () => {
+    const f = fixture()
+    f.record()
+    f.onHibernate = () => f.save([entry({ cwd: f.home, status: "busy" })])
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
+    expect(f.events).toContainEqual(["unhibernate", "worker-id"])
+    expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): claude shows it busy`])
+    expect(readState(f.env, id)).toBeUndefined()
   })
   test("hibernates before stopping and saves resumable state", async () => {
     const f = fixture()
@@ -322,6 +445,7 @@ describe("background task", () => {
     })
     expect(f.events.filter((event) => event[0] === "hibernate")).toEqual([["hibernate", "worker-id", "claude-bg", ref, false]])
     expect(f.calls().map((call) => call.argv)).toEqual([
+      ["agents", "--json", "--all"],
       ["agents", "--json", "--all"],
       ["stop", id],
     ])
@@ -347,7 +471,7 @@ describe("background task", () => {
       }
       await f.run()
       expect(f.events).toContainEqual(["unhibernate", "worker-id"])
-      expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+      expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
       expect(readState(f.env, id)).toBeUndefined()
     })
   }
@@ -374,6 +498,7 @@ describe("background task", () => {
       }
       await f.run()
       expect(f.calls().map((call) => call.argv)).toEqual([
+        ["agents", "--json", "--all"],
         ["agents", "--json", "--all"],
         ["stop", id],
         ["respawn", id],
@@ -431,7 +556,7 @@ describe("acting on a changed worker", () => {
     let reads = 0
     f.deps.ps = async () => (reads++ ? `/usr/bin/claude attach ${id}` : "")
     await f.run()
-    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents"])
     expect(f.facts.hibernate).toBeNull()
   })
   test("wakes a removed worker whose mail arrived during the removal", async () => {
@@ -572,6 +697,26 @@ describe("wake command", () => {
     expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
     expect(readFileSync(victim, "utf8")).toBe("untouched")
   })
+  for (const scenario of ["stopped", "removed"] as const) {
+    test(`wakes a ${scenario} worker swarm did not start from its saved stop, with no config to arm`, async () => {
+      const f = fixture()
+      const cwd = join(f.home, "workspace")
+      mkdirSync(cwd)
+      f.state({ cwd, stoppedAt: now })
+      f.save(scenario === "stopped" ? [stoppedEntry({ cwd })] : [])
+      const ref = reviveRef(sessionId, cwd, "lane")
+      const env = { ...f.env, SCP_WAKE_REF: ref, SCP_WAKE_HANDLE: "w1", SCP_WAKE_TICKET: ticket }
+      expect(await claudeWakeCommand(env, { stdout: () => {} })).toBe(0)
+      expect(f.calls().at(-1)).toEqual(
+        scenario === "stopped"
+          ? { argv: ["respawn", id], cwd: expect.any(String) }
+          : { argv: ["--bg", "--resume", sessionId, "--name", "lane", "You were woken by an SCP message: read it with relay_inbox."], cwd },
+      )
+      const output: string[] = []
+      expect(await claudeWakeCommand({ ...env, SCP_WAKE_HANDLE: "other" }, { stdout: (text) => output.push(text) })).toBe(77)
+      expect(output).toEqual(['{"declined":"unresumable"}\n'])
+    })
+  }
   test("declines a session swarm did not start, and a removed one whose transcript is gone", async () => {
     const f = fixture()
     const output: string[] = []

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
 import type { LocalAgent } from "@scp-dev/core"
 import { RelayClient } from "./client"
-import { startBroker } from "./server"
+import { historicAfter, startBroker } from "./server"
 import { type BrokerTaskContext, startTasks } from "./tasks"
 
 const cleanups: (() => Promise<void> | void)[] = []
@@ -97,5 +97,26 @@ describe("broker tasks", () => {
     await human.hello({ human: true })
     const { agents } = await human.request<{ agents: LocalAgent[] }>("agents")
     expect(agents.map((agent) => agent.address)).toEqual(["me/lane"])
+  })
+
+  test("the historic threshold comes from the option, else SCP_HISTORIC_AFTER_S, else the default", async () => {
+    expect([historicAfter("90"), historicAfter("Infinity"), historicAfter("0"), historicAfter(""), historicAfter("x"), historicAfter(undefined)]).toEqual([
+      90,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+    const threshold = async (options: { historicAfterS?: number; env?: Record<string, string> }) => {
+      const root = mkdtempSync(join(tmpdir(), "relay-historic-"))
+      cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+      const broker = await startBroker({ dir: join(root, "state"), policyPath: join(root, "policy.json"), idleMs: 0, ...options })
+      cleanups.push(() => broker.stop())
+      return (broker.core as unknown as { historicAfterS: number }).historicAfterS
+    }
+    expect(await threshold({ historicAfterS: 5, env: { SCP_HISTORIC_AFTER_S: "9" } })).toBe(5)
+    expect(await threshold({ env: { SCP_HISTORIC_AFTER_S: "Infinity" } })).toBe(Infinity)
+    expect(await threshold({ env: {} })).toBe(3600)
   })
 })
