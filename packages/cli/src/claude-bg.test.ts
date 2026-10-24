@@ -218,9 +218,9 @@ describe("planning", () => {
   test("stops a finished idle worker", () => {
     expect(plan(input())).toMatchObject([{ kind: "stop", id }])
   })
-  test("stops a finished idle worker with unread mail, which its wake then delivers", () => {
+  test("stops an idle worker with unread mail, which its wake then delivers", () => {
     expect(plan(input({ agents: [agent({ unread: true })] }))).toMatchObject([{ kind: "stop", id }])
-    expect(plan(input({ agents: [agent({ unread: true, state: "working", handed_back: true })] }))).toMatchObject([{ kind: "stop", id }])
+    expect(plan(input({ agents: [agent({ unread: true, state: "working" })] }))).toMatchObject([{ kind: "stop", id }])
   })
   const child = (overrides: Partial<LocalAgent> = {}) =>
     agent({ id: "child-id", address: "me/c1", handle: "c1", parent: "me/w1", harness_session: "child-session", state: "working", ...overrides })
@@ -236,7 +236,6 @@ describe("planning", () => {
     ["1 live worker", { agents: [agent({ children: 1 }), child({ presence: "offline", state: "working" })] }],
     ["1 live worker", { agents: [agent({ children: 2 }), child({ presence: "offline", state: "done" })] }],
     ["2 live workers", { agents: [agent({ subagents: 2 })] }],
-    ["unread mail", { agents: [agent({ unread: true, state: "working" })] }],
     ["attached", { attached: new Set([id]) }],
     ["attached", { attached: new Set(["lane"]) }],
     ["the caller's own session", { self: new Set([sessionId]) }],
