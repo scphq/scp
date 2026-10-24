@@ -564,7 +564,10 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
   return `mail raced the stop and claude respawn failed: ${firstLine(respawned.out) || `exit ${respawned.code}`}`
 }
 
-/** null while `claude agents` still shows the session idle with the planned pid, read right before `claude stop` */
+/**
+ * null while `claude agents` still shows the session idle with the planned pid, read right before `claude stop`; a turn that starts in the
+ * moment between this read and the stop is not caught
+ */
 async function stillIdle(claude: Claude, id: string, entry: ClaudeEntry): Promise<string | null> {
   const listed = (await listEntries(claude, true))?.find((one) => one.id === id)
   return listed?.status === "idle" && listed.pid === entry.pid ? null : `claude shows it ${listed ? (listed.status ?? "busy") : "unlisted"}`
@@ -916,13 +919,15 @@ async function unhibernateUnrecorded(
   for (const agent of await port.agents()) {
     const id = agent.hibernate === CLAUDE_BG_PROVIDER && agent.harness_session !== null ? ids.get(agent.harness_session) : undefined
     if (id === undefined) continue
+    const stopped = entries.some((entry) => entry.id === id && typeof entry.pid !== "number")
+    const after = stopped ? ": it stays stopped, and a message waits in its mailbox" : ""
     if (dryRun) {
-      out(`would unhibernate ${id} ${agent.address}`)
+      out(`would unhibernate ${id} ${agent.address}${after}`)
       continue
     }
     try {
       await port.unhibernate(agent)
-      out(`unhibernated ${id} ${agent.address}`)
+      out(`unhibernated ${id} ${agent.address}${after}`)
     } catch (error) {
       failed++
       out(`kept ${id} ${agent.address}: ${error instanceof Error ? error.message : String(error)}`)

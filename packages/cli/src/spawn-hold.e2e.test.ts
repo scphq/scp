@@ -351,7 +351,7 @@ test("--durable refuses a command it cannot resume, and --idle takes seconds, du
   for (const [args, text] of [
     [["--durable", "--", "sh", "-c", "true"], "--durable resumes a headless session"],
     [["--durable", "--", "codex", "exec", "--ephemeral", "go"], "--durable resumes a headless session"],
-    [["--durable", "--idle", "0", "--", "codex", "exec", "go"], "does not go with --idle 0"],
+    [["--durable", "--idle", "0", "--", "codex", "exec", "go"], "does not go with an idle time of 0"],
     [["--durable", "--no-durable", "--", "codex", "exec", "go"], "--durable and --no-durable conflict"],
     [["--idle", "soon", "--", "codex", "exec", "go"], "or Infinity"],
     [["--durable", "--", "codex", "exec", "--model", "x".repeat(600), "go"], "over 512"],
