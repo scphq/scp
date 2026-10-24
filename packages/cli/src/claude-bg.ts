@@ -204,7 +204,7 @@ export function plan(input: PlanInput): Action[] {
       keep(`${running} live worker${running === 1 ? "" : "s"}`, agent)
       continue
     }
-    if (agent.unread) {
+    if (agent.unread && !finishedOf(agent)) {
       keep("unread mail", agent)
       continue
     }
@@ -484,7 +484,7 @@ function changed(agents: AgentFacts[], then: AgentFacts): boolean {
   const now = agents.find((one) => one.id === then.id)
   return (
     !now ||
-    now.unread ||
+    (now.unread && !then.unread) ||
     later(now.worked_at, then.worked_at) ||
     later(now.mail_at, then.mail_at) ||
     (then.parent !== null && !now.parent) ||
@@ -641,7 +641,7 @@ const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind 
  */
 function maybeDue(agent: AgentFacts, agents: AgentFacts[], state: BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
   if (agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) return true
-  if (!agent.parent || agent.unread || liveChildren(agent, agents) > 0) return false
+  if (!agent.parent || (agent.unread && !finishedOf(agent)) || liveChildren(agent, agents) > 0) return false
   if (recorded && config.remove && agent.historic && leaf(agent)) return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
   if (agent.hibernate === CLAUDE_BG_PROVIDER) return false
   return now - Date.parse(agent.worked_at) >= stopAfter(agent, config) * 1000
