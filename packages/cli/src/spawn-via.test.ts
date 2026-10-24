@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { LIMITS } from "@scp-dev/core"
+import { LIMITS, RelayError } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { type FakeHubServer, startFakeHubServer } from "@scp-dev/broker/testing"
 import { processKey } from "./identity"
@@ -288,6 +288,35 @@ describe("swarm spawn --via", () => {
       expect((await swarm(["end", "lifecycle"], env)).stdout).toContain("runner vm: none")
       expect((await swarm(["end", "lifecycle", "--json"], env)).code).toBe(0)
     } finally {
+      writeFileSync(runners, original)
+    }
+  })
+
+  test("a successful runner still succeeds when the broker cannot record it", async () => {
+    const original = await Bun.file(runners).text()
+    const failed = spyOn(laptop.core, "spawnVia").mockImplementation(() => {
+      throw new RelayError("method_not_found", "spawn_via is unavailable")
+    })
+    try {
+      writeFileSync(
+        runners,
+        JSON.stringify({ vm: { command: [process.execPath, "-e", `console.log('{"address":"me/vm/w","machine":"vm","attach":"ssh vm"}')`] } }),
+      )
+      for (const flags of [[], ["--json"]]) {
+        const result = await swarm(["spawn", "--via", "vm", "--name", "w", ...flags, "--", "echo", "hi"], {
+          SCP_DIR: laptopDir,
+          SCP_RUNNERS_FILE: runners,
+        })
+        expect(result.code).toBe(0)
+        expect(result.stderr).toBe("w started, but the broker did not record it: swarm end cannot stop it through the runner (spawn_via is unavailable)\n")
+        if (flags.length) expect(JSON.parse(result.stdout)).toMatchObject({ name: "w", runner: "vm", attach: "ssh vm" })
+        else {
+          expect(result.stdout).toStartWith("w handed to runner vm:")
+          expect(result.stdout).toContain("attach: ssh vm")
+        }
+      }
+    } finally {
+      failed.mockRestore()
       writeFileSync(runners, original)
     }
   })

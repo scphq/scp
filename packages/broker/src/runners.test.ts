@@ -60,7 +60,7 @@ test("via validation, replacement, secret drops, views and parent authority", as
     await expect(f.other.client.request("spawn_end", { endpoint })).rejects.toMatchObject({ code: "not_found" })
   }
   f.mirror("w", "laptop/other")
-  await expect(f.lead.client.request("spawn_end", { endpoint: "me/vm/w" })).rejects.toMatchObject({ code: "unauthorized" })
+  await expect(f.lead.client.request("spawn_end", { endpoint: "me/vm/w" })).rejects.toMatchObject({ code: "not_found" })
   expect(f.broker.core.viaRecords()[0]!.ended_at).toBeNull()
   f.mirror()
   expect(await f.lead.client.request("spawn_end", { endpoint: "me/vm/w" })).toMatchObject({ held: false, runner: { name: "vm", stop: "none" } })
@@ -71,7 +71,8 @@ test("via validation, replacement, secret drops, views and parent authority", as
   expect(() => f.broker.core.endVia({ kind: "human", tty: false }, { endpoint: "me/vm/w" })).toThrow("only the spawner")
   f.record("unaddressed", { address: undefined, machine: undefined })
   f.mirror("unaddressed", "laptop/other")
-  await expect(f.lead.client.request("spawn_end", { endpoint: "unaddressed" })).rejects.toMatchObject({ code: "unauthorized" })
+  await expect(f.lead.client.request("spawn_end", { endpoint: "unaddressed" })).rejects.toMatchObject({ code: "not_found" })
+  expect(() => f.broker.core.endVia({ kind: "human", tty: true }, { endpoint: "unaddressed" })).toThrow("not under this runner's spawner")
   f.record("unjoined", { address: undefined, machine: undefined })
   expect(await f.lead.client.request("spawn_end", { endpoint: "unjoined" })).toEqual({ held: false, runner: { name: "vm", stop: "none" } })
 })
@@ -241,11 +242,55 @@ test("argv stays configured, identity env is scrubbed, and timeout kills the who
     f.root,
   )
   expect(JSON.parse(result.stdout)).toEqual({ argv: [], input: { scp: 1, event: "status", name: record.name, runner: "vm", parent: "me/laptop/lead" } })
-  expect(runnerEnvironment({ PATH: "/bin", SCP_NAME: "lead", SCP_HARNESS_PID: "42", SCP_GRANT: "secret", SCP_WAKE_TICKET: "ticket" })).toEqual({ PATH: "/bin" })
+  expect(
+    runnerEnvironment({
+      PATH: "/bin",
+      SCP_DIR: "/tmp/broker",
+      SCP_NAME: "lead",
+      SCP_HARNESS_PID: "42",
+      SCP_GRANT: "secret",
+      SCP_WAKE_TICKET: "ticket",
+      SCP_TOKEN: "token",
+      SCP_SESSION_TOKEN: "session-token",
+      SCP_RELAY_TOKEN: "relay-token",
+      SCP_FUTURE_CREDENTIAL: "secret",
+      CLAUDE_CODE_SESSION: "session",
+      CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "originator",
+    }),
+  ).toEqual({ PATH: "/bin", SCP_DIR: "/tmp/broker" })
   const pidfile = join(f.root, "pid")
   const ran = await runRunner({ command: ["sh", "-c", `trap '' TERM; sleep 60 & echo $! > '${pidfile}'; wait`], timeout_s: 1 }, {}, {}, f.root, "SIGKILL")
   expect(ran).toMatchObject({ code: 124, timedOut: true })
   const pid = Number(readFileSync(pidfile, "utf8").trim())
   await Bun.sleep(50)
   expect(() => process.kill(pid, 0)).toThrow()
+})
+
+test("status queues across concurrent enrich calls with at most eight processes", async () => {
+  const f = await fixture()
+  const log = join(f.root, "concurrency.log")
+  for (let i = 0; i < 17; i++) {
+    f.record(`w${i}`)
+    f.mirror(`w${i}`)
+  }
+  f.config({
+    status: command(
+      `const fs = require("fs"); const log = ${JSON.stringify(log)}; fs.appendFileSync(log, "+\\n"); await Bun.sleep(150); fs.appendFileSync(log, "-\\n"); console.log('{"state":"running"}')`,
+    ),
+  })
+  const service = runnerService(f.broker.core, f.path)
+  const views = f.broker.core.list({ all: true }).filter((view) => view.runner)
+  await Promise.all([service.enrich(views.slice(0, 9)), service.enrich(views.slice(9)), service.enrich(views)])
+  let active = 0
+  let peak = 0
+  const events = readFileSync(log, "utf8").trim().split("\n")
+  for (const event of events) {
+    active += event === "+" ? 1 : -1
+    peak = Math.max(peak, active)
+    expect(active).toBeLessThanOrEqual(8)
+  }
+  expect(events).toHaveLength(34)
+  expect(active).toBe(0)
+  expect(peak).toBe(8)
+  expect(views.every((view) => view.runner?.status?.state === "running")).toBe(true)
 })

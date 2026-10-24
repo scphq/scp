@@ -141,7 +141,7 @@ A name is lowercase letters, digits and `-`, at most 32. `command`, optional `st
 | --- | --- |
 | 0 | Done: spawn started the worker, stop stopped it, or status returned its reply. |
 | 77 | Declined: stop reports `declined`, status reports `unknown`; spawn returns 77. |
-| 124 | Timeout: the process group is killed. Stop reports `timeout`, status reports `error` with detail `timeout`. |
+| 124 | Timeout: spawn sends `SIGTERM` to the process group; stop and status kill the group with `SIGKILL`. Stop reports `timeout`, status reports `error` with detail `timeout`. |
 | 127, 126 | The runner could not start (not found, or another reason). |
 | anything else | Failure: spawn returns that code, stop reports `failed`, status reports `error` with detail `exit N`. |
 
@@ -161,7 +161,7 @@ Stop and status read one JSON line on stdin, then EOF:
 {"scp":1,"event":"stop","name":"rev","runner":"vm","parent":"me/laptop/lead","address":"me/vm/rev","machine":"vm","ref":"i-0abc123"}
 ```
 
-Status uses the same fields with `"event":"status"`. `address`, `machine` and `ref` are optional, as recorded. Neither input carries a credential, message body or grant. Both run in the user's home directory with the broker's environment minus SCP identity variables. Spawn keeps its spawner environment and requested working directory. Stdout is capped at 4096 bytes and cleaned, redacted stderr at 2048 bytes, with a bounded pipe drain.
+Status uses the same fields with `"event":"status"`. `address`, `machine` and `ref` are optional, as recorded. Neither input carries a credential, message body or grant. Both run in the user's home directory with the broker's environment without SCP variables other than `SCP_DIR`. Spawn keeps its spawner environment and requested working directory. Stdout is capped at 4096 bytes and cleaned, redacted stderr at 2048 bytes, with a bounded pipe drain.
 
 Stop needs no stdout. `swarm end` prints the runner and one of `stopped`, `declined`, `failed`, `timeout` or `none` (no configured stop), and exits 1 on `failed` or `timeout`. Its JSON result is `{endpoint?, held: false, runner: {name, stop, code?, stderr?}}`. Ending a via record stops future status checks even if stop fails; another end retries stop.
 

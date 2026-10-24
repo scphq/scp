@@ -58,8 +58,20 @@ export async function attribute(
     const remote = MACHINE_ADDRESS.exec(parent)
     if (remote) {
       const dir = opts.dir ?? relayDir(env as NodeJS.ProcessEnv)
-      const client = await (deps.connect ?? ((dir: string) => connectBroker(dir, () => startDaemon(dir))))(dir)
-      try {
+      const ms = deps.timeoutMs ?? ATTRIBUTE_TIMEOUT_MS
+      let client: RelayClient | undefined
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new RelayUsage(`no answer from the relay broker at ${dir} within ${ms} ms`)), ms)
+      })
+      const check = async () => {
+        const connected = await (deps.connect ?? ((dir: string) => connectBroker(dir, () => startDaemon(dir), ms)))(dir)
+        if (settled) {
+          connected.close()
+          return
+        }
+        client = connected
         await client.hello({ observe: true })
         const bridge = await client.request<{ enabled: boolean; machine?: string }>("cloud_status")
         if (!bridge.enabled || !bridge.machine)
@@ -67,8 +79,13 @@ export async function attribute(
             `--under ${parent} names an agent on machine ${remote[1]}, but this relay broker is not linked to a hub (${CLI_NAME} login, then ${CLI_NAME} cloud enable)`,
           )
         if (bridge.machine === remote[1]) parent = `me/${remote[2]}`
+      }
+      try {
+        await Promise.race([check(), deadline])
       } finally {
-        client.close()
+        settled = true
+        clearTimeout(timer)
+        client?.close()
       }
     }
     return { ...ROOT, env: { SCP_UNDER: parent }, parent }

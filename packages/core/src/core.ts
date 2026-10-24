@@ -2291,6 +2291,13 @@ export class RelayCore {
     this.sql.all(`UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL`, row.id, held.id)
     this.sql.all(`UPDATE grants SET issuer = ? WHERE issuer = ?`, row.id, held.id)
     this.sql.all(`UPDATE grants SET under = ? WHERE under = ?`, row.id, held.id)
+    this.sql.all(
+      `DELETE FROM spawn_via AS old WHERE spawner = ? AND EXISTS (SELECT 1 FROM spawn_via AS newer WHERE newer.spawner = ? AND newer.name = old.name AND newer.created_at > old.created_at)`,
+      held.id,
+      row.id,
+    )
+    this.sql.all(`DELETE FROM spawn_via WHERE spawner = ? AND name IN (SELECT name FROM spawn_via WHERE spawner = ?)`, row.id, held.id)
+    this.sql.all(`UPDATE spawn_via SET spawner = ? WHERE spawner = ?`, row.id, held.id)
     this.sql.all(`UPDATE groups SET owner = ? WHERE owner = ?`, row.id, held.id)
     this.sql.all(
       `INSERT OR IGNORE INTO group_members (name, endpoint, added_by, at) SELECT name, ?, added_by, at FROM group_members WHERE endpoint = ?`,
@@ -5096,17 +5103,32 @@ export class RelayCore {
       if (me.kind === "agent" && !visible) throw unreachable(params.endpoint)
       throw new RelayError("unauthorized", "only the spawner, its ancestor or the human at a terminal ends a via worker")
     }
-    if (allowed.length !== 1) throw new RelayError("invalid_params", "ambiguous via worker: name its full address")
-    const record = allowed[0]!
-    const candidates =
-      !record.address && !target
-        ? this.sql
-            .all<EndpointRow>(`SELECT * FROM endpoints WHERE kind = 'agent'`)
-            .filter((row) => !this.localRow(row) && this.address(row).startsWith("me/") && this.address(row).split("/").at(-1) === record.name)
-        : []
+    const workers = (record: ViaRecord): EndpointRow[] => {
+      const resolved = record.address ? this.lookup(record.address) : target
+      if (record.address || target) return resolved ? [resolved] : []
+      return this.sql
+        .all<EndpointRow>(`SELECT * FROM endpoints WHERE kind = 'agent'`)
+        .filter(
+          (row) =>
+            this.viaOwned(row, record) && this.discovers(me, row) && this.address(row).startsWith("me/") && this.address(row).split("/").at(-1) === record.name,
+        )
+    }
+    const tied = allowed.filter((record) => workers(record).some((worker) => this.viaOwned(worker, record)))
+    const remaining = tied.length ? tied : allowed
+    if (remaining.length !== 1) throw new RelayError("invalid_params", "ambiguous via worker: name its full address")
+    const record = remaining[0]!
+    const candidates = workers(record)
     if (candidates.length > 1) throw new RelayError("invalid_params", "ambiguous via worker: record its full address")
-    const worker = record.address ? this.lookup(record.address) : (target ?? candidates[0])
-    if (worker && !this.viaOwned(worker, record)) throw new RelayError("unauthorized", "the worker is not under this runner's spawner")
+    const named = (row: EndpointRow) => !this.localRow(row) && this.address(row).startsWith("me/") && this.address(row).split("/").at(-1) === record.name
+    const elsewhere =
+      record.address || target || candidates.length
+        ? undefined
+        : this.sql.all<EndpointRow>(`SELECT * FROM endpoints WHERE kind = 'agent'`).find((row) => named(row) && !this.viaOwned(row, record))
+    const worker = candidates[0] ?? elsewhere
+    if (worker && !this.viaOwned(worker, record)) {
+      if (me.kind === "agent" && !this.discovers(me, worker)) throw unreachable(params.endpoint)
+      throw new RelayError("unauthorized", "the worker is not under this runner's spawner")
+    }
     return this.tx(() => {
       this.sql.all(`UPDATE spawn_via SET ended_at = COALESCE(ended_at, ?) WHERE spawner = ? AND name = ?`, this.now(), record.spawner, record.name)
       this.audit("spawn_end", worker?.id ?? record.spawner, null, {

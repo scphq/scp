@@ -345,7 +345,15 @@ export async function museCommand(args: string[]): Promise<number> {
     if (!server.pid) await new Promise((resolve) => setImmediate(resolve))
     if (died || !server.pid) throw failure()
     const key = processKey(server.pid)
-    unlaunch = writeMuseLaunch(key, { ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}), ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}) }, env)
+    unlaunch = writeMuseLaunch(
+      key,
+      {
+        ...(env.SCP_NAME ? { name: env.SCP_NAME } : {}),
+        ...(env.SCP_GRANT ? { grant: env.SCP_GRANT } : {}),
+        ...(env.SCP_UNDER ? { under: env.SCP_UNDER } : {}),
+      },
+      env,
+    )
     const started = await Promise.race([
       (async () => {
         await host.request("initialize", { clientInfo: { name: "scp_waker", version: "0.1.0" } })

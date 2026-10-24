@@ -54,10 +54,7 @@ export function parseRunnerConfig(text: string, path: string): Record<string, Ru
 export function runnerEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(
     Object.entries(parent).filter(
-      ([key]) =>
-        !/^SCP_(?:NAME|SESSION|GRANT|PARENT|UNDER|HARNESS(?:_PID)?|SHIM_BINDING|SPAWN_RUNNER|AGY_CONVERSATION_FILE|LABELS|WAKE.*)$/.test(key) &&
-        !key.startsWith("CLAUDE_CODE_") &&
-        key !== "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+      ([key]) => (!key.startsWith("SCP_") || key === "SCP_DIR") && !key.startsWith("CLAUDE_CODE_") && key !== "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
     ),
   )
 }
@@ -94,6 +91,19 @@ export function runnerInput(core: FederatedCore, record: ViaRecord, event: "stop
 
 export function runnerService(core: FederatedCore, path: string, now: () => number = Date.now) {
   const cache = new Map<string, { until: number; result: Promise<{ status: NonNullable<RunnerView["status"]>; attach?: string }> }>()
+  let active = 0
+  const queue: (() => void)[] = []
+  async function status(record: ViaRecord, config: Runner, command: string[]) {
+    if (active >= 8) await new Promise<void>((resolve) => queue.push(resolve))
+    else active++
+    try {
+      return await execute(record, "status", config, command)
+    } finally {
+      const next = queue.shift()
+      if (next) next()
+      else active--
+    }
+  }
   function configs(): { runners: Record<string, Runner>; error?: string } {
     try {
       return { runners: existsSync(path) ? parseRunnerConfig(readFileSync(path, "utf8"), path) : {} }
@@ -127,7 +137,7 @@ export function runnerService(core: FederatedCore, path: string, now: () => numb
         const key = JSON.stringify(record)
         let hit = cache.get(key)
         if (!hit || hit.until <= now()) {
-          const result = execute(record, "status", config, config.status).then((r) => {
+          const result = status(record, config, config.status).then((r) => {
             const reply =
               r.code === 0
                 ? statusReply(r.stdout)

@@ -153,7 +153,12 @@ export async function viaSpawn(values: Values, command: string[], cwd: string, o
     const result = await runRunner(runner, request, spawnEnvironment(process.env, {}))
     if (result.code === 0) {
       const reply = runnerReply(result.stdout, name)
-      await client.request("spawn_via", { name, runner: via, ...reply })
+      try {
+        await client.request("spawn_via", { name, runner: via, ...reply })
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        process.stderr.write(`${name} started, but the broker did not record it: swarm end cannot stop it through the runner (${reason})\n`)
+      }
       for (const line of viaStarted({ name, runner: via, parent, reply, json: values.json === true })) out(line)
       return 0
     }
