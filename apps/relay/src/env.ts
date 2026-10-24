@@ -1,5 +1,6 @@
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 export interface Env {
+  SCP_LIMITS?: string;
   DB: D1Database;
   OAUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers;

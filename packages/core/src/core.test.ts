@@ -7,6 +7,19 @@ import { clock as hhmmss, shortId, stripControl, wrapMessage } from "./render"
 import { findSecret } from "./scrub"
 import type { Sql, SqlValue } from "./sql"
 
+const TEST_RATES = {
+  pairBurst: 20,
+  pairPerMinute: 30,
+  pairPerHour: 300,
+  userPerDay: 2000,
+  treePerMinute: 120,
+  treePerHour: 1200,
+  treePauseS: 600,
+  groupPerMinute: 60,
+  peekPairPerMinute: 6,
+  peekTargetPerHour: 60,
+}
+
 function bunSql(db: Database): Sql {
   return { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
 }
@@ -15,6 +28,7 @@ function setup(start = 1_800_000_000_000, alive?: (pid: number) => boolean) {
   const clock = { now: start }
   const db = new Database(":memory:")
   const core = new RelayCore(bunSql(db), {
+    limits: TEST_RATES,
     ...(alive ? { alive } : {}),
     now: () => clock.now,
     hash: (value) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
@@ -431,7 +445,7 @@ describe("safety", () => {
     const { core } = setup()
     const a = core.claim({ handle: "a" })
     core.claim({ handle: "b" })
-    for (let i = 0; i < LIMITS.pairBurst; i++) core.send(a.endpoint.id, { to: "b", body: String(i) })
+    for (let i = 0; i < TEST_RATES.pairBurst; i++) core.send(a.endpoint.id, { to: "b", body: String(i) })
     try {
       core.send(a.endpoint.id, { to: "b", body: "one too many" })
       throw new Error("expected rate_limited")
@@ -462,18 +476,18 @@ describe("safety", () => {
         error = caught as RelayError
       }
     }
-    expect(sent).toBe(LIMITS.pairBurst)
+    expect(sent).toBe(TEST_RATES.pairBurst)
     expect(error?.code).toBe("rate_limited")
-    expect(error?.message).toStartWith(`${LIMITS.pairBurst + 1} messages between `)
+    expect(error?.message).toStartWith(`${TEST_RATES.pairBurst + 1} messages between `)
   })
 
   test("the pair burst counts both directions: the 21st message in 10 s between two endpoints is refused, and passes once the window moves on", () => {
     const { core, clock } = setup()
     const a = core.claim({ handle: "a" }).endpoint.id
     const b = core.claim({ handle: "b" }).endpoint.id
-    for (let i = 0; i < LIMITS.pairBurst / 2; i++) core.send(a, { to: "b", body: `a${i}` })
+    for (let i = 0; i < TEST_RATES.pairBurst / 2; i++) core.send(a, { to: "b", body: `a${i}` })
     clock.now += 1000
-    for (let i = 0; i < LIMITS.pairBurst / 2; i++) core.send(b, { to: "a", body: `b${i}` })
+    for (let i = 0; i < TEST_RATES.pairBurst / 2; i++) core.send(b, { to: "a", body: `b${i}` })
     let error: RelayError | undefined
     try {
       core.send(a, { to: "b", body: "one too many" })
@@ -483,13 +497,13 @@ describe("safety", () => {
     expect(error?.code).toBe("rate_limited")
     expect(error?.retryAfterS).toBe(LIMITS.pairBurstWindowS - 1)
     expect(error?.message).toBe(
-      `${LIMITS.pairBurst + 1} messages between me/a and me/b in ${LIMITS.pairBurstWindowS} s (limit ${LIMITS.pairBurst}): pausing this pair; retry after ${LIMITS.pairBurstWindowS - 1} s`,
+      `${TEST_RATES.pairBurst + 1} messages between me/a and me/b in ${LIMITS.pairBurstWindowS} s (limit ${TEST_RATES.pairBurst}): pausing this pair; retry after ${LIMITS.pairBurstWindowS - 1} s`,
     )
     expect(core.log().at(-1)!.detail).toEqual({
       code: "rate_limited",
       message: error!.message,
       to: ["me/b"],
-      limit: LIMITS.pairBurst,
+      limit: TEST_RATES.pairBurst,
       window_s: LIMITS.pairBurstWindowS,
       retry_after_s: LIMITS.pairBurstWindowS - 1,
     })
@@ -506,11 +520,11 @@ describe("safety", () => {
     core.claim({ handle: "c" })
     const open = core.why(human, "a", "b").reasons
     const reversed = core.why(human, "b", "a").reasons
-    for (let i = 0; i < LIMITS.pairBurst; i++) core.send(i % 4 ? a : b, { to: i % 4 ? "b" : "a", body: String(i) })
+    for (let i = 0; i < TEST_RATES.pairBurst; i++) core.send(i % 4 ? a : b, { to: i % 4 ? "b" : "a", body: String(i) })
     expect(core.why(human, "b", "a")).toEqual({
       allowed: false,
-      reasons: [...reversed, `burst: ${LIMITS.pairBurst} messages between me/b and me/a in ${LIMITS.pairBurstWindowS} s (limit ${LIMITS.pairBurst})`],
-      pair: { burst: { n: LIMITS.pairBurst, limit: LIMITS.pairBurst, window_s: LIMITS.pairBurstWindowS } },
+      reasons: [...reversed, `burst: ${TEST_RATES.pairBurst} messages between me/b and me/a in ${LIMITS.pairBurstWindowS} s (limit ${TEST_RATES.pairBurst})`],
+      pair: { burst: { n: TEST_RATES.pairBurst, limit: TEST_RATES.pairBurst, window_s: LIMITS.pairBurstWindowS } },
     })
     let refused: RelayError | undefined
     try {
@@ -740,7 +754,7 @@ describe("edge cases", () => {
     db.run(
       "CREATE TABLE idempotency (from_ep TEXT NOT NULL, client_id TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (from_ep, client_id))",
     )
-    const core = new RelayCore(bunSql(db), { hash: (value) => value })
+    const core = new RelayCore(bunSql(db), { limits: TEST_RATES, hash: (value) => value })
     core.migrate()
     const a = core.claim({ handle: "a" })
     core.claim({ handle: "b" })
@@ -808,7 +822,7 @@ describe("the human inbox and rendering", () => {
     db.run(
       "CREATE TABLE messages (id TEXT PRIMARY KEY, thread TEXT NOT NULL, reply_to TEXT, kind TEXT NOT NULL, from_ep TEXT NOT NULL, to_addr TEXT NOT NULL, body TEXT NOT NULL, mime TEXT NOT NULL, data_class TEXT NOT NULL, attachments TEXT NOT NULL, hop INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)",
     )
-    const core = new RelayCore(bunSql(db), { hash: (value) => value })
+    const core = new RelayCore(bunSql(db), { limits: TEST_RATES, hash: (value) => value })
     core.migrate()
     core.claim({ handle: "a" })
     expect(code(() => core.send(core.claimHuman(false).id, { to: "a", body: "x" }))).toBeUndefined()
@@ -821,7 +835,7 @@ describe("the human inbox and rendering", () => {
     const insert = db.prepare(
       "INSERT INTO messages (id, thread, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at) VALUES (?, 't', 'message', ?, 'me/b', 'x', 'text/plain', 'public', '[]', 0, ?, ?)",
     )
-    for (let i = 0; i < LIMITS.userPerDay; i++) insert.run(`m${i}`, a.endpoint.id, clock.now - 1000, clock.now + 3_600_000)
+    for (let i = 0; i < TEST_RATES.userPerDay; i++) insert.run(`m${i}`, a.endpoint.id, clock.now - 1000, clock.now + 3_600_000)
     expect(code(() => core.send(a.endpoint.id, { to: "b", body: "over" }))).toBe("rate_limited")
     expect(code(() => core.send(core.claimHuman(true).id, { to: "b", body: "the human still gets through" }, { tty: true }))).toBeUndefined()
   })
@@ -833,7 +847,7 @@ describe("the human inbox and rendering", () => {
     const insert = db.prepare(
       "INSERT INTO messages (id, thread, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at) VALUES (?, 't', 'status', ?, 'me/b', 'x', 'text/plain', 'public', '[]', 0, ?, ?)",
     )
-    for (let i = 0; i < LIMITS.userPerDay; i++) insert.run(`m${i}`, a.endpoint.id, clock.now - 1000, clock.now + 3_600_000)
+    for (let i = 0; i < TEST_RATES.userPerDay; i++) insert.run(`m${i}`, a.endpoint.id, clock.now - 1000, clock.now + 3_600_000)
     expect(code(() => core.send(a.endpoint.id, { to: "b", body: "over", kind: "status" }))).toBe("rate_limited")
   })
 
@@ -844,7 +858,7 @@ describe("the human inbox and rendering", () => {
     const insert = db.prepare(
       "INSERT INTO messages (id, thread, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at, sender_tty) VALUES (?, 't', 'message', ?, 'me/b', 'x', 'text/plain', 'public', '[]', 0, ?, ?, 0)",
     )
-    for (let i = 0; i < LIMITS.userPerDay; i++) insert.run(`m${i}`, human, clock.now - 1000, clock.now + 3_600_000)
+    for (let i = 0; i < TEST_RATES.userPerDay; i++) insert.run(`m${i}`, human, clock.now - 1000, clock.now + 3_600_000)
     expect(code(() => core.send(human, { to: "b", body: "from a script" }))).toBe("rate_limited")
     expect(code(() => core.send(human, { to: "b", body: "from a terminal" }, { tty: true }))).toBeUndefined()
   })
@@ -852,14 +866,14 @@ describe("the human inbox and rendering", () => {
   test("capEverySender counts humans' and status messages against the daily budget too", () => {
     const db = new Database(":memory:")
     const now = 1_800_000_000_000
-    const core = new RelayCore(bunSql(db), { now: () => now, hash: (value) => value, capEverySender: true })
+    const core = new RelayCore(bunSql(db), { limits: TEST_RATES, now: () => now, hash: (value) => value, capEverySender: true })
     core.migrate()
     core.claim({ handle: "b" })
     const human = core.claimHuman(true).id
     const insert = db.prepare(
       "INSERT INTO messages (id, thread, kind, from_ep, to_addr, body, mime, data_class, attachments, hop, created_at, expires_at) VALUES (?, 't', 'status', ?, 'me/b', 'x', 'text/plain', 'public', '[]', 0, ?, ?)",
     )
-    for (let i = 0; i < LIMITS.userPerDay; i++) insert.run(`m${i}`, human, now - 1000, now + 3_600_000)
+    for (let i = 0; i < TEST_RATES.userPerDay; i++) insert.run(`m${i}`, human, now - 1000, now + 3_600_000)
     expect(code(() => core.send(human, { to: "b", body: "over" }))).toBe("rate_limited")
   })
 
@@ -1234,7 +1248,7 @@ describe("sessions and hooks", () => {
     db.run(
       "CREATE TABLE activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, endpoint TEXT NOT NULL, kind TEXT NOT NULL, tool TEXT, summary TEXT)",
     )
-    const core = new RelayCore(bunSql(db), { hash: (value) => value })
+    const core = new RelayCore(bunSql(db), { limits: TEST_RATES, hash: (value) => value })
     core.migrate()
     const a = core.claim({ handle: "a", session: "s" }, { transient: true })
     expect(a.endpoint.presence).toBe("online")
@@ -1252,7 +1266,7 @@ describe("sessions and hooks", () => {
       [now, now, P1, now],
     )
     db.run("INSERT INTO endpoints (id, handle, kind, harness, created_at, session) VALUES ('ep_2', 'named', 'agent', 'codex', ?, 'lane-7')", [now])
-    const core = new RelayCore(bunSql(db), { hash: (value) => value })
+    const core = new RelayCore(bunSql(db), { limits: TEST_RATES, hash: (value) => value })
     core.migrate()
     expect(db.query("SELECT id, process FROM endpoints WHERE kind = 'agent' ORDER BY id").all()).toEqual([
       { id: "ep_1", process: P1 },
@@ -2474,7 +2488,7 @@ describe("machine label", () => {
   test("a machine label naming the hostname names the configured machine instead; any other value, or no machine name, is kept", () => {
     const db = new Database(":memory:")
     const options = { hash: (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex"), hostname: "realhost" }
-    const named = new RelayCore(bunSql(db), { ...options, machine: "desk" })
+    const named = new RelayCore(bunSql(db), { limits: TEST_RATES, ...options, machine: "desk" })
     named.migrate()
     expect(named.claim({ handle: "a", labels: { machine: "realhost", lane: "x" } }).endpoint.labels).toEqual({ machine: "desk", lane: "x" })
     expect(named.claim({ handle: "b", labels: { machine: "other" } }).endpoint.labels).toEqual({ machine: "other" })

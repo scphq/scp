@@ -1,3 +1,4 @@
+import { RATE_LIMITS, parseLimits, wireLimits, type RateLimits } from "@scp-dev/core"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -30,7 +31,7 @@ import {
   stripControl,
   type Wake,
 } from "@scp-dev/core"
-import { FederatedCore } from "@scp-dev/hub"
+import { FederatedCore, type JudgeLimits } from "@scp-dev/hub"
 import type { RelayClient } from "./client"
 import { type Bridge, type BridgeConfig, type BridgeHooks, remoteSend, startBridge } from "./bridge"
 import { type Deliver, type JudgeClientFactory, JudgeGate } from "./judge-gate"
@@ -84,6 +85,8 @@ export interface BrokerOptions {
   env?: Record<string, string | undefined> | undefined
   /** the judge model client for a policy's `judge.model` (default the provider's HTTP API) */
   judgeClient?: JudgeClientFactory | undefined
+  /** overrides of the judge caps */
+  judgeLimits?: Partial<JudgeLimits> | undefined
   /** runner configuration, default runners.json beside the policy file */
   runnersPath?: string | undefined
   /** the wake hooks' configuration file (default wakers.json beside the policy file), read again when it changes */
@@ -314,7 +317,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       hostname: shortHostname(),
       hash: (value) => createHash("sha256").update(value).digest("hex"),
       transaction: (fn) => db.transaction(fn),
-      userPerDay: dailyCap((options.env ?? process.env).SCP_DAILY_CAP),
+      limits: brokerLimits(options.env ?? process.env),
       alive: running,
       startOf: (pid, expected) => {
         const supplied = hookProcesses.getStore()
@@ -326,7 +329,22 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     core.resetConnections()
     core.sweep()
     core.hibernateHeld()
-    judge = new JudgeGate({ sql, core, now: options.now ?? Date.now, env: options.env ?? process.env, client: options.judgeClient, log, wake })
+    judge = new JudgeGate({
+      sql,
+      core,
+      now: options.now ?? Date.now,
+      env: options.env ?? process.env,
+      client: options.judgeClient,
+      limits: {
+        endpointPerMinute: core.rates.pairPerMinute,
+        endpointPerHour: core.rates.pairPerHour,
+        treePerMinute: core.rates.treePerMinute,
+        treePerHour: core.rates.treePerHour,
+        ...options.judgeLimits,
+      },
+      log,
+      wake,
+    })
     judge.sweep()
     if (existsSync(socket)) unlinkSync(socket)
     listener = createServer((raw) => {
@@ -691,7 +709,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       endpoint: core.whoami(endpoint),
       capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
       server_time: new Date().toISOString(),
-      limits: LIMITS,
+      limits: wireLimits({ ...LIMITS, ...core.rates }),
       preamble: PREAMBLE,
       broker: brokerInfo(),
     }
@@ -1005,7 +1023,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           ...(subagent ? { subagent, ...(created ? { created } : {}) } : {}),
           capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
           server_time: new Date().toISOString(),
-          limits: LIMITS,
+          limits: wireLimits({ ...LIMITS, ...core.rates }),
           preamble: PREAMBLE,
           broker: brokerInfo(),
         }
@@ -1030,7 +1048,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           endpoint: null,
           capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
           server_time: new Date().toISOString(),
-          limits: LIMITS,
+          limits: wireLimits({ ...LIMITS, ...core.rates }),
           preamble: PREAMBLE,
           broker: brokerInfo(),
         }
@@ -1079,7 +1097,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         ...(token ? { token } : {}),
         capabilities: options.hook ? [...BROKER_CAPABILITIES, "hook"] : BROKER_CAPABILITIES,
         server_time: new Date().toISOString(),
-        limits: LIMITS,
+        limits: wireLimits({ ...LIMITS, ...core.rates }),
         preamble: PREAMBLE,
         broker: brokerInfo(),
       }
@@ -1654,8 +1672,27 @@ function selectors(params: Record<string, unknown>, key: string): string[] | und
   return value as string[]
 }
 
-/** the broker's daily send cap: off unless SCP_DAILY_CAP names a positive count */
+/** the legacy daily cap override */
 export function dailyCap(raw: string | undefined): number {
   const n = Number(raw)
   return Number.isInteger(n) && n > 0 ? n : Infinity
+}
+
+export function brokerLimits(env: Record<string, string | undefined>): Partial<RateLimits> {
+  const base = env.XDG_CONFIG_HOME || (env.HOME ? join(env.HOME, ".config") : undefined)
+  const path = base ? join(base, "scp", "config.json") : undefined
+  let config: Record<string, number> = {}
+  try {
+    const raw = path ? JSON.parse(readFileSync(path, "utf8")) : {}
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${path}: config must be a JSON object`)
+    if (raw.limits !== undefined) config = parseLimits(raw.limits, Object.keys(RATE_LIMITS), path ?? "config.json")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  const legacy = dailyCap(env.SCP_DAILY_CAP)
+  return {
+    ...config,
+    ...(Number.isFinite(legacy) ? { userPerDay: legacy } : {}),
+    ...(env.SCP_LIMITS !== undefined ? parseLimits(JSON.parse(env.SCP_LIMITS), Object.keys(RATE_LIMITS), "SCP_LIMITS") : {}),
+  }
 }

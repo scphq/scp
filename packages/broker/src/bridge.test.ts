@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type EndpointView, type Envelope, LIMITS, PROTOCOL, RelayError, type SendResult, wrapMessage } from "@scp-dev/core"
-import { type DashboardEvent, HUB_LIMITS } from "@scp-dev/hub"
+import { type DashboardEvent, HUB_LIMITS, type HubLimits } from "@scp-dev/hub"
 import { relaySocketUrl } from "./bridge"
 import { RelayClient } from "./client"
 import { type Broker, startBroker } from "./server"
@@ -29,8 +29,8 @@ async function waitFor<T>(fn: () => T | Promise<T>, what: string, ms = 5000): Pr
   }
 }
 
-function hubServer(now?: () => number): FakeHubServer {
-  const fake = startFakeHubServer({ tokens: { [TOKEN]: { tokenId: "tok_1", user: "ada" }, [OTHER_TOKEN]: { tokenId: "tok_2", user: "ada" } }, now })
+function hubServer(now?: () => number, limits?: Partial<HubLimits>): FakeHubServer {
+  const fake = startFakeHubServer({ tokens: { [TOKEN]: { tokenId: "tok_1", user: "ada" }, [OTHER_TOKEN]: { tokenId: "tok_2", user: "ada" } }, now, limits })
   cleanups.push(() => fake.stop())
   return fake
 }
@@ -655,7 +655,8 @@ describe("bridge", () => {
 
   test("an ack the hub's ack limit refuses is retried after its retry_after, so the delivery does not stay unacked", async () => {
     const clock = { now: Date.now() }
-    const fake = hubServer(() => clock.now)
+    const acksPerMinute = 1200
+    const fake = hubServer(() => clock.now, { acksPerMinute })
     const a = await machine(fake, "a")
     const b = await machine(fake, "b", { token: OTHER_TOKEN })
     const impl = await agent(a, "impl")
@@ -666,7 +667,7 @@ describe("bridge", () => {
     )
     const raw = await rawSocket(fake, OTHER_TOKEN)
     expect((await raw("hello", { protocol: PROTOCOL, machine: "drain", claim: { handle: "drain" } })).error).toBeUndefined()
-    for (let i = 0; i < HUB_LIMITS.acksPerMinute; i++) await raw("ack", { seqs: [] })
+    for (let i = 0; i < acksPerMinute; i++) await raw("ack", { seqs: [] })
     expect((await raw("ack", { seqs: [] })).error?.data?.code).toBe("rate_limited")
     await impl.request("send", { to: "b/review", body: "acked once the limit allows" })
     await waitFor(async () => (await review.request<Inbox>("inbox")).messages.length, "the delivery on b")

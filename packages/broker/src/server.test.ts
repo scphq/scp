@@ -10,6 +10,19 @@ import { LineReader, LineWriter } from "./ndjson"
 import { privateDir, socketPath } from "./paths"
 import { type Broker, type BrokerOptions, startBroker } from "./server"
 
+const TEST_RATES = {
+  pairBurst: 20,
+  pairPerMinute: 30,
+  pairPerHour: 300,
+  userPerDay: 2000,
+  treePerMinute: 120,
+  treePerHour: 1200,
+  treePauseS: 600,
+  groupPerMinute: 60,
+  peekPairPerMinute: 6,
+  peekTargetPerHour: 60,
+}
+
 const cleanups: (() => Promise<void> | void)[] = []
 afterEach(async () => {
   for (const fn of cleanups.splice(0).reverse()) await fn()
@@ -19,7 +32,13 @@ async function setup(options: { idleMs?: number; policy?: unknown } & Partial<Br
   const root = mkdtempSync(join(tmpdir(), "relay-broker-"))
   const policyPath = join(root, "policy.json")
   if (options.policy !== undefined) writeFileSync(policyPath, JSON.stringify(options.policy))
-  const broker = await startBroker({ ...options, dir: join(root, "state"), policyPath, idleMs: options.idleMs ?? 0 })
+  const broker = await startBroker({
+    env: { ...process.env, XDG_CONFIG_HOME: join(root, "config"), SCP_LIMITS: JSON.stringify(TEST_RATES) },
+    ...options,
+    dir: join(root, "state"),
+    policyPath,
+    idleMs: options.idleMs ?? 0,
+  })
   cleanups.push(() => rmSync(root, { recursive: true, force: true }))
   cleanups.push(() => broker.stop())
   return { root, broker, policyPath }
@@ -52,7 +71,7 @@ describe("broker", () => {
 
   test("a second broker on the same directory is refused", async () => {
     const { root } = await setup()
-    await expect(startBroker({ dir: join(root, "state"), idleMs: 0 })).rejects.toBeInstanceOf(BrokerRunning)
+    await expect(startBroker({ env: { XDG_CONFIG_HOME: join(root, "config") }, dir: join(root, "state"), idleMs: 0 })).rejects.toBeInstanceOf(BrokerRunning)
   })
 
   test("hello advertises what the broker serves, peek, judge and holds among it", async () => {
@@ -235,7 +254,7 @@ describe("broker", () => {
     const dir = join(root, "state")
     let started: Broker | undefined
     const client = await connectBroker(dir, () => {
-      void startBroker({ dir, idleMs: 200, policyPath: join(root, "none.json") }).then((b) => (started = b))
+      void startBroker({ env: { XDG_CONFIG_HOME: join(root, "config") }, dir, idleMs: 200, policyPath: join(root, "none.json") }).then((b) => (started = b))
     })
     expect((await client.hello({ human: true })).endpoint!.address).toBe("me/")
     client.close()
@@ -480,7 +499,12 @@ describe("broker, framing and connection limits", () => {
   test("stopping with a watcher and a long poll attached shuts down cleanly", async () => {
     const root = mkdtempSync(join(tmpdir(), "relay-broker-"))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }))
-    const broker = await startBroker({ dir: join(root, "state"), idleMs: 0, policyPath: join(root, "none.json") })
+    const broker = await startBroker({
+      env: { XDG_CONFIG_HOME: join(root, "config") },
+      dir: join(root, "state"),
+      idleMs: 0,
+      policyPath: join(root, "none.json"),
+    })
     const watcher = await RelayClient.connect(broker.socket)
     await watcher.hello({ human: true })
     await watcher.request("watch")
@@ -962,7 +986,7 @@ describe("broker, limits", () => {
     expect(refused!.code).toBe("rate_limited")
     expect(refused!.message).toMatch(
       new RegExp(
-        `^${LIMITS.pairBurst + 1} messages between me/[ab] and me/[ab] in ${LIMITS.pairBurstWindowS} s \\(limit ${LIMITS.pairBurst}\\): pausing this pair; retry after \\d+ s$`,
+        `^${TEST_RATES.pairBurst + 1} messages between me/[ab] and me/[ab] in ${LIMITS.pairBurstWindowS} s \\(limit ${TEST_RATES.pairBurst}\\): pausing this pair; retry after \\d+ s$`,
       ),
     )
     const human = await RelayClient.connect(broker.socket)
@@ -973,12 +997,12 @@ describe("broker, limits", () => {
       to: "b",
     })
     expect(why.allowed).toBe(false)
-    expect(why.pair).toMatchObject({ burst: { n: LIMITS.pairBurst }, refused: { code: "rate_limited" } })
+    expect(why.pair).toMatchObject({ burst: { n: TEST_RATES.pairBurst }, refused: { code: "rate_limited" } })
     expect(why.reasons.at(-1)).toContain(`rate_limited: ${refused!.message}`)
     const { rows } = await human.request<{ rows: { event: string; detail: Record<string, unknown> }[] }>("log", { limit: 5 })
     expect(rows.filter((row) => row.event === "refuse").at(-1)!.detail).toMatchObject({
       code: "rate_limited",
-      limit: LIMITS.pairBurst,
+      limit: TEST_RATES.pairBurst,
       window_s: LIMITS.pairBurstWindowS,
     })
   })
@@ -987,7 +1011,7 @@ describe("broker, limits", () => {
     const root = mkdtempSync(join(tmpdir(), "relay-broker-"))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }))
     const dir = join(root, "d".repeat(120))
-    const broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "none.json") })
+    const broker = await startBroker({ env: { XDG_CONFIG_HOME: join(root, "config") }, dir, idleMs: 0, policyPath: join(root, "none.json") })
     cleanups.push(() => rmSync(dirname(broker.socket), { recursive: true, force: true }))
     expect(dirname(broker.socket)).not.toBe(dir)
     expect(existsSync(dirname(broker.socket))).toBe(true)

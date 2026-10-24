@@ -141,7 +141,7 @@ brokerSuite("broker peek", (start) => {
   });
 
   test("pair and target peek budgets limit agents while a human terminal is exempt", async () => {
-    const broker = await start();
+    const broker = await start({ limits: { peekPairPerMinute: 6, peekTargetPerHour: 60 } });
     const target = await broker.agent("target");
     await target.request("peek_set", { level: "on" });
     const human = await broker.human();

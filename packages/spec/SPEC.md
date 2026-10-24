@@ -538,7 +538,7 @@ On success the broker stores the message once and one delivery per recipient, ac
 
 ### 7.4 Fan-out
 
-- `group:<name>`: the sender MUST be a member. The send reaches every other member that passes the sender's scope, at most `LIMITS.fanOutMax` members. Each group admits at most `LIMITS.groupPerMinute` (60) sends per minute.
+- `group:<name>`: the sender MUST be a member. The send reaches every other member that passes the sender's scope, at most `LIMITS.fanOutMax` members. Each group admits at most `groupPerMinute` (off by default) sends per minute.
 - `tree:children`: the sender's direct children that pass scope, at most `LIMITS.fanOutMax`.
 - Fan-out is local to a broker.
 
@@ -1192,14 +1192,18 @@ A broker MAY load a policy document with the schema below. Where the document li
 
 ### 12.2 Rates and pauses
 
+Send and peek rates are off by default. A positive integer enables a cap; `null`, `0` or an absent key disables it. `treePauseS` is a duration, default 600 seconds; `null`, `0` or an absent key retains that default. The broker reads the `limits` object in `$XDG_CONFIG_HOME/scp/config.json` (or `$HOME/.config/scp/config.json`), then a positive legacy `SCP_DAILY_CAP` overrides `userPerDay`, then the JSON object `SCP_LIMITS` overrides individual keys. Unknown keys and invalid values fail startup. Hub deployments accept the send and contact keys through their limits configuration and may read `SCP_LIMITS`. Safety and capacity guards remain enabled.
+
+`hello` and status report effective rates alongside `LIMITS`, with disabled caps explicitly `null`. Clients MUST tolerate absent or null rate keys.
+
 | Guard | Scope | Limit | Error |
 | --- | --- | --- | --- |
-| Daily cap | All agent and terminal-less human senders of a broker together; on a hub, every sender but the relay | `LIMITS.userPerDay` (2000) per 24 h on a hub; none on a broker unless `SCP_DAILY_CAP` sets one | `rate_limited`, `retry_after` 3600 |
-| Pair burst | Both directions of a pair | `LIMITS.pairBurst` (20) per `LIMITS.pairBurstWindowS` (10 s) | `rate_limited` |
-| Pair rate | One direction of a pair | `LIMITS.pairPerMinute` (30), `LIMITS.pairPerHour` (300) | `rate_limited` |
+| Daily cap | All agent and terminal-less human senders of a broker together; on a hub, every sender but the relay | `userPerDay` per 24 h, off by default | `rate_limited`, `retry_after` 3600 |
+| Pair burst | Both directions of a pair | `pairBurst` (off by default) per `LIMITS.pairBurstWindowS` (10 s) | `rate_limited` |
+| Pair rate | One direction of a pair | `pairPerMinute`, `pairPerHour` (off by default) | `rate_limited` |
 | Ping-pong | A pair | `LIMITS.pingPongAlternations` (100) sender alternations within `LIMITS.pingPongWindowS` (600 s) | pause `LIMITS.pingPongBlockS` (600 s), then `loop_guard` |
-| Tree rate | Messages from agents of one tree, counted once per non-human or not yet joined recipient | `LIMITS.treePerMinute` (120), `LIMITS.treePerHour` (1200) | the send that would pass a cap is refused `loop_guard` and the tree is paused `LIMITS.treePauseS` (600 s) |
-| Group rate | One group | `LIMITS.groupPerMinute` (60) | `rate_limited` |
+| Tree rate | Messages from agents of one tree, counted once per non-human or not yet joined recipient | `treePerMinute`, `treePerHour` (off by default) | the send that would pass a cap is refused `loop_guard` and the tree is paused `treePauseS` (600 s) |
+| Group rate | One group | `groupPerMinute` (off by default) | `rate_limited` |
 | Thread | One thread | `LIMITS.threadMax` (200) messages | `loop_guard` |
 | Inbox | One recipient | `LIMITS.inboxMax` (1000) unacknowledged; for an address not joined yet, all its deliveries. A sender's first reply to a message the recipient sent it is exempt | `inbox_full` |
 
@@ -1229,7 +1233,7 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 
 - `peek {endpoint, turns?, full?}` returns `PeekResult {endpoint, at, level, source, turns[] {role, at, text, tools}, recent_tools, status, title, unread, truncated}`. `turns` is an integer from 1 to 10, default 3, else `invalid_params`; the oldest turns are dropped while the total exceeds 8 KiB, keeping at least one. Assistant turns list the tools used since the previous turn; `recent_tools` lists those used since the newest turn read (since the incarnation when there is none); each list holds at most the 20 newest. `truncated` is true when older turns exist, a turn was clipped or turns were dropped for size. `source` is `digest` when turns are shown, else `status`.
 - The endpoint itself and the human at a terminal may always peek. Otherwise peek must be on and the viewer must be the human without a terminal that may message the target, or an agent that may message the target or has authority over it. Any access refusal is `not_found`, as is a target that is not a local agent.
-- Viewers other than the human at a terminal are limited to 6 peeks per viewer and target per minute and 60 per target per hour (`rate_limited`, `retry_after` until the oldest counted peek leaves the window).
+- Viewers other than the human at a terminal may be limited by `peekPairPerMinute` per viewer and target and `peekTargetPerHour` per target, both off by default (`rate_limited`, `retry_after` until the oldest counted peek leaves the window).
 - Output is shown as `<relay-peek of="<address>" source="<source>" turns="<n>" at="<time>" [truncated="true"]>`, one line per turn `[<role>] <text>`, `[tools: ...]`, `[tools since: ...]` (repeats collapsed to `<tool> x<n>`), `[status: <state>[, <note>]]`, `[title: ...]`, `[unread: <n>]` when above 0, or `[nothing to show]` when none of these apply, then `</relay-peek>`, after the full preamble and escaped like a message body.
 - Every peek is audited (`by`, `auth`, `turns`, `bytes`, `source`, `level`, never text), and every level change as `peek_set` (`by`, `auth`, `target`, `before`, `after`). `peek_who` returns the last 50 peeks of an endpoint to the endpoint itself, an agent with authority over it, the human at a terminal, or the human without a terminal that may message it, else `not_found`; `whoami` includes the last 5. Nothing is sent to the peeked endpoint.
 
@@ -1250,7 +1254,7 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 - A machine name matches `^[a-z0-9][a-z0-9-]{0,31}$` and is neither `me`, `local` nor the account handle. A machine binds to the first credential whose bridge, `claim` or `resume` hello succeeds on it; such a hello from another credential is `unauthorized`. Human and observer hellos bind nothing. A `claim` or `resume` hello on a machine bound by a bridge is `invalid_params`. A machine whose credential was revoked can be taken back only by a full login of the same member, or by an owner or admin.
 - Errors use the codes of section 5.5; a hub does not forward refusal detail.
 - Hub notifications to a bridge: `deliver {seq, endpoint, message}`, `endpoints {machine, endpoints, full, own?, released?}` (`own`: whether the receiving bridge's member bound the machine; `released: true` when the machine was released or expired, and the bridge then drops its rows), `fleet {at, type, ...}`, `revoked {reason}`. A newer bridge for the same machine replaces the older one, which is closed with 4000.
-- Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored; 120 calls per minute per credential (600 for a bridge), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise, lower or remove (`Infinity`) any cap, count, rate or the frame size; durations (revalidation, HTTP wait, idle times, the revoked-credential window) stay finite. `hello` reports the limits in force in `limits`, merged over the broker's `LIMITS`, a removed one as `null`, under the keys `machines`, `endpoints`, `sockets`, `frameBytes`, `callsPerMinute`, `bridgeCallsPerMinute`, `accountCallsPerMinute`, `acksPerMinute`, `accountAcksPerMinute`, `storedBytes`, `refusalsPerMinute`, `historicAfterS` (section 11.4; `Infinity` makes no agent historic) and the durations `clientMachineIdleS`, `idlePurgeS`, `httpWaitS`, `mcpWaitS`, `revalidateMs`, `deniedS` (Appendix D).
+- Limits per account: 16 machines, 512 endpoints, 64 sockets, 256 MiB stored. Request and acknowledgement rates are off by default. Repeated rate refusals close the socket with 1013. These are defaults: a deployment MAY raise, lower or remove (`Infinity`) any cap, count, rate or the frame size; durations (revalidation, HTTP wait, idle times, the revoked-credential window) stay finite. `hello` reports the limits in force in `limits`, merged over the broker's `LIMITS`, a removed one as `null`, under the keys `machines`, `endpoints`, `sockets`, `frameBytes`, `callsPerMinute`, `bridgeCallsPerMinute`, `accountCallsPerMinute`, `acksPerMinute`, `accountAcksPerMinute`, `storedBytes`, `refusalsPerMinute`, `historicAfterS` (section 11.4; `Infinity` makes no agent historic) and the durations `clientMachineIdleS`, `idlePurgeS`, `httpWaitS`, `mcpWaitS`, `revalidateMs`, `deniedS` (Appendix D).
 - The hub's `list {all?, historic?, harness?, kind?, presence?}` filters as section 11.3: without `all` or `historic` it leaves historic agents out, and its views carry `active_at` and `historic` as the hub derives them (section 11.4).
 
 ### 14.2 Bridge
@@ -1330,14 +1334,14 @@ A hub reads contacts, allowlists and the egress and ingress gates from its host 
 
 | Limit | Default | Window | Error |
 | --- | --- | --- | --- |
-| Pair (sender, target) | 10 | minute | `rate_limited` |
-| Pair | 100 | hour | `rate_limited` |
-| Contact | 200, raisable by the contact's own limits to at most 2000 | UTC day | `rate_limited`, `retry_after` to UTC midnight |
+| Pair (sender, target) | off (`contactPerMinute`) | minute | `rate_limited` |
+| Pair | off (`contactPerHour`) | hour | `rate_limited` |
+| Contact | off (`contactPerDay`, ceiling `contactPerDayMax`) | UTC day | `rate_limited`, `retry_after` to UTC midnight |
 | Thread | 50 messages | 24 h (sender), stored messages (receiver) | `loop_guard` |
 | Hop | 8 | | `loop_guard` |
 | Body | 16 KiB | | `too_large` |
 
-- A contact's own limits can only lower the minute and hour limits. The receiver also applies the sender's declared limits.
+- Minute and hour caps are the minimum of the relay cap, the contact's own limit and the sender's declared limit, with missing values unlimited. A finite relay `contactPerDay` is a floor: the contact's own daily limit may raise it up to `contactPerDayMax`. With the relay daily cap off, the contact's own daily limit applies, or the day is unlimited. The sender's declared daily limit lowers the result in both cases.
 - The receiver counts from its cross-account inbox per (sending account, sender, target) for minute and hour and per sending account for the day; `retry_after` is the oldest counted message plus the window minus now. It also refuses `inbox_full` above 256 MiB stored or 1000 unread for the target.
 - **Day reservation.** The sender hub persists the day count ahead of use: when the stored reservation is used up, it reserves the count plus `min(20, 1 + sends in the last 60 s)`. After a restart the stored reservation is taken as spent, so the count can only overcount. The reservation is trued down to the real count at the later of 60 s after the last send and 5 minutes after the last write.
 - **Refund.** When delivery to the peer fails with an internal error or `unavailable`, the minute, hour, thread and day counts are refunded (the stored reservation stays). A refusal by the peer, a peer hold and a duplicate are not refunded. Egress holds and refusals spend nothing.
@@ -1569,7 +1573,7 @@ Frame and body limits, per-connection concurrency and output caps, inbox capacit
 ### 17.8 Privacy
 
 - Titles, now lines, working directories and labels are visible to every endpoint that may message the agent. A bridge mirrors them to the hub with harness, model and presence, and forwards the activity rows (kind, tool, summary) of mirrored endpoints; redaction drops titles, now lines, working directories and activity summaries, never labels or tool names. An inferred title can carry the first line of the session's first prompt.
-- Peek is off by default, local only, audited, rate limited and visible to the peeked endpoint through `peek_who`.
+- Peek is off by default, local only, audited, optionally rate limited and visible to the peeked endpoint through `peek_who`.
 - The judge model sees bodies on judged boundaries; holds keep bodies until resolved or expired. Audit never keeps bodies.
 - A hub keeps the bodies of the messages it relays until 7 days after they expire, and their sender and recipient pairs for an hour. The bodies of sends between endpoints of one machine never reach the hub.
 - A linked broker reports metadata of same-machine deliveries to its hub (section 14.2): sender and recipient handles, kind, time and hashed message and thread ids. Only metadata leaves the machine, never a body, note, label or title. A bridge configured with `mirror_local: false` sends none.
@@ -1847,7 +1851,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 
 ## Appendix D. Limits and defaults
 
-**Broker (`LIMITS`).** Fixed in the reference broker and reported by `hello` as `limits`; they are not configurable, except `endpointRetireS` and `endpointRetireMax` (section 6.4 rule 3) and `historicAfterS` (section 11.4).
+**Broker (`LIMITS`).** Reported by `hello` as `limits`, with configurable send and peek rates merged over the fixed safety guards. Other configurable entries are `endpointRetireS` and `endpointRetireMax` (section 6.4 rule 3) and `historicAfterS` (section 11.4).
 
 | Name | Value | Name | Value |
 | --- | --- | --- | --- |
@@ -1857,9 +1861,9 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `inboxMax` | 1000 | `inboxPage` | 100 |
 | `waitMaxS` | 50 | `hopMax` | 64 |
 | `threadMax` | 200 | `causalWindowS` | 120 |
-| `pairBurst` | 20 | `pairBurstWindowS` | 10 |
-| `pairPerMinute` | 30 | `pairPerHour` | 300 |
-| `userPerDay` | 2000 | `pingPongAlternations` | 100 |
+| `pairBurst` | null (off) | `pairBurstWindowS` | 10 |
+| `pairPerMinute` | null (off) | `pairPerHour` | null (off) |
+| `userPerDay` | null (off) | `pingPongAlternations` | 100 |
 | `pingPongWindowS` | 600 | `pingPongBlockS` | 600 |
 | `onlineWithinS` | 60 | `hookOnlineS` | 300 |
 | `hookIdleS` | 1800 | `hookEndedGraceS` | 30 |
@@ -1876,8 +1880,9 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `activitySummaryChars` | 200 | `textField` | 512 |
 | `lineageMax` | 16 | `depthMax` | 32 |
 | `fanOutMax` | 32 | `fanOutTotal` | 64 |
-| `treePerMinute` | 120 | `treePerHour` | 1200 |
-| `treePauseS` | 600 | `groupPerMinute` | 60 |
+| `treePerMinute` | null (off) | `treePerHour` | null (off) |
+| `treePauseS` | 600 | `groupPerMinute` | null (off) |
+| `peekPairPerMinute` | null (off) | `peekTargetPerHour` | null (off) |
 | `grantTtlS` | 604800 | `groupIdleS` | 86400 |
 | `policyLoadsKept` | 8 | `titleRefreshTurns` | 5 |
 | `stderrBytes` | 1024 | `wakeDebounceS` | 60 |
@@ -1887,13 +1892,13 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 
 **Other local values.** Line 256 KiB; partial line 30 s; 32 concurrent requests per connection; 4 MiB output buffer (the last three are defaults an embedding MAY change at broker start); title 64 characters; labels 16; `client_id` 128 characters; mime 64 characters; selectors per list 64; message short id 6 characters, suffix references at least 4.
 
-**Peek.** Ring 20 turns; store 2000 characters; read 600 (full 2000) per turn; 8 KiB total; 3 turns default, 10 maximum; 6 per viewer and target per minute; 60 per target per hour; quote cut 40 characters against 50 bodies; `peek_who` 50 rows; `whoami` 5 rows; tool lists 20 names; raw turn input 65536 characters.
+**Peek.** Ring 20 turns; store 2000 characters; read 600 (full 2000) per turn; 8 KiB total; 3 turns default, 10 maximum; `peekPairPerMinute` and `peekTargetPerHour` off by default; quote cut 40 characters against 50 bodies; `peek_who` 50 rows; `whoami` 5 rows; tool lists 20 names; raw turn input 65536 characters.
 
-**Hub** (defaults, section 14.1). 16 machines; 512 endpoints; 64 sockets; frame 262144 bytes; 120 calls per minute per credential (bridge 600), 1200 per account; 1200 acknowledgements per minute per credential, 4800 per account; 256 MiB stored; 10 refusal audit rows per minute per code; client machine idle 14 d; idle hub storage purged after 30 d; HTTP wait 25 s; remote MCP wait 50 s (`mcpWaitS`, at most 50); remote MCP result text 150000 characters, `relay_inbox` messages 145000; revalidation 300 s, a check failing that long closes with 1013; revoked credential refused 3600 s; a mirror sync at most 4096 parts of 261120 bytes.
+**Hub** (defaults, section 14.1). 16 machines; 512 endpoints; 64 sockets; frame 262144 bytes; request and acknowledgement rates off by default; 256 MiB stored; 10 refusal audit rows per minute per code; client machine idle 14 d; idle hub storage purged after 30 d; HTTP wait 25 s; remote MCP wait 50 s (`mcpWaitS`, at most 50); remote MCP result text 150000 characters, `relay_inbox` messages 145000; revalidation 300 s, a check failing that long closes with 1013; revoked credential refused 3600 s; a mirror sync at most 4096 parts of 261120 bytes.
 
-**Cross-account.** Body 16384; hop 8; thread 50; pair 10 per minute and 100 per hour; contact 200 per day (at most 2000); reservation step at most 20; true-up after 5 minutes; 50 active contacts; 20 invites per day; 32 allowlist entries.
+**Cross-account.** Body 16384; hop 8; thread 50; pair and contact rates off by default; reservation step at most 20; true-up after 5 minutes; 50 active contacts; 20 invites per day; 32 allowlist entries.
 
-**Judge.** Timeout 12 s (1 to 30); local budget 120 per minute and 1200 per hour per broker, 30 and 300 per endpoint, 60 and 600 per tree; 100 waiting holds per sender; hosted (egress and ingress) budgets 10 and 100 per endpoint, 30 and 300 per account, 120 and 1200 per hub, while a hub's local-side judge uses the local values unless its operator lifts them; hosted holds 100 per account and 25 per peer; reason 200 characters; 64 redactions.
+**Judge.** Timeout 12 s (1 to 30); local budget 120 per minute and 1200 per hour per broker (the policy `budget`); per endpoint and per tree judge rates follow `pairPerMinute`, `pairPerHour`, `treePerMinute` and `treePerHour`, off by default; 100 waiting holds per sender; hosted (egress and ingress) budgets 10 and 100 per endpoint, 30 and 300 per account, 120 and 1200 per hub; hosted holds 100 per account and 25 per peer; reason 200 characters; 64 redactions.
 
 ## Appendix E. Local binding (Unix)
 

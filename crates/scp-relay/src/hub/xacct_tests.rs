@@ -14,7 +14,10 @@ struct Linked {
     brx: mpsc::Receiver<String>,
 }
 async fn linked(gate: Option<Arc<dyn Gate>>) -> Linked {
-    let (hub, ga) = fixture().await;
+    linked_limits(gate, &[]).await
+}
+async fn linked_limits(gate: Option<Arc<dyn Gate>>, overrides: &[&str]) -> Linked {
+    let (hub, ga) = fixture_limits(overrides).await;
     crate::admin::account(hub.store.as_ref(), "beta")
         .await
         .unwrap();
@@ -251,7 +254,7 @@ async fn contact_direction_allowlist_and_scopes_fail_closed() {
 }
 #[tokio::test]
 async fn cross_limits_and_deduplication() {
-    let mut r = linked(None).await;
+    let mut r = linked_limits(None, &["contactPerMinute=10"]).await;
     assert_eq!(
         r.send(false, json!({"body":"é".repeat(8193)})).await["error"]["data"]["code"],
         "too_large"

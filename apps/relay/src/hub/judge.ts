@@ -31,7 +31,7 @@ export function judgeSetup(env: Env): { policy: JudgePolicy; options: HubJudgeOp
       env: { [KEY_ENV]: key },
       // a bound fetch: the Workers runtime refuses one called as another object's method
       client: (m, k) => new HttpJudgeClient({ model: m.id, effort: m.effort, key: k, fetch: (input, init) => fetch(input, init) }),
-      limits: { endpointPerMinute: Infinity, endpointPerHour: Infinity, treePerMinute: Infinity, treePerHour: Infinity, heldPerSender: Infinity },
+      limits: { heldPerSender: Infinity },
     },
   };
 }

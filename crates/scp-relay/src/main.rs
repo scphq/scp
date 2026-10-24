@@ -211,6 +211,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             wake,
         } => {
             let mut configured = Limits::default();
+            match std::env::var("SCP_LIMITS") {
+                Ok(raw) => configured.apply_json(&raw).map_err(std::io::Error::other)?,
+                Err(std::env::VarError::NotPresent) => {}
+                Err(error) => return Err(error.into()),
+            }
             for limit in limits {
                 configured.apply(&limit).map_err(std::io::Error::other)?;
             }

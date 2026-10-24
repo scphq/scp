@@ -1,5 +1,5 @@
-import { LIMITS, RelayError, sha256Hex, type Sql, type SqlValue, stripControl } from "@scp-dev/core";
-import { GRAPH_MINUTES, type HubConn, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub";
+import { parseLimits, LIMITS, RelayError, sha256Hex, type Sql, type SqlValue, stripControl } from "@scp-dev/core";
+import { GRAPH_MINUTES, HUB_DURATIONS, HUB_LIMITS, type HubConn, type HubLimits, type HubSocket, RelayHub } from "@scp-dev/hub";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import { DASH_HEADER, GRANT_HEADER, grantValid, ORG_HEADER, parseGrant } from "./grant";
@@ -12,19 +12,13 @@ const ORG_KEY = "hub:org";
 const JUDGE_KEY = "hub:judge";
 const HANDLE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-/** the demo relay caps nothing; durations stay as the hub sets them */
+/** the demo relay lifts capacity caps */
 export const NO_LIMITS: Partial<HubLimits> = {
   machines: Infinity,
   endpoints: Infinity,
   sockets: Infinity,
   frameBytes: Infinity,
-  callsPerMinute: Infinity,
-  bridgeCallsPerMinute: Infinity,
-  accountCallsPerMinute: Infinity,
-  acksPerMinute: Infinity,
-  accountAcksPerMinute: Infinity,
   storedBytes: Infinity,
-  refusalsPerMinute: Infinity,
 };
 
 /** each socket's hub view, rebuilt from its attachment once per instance */
@@ -94,7 +88,10 @@ export class OrgHub extends DurableObject<Env> {
       save: (socket) => webSockets.get(socket)?.serializeAttachment(socket.conn),
       log: (event, fields) => console.log(JSON.stringify({ event, ...fields })),
       fetch: (url, init) => fetch(url, init),
-      limits: NO_LIMITS,
+      limits: {
+        ...NO_LIMITS,
+        ...(env.SCP_LIMITS !== undefined ? parseLimits(JSON.parse(env.SCP_LIMITS), Object.keys(HUB_LIMITS), "SCP_LIMITS", HUB_DURATIONS) : {}),
+      },
       dashboard: (event) => {
         const text = JSON.stringify(event);
         for (const ws of ctx.getWebSockets(DASH_TAG)) {

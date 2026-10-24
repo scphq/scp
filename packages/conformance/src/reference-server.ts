@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { type CrossAccountLink, PASS_GATE, sha256Hex, type Sql, type SqlValue, type XContact } from "@scp-dev/core";
-import { type HubGrant, type HubLimits, type HubSocket, type HubWakeOptions, RelayHub } from "@scp-dev/hub";
+import { type CrossAccountLink, PASS_GATE, parseLimits, sha256Hex, type Sql, type SqlValue, type XContact } from "@scp-dev/core";
+import { HUB_DURATIONS, HUB_LIMITS, type HubGrant, type HubLimits, type HubSocket, type HubWakeOptions, RelayHub } from "@scp-dev/hub";
 import type { ServerWebSocket } from "bun";
 import type { ContactOp, ContactOptions, MintOptions } from "./targets";
 
@@ -18,14 +18,17 @@ const { values } = parseArgs({
     "cors-origin": { type: "string", multiple: true },
   },
 });
-const limits: Partial<HubLimits> = Object.fromEntries(
-  (values.limit ?? []).map((entry) => {
-    const [key, raw] = entry.split("=");
-    const value = Number(raw);
-    if (!key || raw === undefined || Number.isNaN(value) || value <= 0) throw new Error("--limit requires name=positive-number");
-    return [key, value];
-  }),
-);
+const limits: Partial<HubLimits> = {
+  ...(process.env.SCP_LIMITS !== undefined ? parseLimits(JSON.parse(process.env.SCP_LIMITS), Object.keys(HUB_LIMITS), "SCP_LIMITS", HUB_DURATIONS) : {}),
+  ...Object.fromEntries(
+    (values.limit ?? []).map((entry) => {
+      const [key, raw] = entry.split("=");
+      const value = Number(raw);
+      if (!key || raw === undefined || Number.isNaN(value) || value < 0) throw new Error("--limit requires name=nonnegative-number");
+      return [key, value];
+    }),
+  ),
+};
 const wake: Partial<HubWakeOptions> = Object.fromEntries(
   (values.wake ?? []).map((entry) => {
     const [key, raw] = entry.split("=");

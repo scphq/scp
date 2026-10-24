@@ -10,8 +10,6 @@ export const PEEK = {
   totalBytes: 8 * 1024,
   turnsDefault: 3,
   turnsMax: 10,
-  pairPerMinute: 6,
-  targetPerHour: 60,
   whoKeep: 50,
   stateKeep: 5,
   toolsKeep: 20,

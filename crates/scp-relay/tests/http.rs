@@ -478,6 +478,13 @@ fn limits_validate() {
     let mut l = Limits::default();
     l.apply("machines=Infinity").unwrap();
     assert_eq!(l.0["machines"], None);
+    l.apply("userPerDay=0").unwrap();
+    assert_eq!(l.cap("userPerDay"), None);
+    l.apply_json(r#"{"pairBurst":2,"contactPerDay":null}"#)
+        .unwrap();
+    assert_eq!(l.cap("pairBurst"), Some(2));
+    assert_eq!(l.cap("contactPerDay"), None);
+    assert!(l.apply("treePauseS=0").is_err());
     l.apply("frameBytes=42").unwrap();
     assert_eq!(l.0["frameBytes"], Some(42));
     assert!(l.apply("httpWaitS=Infinity").is_err());
@@ -527,7 +534,17 @@ async fn process_sigterm_flushes_socket_close() {
     let file = target.join(format!("signal-test-{}.db", scp_relay::random("")));
     let store = format!("sqlite://{}", file.display());
     let mut process = tokio::process::Command::new(binary)
-        .args(["serve", "--listen", "127.0.0.1:0", "--store", &store])
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--store",
+            &store,
+            "--limit",
+            "pairBurst=3",
+        ])
+        .env("SCP_LIMITS", r#"{"pairBurst":1,"userPerDay":7}"#)
+        .env("SCP_RELAY_LIMIT", "pairBurst=2")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -580,6 +597,17 @@ async fn process_sigterm_flushes_socket_close() {
             .unwrap(),
     );
     let (mut ws, _) = connect_async(request).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id":1,"method":"hello","params":{"protocol":"scp/1","observe":true}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let hello = ws.next().await.unwrap().unwrap();
+    let hello: Value = serde_json::from_str(hello.to_text().unwrap()).unwrap();
+    assert_eq!(hello["result"]["limits"]["pairBurst"], 3);
+    assert_eq!(hello["result"]["limits"]["userPerDay"], 7);
     let killed = tokio::process::Command::new("kill")
         .args(["-TERM", &process.id().unwrap().to_string()])
         .status()
@@ -836,4 +864,36 @@ async fn wake_cli_rejects_unknown_keys_and_invalid_values() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
     }
+}
+
+#[tokio::test]
+async fn limits_env_rejects_invalid_configuration_at_startup() {
+    for raw in [
+        "[]",
+        r#"{"unknown":1}"#,
+        r#"{"pairBurst":false}"#,
+        r#"{"treePauseS":-1}"#,
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_scp-relay"))
+            .args(["serve", "--store", "sqlite::memory:"])
+            .env("SCP_LIMITS", raw)
+            .env_remove("SCP_RELAY_LIMIT")
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("SCP_LIMITS"),
+            "{raw}"
+        );
+    }
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_scp-relay"))
+        .args(["serve", "--store", "sqlite::memory:", "--wake", "unknown=1"])
+        .env("SCP_LIMITS", r#"{"pairBurst":1}"#)
+        .env("SCP_RELAY_LIMIT", "treePauseS=0")
+        .output()
+        .await
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duration must be positive"));
 }

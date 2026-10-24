@@ -6,6 +6,19 @@ import { LIMITS, RelayError, type ScopeActor } from "./protocol"
 import { PREAMBLE, wrapMessage, wrapPeek } from "./render"
 import type { Sql, SqlValue } from "./sql"
 
+const TEST_RATES = {
+  pairBurst: 20,
+  pairPerMinute: 30,
+  pairPerHour: 300,
+  userPerDay: 2000,
+  treePerMinute: 120,
+  treePerHour: 1200,
+  treePauseS: 600,
+  groupPerMinute: 60,
+  peekPairPerMinute: 6,
+  peekTargetPerHour: 60,
+}
+
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`
 const TTY: ScopeActor = { kind: "human", tty: true }
 const NO_TTY: ScopeActor = { kind: "human", tty: false }
@@ -16,6 +29,7 @@ function setup() {
   const db = new Database(":memory:")
   const sql: Sql = { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
   const core = new RelayCore(sql, {
+    limits: TEST_RATES,
     now: () => clock.now,
     hash: (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
     transaction: <T>(fn: () => T): T => db.transaction(fn)(),
@@ -291,15 +305,15 @@ describe("peek", () => {
     for (let n = 0; n < 12; n++) claim(`p${n}`, 100 + n)
     claim("b", 2)
     core.peekSet(as("b"), { level: "on" })
-    for (let n = 0; n < PEEK.pairPerMinute; n++) core.peek(as("p0"), { endpoint: "b" })
+    for (let n = 0; n < TEST_RATES.peekPairPerMinute; n++) core.peek(as("p0"), { endpoint: "b" })
     const limited = failure(() => core.peek(as("p0"), { endpoint: "b" }))
     expect(limited.code).toBe("rate_limited")
     expect(limited.retryAfterS).toBeGreaterThan(0)
     for (let n = 0; n < 20; n++) core.peek(TTY, { endpoint: "b" })
-    let done = PEEK.pairPerMinute
-    while (done < PEEK.targetPerHour) {
+    let done = TEST_RATES.peekPairPerMinute
+    while (done < TEST_RATES.peekTargetPerHour) {
       tick(61_000)
-      for (let p = 1; p < 12 && done < PEEK.targetPerHour; p++, done++) core.peek(as(`p${p}`), { endpoint: "b" })
+      for (let p = 1; p < 12 && done < TEST_RATES.peekTargetPerHour; p++, done++) core.peek(as(`p${p}`), { endpoint: "b" })
     }
     expect(failure(() => core.peek(as("p11"), { endpoint: "b" })).code).toBe("rate_limited")
   })

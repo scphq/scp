@@ -256,8 +256,7 @@ async fn disabled_budgets_and_zero_budgets() {
     drop(hub);
     let (hub, g) = fixture_limits(&["callsPerMinute=0"]).await;
     let response = hub.rpc(g, observer_hello()).await;
-    assert_eq!(code(&response), "rate_limited");
-    assert!(response["error"]["data"]["retry_after"].is_null());
+    assert!(response["error"].is_null(), "{response}");
 }
 #[tokio::test]
 async fn machine_and_endpoint_caps_allow_updates_and_rollback_failed_claims() {
@@ -952,7 +951,7 @@ async fn oversized_ack_spends_at_most_a_page_even_when_validation_refuses_it() {
 }
 #[tokio::test]
 async fn terminal_humans_keep_hops_and_spend_the_account_daily_message_budget() {
-    let (hub, g) = fixture().await;
+    let (hub, g) = fixture_limits(&["userPerDay=2000"]).await;
     let human_hello = || {
         request(
             1,
@@ -1022,4 +1021,196 @@ async fn terminal_humans_keep_hops_and_spend_the_account_daily_message_budget() 
         "2000 messages in the last day"
     );
     assert_eq!(response[1]["error"]["data"]["retry_after"], 3600);
+}
+
+async fn guard_endpoints(hub: &Hub, g: &Grant) -> (Arc<Mutex<AccountHub>>, Endpoint, Endpoint) {
+    let (account, id, _rx) = bridge(hub, g, "host").await;
+    let response = hub
+        .call(
+            &account,
+            &id,
+            request(
+                2,
+                "mirror",
+                json!({"endpoints":[view("sender"),view("target")]}),
+            ),
+            false,
+        )
+        .await;
+    assert!(response["error"].is_null(), "{response}");
+    let endpoints = account.lock().await.endpoints().await.unwrap();
+    let sender = endpoints
+        .iter()
+        .find(|e| e.handle == "sender")
+        .unwrap()
+        .clone();
+    let target = endpoints
+        .iter()
+        .find(|e| e.handle == "target")
+        .unwrap()
+        .clone();
+    (account, sender, target)
+}
+
+#[tokio::test]
+async fn configured_pair_and_tree_windows_and_pause() {
+    for key in [
+        "pairBurst",
+        "pairPerMinute",
+        "pairPerHour",
+        "treePerMinute",
+        "treePerHour",
+    ] {
+        let setting = format!("{key}=2");
+        let (hub, g) = fixture_limits(&[&setting, "treePauseS=90"]).await;
+        let (account, sender, target) = guard_endpoints(&hub, &g).await;
+        let now = crate::now_ms();
+        hub.store
+            .hub_write(
+                &g.user_id,
+                HubWrite {
+                    pairs: (0..2)
+                        .map(|_| {
+                            (
+                                scp_relay_store::PairEvent {
+                                    from_ep: sender.id.clone(),
+                                    to_ep: target.id.clone(),
+                                    at: now,
+                                },
+                                false,
+                            )
+                        })
+                        .collect(),
+                    ..HubWrite::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut account = account.lock().await;
+        let error = account
+            .send_guards(
+                &sender,
+                std::slice::from_ref(&target),
+                "fresh",
+                None,
+                "message",
+                now,
+            )
+            .await
+            .unwrap_err();
+        if key.starts_with("tree") {
+            assert_eq!(error.code, "loop_guard", "{key}");
+            assert_eq!(error.retry, Some(90));
+            let notices = hub.store.messages(&g.user_id, None, now, 10).await.unwrap();
+            assert!(notices.iter().any(|m| m.envelope.contains("1.5 minutes")));
+            let paused = account
+                .send_guards(
+                    &sender,
+                    std::slice::from_ref(&target),
+                    "fresh",
+                    None,
+                    "message",
+                    now + 1,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(paused.message, "this tree is paused");
+        } else {
+            assert_eq!(error.code, "rate_limited", "{key}");
+            account.limits.apply(&format!("{key}=0")).unwrap();
+            account
+                .send_guards(
+                    &sender,
+                    std::slice::from_ref(&target),
+                    "fresh",
+                    None,
+                    "message",
+                    now,
+                )
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn default_rates_allow_more_than_two_thousand_messages() {
+    let (hub, g) = fixture().await;
+    let (account, sender, target) = guard_endpoints(&hub, &g).await;
+    let now = crate::now_ms();
+    for n in 0..2001 {
+        hub.store
+            .store_message(
+                &g.user_id,
+                scp_relay_store::Message {
+                    id: format!("seed{n}"),
+                    thread: format!("thread{n}"),
+                    reply_to: None,
+                    kind: "message".into(),
+                    from_ep: sender.id.clone(),
+                    to_addr: "host/target".into(),
+                    created_at: now,
+                    expires_at: now + 86400000,
+                    envelope: "{}".into(),
+                },
+                vec![],
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    hub.store
+        .hub_write(
+            &g.user_id,
+            HubWrite {
+                pairs: (0..2001)
+                    .map(|_| {
+                        (
+                            scp_relay_store::PairEvent {
+                                from_ep: sender.id.clone(),
+                                to_ep: target.id.clone(),
+                                at: now,
+                            },
+                            false,
+                        )
+                    })
+                    .collect(),
+                ..HubWrite::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = account.lock().await;
+    for _ in 0..32 {
+        account
+            .send_guards(
+                &sender,
+                std::slice::from_ref(&target),
+                "fresh",
+                None,
+                "message",
+                now,
+            )
+            .await
+            .unwrap();
+    }
+    drop(account);
+    let hello = hub.rpc(g, observer_hello()).await;
+    let report = &hello["result"]["limits"];
+    for key in [
+        "userPerDay",
+        "pairBurst",
+        "pairPerMinute",
+        "pairPerHour",
+        "treePerMinute",
+        "treePerHour",
+        "contactPerMinute",
+        "contactPerHour",
+        "contactPerDay",
+        "contactPerDayMax",
+    ] {
+        assert!(report.get(key).unwrap().is_null(), "{key}");
+    }
+    assert_eq!(report["treePauseS"], 600);
+    assert_eq!(report["pairBurstWindowS"], 10);
 }

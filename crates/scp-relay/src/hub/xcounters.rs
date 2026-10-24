@@ -49,20 +49,35 @@ pub(super) fn until_tomorrow(now: i64) -> i64 {
     ((day_start(now) + DAY - now + 999) / 1000).max(1)
 }
 pub(super) fn caps(
+    limits: &crate::http::Limits,
     own: Option<&scp_relay_store::XLimits>,
     declared: Option<&scp_relay_store::XLimits>,
 ) -> (i64, i64, i64) {
     let own = own.cloned().unwrap_or_default();
     let dec = declared.cloned().unwrap_or_default();
-    (
-        10.min(own.per_minute.unwrap_or(10))
-            .min(dec.per_minute.unwrap_or(i64::MAX)),
-        100.min(own.per_hour.unwrap_or(100))
-            .min(dec.per_hour.unwrap_or(i64::MAX)),
-        own.per_day
+    let relay = |key| {
+        limits
+            .cap(key)
+            .map(|n| i64::try_from(n).unwrap_or(i64::MAX))
+    };
+    let day = match relay("contactPerDay") {
+        Some(floor) => own
+            .per_day
             .unwrap_or(0)
-            .clamp(200, 2000)
-            .min(dec.per_day.unwrap_or(i64::MAX)),
+            .min(relay("contactPerDayMax").unwrap_or(i64::MAX))
+            .max(floor),
+        None => own.per_day.unwrap_or(i64::MAX),
+    };
+    (
+        relay("contactPerMinute")
+            .unwrap_or(i64::MAX)
+            .min(own.per_minute.unwrap_or(i64::MAX))
+            .min(dec.per_minute.unwrap_or(i64::MAX)),
+        relay("contactPerHour")
+            .unwrap_or(i64::MAX)
+            .min(own.per_hour.unwrap_or(i64::MAX))
+            .min(dec.per_hour.unwrap_or(i64::MAX)),
+        day.min(dec.per_day.unwrap_or(i64::MAX)),
     )
 }
 impl Counters {
@@ -125,6 +140,7 @@ impl Counters {
     }
     pub(super) async fn check(
         &mut self,
+        limits: &crate::http::Limits,
         store: &dyn RelayStore,
         account: &str,
         c: &Contact,
@@ -136,7 +152,7 @@ impl Counters {
         let key = format!("{sender} {target}");
         self.windows(&key, thread, now);
         let p = &self.pairs[&key];
-        let (minute, hour, day) = caps(c.config.limits.as_ref(), None);
+        let (minute, hour, day) = caps(limits, c.config.limits.as_ref(), None);
         for (w, cap, ms, unit) in [
             (&p.minute, minute, 60_000, "minute"),
             (&p.hour, hour, 3_600_000, "hour"),
@@ -280,12 +296,18 @@ impl Counters {
 mod tests {
     use super::*;
     use scp_relay_store::ContactConfig;
+    fn relay_limits() -> crate::http::Limits {
+        let mut limits = crate::http::Limits::default();
+        limits.apply_json(r#"{"contactPerMinute":10,"contactPerHour":100,"contactPerDay":200,"contactPerDayMax":2000}"#).unwrap();
+        limits
+    }
     #[test]
     fn limits_only_raise_the_day_cap() {
         use scp_relay_store::XLimits;
-        assert_eq!(caps(None, None), (10, 100, 200));
+        assert_eq!(caps(&relay_limits(), None, None), (10, 100, 200));
         assert_eq!(
             caps(
+                &relay_limits(),
                 Some(&XLimits {
                     per_minute: Some(30),
                     per_hour: Some(7),
@@ -301,6 +323,7 @@ mod tests {
         );
         assert_eq!(
             caps(
+                &relay_limits(),
                 Some(&XLimits {
                     per_day: Some(1),
                     ..XLimits::default()
@@ -308,6 +331,41 @@ mod tests {
                 None
             ),
             (10, 100, 200)
+        );
+    }
+    #[test]
+    fn off_relay_caps_respect_own_and_declared_limits() {
+        use scp_relay_store::XLimits;
+        let mut relay = crate::http::Limits::default();
+        assert_eq!(caps(&relay, None, None), (i64::MAX, i64::MAX, i64::MAX));
+        let own = XLimits {
+            per_minute: Some(40),
+            per_hour: Some(400),
+            per_day: Some(4000),
+        };
+        assert_eq!(caps(&relay, Some(&own), None), (40, 400, 4000));
+        let declared = XLimits {
+            per_minute: Some(50),
+            per_hour: Some(300),
+            per_day: Some(3000),
+        };
+        assert_eq!(caps(&relay, Some(&own), Some(&declared)), (40, 300, 3000));
+        relay.apply("contactPerDayMax=100").unwrap();
+        assert_eq!(caps(&relay, Some(&own), None).2, 4000);
+        relay.apply("contactPerDayMax=0").unwrap();
+        relay.apply("contactPerDay=200").unwrap();
+        assert_eq!(caps(&relay, Some(&own), None).2, 4000);
+        assert_eq!(
+            caps(
+                &relay,
+                None,
+                Some(&XLimits {
+                    per_day: Some(5),
+                    ..XLimits::default()
+                })
+            )
+            .2,
+            5
         );
     }
     #[tokio::test]
@@ -329,7 +387,14 @@ mod tests {
             let target = format!("beta/{n}");
             let thread = format!("t{n}");
             counters
-                .check(store.as_ref(), &a.id, &c, ("desk/a", &target, &thread), now)
+                .check(
+                    &relay_limits(),
+                    store.as_ref(),
+                    &a.id,
+                    &c,
+                    ("desk/a", &target, &thread),
+                    now,
+                )
                 .await
                 .unwrap();
             counters
@@ -339,14 +404,28 @@ mod tests {
         }
         assert_eq!(
             counters
-                .check(store.as_ref(), &a.id, &c, ("desk/a", "new", "new"), now)
+                .check(
+                    &relay_limits(),
+                    store.as_ref(),
+                    &a.id,
+                    &c,
+                    ("desk/a", "new", "new"),
+                    now
+                )
                 .await
                 .unwrap_err()
                 .retry,
             Some(until_tomorrow(now))
         );
         counters
-            .check(store.as_ref(), &a.id, &c, ("desk/a", "new", "new"), DAY)
+            .check(
+                &relay_limits(),
+                store.as_ref(),
+                &a.id,
+                &c,
+                ("desk/a", "new", "new"),
+                DAY,
+            )
             .await
             .unwrap();
         c.peer_id = "thread-peer".into();
@@ -354,6 +433,7 @@ mod tests {
             let target = format!("other/{n}");
             counters
                 .check(
+                    &relay_limits(),
                     store.as_ref(),
                     &a.id,
                     &c,
@@ -375,7 +455,14 @@ mod tests {
         }
         assert_eq!(
             counters
-                .check(store.as_ref(), &a.id, &c, ("desk/a", "last", "shared"), now)
+                .check(
+                    &relay_limits(),
+                    store.as_ref(),
+                    &a.id,
+                    &c,
+                    ("desk/a", "last", "shared"),
+                    now
+                )
                 .await
                 .unwrap_err()
                 .code,
@@ -387,6 +474,7 @@ mod tests {
             let thread = format!("hour{n}");
             counters
                 .check(
+                    &relay_limits(),
                     store.as_ref(),
                     &a.id,
                     &c,
@@ -408,6 +496,7 @@ mod tests {
         }
         let err = counters
             .check(
+                &relay_limits(),
                 store.as_ref(),
                 &a.id,
                 &c,
@@ -436,7 +525,14 @@ mod tests {
         let now = 1_000_000;
         for _ in 0..10 {
             counters
-                .check(store.as_ref(), &a.id, &c, ("desk/a", "beta/b", "t"), now)
+                .check(
+                    &relay_limits(),
+                    store.as_ref(),
+                    &a.id,
+                    &c,
+                    ("desk/a", "beta/b", "t"),
+                    now,
+                )
                 .await
                 .unwrap();
             counters
@@ -455,7 +551,14 @@ mod tests {
         assert_eq!(restarted.days["peer"].count, 15);
         assert!(
             counters
-                .check(store.as_ref(), &a.id, &c, ("desk/a", "beta/b", "t"), now)
+                .check(
+                    &relay_limits(),
+                    store.as_ref(),
+                    &a.id,
+                    &c,
+                    ("desk/a", "beta/b", "t"),
+                    now
+                )
                 .await
                 .is_err()
         );
