@@ -1,5 +1,12 @@
 # @scp-dev/core
 
+## 0.14.0
+
+### Minor Changes
+
+- 1538046: Make send, peek, request and contact rates configurable and off by default. Report disabled caps as null and accept broker configuration and SCP_LIMITS overrides.
+- b43ec2c: An idle Claude Code background worker `swarm claude --bg` started stops after `lifecycle.idle_after_s` (default 10 minutes) and stays wakeable; `SCP_HISTORIC_AFTER_S` or `historic_after_s` sets when an agent turns historic, and `agents` reports live `subagents`.
+
 ## 0.13.1
 
 ### Patch Changes
