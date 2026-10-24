@@ -28,8 +28,7 @@ back its last ${LIMITS.stderrBytes / 1024} KB of stderr.
 Steer: ${CLI_NAME} send <name> <text>; a claude -p or codex exec prompt gets a note naming you and your steer key.
 A codex exec worker that exited before a late steer is resumed with it (codex exec resume, at most twice).
 A codex exec, agy -p, grok -p or muse exec worker stays resumable: a message resumes its session (--idle S, detached
-default lifecycle.idle_after_s, 600 s, after which a worker with a parent hibernates, revivable, unless --no-durable;
-${CLI_NAME} end <name> lets it go; --durable fails the spawn when it cannot be kept).
+600 s, then one with a parent hibernates unless --no-durable; ${CLI_NAME} end <name> lets it go).
 Harnesses: codex gets -c overrides that hand it the grant (also behind env, timeout, nohup or nice); a ${CLI_NAME}
 command from its workspace-write sandbox needs -c sandbox_workspace_write.network_access=true. codex exec
 gets --skip-git-repo-check outside a git repo, and with its prompt in argv piped stdin only under --fg. Workers
