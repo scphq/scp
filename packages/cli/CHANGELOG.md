@@ -1,5 +1,20 @@
 # @scp-dev/cli
 
+## 0.15.0
+
+### Minor Changes
+
+- 770d3ec: Add --under ADDR to harness launchers, including background claude sessions, to link through the session claim to a local or cross-machine parent without minting a grant.
+- 770d3ec: Record runner workers, show runner attach and cached status in list and peek, and stop remote workers through swarm end.
+
+### Patch Changes
+
+- Updated dependencies [770d3ec]
+  - @scp-dev/core@0.13.0
+  - @scp-dev/broker@0.10.0
+  - @scp-dev/hub@0.10.2
+  - @scp-dev/mcp@0.5.1
+
 ## 0.14.0
 
 ### Minor Changes

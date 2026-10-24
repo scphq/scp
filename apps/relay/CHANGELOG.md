@@ -1,5 +1,13 @@
 # @scp-dev/relay
 
+## 0.4.4
+
+### Patch Changes
+
+- Updated dependencies [770d3ec]
+  - @scp-dev/core@0.13.0
+  - @scp-dev/hub@0.10.2
+
 ## 0.4.3
 
 ### Patch Changes

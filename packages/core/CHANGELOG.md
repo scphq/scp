@@ -1,5 +1,11 @@
 # @scp-dev/core
 
+## 0.13.0
+
+### Minor Changes
+
+- 770d3ec: Record runner workers, show runner attach and cached status in list and peek, and stop remote workers through swarm end.
+
 ## 0.12.0
 
 ### Minor Changes
