@@ -97,6 +97,8 @@ export interface BrokerOptions {
   builtinWakers?: Record<string, unknown> | undefined
   /** in-process tasks run on an interval with the broker's view of its local agents */
   tasks?: BrokerTask[] | undefined
+  /** seconds without activity before an agent is historic (default `$SCP_HISTORIC_AFTER_S`, else `LIMITS.historicAfterS`); `Infinity` never */
+  historicAfterS?: number | undefined
 }
 
 /** what a link gets from the broker: its core, the remote hooks a bridge gets, and a send as a local endpoint or a mirrored one through the judge */
@@ -318,6 +320,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       hash: (value) => createHash("sha256").update(value).digest("hex"),
       transaction: (fn) => db.transaction(fn),
       limits: brokerLimits(options.env ?? process.env),
+      ...compact({ historicAfterS: options.historicAfterS ?? historicAfter((options.env ?? process.env).SCP_HISTORIC_AFTER_S) }),
       alive: running,
       startOf: (pid, expected) => {
         const supplied = hookProcesses.getStore()
@@ -1670,6 +1673,13 @@ function selectors(params: Record<string, unknown>, key: string): string[] | und
   if (value === undefined || value === null) return undefined
   if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) throw new RelayError("invalid_params", `${key} must be a list of selectors`)
   return value as string[]
+}
+
+/** `SCP_HISTORIC_AFTER_S`: seconds, or `Infinity`; undefined when unset or unreadable */
+export function historicAfter(raw: string | undefined): number | undefined {
+  if (raw?.trim() === "Infinity") return Number.POSITIVE_INFINITY
+  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
 /** the legacy daily cap override */

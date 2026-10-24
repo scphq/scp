@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { closeSync, openSync, statSync, truncateSync } from "node:fs"
 import { join } from "node:path"
-import { CLI_NAME, type EndpointView, type ScopePreset } from "@scp-dev/core"
+import { CLI_NAME, type EndpointView, RelayError, type ScopePreset } from "@scp-dev/core"
 import { type BrokerInfo, BrokerUnavailable, type HelloResult, connectBroker, privateDir, type RelayClient, relayDir } from "@scp-dev/broker"
 import {
   CODEX_THREAD,
@@ -16,6 +16,7 @@ import {
   lineage,
   type PsCommTable,
   readPsTable,
+  SHELL_PS_TIMEOUT_MS,
   readShimBinding,
   sessionKey,
 } from "./identity"
@@ -224,12 +225,20 @@ export function localHandle(raw: string): string {
   return handle
 }
 
-/** this shell's process walk: the lineage keys, the harness walk it claims with and the harness its nearest harness process runs */
-export type Walk = { keys: string[]; self: string[]; harness?: string | undefined }
+/**
+ * this shell's process walk: the lineage keys, the harness walk it claims with and the harness its nearest harness process runs;
+ * `unread` when ps failed, so the walk is empty for want of a table rather than of a harness
+ */
+export type Walk = { keys: string[]; self: string[]; harness?: string | undefined; unread?: true }
 
-export function walkNow(env = process.env, pid = process.ppid, table: PsCommTable | undefined = readPsTable()): Walk {
-  const keys = lineage(pid, table)
-  const self = harnessLineage(pid, table)
+/** what a shell whose process table read failed is told */
+export const PS_UNREAD = "could not read the process table (ps failed or timed out), so this shell's harness process is unknown; retry"
+
+/** with no `given` table this reads one; a given undefined is a failed read, never read again */
+export function walkNow(env = process.env, pid = process.ppid, ...given: [table?: PsCommTable | undefined]): Walk {
+  const table = given.length ? given[0] : readPsTable(SHELL_PS_TIMEOUT_MS)
+  const keys = table ? lineage(pid, table) : []
+  const self = table ? harnessLineage(pid, table) : []
   if (!self.length && codexShell(env)) {
     const binding = readShimBinding(env, pid, table)
     if (binding) {
@@ -240,7 +249,7 @@ export function walkNow(env = process.env, pid = process.ppid, table: PsCommTabl
   const harnessPid = Number(/^pid:(\d+)/.exec(self.at(-1) ?? "")?.[1])
   const provider = self.length ? harnessAt(harnessPid, table, env) : undefined
   const harness = provider ? harnessVariant(provider, env, harnessPid, () => table) : undefined
-  return { keys, self, ...(harness ? { harness } : {}) }
+  return { keys, self, ...(harness ? { harness } : {}), ...(table ? {} : { unread: true as const }) }
 }
 
 /**
@@ -265,7 +274,7 @@ export function claimHarness(values: Identity, env: Record<string, string | unde
   const explicit = values.harness ?? env.SCP_HARNESS
   if (explicit) return explicit
   if (!inferring(env)) return "cli"
-  return harnessVariant(walk?.harness ?? detectHarness(env) ?? "cli", env)
+  return harnessVariant(walk?.harness ?? detectHarness(env) ?? "cli", env, process.ppid, walk?.unread ? () => undefined : undefined)
 }
 
 export async function open(verb: string, values: Identity, cwd: string, bodyFromStdin: boolean, walk?: Walk): Promise<Opened> {
@@ -315,7 +324,7 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
   }
   if (values.machine !== undefined) throw new RelayUsage("--machine names the machine of the cloud transport: add --cloud")
   const here = walk ?? walkNow()
-  const { keys, self } = here
+  const { keys, self, unread } = here
   const joined = !values.as && named && self.length ? membership(process.env, sessionKey(process.env, self.at(-1)!)) : {}
   const handle = "handle" in joined && joined.handle ? joined.handle : named ? localHandle(named) : undefined
   const harnessPid = self.length ? Number(/^pid:(\d+)/.exec(self.at(-1)!)?.[1]) : undefined
@@ -354,7 +363,9 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
       hello = await client.hello({ observe: true, ...lineageClaim, ...(self.length ? { self } : {}), cwd, brief: true })
       bound = hello.endpoint ? "lineage" : null
       if (!hello.endpoint && !OBSERVE.has(verb)) {
-        if (hiddenHarness(process.ppid, readPsTable()))
+        if (unread) throw new RelayUsage(`${CLI_NAME} ${verb}: ${PS_UNREAD}, or pass --as HANDLE or --human`)
+        const table = readPsTable(SHELL_PS_TIMEOUT_MS)
+        if (table && hiddenHarness(process.ppid, table))
           throw new RelayUsage(`${CLI_NAME} ${verb}: sandbox pid namespace: this shell cannot see its harness; use the scp MCP tools`)
         throw new RelayUsage(
           `${CLI_NAME} ${verb}: no relay agent runs this shell's harness process (${harnessPid ? `pid ${harnessPid}` : "none found"}); ${CLI_NAME} join <name> puts this session on the relay, or pass --as HANDLE or --human (no terminal is attached, so me/ is not assumed)`,
@@ -364,6 +375,8 @@ export async function open(verb: string, values: Identity, cwd: string, bodyFrom
     return { client, me: hello.endpoint, broker: hello.broker, where: brokerLine(hello.broker), bound, harnessPid }
   } catch (error) {
     client.close()
+    if (unread && error instanceof RelayError && error.code === "unauthorized")
+      throw new RelayError(error.code, `${error.message}; ${PS_UNREAD}`, error.retryAfterS, error.detail)
     throw error
   }
 }

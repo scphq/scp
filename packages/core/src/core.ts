@@ -348,6 +348,8 @@ export interface LocalAgent {
   parent: string | null
   /** the endpoints linked under it, in-process subagents aside */
   children: number
+  /** its in-process subagents that are neither done nor historic */
+  subagents: number
   harness_session: string | null
   state: StatusState | null
   presence: Presence
@@ -2459,6 +2461,12 @@ export class RelayCore {
        AND (session IS NULL OR substr(session, 1, 4) != 'sub:') GROUP BY parent_ep`,
     ))
       children.set(parent, n)
+    const subagents = new Map<string, number>()
+    for (const row of this.sql.all<EndpointRow>(
+      `SELECT * FROM endpoints WHERE kind = 'agent' AND parent_ep IS NOT NULL AND substr(session, 1, 4) = 'sub:' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
+       AND (status_state IS NULL OR status_state != 'done')`,
+    ))
+      if (!this.historic(row, now)) subagents.set(row.parent_ep!, (subagents.get(row.parent_ep!) ?? 0) + 1)
     const handedBack = new Set(
       this.sql.all<{ used_by: string }>(`SELECT DISTINCT used_by FROM grants WHERE used_by IS NOT NULL AND handback IS NOT NULL`).map((row) => row.used_by),
     )
@@ -2472,6 +2480,7 @@ export class RelayCore {
         cwd: row.cwd,
         parent: parent ? this.address(parent) : row.parent_addr,
         children: children.get(row.id) ?? 0,
+        subagents: subagents.get(row.id) ?? 0,
         harness_session: row.harness_session,
         state: row.status_state,
         presence: this.presence(row, now),

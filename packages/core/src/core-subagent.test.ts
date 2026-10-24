@@ -118,6 +118,19 @@ describe("subagent endpoints", () => {
     expect(core.whoami(sub.id).status?.state).toBe("working")
   })
 
+  test("local agents count the root's subagents that are neither done nor historic", () => {
+    const { core, clock, hook } = setup()
+    const root = hook(9).endpoint
+    const sub = hook(9, { subagent: { id: AGENT, type: "Explore" } }).endpoint
+    hook(9, { subagent: { id: "f00d42", type: "Explore" } })
+    const facts = () => core.localAgents().find((agent) => agent.id === root.id)!
+    expect(facts()).toMatchObject({ children: 0, subagents: 2 })
+    core.status(sub.id, "done", undefined)
+    expect(facts().subagents).toBe(1)
+    clock.now += LIMITS.historicAfterS * 1000
+    expect(facts().subagents).toBe(0)
+  })
+
   test("the derived handle stays valid and leaves room for a suffix", () => {
     const long = subagentHandle("a".repeat(63), { id: AGENT, type: "Some Plugin:Very-Long-Agent-Type-Name" })
     expect(long.length).toBeLessThanOrEqual(58)

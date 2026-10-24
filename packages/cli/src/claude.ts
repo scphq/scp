@@ -374,13 +374,18 @@ ${CLI_NAME} claude --bg [--name N] [--root] [--under ADDR] [--] [claude args...]
 ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first
   --resume <id> of a live background session attaches to it: it is already woken through claude-inbox
 ${CLI_NAME} claude ls [--all] [--json]          the background sessions (--all: stopped ones too), orchestrators first, with their SCP role
-                                                 (orchestrator: a root or one with workers; worker; unknown: no endpoint), endpoint and cwd
-${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop, then remove, the workers ${CLI_NAME} claude --bg started
-                                                 that finished: never a root, an orchestrator, one with unread mail or one claude attach
-                                                 holds, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
+                                                 (orchestrator: a root or one with workers; worker; unknown: no endpoint), endpoint, policy
+                                                 (kept: why, or due: stop or remove) and cwd
+${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop idle workers now, then remove the historic ones
+                                                 ${CLI_NAME} claude --bg started: never a root, the caller's own session, one with live
+                                                 workers or subagents, unread mail, or one claude attach holds or that is not exactly
+                                                 idle, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
                                                  (30m, 2h, 1d) replaces the thresholds; --stop-only removes nothing. Needs the broker
-  The broker does the same on its own: a worker done (or handed back) and idle stops after $SCP_CLAUDE_BG_STOP_AFTER_S (600 s,
-  Infinity never) and is removed once historic unless $SCP_CLAUDE_BG_REMOVE=0; config.json claude_bg {stop_after_s, remove} sets both.
+  The broker does the same on its own, for any background worker with an endpoint: idle without work it stops after
+  $SCP_IDLE_AFTER_S (config.json lifecycle.idle_after_s; 600 s, Infinity never), a done (or handed back) one after
+  $SCP_CLAUDE_BG_STOP_AFTER_S when sooner, and one ${CLI_NAME} claude --bg started is removed once historic unless
+  $SCP_CLAUDE_BG_REMOVE=0; config.json claude_bg {stop_after_s, remove} sets those. $SCP_HISTORIC_AFTER_S (historic_after_s) sets
+  when an agent turns historic.
   A stopped or removed worker keeps its endpoint and mail: a message respawns it, or resumes it in its directory after a removal
 `
 

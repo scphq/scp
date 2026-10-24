@@ -19,6 +19,7 @@ export const CLAUDE_WAKE_TIMEOUT_S = 90
 /** how often the broker looks for workers to stop or remove */
 export const CLAUDE_BG_EVERY_MS = 120_000
 const STOP_AFTER_S = 600
+const IDLE_AFTER_S = 600
 const LIST_TIMEOUT_MS = 15_000
 const ACT_TIMEOUT_MS = 30_000
 /** a refused `claude rm` is tried again no sooner than this */
@@ -80,9 +81,13 @@ export interface BgState {
   rmRefused?: { at: number; reason: string }
 }
 
-/** `stopAfterS`: idle seconds before a finished worker stops, `Infinity` never; `remove`: whether a historic worker is removed */
+/**
+ * `stopAfterS`: idle seconds before a finished worker stops; `idleAfterS`: idle seconds before any worker stops, finished or not;
+ * `Infinity` never; `remove`: whether a historic worker is removed
+ */
 export interface BgConfig {
   stopAfterS: number
+  idleAfterS: number
   remove: boolean
 }
 
@@ -91,10 +96,13 @@ export type AgentFacts = Pick<
   | "id"
   | "address"
   | "handle"
+  | "harness"
   | "parent"
   | "children"
+  | "subagents"
   | "harness_session"
   | "state"
+  | "presence"
   | "historic"
   | "worked_at"
   | "mail_at"
@@ -104,7 +112,8 @@ export type AgentFacts = Pick<
   | "handed_back"
 >
 
-type Target = { id: string; entry: ClaudeEntry; agent: AgentFacts; record: BgRecord }
+/** `record` is absent for a session `swarm claude --bg` did not start: such a session is stopped, never removed */
+type Target = { id: string; entry: ClaudeEntry; agent: AgentFacts; record?: BgRecord }
 export type Action =
   | ({ kind: "stop" } & Target)
   | ({ kind: "remove"; live: boolean } & Target)
@@ -125,12 +134,17 @@ export interface PlanInput {
   stopOnly?: boolean
   /** try a refused `claude rm` again at once */
   retryRefused?: boolean
+  /** the session ids of the sessions the caller runs in, never stopped or removed */
+  self?: Set<string>
 }
 
-/** the endpoint of a session: the one its hooks named with its session id, else the one its record claims, unless that one runs another session */
-function endpointOf(entry: ClaudeEntry, record: BgRecord, agents: AgentFacts[]): AgentFacts | undefined {
+/**
+ * the endpoint of a session: the one its hooks named with its session id, else the one its record claims, unless that one runs another
+ * session; without a record only its session id names it
+ */
+function endpointOf(entry: ClaudeEntry, record: BgRecord | undefined, agents: AgentFacts[]): AgentFacts | undefined {
   const bySession = entry.sessionId ? agents.find((agent) => agent.harness_session === entry.sessionId) : undefined
-  if (bySession) return bySession
+  if (bySession || !record) return bySession
   const byHandle = record.handle === undefined ? undefined : agents.find((agent) => agent.handle === record.handle)
   return byHandle && (byHandle.harness_session === null || byHandle.harness_session === entry.sessionId) ? byHandle : undefined
 }
@@ -139,9 +153,26 @@ const attachedTo = (entry: ClaudeEntry, attached: Set<string>): boolean =>
   [entry.id, entry.name, entry.sessionId].some((key) => key !== undefined && attached.has(key))
 
 /**
- * what to do with each background session: only a worker `swarm claude --bg` started, linked under a parent, with no workers of its own, no
- * unread mail and no `claude attach` is ever stopped or removed. A finished one (done or handed back) that Claude shows idle stops after
- * `stopAfterS` without work; a historic one is removed; `olderThanS` replaces both thresholds and the finished check
+ * the workers under an endpoint that still run: a local child not historic and online or working, any child the broker's local agents do not
+ * list, and its in-process subagents neither done nor historic
+ */
+export function liveChildren(agent: AgentFacts, agents: AgentFacts[]): number {
+  const local = agents.filter((one) => one.parent === agent.address)
+  const live = local.filter((one) => !one.historic && (one.presence === "online" || one.state === "working")).length
+  return live + Math.max(0, agent.children - local.length) + agent.subagents
+}
+
+/** a worker with no workers of its own: the only kind ever removed */
+const leaf = (agent: AgentFacts): boolean => agent.parent !== null && agent.children === 0
+const finishedOf = (agent: AgentFacts): boolean => agent.state === "done" || agent.handed_back
+/** the idle seconds before the policy stops a session */
+const stopAfter = (agent: AgentFacts, config: BgConfig): number => (finishedOf(agent) ? Math.min(config.stopAfterS, config.idleAfterS) : config.idleAfterS)
+
+/**
+ * what to do with each background session: only a worker, an endpoint linked under a parent, with no live workers, no unread mail, no
+ * `claude attach` and not the caller's own is ever stopped, and only while Claude shows it exactly idle. Such a worker stops after
+ * `idleAfterS` without work, a finished one (done or handed back) after `stopAfterS` when sooner; a historic worker `swarm claude --bg`
+ * started, with no children, is removed; `olderThanS` replaces the thresholds
  */
 export function plan(input: PlanInput): Action[] {
   const actions: Action[] = []
@@ -150,23 +181,21 @@ export function plan(input: PlanInput): Action[] {
     if (entry.kind !== "background" || typeof id !== "string" || !SHORT_ID.test(id)) continue
     const keep = (reason: string, agent?: AgentFacts) => actions.push({ kind: "keep", id, entry, ...(agent ? { agent } : {}), reason })
     const record = input.records.get(id)
-    if (!record) {
-      keep(`not started by ${CLI_NAME} claude --bg`)
-      continue
-    }
     const agent = endpointOf(entry, record, input.agents)
     if (!agent) {
-      keep("no endpoint")
+      keep(record ? "no endpoint" : "no SCP endpoint, so nothing could wake it")
       continue
     }
     const live = typeof entry.pid === "number"
-    if (live && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) actions.push({ kind: "unhibernate", id, entry, agent, record })
+    if (live && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0)
+      actions.push({ kind: "unhibernate", id, entry, agent, ...(record ? { record } : {}) })
     if (!agent.parent) {
       keep("a root", agent)
       continue
     }
-    if (agent.children > 0) {
-      keep("an orchestrator", agent)
+    const running = liveChildren(agent, input.agents)
+    if (running > 0) {
+      keep(`${running} live worker${running === 1 ? "" : "s"}`, agent)
       continue
     }
     if (agent.unread) {
@@ -177,6 +206,10 @@ export function plan(input: PlanInput): Action[] {
       keep("attached", agent)
       continue
     }
+    if ([entry.sessionId, agent.harness_session].some((key) => typeof key === "string" && input.self?.has(key))) {
+      keep("the caller's own session", agent)
+      continue
+    }
     if (live && entry.status !== "idle") {
       keep(entry.status ?? "busy", agent)
       continue
@@ -185,9 +218,11 @@ export function plan(input: PlanInput): Action[] {
     const older = input.olderThanS
     const refused = input.states.get(id)?.rmRefused
     const holding = refused !== undefined && !input.retryRefused && input.now - refused.at < RM_RETRY_MS
-    const finished = agent.state === "done" || agent.handed_back
+    const threshold = older ?? stopAfter(agent, input.config)
     const removable =
-      older !== undefined ? idleMs >= older * 1000 : input.config.remove && agent.historic && (!live || (finished && idleMs >= input.config.stopAfterS * 1000))
+      record !== undefined &&
+      leaf(agent) &&
+      (older !== undefined ? idleMs >= older * 1000 : input.config.remove && agent.historic && (!live || idleMs >= threshold * 1000))
     if (!input.stopOnly && !holding && removable) {
       actions.push({ kind: "remove", id, entry, agent, record, live })
       continue
@@ -196,15 +231,15 @@ export function plan(input: PlanInput): Action[] {
       keep(holding ? `claude rm refused: ${refused.reason}` : "stopped", agent)
       continue
     }
-    if (older === undefined && !finished) {
-      keep("not done", agent)
+    if (!Number.isFinite(threshold)) {
+      keep(finishedOf(agent) ? "stop_after_s and idle_after_s are Infinity" : "not done, and idle_after_s is Infinity", agent)
       continue
     }
-    if (!(idleMs >= (older ?? input.config.stopAfterS) * 1000)) {
-      keep("recently active", agent)
+    if (!(idleMs >= threshold * 1000)) {
+      keep(`idle ${Math.max(0, Math.floor(idleMs / 1000))} s of ${threshold} s`, agent)
       continue
     }
-    actions.push({ kind: "stop", id, entry, agent, record })
+    actions.push({ kind: "stop", id, entry, agent, ...(record ? { record } : {}) })
   }
   return actions
 }
@@ -228,17 +263,45 @@ function flag(value: unknown): boolean | undefined {
   return undefined
 }
 
-/** `$SCP_CLAUDE_BG_STOP_AFTER_S` and `$SCP_CLAUDE_BG_REMOVE`, else `claude_bg.stop_after_s` and `claude_bg.remove` in config.json, else 600 s and true */
-export function bgConfig(env: Env): BgConfig {
-  let file: { stop_after_s?: unknown; remove?: unknown } = {}
+function configFile(env: Env): Record<string, unknown> {
   try {
-    const parsed = JSON.parse(readOwnedFile(join(configDir(env), "config.json"))) as { claude_bg?: unknown }
-    if (parsed?.claude_bg && typeof parsed.claude_bg === "object") file = parsed.claude_bg as typeof file
-  } catch {}
-  return {
-    stopAfterS: seconds(env.SCP_CLAUDE_BG_STOP_AFTER_S) ?? seconds(file.stop_after_s) ?? STOP_AFTER_S,
-    remove: flag(env.SCP_CLAUDE_BG_REMOVE) ?? flag(file.remove) ?? true,
+    const parsed = JSON.parse(readOwnedFile(join(configDir(env), "config.json"))) as unknown
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
   }
+}
+
+const section = (file: Record<string, unknown>, key: string): Record<string, unknown> => {
+  const value = file[key]
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {}
+}
+
+/**
+ * `$SCP_CLAUDE_BG_STOP_AFTER_S`, `$SCP_IDLE_AFTER_S` (alias `$SCP_CLAUDE_BG_IDLE_AFTER_S`) and `$SCP_CLAUDE_BG_REMOVE`, else
+ * `claude_bg.stop_after_s`, `lifecycle.idle_after_s` (alias `claude_bg.idle_after_s`) and `claude_bg.remove` in config.json, else 600 s,
+ * 600 s and true
+ */
+export function bgConfig(env: Env): BgConfig {
+  const file = configFile(env)
+  const bg = section(file, "claude_bg")
+  const lifecycle = section(file, "lifecycle")
+  return {
+    stopAfterS: seconds(env.SCP_CLAUDE_BG_STOP_AFTER_S) ?? seconds(bg.stop_after_s) ?? STOP_AFTER_S,
+    idleAfterS:
+      seconds(env.SCP_IDLE_AFTER_S) ?? seconds(env.SCP_CLAUDE_BG_IDLE_AFTER_S) ?? seconds(lifecycle.idle_after_s) ?? seconds(bg.idle_after_s) ?? IDLE_AFTER_S,
+    remove: flag(env.SCP_CLAUDE_BG_REMOVE) ?? flag(bg.remove) ?? true,
+  }
+}
+
+/**
+ * `$SCP_HISTORIC_AFTER_S`, else `historic_after_s` (alias `lifecycle.historic_after_s`) in config.json: seconds, a duration such as 2h, or
+ * Infinity; undefined (and 0) leaves the broker's default
+ */
+export function historicAfterS(env: Env): number | undefined {
+  const file = configFile(env)
+  const value = seconds(env.SCP_HISTORIC_AFTER_S) ?? seconds(file.historic_after_s) ?? seconds(section(file, "lifecycle").historic_after_s)
+  return value === 0 ? undefined : value
 }
 
 /** the sessions `swarm claude --bg` started, by short id */
@@ -380,9 +443,18 @@ type Act = Exclude<Action, { kind: "keep" }>
 export type Outcome = { action: Act; ok: boolean; note: string }
 
 const later = (now: string | null | undefined, then: string | null): boolean => !!now && (then === null || Date.parse(now) > Date.parse(then))
-/** the worker got mail or did work since `then`, gained workers, lost its parent, or is gone */
-const changed = (now: AgentFacts | undefined, then: AgentFacts) =>
-  !now || now.unread || later(now.worked_at, then.worked_at) || later(now.mail_at, then.mail_at) || !now.parent || now.children > 0
+/** the session got mail or did work since `then`, gained live workers, lost its parent, or is gone */
+function changed(agents: AgentFacts[], then: AgentFacts): boolean {
+  const now = agents.find((one) => one.id === then.id)
+  return (
+    !now ||
+    now.unread ||
+    later(now.worked_at, then.worked_at) ||
+    later(now.mail_at, then.mail_at) ||
+    (then.parent !== null && !now.parent) ||
+    liveChildren(now, agents) > 0
+  )
+}
 
 async function current(port: BgPort, agent: AgentFacts): Promise<AgentFacts | undefined> {
   return (await port.agents()).find((one) => one.id === agent.id)
@@ -402,7 +474,7 @@ const runOf = (claude: Claude, env: Env, now: () => number, ps: () => Promise<st
 
 /** why the planned worker may no longer be stopped or removed: it changed since the plan, or a `claude attach` holds it now */
 async function moved(target: Target, port: BgPort, run: Run): Promise<string | null> {
-  if (changed(await current(port, target.agent), target.agent)) return "it got work"
+  if (changed(await port.agents(), target.agent)) return "it got work"
   const attached = await run.attached()
   if (attached === null) return "ps failed, so attached sessions are unknown"
   return attachedTo(target.entry, attached) ? "attached" : null
@@ -425,7 +497,10 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
   }
   writeState(run.env, id, { sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle })
   await port.hibernate(agent, ref)
-  const why = await moved(target, port, run)
+  const listed = (await listEntries(claude, true))?.find((one) => one.id === id)
+  const why =
+    (await moved(target, port, run)) ??
+    (listed?.status === "idle" && listed.pid === entry.pid ? null : `claude shows it ${listed ? (listed.status ?? "busy") : "unlisted"}`)
   if (why) {
     await port.unhibernate(agent)
     restore()
@@ -449,7 +524,7 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
     return null
   }
   await port.unhibernate(agent)
-  armTicket(target.record.file, undefined)
+  if (target.record) armTicket(target.record.file, undefined)
   const respawned = await claude.exec(claude.bin, ["respawn", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
   if (respawned.code === 0) return "mail raced the stop, so it was respawned"
   await port.hibernate(agent, ref)
@@ -511,46 +586,74 @@ async function apply(actions: Act[], port: BgPort, run: Run): Promise<Outcome[]>
 
 const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind === "remove" ? "removed" : "woke")
 
-/** whether a worker may be due for a stop or a removal, read from the broker alone, so an idle broker never runs claude */
-function maybeDue(agent: AgentFacts, state: BgState | undefined, config: BgConfig, now: number): boolean {
+/**
+ * whether a worker may be due for a stop or a removal, read from the broker alone, so an idle broker never runs claude; only one
+ * `swarm claude --bg` started (`recorded`) is ever removed
+ */
+function maybeDue(agent: AgentFacts, agents: AgentFacts[], state: BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
   if (agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) return true
-  if (!agent.parent || agent.children > 0 || agent.unread) return false
-  if (config.remove && agent.historic) return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
+  if (!agent.parent || agent.unread || liveChildren(agent, agents) > 0) return false
+  if (recorded && config.remove && agent.historic && leaf(agent)) return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
   if (agent.hibernate === CLAUDE_BG_PROVIDER) return false
-  return (agent.state === "done" || agent.handed_back) && now - Date.parse(agent.worked_at) >= config.stopAfterS * 1000
+  return now - Date.parse(agent.worked_at) >= stopAfter(agent, config) * 1000
 }
 
-/** the broker's task: stops and removes finished workers by the configured policy, read again on each run */
+/** a Claude Code endpoint whose hooks named its session: it may run in a background session no record covers */
+const claudeAgent = (agent: AgentFacts): boolean => agent.harness === "claude-code" && agent.harness_session !== null
+
+/** the broker's task: stops and removes idle workers by the configured policy, read again on each run */
 export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): BrokerTask {
-  /** the session ids of the sessions this launcher started, from the last listing, by short id */
+  /** the short ids of the background sessions in the last listing, by session id */
   const sessions = new Map<string, string>()
   /** the records the last listing covered */
   const seen = new Set<string>()
+  /** endpoints without a record the last listing showed nothing to stop for, with their `worked_at` then */
+  const quiet = new Map<string, string>()
+  let listed = false
   return {
     name: "claude-bg",
     everyMs: CLAUDE_BG_EVERY_MS,
     async run(context) {
       const records = readRecords(env)
-      if (!records.size) return
+      const unrecorded = (agent: AgentFacts) => {
+        const id = agent.harness_session !== null ? sessions.get(agent.harness_session) : undefined
+        return claudeAgent(agent) && (id === undefined || !records.has(id))
+      }
+      if (!records.size && !context.agents().some(unrecorded)) return
       const config = bgConfig(env)
       const now = deps.now ?? Date.now
       const handles = new Map([...records].flatMap(([id, record]) => (record.handle ? [[record.handle, id] as const] : [])))
       const idOf = (agent: AgentFacts) =>
         agent.harness_session !== null ? (sessions.get(agent.harness_session) ?? handles.get(agent.handle)) : handles.get(agent.handle)
-      const isDue = () =>
-        context.agents().some((agent) => {
+      const isDue = () => {
+        const agents = context.agents()
+        return agents.some((agent) => {
           const id = idOf(agent)
-          return id !== undefined && maybeDue(agent, readState(env, id), config, now())
+          if (id !== undefined && records.has(id)) return maybeDue(agent, agents, readState(env, id), config, now(), true)
+          if (!unrecorded(agent) || quiet.get(agent.id) === agent.worked_at) return false
+          return maybeDue(agent, agents, id === undefined ? undefined : readState(env, id), config, now(), false)
         })
-      if ([...records.keys()].every((id) => seen.has(id)) && !isDue()) return
+      }
+      if (listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return
       const claude = claudeOf(env, deps)
       if (!claude) return
       const entries = await listEntries(claude, true)
       if (!entries) return
+      listed = true
       seen.clear()
       for (const id of records.keys()) seen.add(id)
       sessions.clear()
-      for (const entry of entries) if (entry.id && entry.sessionId && records.has(entry.id)) sessions.set(entry.sessionId, entry.id)
+      const live = new Set<string>()
+      for (const entry of entries)
+        if (entry.kind === "background" && entry.id && SHORT_ID.test(entry.id) && entry.sessionId) {
+          sessions.set(entry.sessionId, entry.id)
+          if (typeof entry.pid === "number") live.add(entry.id)
+        }
+      quiet.clear()
+      for (const agent of context.agents()) {
+        const id = agent.harness_session !== null ? sessions.get(agent.harness_session) : undefined
+        if (unrecorded(agent) && (id === undefined || !live.has(id))) quiet.set(agent.id, agent.worked_at)
+      }
       if (!isDue()) return
       const ps = deps.ps ?? psTable(claude.env, claude.exec)
       const table = await ps()
@@ -559,7 +662,7 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         entries,
         agents: context.agents(),
         records,
-        states: readStates(env, records.keys()),
+        states: readStates(env, sessions.values()),
         attached: attachTargets(table),
         now: now(),
         config,
@@ -596,6 +699,9 @@ async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
   }
 }
 
+/** the Claude Code session the caller runs in, by its session id */
+const selfSessions = (env: Env): Set<string> => new Set(env.CLAUDE_CODE_SESSION_ID ? [env.CLAUDE_CODE_SESSION_ID] : [])
+
 type Role = "orchestrator" | "worker" | "unknown"
 
 const roleOf = (agent: AgentFacts | undefined): Role => (!agent ? "unknown" : !agent.parent || agent.children > 0 ? "orchestrator" : "worker")
@@ -611,7 +717,7 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
   const entries = await listEntries(claude, all)
   if (!entries) throw new Error(`${CLI_NAME} claude: claude agents --json failed`)
   const records = readRecords(env)
-  let agents: AgentFacts[] = []
+  let agents: AgentFacts[] | undefined
   try {
     const { port, close } = await socketPort(env)
     try {
@@ -622,11 +728,30 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
   } catch (error) {
     note(`${CLI_NAME} claude: no endpoints, so every role shows unknown (${error instanceof Error ? error.message : String(error)})`)
   }
+  const policy = new Map<string, string>()
+  if (agents) {
+    const table = await (deps.ps ?? psTable(claude.env, claude.exec))()
+    const config = bgConfig(env)
+    const listed = all ? entries : await listEntries(claude, true)
+    for (const action of plan({
+      entries: listed ?? entries,
+      agents,
+      records,
+      states: readStates(env, records.keys()),
+      attached: table === null ? new Set() : attachTargets(table),
+      now: (deps.now ?? Date.now)(),
+      config,
+      self: selfSessions(env),
+    }))
+      if (action.kind !== "unhibernate")
+        policy.set(action.id, action.kind === "keep" ? `kept: ${action.reason}` : table === null ? "ps failed, so attached is unknown" : `due: ${action.kind}`)
+  }
+  const known = agents ?? []
   const rows = entries
     .filter((entry) => entry.kind === "background" && typeof entry.id === "string")
     .map((entry) => {
       const record = records.get(entry.id!)
-      const agent = record ? endpointOf(entry, record, agents) : entry.sessionId ? agents.find((a) => a.harness_session === entry.sessionId) : undefined
+      const agent = endpointOf(entry, record, known)
       return {
         id: entry.id!,
         name: entry.name ?? null,
@@ -636,6 +761,7 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
         endpoint: agent?.address ?? null,
         cwd: entry.cwd ?? null,
         swarm: record !== undefined,
+        policy: policy.get(entry.id!) ?? null,
       }
     })
     .sort((a, b) => Number(b.role === "orchestrator") - Number(a.role === "orchestrator"))
@@ -643,8 +769,16 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
   else if (!rows.length) note(`${CLI_NAME} claude: no background sessions`)
   else
     printTable([
-      ["ID", "NAME", "STATE", "ROLE", "ENDPOINT", "CWD"],
-      ...rows.map((row) => [row.id, row.name ?? "", [row.state, row.status].filter(Boolean).join("/"), row.role, row.endpoint ?? "-", row.cwd ?? ""]),
+      ["ID", "NAME", "STATE", "ROLE", "ENDPOINT", "POLICY", "CWD"],
+      ...rows.map((row) => [
+        row.id,
+        row.name ?? "",
+        [row.state, row.status].filter(Boolean).join("/"),
+        row.role,
+        row.endpoint ?? "-",
+        row.policy ?? "-",
+        row.cwd ?? "",
+      ]),
     ])
   return 0
 }
@@ -697,6 +831,7 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
       ...(olderThanS !== undefined ? { olderThanS } : {}),
       stopOnly,
       retryRefused: true,
+      self: selfSessions(env),
     })
     for (const action of actions) if (action.kind === "keep") out(`keep ${action.id}${action.agent ? ` ${action.agent.address}` : ""}: ${action.reason}`)
     const acting = acts(actions).filter((action) => action.kind !== "unhibernate")
@@ -779,10 +914,11 @@ function transcriptGone(env: Env, sessionId: string): boolean {
 
 /**
  * `swarm claude-wake`, the broker's built-in `claude-bg` waker: the ref is the revive record (or the bare session id) of a worker the policy
- * stopped or removed. A stopped session is respawned; a removed one is resumed in the background in its own
- * directory with its MCP config. Either way the run's wake ticket goes into that config first, so the session's shim takes the same endpoint
- * back with it. It wakes only the endpoint's own session: the handle its stop saved, else the harness session its hooks reported, else its
- * launcher record's handle must match
+ * stopped or removed. A stopped session is respawned; a removed one is resumed in the background in its own directory, with its MCP config
+ * when `swarm claude --bg` started it. Either way the run's wake ticket goes into that config first, so the session's shim takes the same
+ * endpoint back with it; a session without one has no config to arm. It wakes only the endpoint's own session: the handle its stop saved,
+ * else the harness session its hooks reported, else its launcher record's handle must match, and never one with neither a record nor a
+ * saved stop
  */
 export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDeps & { stdout?: (text: string) => void } = {}): Promise<number> {
   const out = deps.stdout ?? ((text: string) => void process.stdout.write(text))
@@ -813,15 +949,15 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
       ? handles.every((handle) => handle === state.handle)
       : env.SCP_WAKE_SESSION
         ? env.SCP_WAKE_SESSION === ref
-        : handles.every((handle) => handle === record?.handle)
+        : record !== undefined && handles.every((handle) => handle === record.handle)
   if (
-    !record ||
+    (!record && !state) ||
     (entry?.sessionId !== undefined && entry.sessionId !== ref) ||
     !owned ||
     (revive && (revive.harness !== "claude-code" || (state !== undefined && state.sessionId !== revive.session)))
   )
     return decline(out, "unresumable")
-  if (!armTicket(record.file, ticket)) {
+  if (record && !armTicket(record.file, ticket)) {
     note(`${CLI_NAME} claude-wake: could not update the wake ticket`)
     return 1
   }
@@ -840,7 +976,14 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
   if (!dir || transcriptGone(env, ref)) return decline(out, "gone")
   const run = await claude.exec(
     claude.bin,
-    ["--bg", "--resume", ref, ...(state.name && SAFE_NAME.test(state.name) ? ["--name", state.name] : []), WAKE_PROMPT, "--mcp-config", record.file],
+    [
+      "--bg",
+      "--resume",
+      ref,
+      ...(state.name && SAFE_NAME.test(state.name) ? ["--name", state.name] : []),
+      WAKE_PROMPT,
+      ...(record ? ["--mcp-config", record.file] : []),
+    ],
     { timeoutMs: ACT_TIMEOUT_MS, env: claude.env, cwd: state.cwd },
   )
   if (run.code === 0) {
