@@ -1,5 +1,17 @@
 # @scp-dev/broker
 
+## 0.10.0
+
+### Minor Changes
+
+- 770d3ec: Record runner workers, show runner attach and cached status in list and peek, and stop remote workers through swarm end.
+
+### Patch Changes
+
+- Updated dependencies [770d3ec]
+  - @scp-dev/core@0.13.0
+  - @scp-dev/hub@0.10.2
+
 ## 0.9.0
 
 ### Minor Changes
