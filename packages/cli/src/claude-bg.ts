@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { type BrokerTask, type BrokerTaskContext, connectBroker, readOwnedFile, relayDir } from "@scp-dev/broker"
+import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, readOwnedFile, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
 import { bgDir, LAUNCHER_IDENTITY } from "./claude"
 import { RelayUsage, terminalAttached } from "./common"
@@ -189,6 +189,10 @@ export function plan(input: PlanInput): Action[] {
     const live = typeof entry.pid === "number"
     if (live && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0)
       actions.push({ kind: "unhibernate", id, entry, agent, ...(record ? { record } : {}) })
+    if (!record) {
+      keep(`not started by ${CLI_NAME} claude --bg, so no wake ticket would take its endpoint back`, agent)
+      continue
+    }
     if (!agent.parent) {
       keep("a root", agent)
       continue
@@ -340,9 +344,14 @@ export function readState(env: Env, id: string): BgState | undefined {
 
 function writeState(env: Env, id: string, state: BgState): void {
   const path = statePath(env, id)
+  privateDir(bgDir(env))
   writeFileSync(`${path}.tmp`, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
   renameSync(`${path}.tmp`, path)
 }
+
+/** the short ids whose state files a plan reads: the recorded sessions and every listed background session */
+const stateIds = (records: Map<string, BgRecord>, entries: ClaudeEntry[]): Set<string> =>
+  new Set([...records.keys(), ...entries.flatMap((entry) => (entry.id && SHORT_ID.test(entry.id) ? [entry.id] : []))])
 
 function readStates(env: Env, ids: Iterable<string>): Map<string, BgState> {
   const states = new Map<string, BgState>()
@@ -607,8 +616,6 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
   const sessions = new Map<string, string>()
   /** the records the last listing covered */
   const seen = new Set<string>()
-  /** endpoints without a record the last listing showed nothing to stop for, with their `worked_at` then */
-  const quiet = new Map<string, string>()
   let listed = false
   return {
     name: "claude-bg",
@@ -630,8 +637,7 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         return agents.some((agent) => {
           const id = idOf(agent)
           if (id !== undefined && records.has(id)) return maybeDue(agent, agents, readState(env, id), config, now(), true)
-          if (!unrecorded(agent) || quiet.get(agent.id) === agent.worked_at) return false
-          return maybeDue(agent, agents, id === undefined ? undefined : readState(env, id), config, now(), false)
+          return unrecorded(agent) && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0
         })
       }
       if (listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return
@@ -643,17 +649,10 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
       seen.clear()
       for (const id of records.keys()) seen.add(id)
       sessions.clear()
-      const live = new Set<string>()
       for (const entry of entries)
         if (entry.kind === "background" && entry.id && SHORT_ID.test(entry.id) && entry.sessionId) {
           sessions.set(entry.sessionId, entry.id)
-          if (typeof entry.pid === "number") live.add(entry.id)
         }
-      quiet.clear()
-      for (const agent of context.agents()) {
-        const id = agent.harness_session !== null ? sessions.get(agent.harness_session) : undefined
-        if (unrecorded(agent) && (id === undefined || !live.has(id))) quiet.set(agent.id, agent.worked_at)
-      }
       if (!isDue()) return
       const ps = deps.ps ?? psTable(claude.env, claude.exec)
       const table = await ps()
@@ -737,7 +736,7 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
       entries: listed ?? entries,
       agents,
       records,
-      states: readStates(env, records.keys()),
+      states: readStates(env, stateIds(records, listed ?? entries)),
       attached: table === null ? new Set() : attachTargets(table),
       now: (deps.now ?? Date.now)(),
       config,
@@ -824,7 +823,7 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
       entries,
       agents: await opened.port.agents(),
       records,
-      states: readStates(env, records.keys()),
+      states: readStates(env, stateIds(records, entries)),
       attached: attachTargets(table),
       now: now(),
       config: bgConfig(env),
