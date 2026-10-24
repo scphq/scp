@@ -1,5 +1,16 @@
 # @scp-dev/cli
 
+## 0.15.1
+
+### Patch Changes
+
+- 968c1d2: The local broker no longer caps a day's messages unless `SCP_DAILY_CAP` sets one. A hub keeps its 2000 a day.
+- Updated dependencies [968c1d2]
+  - @scp-dev/core@0.13.1
+  - @scp-dev/broker@0.10.1
+  - @scp-dev/hub@0.10.3
+  - @scp-dev/mcp@0.5.2
+
 ## 0.15.0
 
 ### Minor Changes
