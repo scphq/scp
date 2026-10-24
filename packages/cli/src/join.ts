@@ -1,7 +1,7 @@
 import { CLI_NAME } from "@scp-dev/core"
 import { readSessionMarker, relayDir } from "@scp-dev/broker"
-import { connectShell, localHandle, RelayUsage, walkNow } from "./common"
-import { CODEX_THREAD_KEY, codexShell, harnessAt, relayIdentity, sessionKey } from "./identity"
+import { connectShell, localHandle, PS_UNREAD, RelayUsage, walkNow } from "./common"
+import { CODEX_THREAD_KEY, codexShell, harnessAt, readPsTable, relayIdentity, sessionKey, SHELL_PS_TIMEOUT_MS } from "./identity"
 
 type Values = { harness?: unknown; json?: unknown; under?: unknown }
 
@@ -15,10 +15,12 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
   const handle = positionals[0] === undefined ? undefined : localHandle(positionals[0])
   const under = typeof values.under === "string" ? values.under : undefined
   const tool = `relay_join${handle || under ? ` {${[handle ? `name: "${handle}"` : "", under ? `under: "${under}"` : ""].filter(Boolean).join(", ")}}` : ""} (MCP)`
-  const { keys, self } = walkNow()
+  const table = readPsTable(SHELL_PS_TIMEOUT_MS)
+  const { keys, self, unread } = walkNow(process.env, process.ppid, table)
   const key = self.at(-1)
   const match = key === undefined ? null : /^pid:(\d+):(.+)$/.exec(key)
   if (!match) {
+    if (unread) throw new RelayUsage(`${CLI_NAME} join: ${PS_UNREAD}`)
     if (codexShell(process.env)) throw new RelayUsage(`${CLI_NAME} join: the codex sandbox hides the harness; use ${tool} instead`)
     throw new RelayUsage(`${CLI_NAME} join runs in an agent session's shell: no harness process runs this shell`)
   }
@@ -31,7 +33,8 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
       cwd,
       env: process.env,
       harnessPid: () => Number(match[1]),
-      inferHarness: (pid) => harnessAt(pid),
+      inferHarness: (pid) => harnessAt(pid, table ?? new Map()),
+      psTable: () => table,
       startOf: () => match[2],
       lineageOf: () => keys.slice(Math.max(0, keys.indexOf(key!))),
     })

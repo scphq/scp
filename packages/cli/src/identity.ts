@@ -283,11 +283,20 @@ export function parsePsCommTable(text: string): PsCommTable {
 
 /** how long the process table read may take: a loaded machine's ps otherwise eats a hook's whole budget */
 export const PS_TIMEOUT_MS = 1500
+/** a shell command's process table deadline: it has no hook budget, and a heavily loaded machine's ps can take seconds */
+export const SHELL_PS_TIMEOUT_MS = 5000
+/** room for the whole table: long command lines on a busy machine pass the 1 MiB default, which would kill ps */
+export const PS_MAX_BUFFER = 64 * 1024 * 1024
 
-/** one ps call for the whole process table, in the C locale; undefined when ps cannot run or takes over {@link PS_TIMEOUT_MS} */
-export function readPsTable(): PsCommTable | undefined {
+/** one ps call for the whole process table, in the C locale; undefined when ps cannot run or takes over `timeoutMs` */
+export function readPsTable(timeoutMs = PS_TIMEOUT_MS): PsCommTable | undefined {
   try {
-    const table = capture(["ps", "-ww", "-axo", "pid=,ppid=,lstart=,args="], { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" }, PS_TIMEOUT_MS)
+    const table = capture(
+      ["ps", "-ww", "-axo", "pid=,ppid=,lstart=,args="],
+      { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" },
+      timeoutMs,
+      PS_MAX_BUFFER,
+    )
     return table === undefined ? undefined : parsePsCommTable(table)
   } catch {
     return undefined
@@ -481,10 +490,11 @@ function helper(args: string): boolean {
  * a wrapper or a helper script's interpreter; with no harness above the helpers, the whole lineage; empty when there is none
  */
 export function harnessLineage(pid: number, table: PsCommTable | undefined = readPsTable()): string[] {
+  if (!table) return []
   const keys = lineage(pid, table)
   let first = -1
-  for (let i = 0, at = pid; i < keys.length; i++, at = table!.get(at)!.ppid) {
-    const args = table!.get(at)!.args
+  for (let i = 0, at = pid; i < keys.length; i++, at = table.get(at)!.ppid) {
+    const args = table.get(at)!.args
     if (PASS_THROUGH.has(command(args))) continue
     if (!helper(args)) return keys.slice(0, i + 1)
     if (first < 0) first = i
@@ -525,7 +535,7 @@ export function lineage(harnessPid: number, table: PsTable | undefined = readPsT
 
 /** `pid`'s own key as its children's {@link lineage} spells it, from the same ps table; undefined without a start time */
 export function spawnerKey(pid = process.pid, table: PsTable | undefined = readPsTable()): string | undefined {
-  const key = lineage(pid, table)[0]
+  const key = table && lineage(pid, table)[0]
   return key?.startsWith(`pid:${pid}:`) ? key : undefined
 }
 
