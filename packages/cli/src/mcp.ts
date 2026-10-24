@@ -15,6 +15,7 @@ import {
   type PsCommTable,
   psParent,
   readPsTable,
+  SHELL_PS_TIMEOUT_MS,
   relayIdentity,
   writeShimBinding,
 } from "./identity"
@@ -55,9 +56,9 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
       pid ??= launcherPid(process.env) ?? harnessPid()
       return pid
     },
-    inferHarness: (at) => harnessAt(at, input.psTable!()),
+    inferHarness: (at) => harnessAt(at, input.psTable!() ?? new Map()),
     psTable: () => {
-      table ??= { value: readPsTable() }
+      if (!table?.value) table = { value: readPsTable(SHELL_PS_TIMEOUT_MS) }
       return table.value
     },
   }
