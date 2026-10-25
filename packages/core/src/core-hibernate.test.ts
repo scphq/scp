@@ -116,6 +116,40 @@ describe("hibernate", () => {
     expect(core.whoami(lane.id).presence).toBe("hibernated")
   })
 
+  test("only mail that arrives after the hibernation is due; the job still counts every unread message", () => {
+    const { core, clock, peer, lane } = setup()
+    core.send(peer.id, { to: "lane", body: "stale" })
+    clock.now += 1000
+    core.brokerHibernate(lane.id, { wake: "claude-bg", ref: "s-1" })
+    expect(core.wakeDue(lane.id)).toBeNull()
+    clock.now += LIMITS.wakeDebounceS * 1000
+    core.brokerHibernate(lane.id, { wake: "claude-bg", ref: "s-1" })
+    expect(core.wakeDue(lane.id)).toBeNull()
+    const fresh = core.send(peer.id, { to: "lane", body: "fresh" })
+    expect(core.wakeDue(lane.id)).toMatchObject({ message: { id: fresh.id }, unread: 2 })
+  })
+
+  test("hibernating again with the same provider and ref keeps the watermark, so mail since the first still wakes", () => {
+    const { core, clock, peer, lane } = setup()
+    core.brokerHibernate(lane.id, { wake: "claude-bg", ref: "019a-session" })
+    clock.now += 1000
+    const raced = core.send(peer.id, { to: "lane", body: "raced" })
+    core.wakeResult(lane.id, { ok: false, ms: 1 })
+    clock.now += 1000
+    core.brokerHibernate(lane.id, { wake: "claude-bg", ref: "019a-session" })
+    expect(core.wakeDue(lane.id)).toMatchObject({ message: { id: raced.id } })
+    core.brokerHibernate(lane.id, { wake: "claude-bg", ref: "other" })
+    expect(core.wakeDue(lane.id)).toBeNull()
+  })
+
+  test("a spawn hibernation still wakes for mail queued before it", () => {
+    const { core, clock, db, peer, lane } = setup()
+    core.send(peer.id, { to: "lane", body: "queued" })
+    clock.now += 1000
+    db.query("UPDATE endpoints SET hibernate = 'spawn', wake_ref = 'r', hibernated_at = ? WHERE id = ?").run(clock.now, lane.id)
+    expect(core.wakeDue(lane.id)).toMatchObject({ provider: "spawn", unread: 1 })
+  })
+
   test("a decline shows wake_declined, adds no backoff, and holds runs for that message and its sender until another sender or a new hibernate", () => {
     const { core, peer, lane, audit } = setup()
     const other = core.claim({ handle: "other", harness: "codex" }).endpoint

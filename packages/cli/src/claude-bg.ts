@@ -18,7 +18,7 @@ export const CLAUDE_BG_PROVIDER = "claude-bg"
 export const CLAUDE_WAKE_TIMEOUT_S = 90
 /** how often the broker looks for workers to stop or remove */
 export const CLAUDE_BG_EVERY_MS = 120_000
-const STOP_AFTER_S = 600
+const STOP_AFTER_S = 120
 const IDLE_AFTER_S = 600
 const LIST_TIMEOUT_MS = 15_000
 const ACT_TIMEOUT_MS = 30_000
@@ -109,6 +109,7 @@ export type AgentFacts = Pick<
   | "connections"
   | "hibernate"
   | "unread"
+  | "unread_at"
   | "handed_back"
 >
 
@@ -171,7 +172,7 @@ const finishedOf = (agent: AgentFacts): boolean => agent.state === "done" || age
 const stopAfter = (agent: AgentFacts, config: BgConfig): number => (finishedOf(agent) ? Math.min(config.stopAfterS, config.idleAfterS) : config.idleAfterS)
 
 /**
- * what to do with each background session: only a worker, an endpoint linked under a parent, with no live workers, no unread mail, no
+ * what to do with each background session: only a worker, an endpoint linked under a parent, with no live workers, no
  * `claude attach` and not the caller's own is ever stopped, and only while Claude shows it exactly idle. Such a worker stops after
  * `idleAfterS` without work, a finished one (done or handed back) after `stopAfterS` when sooner; a historic worker `swarm claude --bg`
  * started, with no children, is removed; `olderThanS` replaces the thresholds
@@ -202,10 +203,6 @@ export function plan(input: PlanInput): Action[] {
     const running = liveChildren(agent, input.agents)
     if (running > 0) {
       keep(`${running} live worker${running === 1 ? "" : "s"}`, agent)
-      continue
-    }
-    if (agent.unread) {
-      keep("unread mail", agent)
       continue
     }
     if (attachedTo(entry, input.attached)) {
@@ -291,7 +288,7 @@ export const idleAfterS = (env: Env): number => bgConfig(env).idleAfterS
 
 /**
  * `$SCP_CLAUDE_BG_STOP_AFTER_S`, `$SCP_IDLE_AFTER_S` (alias `$SCP_CLAUDE_BG_IDLE_AFTER_S`) and `$SCP_CLAUDE_BG_REMOVE`, else
- * `claude_bg.stop_after_s`, `lifecycle.idle_after_s` (alias `claude_bg.idle_after_s`) and `claude_bg.remove` in config.json, else 600 s,
+ * `claude_bg.stop_after_s`, `lifecycle.idle_after_s` (alias `claude_bg.idle_after_s`) and `claude_bg.remove` in config.json, else 120 s,
  * 600 s and true
  */
 export function bgConfig(env: Env): BgConfig {
@@ -479,12 +476,12 @@ type Act = Exclude<Action, { kind: "keep" }>
 export type Outcome = { action: Act; ok: boolean; note: string }
 
 const later = (now: string | null | undefined, then: string | null): boolean => !!now && (then === null || Date.parse(now) > Date.parse(then))
-/** the session got mail or did work since `then`, gained live workers, lost its parent, or is gone */
+/** the session got mail or did work since `then` (unread mail it already had is no change), gained live workers, lost its parent, or is gone */
 function changed(agents: AgentFacts[], then: AgentFacts): boolean {
   const now = agents.find((one) => one.id === then.id)
   return (
     !now ||
-    now.unread ||
+    (now.unread && !then.unread) ||
     later(now.worked_at, then.worked_at) ||
     later(now.mail_at, then.mail_at) ||
     (then.parent !== null && !now.parent) ||
@@ -518,7 +515,8 @@ async function moved(target: Target, port: BgPort, run: Run): Promise<string | n
 
 /**
  * hibernates the worker, checks nothing reached it, stops it, then brings it back at once when a message raced in: through its waker while
- * the message is unread, else by respawning it awake, since its shim may have handed the message to the session just before the stop
+ * that message is unread, else by respawning it awake, since its shim may have handed the message to the session just before the stop.
+ * Unread mail it already had at the plan never brings it back
  */
 async function stopWorker(target: Target, port: BgPort, run: Run): Promise<string | null> {
   const { id, entry, agent } = target
@@ -548,7 +546,7 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
   writeState(run.env, id, { sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle, stoppedAt: run.now() })
   const after = await current(port, agent)
   if (!after) return null
-  if (after.unread) {
+  if (later(after.unread_at, agent.mail_at)) {
     await port.kick(agent, ref)
     return "mail raced the stop, so its waker brings it back"
   }
@@ -610,7 +608,7 @@ async function removeWorker(target: Target & { live: boolean }, port: BgPort, ru
   }
   const { rmRefused: _, ...kept } = state
   writeState(env, id, { ...kept, removedAt: now() })
-  if ((await current(port, agent))?.unread) await port.kick(agent, ref)
+  if (later((await current(port, agent))?.unread_at, agent.mail_at)) await port.kick(agent, ref)
   return null
 }
 
@@ -641,7 +639,7 @@ const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind 
  */
 function maybeDue(agent: AgentFacts, agents: AgentFacts[], state: BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
   if (agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) return true
-  if (!agent.parent || agent.unread || liveChildren(agent, agents) > 0) return false
+  if (!agent.parent || liveChildren(agent, agents) > 0) return false
   if (recorded && config.remove && agent.historic && leaf(agent)) return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
   if (agent.hibernate === CLAUDE_BG_PROVIDER) return false
   return now - Date.parse(agent.worked_at) >= stopAfter(agent, config) * 1000

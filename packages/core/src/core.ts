@@ -362,6 +362,8 @@ export interface LocalAgent {
   /** the provider of its hibernation, or null */
   hibernate: string | null
   unread: boolean
+  /** when its newest unread message was sent, or null */
+  unread_at: string | null
   /** a spawn grant it spent has a handback */
   handed_back: boolean
 }
@@ -2499,6 +2501,7 @@ export class RelayCore {
         connections: row.connections,
         hibernate: row.hibernate,
         unread: this.hasUnread(row.id),
+        unread_at: iso(this.unreadAt(row.id)),
         handed_back: handedBack.has(row.id),
       }
     })
@@ -2518,13 +2521,14 @@ export class RelayCore {
       this.sql.all(`UPDATE endpoints SET wake_tried = NULL WHERE id = ?`, target.id)
       return this.view(this.byId(target.id)!)
     }
+    const again = target.hibernate === set.wake && target.wake_ref === set.ref && target.hibernated_at !== null
     this.clearHibernation(target.id)
     this.sql.all(
       `UPDATE endpoints SET hibernate = ?, wake_ref = ?, wake_eta = ?, hibernated_at = ?, hold_ref = NULL, revive = ? WHERE id = ?`,
       set.wake,
       set.ref,
       set.eta,
-      this.now(),
+      again ? target.hibernated_at : this.now(),
       reviveVia(set.ref, set.wake),
       target.id,
     )
@@ -2564,7 +2568,7 @@ export class RelayCore {
   /**
    * the wake hook run a delivery to a hibernated local agent is due, recorded as tried; for a broker wake, its waker's run, with the harness
    * session as the ref. None while it is neither hibernated nor has a broker wake and a harness session, has no unread
-   * message, ran within LIMITS.wakeDebounceS (after failures, a doubling backoff up to LIMITS.wakeBackoffMaxS), or the provider declined a
+   * message (hibernated by any provider but {@link SPAWN_PROVIDER}, none that arrived since it hibernated: older mail stays queued), ran within LIMITS.wakeDebounceS (after failures, a doubling backoff up to LIMITS.wakeBackoffMaxS), or the provider declined a
    * wake for the newest unread message or for another from its sender. The newest unread message's metadata only, never its body
    */
   wakeDue(endpoint: string, now = this.now()): WakeJob | null {
@@ -2578,9 +2582,10 @@ export class RelayCore {
     const newest = one<{ id: string; from_ep: string; kind: MessageKind; thread: string; created_at: number }>(
       this.sql,
       `SELECT m.id, m.from_ep, m.kind, m.thread, m.created_at FROM deliveries d JOIN messages m ON m.id = d.message_id
-       WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ? ORDER BY d.seq DESC LIMIT 1`,
+       WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ? AND m.created_at >= ? ORDER BY d.seq DESC LIMIT 1`,
       endpoint,
       now,
+      row.hibernate && row.hibernate !== SPAWN_PROVIDER ? (row.hibernated_at ?? 0) : 0,
     )
     if (!newest) return null
     if (row.wake_declined !== null && (newest.id === row.declined_message || newest.from_ep === row.declined_from)) return null
@@ -3895,6 +3900,18 @@ export class RelayCore {
       hop,
       now - LIMITS.causalWindowS * 1000,
       endpoint,
+    )
+  }
+
+  /** when the newest unread message to `endpoint` was sent, or null */
+  private unreadAt(endpoint: string): number | null {
+    return (
+      one<{ at: number | null }>(
+        this.sql,
+        `SELECT MAX(m.created_at) AS at FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ?`,
+        endpoint,
+        this.now(),
+      )?.at ?? null
     )
   }
 

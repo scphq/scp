@@ -32,6 +32,12 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
+/** a message queued for it now and still unread */
+function mail(facts: LocalAgent): void {
+  facts.unread = true
+  facts.unread_at = facts.mail_at = new Date(now).toISOString()
+}
+
 function agent(overrides: Partial<LocalAgent> = {}): LocalAgent {
   return {
     id: "worker-id",
@@ -51,6 +57,7 @@ function agent(overrides: Partial<LocalAgent> = {}): LocalAgent {
     connections: 1,
     hibernate: null,
     unread: false,
+    unread_at: null,
     handed_back: false,
     ...overrides,
   }
@@ -218,6 +225,10 @@ describe("planning", () => {
   test("stops a finished idle worker", () => {
     expect(plan(input())).toMatchObject([{ kind: "stop", id }])
   })
+  test("stops an idle worker with unread mail, finished or not", () => {
+    expect(plan(input({ agents: [agent({ unread: true })] }))).toMatchObject([{ kind: "stop", id }])
+    expect(plan(input({ agents: [agent({ unread: true, state: "working" })] }))).toMatchObject([{ kind: "stop", id }])
+  })
   const child = (overrides: Partial<LocalAgent> = {}) =>
     agent({ id: "child-id", address: "me/c1", handle: "c1", parent: "me/w1", harness_session: "child-session", state: "working", ...overrides })
   const guards: [string, Partial<PlanInput>][] = [
@@ -232,7 +243,6 @@ describe("planning", () => {
     ["1 live worker", { agents: [agent({ children: 1 }), child({ presence: "offline", state: "working" })] }],
     ["1 live worker", { agents: [agent({ children: 2 }), child({ presence: "offline", state: "done" })] }],
     ["2 live workers", { agents: [agent({ subagents: 2 })] }],
-    ["unread mail", { agents: [agent({ unread: true })] }],
     ["attached", { attached: new Set([id]) }],
     ["attached", { attached: new Set(["lane"]) }],
     ["the caller's own session", { self: new Set([sessionId]) }],
@@ -356,7 +366,7 @@ describe("configuration", () => {
   }
   test("reads defaults and file settings with environment precedence", () => {
     const f = fixture()
-    expect(bgConfig(f.env)).toEqual({ stopAfterS: 600, idleAfterS: 600, remove: true })
+    expect(bgConfig(f.env)).toEqual({ stopAfterS: 120, idleAfterS: 600, remove: true })
     for (const [value, seconds] of [
       ["900", 900],
       ["10m", 600],
@@ -501,11 +511,28 @@ describe("background task", () => {
     const f = fixture()
     f.record()
     f.onAgents = () => {
-      if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.unread = true
+      if (f.calls().some((call) => call.argv[0] === "stop")) mail(f.facts)
     }
     await f.run()
     expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
     expect(f.events.filter((event) => event[0] === "hibernate").at(-1)?.[4]).toBe(true)
+    expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): mail raced the stop, so its waker brings it back`])
+  })
+  test("a worker stopped with unread mail it already had stays stopped across sweeps, its waker never kicked", async () => {
+    const f = fixture()
+    f.record()
+    const old = new Date(now - 3_600_000).toISOString()
+    f.facts = agent({ state: "working", unread: true, unread_at: old, mail_at: old })
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = { ...f.facts, presence: "hibernated", connections: 0 }
+    for (let n = 0; n < 3; n++) await task.run(f.context)
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents", "stop"])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+    expect(f.events.some((event) => event[0] === "unhibernate" || event[0] === "kick")).toBe(false)
   })
   for (const fails of [false, true]) {
     test(`respawns awake a worker whose shim took mail just before the stop, with respawn failing ${fails}`, async () => {
@@ -567,7 +594,7 @@ describe("acting on a changed worker", () => {
     f.record()
     f.facts = agent({ historic: true })
     f.onAgents = () => {
-      if (f.calls().some((call) => call.argv[0] === "stop")) f.facts.unread = true
+      if (f.calls().some((call) => call.argv[0] === "stop")) mail(f.facts)
     }
     await f.run()
     expect(f.calls().map((call) => call.argv[0])).not.toContain("rm")
@@ -587,11 +614,21 @@ describe("acting on a changed worker", () => {
     f.save([stoppedEntry({ cwd: f.home })])
     f.facts = agent({ historic: true, hibernate: "claude-bg", connections: 0 })
     f.onAgents = () => {
-      if (f.calls().some((call) => call.argv[0] === "rm")) f.facts.unread = true
+      if (f.calls().some((call) => call.argv[0] === "rm")) mail(f.facts)
     }
     await f.run()
     expect(f.calls().at(-1)?.argv).toEqual(["rm", id])
     expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+  })
+  test("never kicks a removed worker for unread mail it already had", async () => {
+    const f = fixture()
+    f.record()
+    f.save([stoppedEntry({ cwd: f.home })])
+    const old = new Date(now - 3_600_000).toISOString()
+    f.facts = agent({ historic: true, hibernate: "claude-bg", connections: 0, unread: true, unread_at: old, mail_at: old })
+    await f.run()
+    expect(f.calls().at(-1)?.argv).toEqual(["rm", id])
+    expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(0)
   })
   test("keeps and kicks a stopped worker that claude shows running again right before the removal", async () => {
     const f = fixture()
