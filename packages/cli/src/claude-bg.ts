@@ -171,7 +171,7 @@ const finishedOf = (agent: AgentFacts): boolean => agent.state === "done" || age
 const stopAfter = (agent: AgentFacts, config: BgConfig): number => (finishedOf(agent) ? Math.min(config.stopAfterS, config.idleAfterS) : config.idleAfterS)
 
 /**
- * what to do with each background session: only a worker, an endpoint linked under a parent, with no live workers, no
+ * what to do with each background session: only a worker, an endpoint linked under a parent, with no live workers, no unread mail, no
  * `claude attach` and not the caller's own is ever stopped, and only while Claude shows it exactly idle. Such a worker stops after
  * `idleAfterS` without work, a finished one (done or handed back) after `stopAfterS` when sooner; a historic worker `swarm claude --bg`
  * started, with no children, is removed; `olderThanS` replaces the thresholds
@@ -202,6 +202,10 @@ export function plan(input: PlanInput): Action[] {
     const running = liveChildren(agent, input.agents)
     if (running > 0) {
       keep(`${running} live worker${running === 1 ? "" : "s"}`, agent)
+      continue
+    }
+    if (agent.unread) {
+      keep("unread mail", agent)
       continue
     }
     if (attachedTo(entry, input.attached)) {
@@ -480,7 +484,7 @@ function changed(agents: AgentFacts[], then: AgentFacts): boolean {
   const now = agents.find((one) => one.id === then.id)
   return (
     !now ||
-    (now.unread && !then.unread) ||
+    now.unread ||
     later(now.worked_at, then.worked_at) ||
     later(now.mail_at, then.mail_at) ||
     (then.parent !== null && !now.parent) ||
@@ -637,7 +641,7 @@ const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind 
  */
 function maybeDue(agent: AgentFacts, agents: AgentFacts[], state: BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
   if (agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) return true
-  if (!agent.parent || liveChildren(agent, agents) > 0) return false
+  if (!agent.parent || agent.unread || liveChildren(agent, agents) > 0) return false
   if (recorded && config.remove && agent.historic && leaf(agent)) return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
   if (agent.hibernate === CLAUDE_BG_PROVIDER) return false
   return now - Date.parse(agent.worked_at) >= stopAfter(agent, config) * 1000
