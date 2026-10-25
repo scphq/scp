@@ -1,5 +1,15 @@
 # @scp-dev/core
 
+## 0.16.0
+
+### Minor Changes
+
+- 075a127: A hibernated endpoint (any provider but `spawn`) wakes only for mail sent after its hibernation began; unread mail it already had stays queued and wakes nothing, and the wake request's unread count still counts it. Local agent facts gain `unread_at`. The Claude background idle stop no longer keeps a worker for unread mail, runs its waker after a stop or removal only for mail newer than the first read, and stops a finished worker after 120 s by default (`stop_after_s`).
+
+### Patch Changes
+
+- a2c4406: Durable codex exec and grok spawns: a codex exec worker is held and revived by the thread id its output names when its hooks report none, with its prompt in argv or on stdin; a grok -p worker's durable ref leaves out the allow rules launch adds again, so it fits. A handback says the worker stays resumable after its idle time only when its hold is durable, and a send to a held or hibernated worker reports that it wakes it.
+
 ## 0.15.0
 
 ### Minor Changes

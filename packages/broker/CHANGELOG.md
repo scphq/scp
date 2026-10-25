@@ -1,5 +1,15 @@
 # @scp-dev/broker
 
+## 0.11.2
+
+### Patch Changes
+
+- 075a127: A hibernated endpoint (any provider but `spawn`) wakes only for mail sent after its hibernation began; unread mail it already had stays queued and wakes nothing, and the wake request's unread count still counts it. Local agent facts gain `unread_at`. The Claude background idle stop no longer keeps a worker for unread mail, runs its waker after a stop or removal only for mail newer than the first read, and stops a finished worker after 120 s by default (`stop_after_s`).
+- Updated dependencies [a2c4406]
+- Updated dependencies [075a127]
+  - @scp-dev/core@0.16.0
+  - @scp-dev/hub@0.11.2
+
 ## 0.11.1
 
 ### Patch Changes
