@@ -11,6 +11,7 @@ import {
   agyNote,
   closedStdin,
   codexOverrideAt,
+  codexThread,
   codexOverrides,
   contributorRefusal,
   harnessArgv,
@@ -1361,15 +1362,34 @@ describe("harness argv and environment", () => {
       "steer",
     ])
     expect(resumeArgv(["codex", "exec", "--", "go"], "s-1", "steer")).toEqual(["codex", "exec", "resume", "s-1", "steer"])
+    expect(resumeArgv(["codex", "exec", "-"], "s-1", "steer")).toEqual(["codex", "exec", "resume", "s-1", "steer"])
+    expect(resumeArgv(["codex", "exec", "--json"], "s-1", "steer")).toEqual(["codex", "exec", "resume", "--json", "s-1", "steer"])
     for (const command of [
       ["codex", "exec", "--ephemeral", "go"],
-      ["codex", "exec", "-"],
+      ["codex", "exec", "--ephemeral"],
       ["codex", "exec", "resume", "--last", "go"],
+      ["codex", "exec", "review"],
       ["codex", "go"],
       ["claude", "-p", "go"],
     ])
       expect(resumeArgv(command, "s-1", "steer")).toBeUndefined()
     expect(codexOverrideAt(["exec", "--skip-git-repo-check", "-m", "m1", "resume", "s-1", "p"])).toEqual([0, 1, 5])
+  })
+
+  test("a codex exec run's thread comes from its session id header on stderr, else from --json's first event; nothing else names one", () => {
+    const id = "01a170c3-51dc-7c13-80cf-fe831e27d903"
+    const run = (out: string, err: string) => ({ head: { out: new TextEncoder().encode(out), err: new TextEncoder().encode(err) } })
+    const header = `Reading additional input from stdin...\nOpenAI Codex v0.1\n--------\nworkdir: /w\nsession id: ${id}\n--------\nuser\nhi\n`
+    expect(codexThread(run("OK\n", header))).toBe(id)
+    expect(codexThread(run("OK\n", header.replaceAll("\n", "\r\n")))).toBe(id)
+    expect(codexThread(run(`{"type":"thread.started","thread_id":"${id}"}\n{"type":"turn.started"}\n`, ""))).toBe(id)
+    for (const [out, err] of [
+      ["OK\n", ""],
+      [`OK\n{"type":"thread.started","thread_id":"${id}"}\n`, ""],
+      ["", `codex\nsession id: not-a-uuid\n`],
+    ])
+      expect(codexThread(run(out!, err!))).toBeUndefined()
+    expect(codexThread({})).toBeUndefined()
   })
 
   test("a resumable worker is held for idle_after_s when detached or --durable, none in the foreground; --idle wins", () => {

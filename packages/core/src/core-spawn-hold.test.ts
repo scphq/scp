@@ -91,7 +91,7 @@ describe("a held spawn", () => {
 
   test("its first handback says it stays resumable; each later run hands back once, as a reply in the spawn thread", () => {
     const { core, actor, main, grant, worker, hold, message } = setup()
-    hold()
+    hold(REF)
     const first = core.spawnExit(actor, { grant: grant.token, code: 0, output: "first result" })
     expect(message(first.handback!).body).toBe("worker me/w1 finished (exit 0)\n\nfirst result\n\nme/w1 stays resumable: message it to resume its session")
     expect(core.whoami(worker.id)).toMatchObject({ wake: "spawn-resume", status: { state: "done", note: "exited 0" } })
@@ -114,6 +114,27 @@ describe("a held spawn", () => {
     expect(core.spawnExit(actor, { grant: grant.token, code: 0, run: 2 }).handback).toBeNull()
     expect(core.inbox(main.id).map((m) => m.id)).toEqual([first.handback!, second.handback!, third.handback!])
     expect(code(() => core.spawnExit(actor, { grant: grant.token, code: 0, run: 0 }))).toBe("invalid_params")
+  })
+
+  test("a plain hold's handback says it stays resumable only until the spawn's idle time runs out", () => {
+    const { core, actor, grant, hold, message } = setup()
+    hold()
+    const first = core.spawnExit(actor, { grant: grant.token, code: 0, output: "done" })
+    expect(message(first.handback!).body).toBe(
+      "worker me/w1 finished (exit 0)\n\ndone\n\nme/w1 stays resumable until its spawn's idle time runs out: message it before then to resume its session",
+    )
+  })
+
+  test("a send to a done worker its spawn holds or hibernated wakes it; once let go its run ended", () => {
+    const { core, actor, main, grant, worker, hold } = setup()
+    hold(REF)
+    core.spawnExit(actor, { grant: grant.token, code: 0, output: "done" })
+    expect(core.send(main.id, { to: "w1", body: "held" }).deliveries[0]).toMatchObject({ state: "running", wake: "spawn-resume", idle: true })
+    core.hibernateHeld(worker.id)
+    core.waker(worker.id, false)
+    expect(core.send(main.id, { to: "w1", body: "hibernated" }).deliveries[0]).toMatchObject({ state: "running", hibernated: true, idle: true })
+    core.spawnEnd(actor, { endpoint: "w1" })
+    expect(core.send(main.id, { to: "w1", body: "gone" }).deliveries[0]).toMatchObject({ state: "ended" })
   })
 
   test("a durable hold whose connection goes without a hibernate or an end is hibernated by the broker with its ref; one woken plainly is not", () => {

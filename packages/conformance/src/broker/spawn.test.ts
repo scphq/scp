@@ -236,7 +236,9 @@ brokerSuite("broker spawn", (start) => {
     await holder.request("wake", { via: "spawn-resume" });
     const first = await lead.request<Exit>("spawn_exit", { grant: grant.token, code: 0, output: "first" });
     expect(first.endpoint).toMatchObject({ wake: "spawn-resume", status: { state: "done" } });
-    expect((await inbox(lead))[0]!.body.text).toEndWith("me/w stays resumable: message it to resume its session");
+    expect((await inbox(lead))[0]!.body.text).toEndWith(
+      "me/w stays resumable until its spawn's idle time runs out: message it before then to resume its session",
+    );
     const steer = await lead.request<{ id: string; thread: string }>("send", { to: "w", body: "more", thread: "thr_work" });
     const second = await lead.request<Exit>("spawn_exit", { grant: grant.token, code: 0, output: "second", run: 2, reply_to: steer.id });
     expect((await inbox(lead)).find((m) => m.id === second.handback)).toMatchObject({ reply_to: steer.id, thread: steer.thread });

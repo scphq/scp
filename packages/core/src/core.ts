@@ -3061,7 +3061,7 @@ export class RelayCore {
     if (recipient.kind !== "agent" || !this.localRow(recipient)) return undefined
     const done = recipient.status_state === "done"
     if ((done || this.presence(recipient, now) === "offline") && this.unjoinedSpawn(sender, recipient.handle, now)) return "starting"
-    if (done) return this.rootWake(recipient, now) ? "running" : "ended"
+    if (done) return this.rootWake(recipient, now) || resumes(recipient) ? "running" : "ended"
     return offline ? "offline" : "running"
   }
 
@@ -5302,7 +5302,7 @@ export class RelayCore {
         ...(unapplied.length ? this.unappliedLines(spender, grant, unapplied, now, exits) : []),
       ]
       if (steers.length) body.push(steers.join("\n"))
-      if (spender.wake === "spawn-resume") body.push(heldLine(this.address(spender)))
+      if (spender.wake === "spawn-resume") body.push(heldLine(this.address(spender), spender.hold_ref !== null))
     }
     const causal = spender && spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
     const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, LIMITS.hopMax) : 0
@@ -5357,7 +5357,7 @@ export class RelayCore {
       kept ? `worker ${address} finished (exit ${code})` : `worker ${address} exited without replying (exit ${code})`,
       kept,
       tail,
-      spender.wake === "spawn-resume" ? heldLine(address) : "",
+      spender.wake === "spawn-resume" ? heldLine(address, spender.hold_ref !== null) : "",
     ]
     const now = this.now()
     const causal = spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
@@ -6965,9 +6965,11 @@ function subagentKind(type: string | undefined): string {
   return word ? word.toLowerCase().slice(0, 16) : "agent"
 }
 
-/** the line a held spawn's handback ends with */
-function heldLine(address: string): string {
-  return `${address} stays resumable: message it to resume its session`
+/** the line a held spawn's handback ends with: a durable hold's revives the worker after the hold lets go, a plain one's only until then */
+function heldLine(address: string, durable: boolean): string {
+  return durable
+    ? `${address} stays resumable: message it to resume its session`
+    : `${address} stays resumable until its spawn's idle time runs out: message it before then to resume its session`
 }
 
 /** `<root handle>-<short type>-<first 4 alphanumerics of id>`, the root's part clipped so the whole leaves room for a `-<n>` suffix */
@@ -7009,6 +7011,11 @@ function wakes(row: EndpointRow): boolean {
 /** a wake with a live waker, or a hook waker that left within LIMITS.restartGraceS */
 function waking(row: EndpointRow, now: number): boolean {
   return wakeOf(row) !== null && (row.wakers > 0 || (row.waker_left ?? 0) >= now - LIMITS.restartGraceS * 1000)
+}
+
+/** a done row a message still resumes: held by its spawn, or hibernated by a provider that has not declined */
+function resumes(row: EndpointRow): boolean {
+  return row.hibernate !== null ? row.wake_declined === null : row.wake === "spawn-resume" && row.wakers > 0
 }
 
 /** whether the broker itself wakes the row, which is not hibernated, through its waker named after the row's wake */

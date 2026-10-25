@@ -88,7 +88,7 @@ export function firstRun(command: string[], uuid: () => string = randomUUID): { 
   return { command: [...found.prefix, ...found.launch.first!], session: found.launch.id }
 }
 
-/** the session a resumed run of `command` names: codex's from its hooks, agy's from the conversation file, grok's and muse's the one it was given */
+/** the session a resumed run of `command` names: codex's from its hooks or its output, agy's from the conversation file, grok's and muse's the one it was given */
 export function resumeSession(command: string[], session: string | null | undefined): string | undefined {
   if (resumable(command) === "agy") session ??= headless("agy", command)?.launch.id
   return session && SESSION.test(session) ? session : undefined
@@ -96,8 +96,9 @@ export function resumeSession(command: string[], session: string | null | undefi
 
 /**
  * a resumed run's words before its prompt, which goes last: `codex exec [opts] resume [opts] <session>`, `agy [args] --conversation <id> -p`,
- * `grok [args] --resume <id> [--allow ...] -p`, `muse [opts] exec [opts] --session-id <id>`; undefined for any other command, an ephemeral
- * codex, a muse without a session log, or one that is not headless
+ * `grok [args] --resume <id> -p` (its messaging allow rules added at launch, as for any headless grok, so they stay out of a durable ref),
+ * `muse [opts] exec [opts] --session-id <id>`; undefined for any other command, an ephemeral codex, a muse without a session log, or one that
+ * is not headless
  */
 export function resumeBase(command: string[], session: string): string[] | undefined {
   if (!SESSION.test(session)) return undefined
@@ -108,7 +109,7 @@ export function resumeBase(command: string[], session: string): string[] | undef
   const found = headless(harness, command)
   if (!found) return undefined
   const conversation = harness === "agy" ? ["--conversation", session] : ["--resume", session]
-  return [...found.prefix, ...found.launch.base, ...conversation, ...found.launch.extra, "-p"]
+  return [...found.prefix, ...found.launch.base, ...conversation, "-p"]
 }
 
 /** messages as one resume prompt: each framed as a channel push, joined by a blank line */
