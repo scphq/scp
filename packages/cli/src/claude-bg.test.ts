@@ -20,6 +20,7 @@ import {
   idleAfterS,
   plan,
   readState,
+  runsCommand,
   refSession,
   reviveRef,
 } from "./claude-bg"
@@ -28,6 +29,21 @@ const id = "1a2b3c4d"
 const sessionId = `${id}-0000-4000-8000-000000000001`
 const now = Date.parse("2030-01-02T00:00:00Z")
 const cleanups: (() => void | Promise<void>)[] = []
+/** a session's process tree with only its helpers: the pty host above it, MCP servers, a hook, and another session's Bash tool shell */
+const helpers = [
+  "  4200     1 claude bg-pty-host --bg-pty-host /tmp/d/a.pty.sock 200 50 -- /opt/claude --bg-spare /tmp/d/a.claim",
+  "  4242  4200 claude bg-spare --bg-spare /tmp/d/a.claim.sock",
+  "  4300  4242 node /opt/scp/cli.js mcp --harness claude --channels",
+  "  4301  4242 bun packages/notes/mcp/src/index.ts",
+  "  4302  4242 caffeinate -i -t 300",
+  "  4303  4242 /bin/sh -c /opt/hooks/on-stop.sh",
+  "  5000  4999 /bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-9-b.sh 2>/dev/null || true && eval 'sleep 600'",
+  "",
+].join("\n")
+/** the same tree with a Bash tool command still running under the session */
+const running = `${helpers}  4400  4242 /bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-1-a.sh 2>/dev/null || true && eval 'bash suite.sh' < /dev/null && pwd -P >| /tmp/c-cwd
+  4401  4400 bash suite.sh
+`
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
@@ -85,6 +101,7 @@ function input(overrides: Partial<PlanInput> = {}): PlanInput {
     records: new Map([[id, { file: "/record.json", handle: "w1" }]]),
     states: new Map(),
     attached: new Set(),
+    processes: helpers,
     now,
     config: { stopAfterS: 600, idleAfterS: 600, remove: true },
     ...overrides,
@@ -247,6 +264,9 @@ describe("planning", () => {
     ["attached", { attached: new Set(["lane"]) }],
     ["the caller's own session", { self: new Set([sessionId]) }],
     ["the caller's own session", { selfPids: new Set([1, 4242]) }],
+    ["running a background command", { processes: running }],
+    ["running a background command", { processes: running, agents: [agent({ historic: true })] }],
+    ["ps failed, so running commands are unknown", { processes: null }],
     ["busy", { entries: [entry({ status: "busy" })] }],
     ["blocked", { entries: [entry({ status: "blocked" })] }],
     ["waiting", { entries: [entry({ status: "waiting" })] }],
@@ -342,6 +362,14 @@ describe("planning", () => {
   test("unhibernates a connected live session", () => {
     expect(plan(input({ agents: [agent({ hibernate: "claude-bg" })] }))[0]).toMatchObject({ kind: "unhibernate", id })
   })
+})
+
+test("finds a Bash tool command at any depth under a session, never in its helpers or another session", () => {
+  expect(runsCommand(helpers, 4242)).toBe(false)
+  expect(runsCommand(running, 4242)).toBe(true)
+  expect(runsCommand(running.replace("4400  4242", "4400  4301"), 4242)).toBe(true)
+  expect(runsCommand(running, 4300)).toBe(false)
+  expect(runsCommand("bad line\n4400 4242\n", 4242)).toBe(false)
 })
 
 test("walks a process's ancestors, stopping at pid 1 and on a cycle", () => {
@@ -604,6 +632,35 @@ describe("acting on a changed worker", () => {
     f.record()
     let reads = 0
     f.deps.ps = async () => (reads++ ? `/usr/bin/claude attach ${id}` : "")
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+    expect(f.facts.hibernate).toBeNull()
+  })
+  test("stops a worker whose process runs only its helpers", async () => {
+    const f = fixture()
+    f.record()
+    f.deps.ps = async () => helpers
+    await f.run()
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents", "agents", "stop"])
+  })
+  test("keeps a worker a command runs under, seen at the plan or right before the stop", async () => {
+    for (const seen of [0, 1]) {
+      const f = fixture()
+      f.record()
+      let reads = 0
+      f.deps.ps = async () => (reads++ >= seen ? running : helpers)
+      await f.run()
+      expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+      expect(f.facts.hibernate).toBeNull()
+      expect(readState(f.env, id)).toBeUndefined()
+      if (seen) expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): running a background command`])
+    }
+  })
+  test("keeps a worker when the process table cannot be read right before the stop", async () => {
+    const f = fixture()
+    f.record()
+    let reads = 0
+    f.deps.ps = async () => (reads++ ? null : helpers)
     await f.run()
     expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
     expect(f.facts.hibernate).toBeNull()
@@ -896,6 +953,16 @@ describe("broker commands", () => {
     expect(await f.prune(["--stop-only", "--older-than", "30m"])).toBe(0)
     expect(f.calls().some((call) => call.argv[0] === "stop")).toBe(true)
     expect(f.calls().some((call) => call.argv[0] === "rm")).toBe(false)
+  })
+  test("keeps a worker a command runs under, in prune and in ls", async () => {
+    const f = await brokerFixture()
+    f.deps.ps = async () => running
+    expect(await f.prune(["--older-than", "30m"])).toBe(0)
+    expect(f.lines).toContain(`keep ${id} me/w1: running a background command`)
+    expect(f.calls().map((call) => call.argv[0])).toEqual(["agents"])
+    const rows: string[] = []
+    expect(await claudeBgCommand("ls", ["--json"], f.env, (line) => rows.push(line), f.deps)).toBe(0)
+    expect(JSON.parse(rows[0]!)).toMatchObject([{ id, policy: "kept: running a background command" }])
   })
   test("stops unfinished workers past an explicit age", async () => {
     const f = await brokerFixture()

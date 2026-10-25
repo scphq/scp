@@ -128,6 +128,8 @@ export interface PlanInput {
   states: Map<string, BgState>
   /** the sessions `claude attach` holds, by id, name or session id */
   attached: Set<string>
+  /** the process table, `ps -Ao pid=,ppid=,args=`; null when unread, which keeps every live session */
+  processes: string | null
   now: number
   config: BgConfig
   /** idle seconds that replace the configured thresholds */
@@ -218,6 +220,11 @@ export function plan(input: PlanInput): Action[] {
     }
     if (live && entry.status !== "idle") {
       keep(entry.status ?? "busy", agent)
+      continue
+    }
+    const commands = live ? commandsOf(input.processes, entry.pid!) : null
+    if (commands) {
+      keep(commands, agent)
       continue
     }
     const idleMs = input.now - Date.parse(agent.worked_at)
@@ -394,7 +401,7 @@ const firstLine = (text: string): string =>
 
 export interface ClaudeBgDeps {
   exec?: Exec
-  /** the process table's command lines, `ps -Ao args=`; null when it cannot be read */
+  /** the process table, `ps -Ao pid=,ppid=,args=`; null when it cannot be read */
   ps?: () => Promise<string | null>
   /** this process and its ancestors; null when the process table cannot be read */
   ancestors?: () => Promise<Set<number> | null>
@@ -444,13 +451,44 @@ export function ancestorsOf(table: string, pid: number): Set<number> {
   return chain
 }
 
+/** a Bash tool shell of Claude Code: it sources a shell snapshot and lives until its command exits */
+const BASH_TOOL_SHELL = "/shell-snapshots/snapshot-"
+
+/**
+ * whether a command Claude Code's Bash tool started still runs under `pid` in a `ps -Ao pid=,ppid=,args=` table: a descendant shell that
+ * sources a shell snapshot. MCP servers, hooks and other helpers do not count
+ */
+export function runsCommand(table: string, pid: number): boolean {
+  const children = new Map<number, { pid: number; args: string }[]>()
+  for (const line of table.split("\n")) {
+    const row = /^\s*(\d+)\s+(\d+)\s*(.*)$/.exec(line)
+    if (!row) continue
+    const parent = Number(row[2])
+    children.set(parent, [...(children.get(parent) ?? []), { pid: Number(row[1]), args: row[3]! }])
+  }
+  const queue = [pid]
+  const seen = new Set(queue)
+  while (queue.length)
+    for (const child of children.get(queue.pop()!) ?? []) {
+      if (child.args.includes(BASH_TOOL_SHELL)) return true
+      if (seen.has(child.pid)) continue
+      seen.add(child.pid)
+      queue.push(child.pid)
+    }
+  return false
+}
+
+/** why the process tree keeps a live session: a command still runs under it, or the table is unread */
+const commandsOf = (table: string | null, pid: number): string | null =>
+  table === null ? "ps failed, so running commands are unknown" : runsCommand(table, pid) ? "running a background command" : null
+
 const psAncestors = (env: Env, exec: Exec) => async (): Promise<Set<number> | null> => {
   const run = await exec("ps", ["-Ao", "pid=,ppid="], { timeoutMs: LIST_TIMEOUT_MS, env })
   return run.code === 0 ? ancestorsOf(run.out, process.pid) : null
 }
 
 const psTable = (env: Env, exec: Exec) => async (): Promise<string | null> => {
-  const run = await exec("ps", ["-Ao", "args="], { timeoutMs: LIST_TIMEOUT_MS, env })
+  const run = await exec("ps", ["-Ao", "pid=,ppid=,args="], { timeoutMs: LIST_TIMEOUT_MS, env })
   return run.code === 0 ? run.out : null
 }
 
@@ -493,24 +531,20 @@ async function current(port: BgPort, agent: AgentFacts): Promise<AgentFacts | un
   return (await port.agents()).find((one) => one.id === agent.id)
 }
 
-type Run = { claude: Claude; env: Env; now: () => number; attached: () => Promise<Set<string> | null> }
+type Run = { claude: Claude; env: Env; now: () => number; ps: () => Promise<string | null> }
 
-const runOf = (claude: Claude, env: Env, now: () => number, ps: () => Promise<string | null>): Run => ({
-  claude,
-  env,
-  now,
-  attached: async () => {
-    const table = await ps()
-    return table === null ? null : attachTargets(table)
-  },
-})
+const runOf = (claude: Claude, env: Env, now: () => number, ps: () => Promise<string | null>): Run => ({ claude, env, now, ps })
 
-/** why the planned worker may no longer be stopped or removed: it changed since the plan, or a `claude attach` holds it now */
+/**
+ * why the planned worker may no longer be stopped or removed: it changed since the plan, a `claude attach` holds it now, or a command
+ * still runs under its process
+ */
 async function moved(target: Target, port: BgPort, run: Run): Promise<string | null> {
   if (changed(await port.agents(), target.agent)) return "it got work"
-  const attached = await run.attached()
-  if (attached === null) return "ps failed, so attached sessions are unknown"
-  return attachedTo(target.entry, attached) ? "attached" : null
+  const table = await run.ps()
+  if (table === null) return "ps failed, so attached sessions are unknown"
+  if (attachedTo(target.entry, attachTargets(table))) return "attached"
+  return typeof target.entry.pid === "number" ? commandsOf(table, target.entry.pid) : null
 }
 
 /**
@@ -702,6 +736,7 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         records,
         states: readStates(env, sessions.values()),
         attached: attachTargets(table),
+        processes: table,
         now: now(),
         config,
         selfPids,
@@ -778,6 +813,7 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
       records,
       states: readStates(env, stateIds(records, listed ?? entries)),
       attached: table === null ? new Set() : attachTargets(table),
+      processes: table,
       now: (deps.now ?? Date.now)(),
       config,
       self: selfSessions(env),
@@ -875,6 +911,7 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
       records,
       states: readStates(env, stateIds(records, entries)),
       attached: attachTargets(table),
+      processes: table,
       now: now(),
       config: bgConfig(env),
       ...(olderThanS !== undefined ? { olderThanS } : {}),
