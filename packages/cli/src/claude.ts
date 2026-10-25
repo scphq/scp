@@ -378,17 +378,18 @@ ${CLI_NAME} claude ls [--all] [--json]          the background sessions (--all: 
                                                  (kept: why, or due: stop or remove) and cwd
 ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop the idle workers ${CLI_NAME} claude --bg started
                                                  now, then remove the historic ones: never a root, the caller's own session, one with live
-                                                 workers or subagents, unread mail, or one claude attach holds or that is not exactly
+                                                 workers or subagents, or one claude attach holds or that is not exactly
                                                  idle, and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
                                                  (30m, 2h, 1d) replaces the thresholds; --stop-only removes nothing. Needs the broker
 ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of the endpoints of the
                                                  sessions ${CLI_NAME} claude --bg did not start; stops, removes and respawns nothing
   The broker does the same on its own, for the workers ${CLI_NAME} claude --bg started: idle without work one stops after
   $SCP_IDLE_AFTER_S (config.json lifecycle.idle_after_s; 600 s, Infinity never), a done (or handed back) one after
-  $SCP_CLAUDE_BG_STOP_AFTER_S when sooner, and it is removed once historic unless
+  $SCP_CLAUDE_BG_STOP_AFTER_S (120 s) when sooner, and it is removed once historic unless
   $SCP_CLAUDE_BG_REMOVE=0; config.json claude_bg {stop_after_s, remove} sets those. $SCP_HISTORIC_AFTER_S (historic_after_s) sets
   when an agent turns historic.
-  A stopped or removed worker keeps its endpoint and mail: a message respawns it, or resumes it in its directory after a removal
+  A stopped or removed worker keeps its endpoint and mail: a message that arrives after the stop respawns it (unread mail
+  it already had does not), or resumes it in its directory after a removal
 `
 
 const SIGNALS: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 1, SIGINT: 2, SIGKILL: 9, SIGTERM: 15 }
