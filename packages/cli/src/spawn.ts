@@ -580,18 +580,20 @@ const RESUME_TAKES = new Set([
 /** codex exec's options a resume leaves out: images belong to the first prompt, and a new worktree or thread source to a new session */
 const RESUME_DROPS = new Set(["-i", "--image", "--worktree", "--thread-source"])
 
-/** Resume Codex exec with its existing options where resume accepts them; ephemeral sessions cannot resume. */
+/** Resume Codex exec, its prompt in argv or on stdin, with its existing options where resume accepts them; ephemeral sessions cannot resume. */
 export function resumeArgv(command: string[], session: string, prompt: string): string[] | undefined {
   const found = promptAt(command)
   const at = programAt(command)
-  if (!found || command[at] === undefined || basename(command[at]!) !== "codex") return undefined
+  if (command[at] === undefined || basename(command[at]!) !== "codex") return undefined
+  const run = codexExec(command.slice(at + 1))
+  if (!run || run.sub || run.operands.length > 1 || (!found && run.operands.some((word) => word !== "-"))) return undefined
   let exec = at + 1
   while (exec < command.length && command[exec]!.startsWith("-")) exec += CODEX_VALUED.has(command[exec]!) ? 2 : 1
   const before: string[] = []
   const after: string[] = []
   for (let i = exec + 1; i < command.length; i++) {
     const word = command[i]!
-    if (i === found.at || word === "--") continue
+    if (i === found?.at || word === "--" || word === "-") continue
     const eq = word.startsWith("--") ? word.indexOf("=") : -1
     const flag = eq > 0 ? word.slice(0, eq) : word
     const valued = eq < 0 && CODEX_EXEC_VALUED.has(flag)
@@ -689,15 +691,21 @@ export interface HarnessRun {
   err: Uint8Array
   /** whether stderr before its tail was dropped */
   errCut: boolean
+  /** the first HEAD_BYTES bytes the harness wrote to stdout and to stderr, empty unless captured */
+  head?: { out: Uint8Array; err: Uint8Array }
   /** whether the harness started at all */
   started: boolean
 }
 
-/** a pipe's last TAIL_BYTES bytes, as it writes them on to `to` unchanged, pausing for `to` to drain */
-function tee(from: NodeJS.ReadableStream, to: NodeJS.WritableStream): { bytes: () => Uint8Array; cut: () => boolean } {
+const HEAD_BYTES = 4096
+
+/** a pipe's first HEAD_BYTES and last TAIL_BYTES bytes, as it writes them on to `to` unchanged, pausing for `to` to drain */
+function tee(from: NodeJS.ReadableStream, to: NodeJS.WritableStream): { head: () => Uint8Array; bytes: () => Uint8Array; cut: () => boolean } {
+  let head = Buffer.alloc(0)
   let tail = Buffer.alloc(0)
   let cut = false
   from.on("data", (chunk: Buffer) => {
+    if (head.length < HEAD_BYTES) head = Buffer.concat([head, chunk.subarray(0, HEAD_BYTES - head.length)])
     tail = Buffer.concat([tail, chunk])
     if (tail.length > TAIL_BYTES) {
       tail = tail.subarray(tail.length - TAIL_BYTES)
@@ -708,7 +716,7 @@ function tee(from: NodeJS.ReadableStream, to: NodeJS.WritableStream): { bytes: (
       to.once("drain", () => from.resume())
     }
   })
-  return { bytes: () => new Uint8Array(tail), cut: () => cut }
+  return { head: () => new Uint8Array(head), bytes: () => new Uint8Array(tail), cut: () => cut }
 }
 
 /** for a muse process `pid`, whose shim and hooks Muse starts without SCP_* variables: a launch file with the run's identity, and its remover */
@@ -806,6 +814,7 @@ export function runHarness(
         cut: stdout?.cut() ?? false,
         err: stderr?.bytes() ?? new Uint8Array(),
         errCut: stderr?.cut() ?? false,
+        head: { out: stdout?.head() ?? new Uint8Array(), err: stderr?.head() ?? new Uint8Array() },
         started,
       })
     }
@@ -824,6 +833,17 @@ export function runHarness(
     })
     child.once("exit", (code, signal) => void done(code ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0)))
   })
+}
+
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+const CODEX_SESSION_LINE = new RegExp(`^session id: (${UUID})\\r?$`, "m")
+const CODEX_THREAD_EVENT = new RegExp(`^\\{"type":"thread\\.started","thread_id":"(${UUID})"\\}\\r?$`)
+
+/** the thread a codex exec run opened, as its output starts: the `session id:` header on stderr, else --json's first event on stdout */
+export function codexThread(run: Pick<HarnessRun, "head">): string | undefined {
+  if (!run.head) return undefined
+  const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
+  return (CODEX_SESSION_LINE.exec(decode(run.head.err)) ?? CODEX_THREAD_EVENT.exec(decode(run.head.out).split("\n", 1)[0]!))?.[1]
 }
 
 /** Decode from a whole UTF-8 character, then clean, redact and cap the output tail. */
@@ -1056,7 +1076,11 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
     const opening = harness ? firstRun(command) : { command }
     const first = steerArgv(opening.command, steer)
     const stdin = closedStdin(first) ? await harnessStdin(agentShell(process.env) ? STDIN_WAIT_MS : undefined) : undefined
-    let run = await launch(first, { ...(started ? { started } : {}), ...(stdin ? { stdin } : {}) })
+    let run = await launch(first, {
+      ...(started ? { started } : {}),
+      ...(stdin ? { stdin } : {}),
+      ...(harness === "codex" ? { capture: true, captureErr: true } : {}),
+    })
     if (!run.started) {
       await spawnExit(values, cwd, grant.SCP_GRANT!, run.code, name, "", walk, [], [], false)
       return run.code
@@ -1081,7 +1105,11 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
       harness && worker?.joined && !signals?.caught()
         ? resumeSession(
             command,
-            harness === "agy" ? readConversation(env.SCP_AGY_CONVERSATION_FILE) : harness === "grok" || harness === "muse" ? opening.session : worker.session,
+            harness === "agy"
+              ? readConversation(env.SCP_AGY_CONVERSATION_FILE)
+              : harness === "grok" || harness === "muse"
+                ? opening.session
+                : (worker.session ?? codexThread(run)),
           )
         : undefined
     const held = session
@@ -1195,7 +1223,7 @@ function durableCheck(values: Values, command: string[], cwd: string, idleAfter:
   const base = harness ? resumeBase(command, "0".repeat(64)) : undefined
   if (!harness || !base)
     throw new RelayUsage(
-      "--durable resumes a headless session: codex exec, agy -p, grok -p with its prompt in the command (codex not --ephemeral), or muse exec with a session log",
+      "--durable resumes a headless session: codex exec (not --ephemeral), agy -p or grok -p with its prompt in the command, or muse exec with a session log",
     )
   const problem = refProblem(durableRef(harness, "0".repeat(64), resolve(cwd), base, SPAWN_IDLE_S, `me/${"x".repeat(63)}`, process.env))
   if (problem) throw new RelayUsage(`--durable cannot keep this worker: ${problem}`)

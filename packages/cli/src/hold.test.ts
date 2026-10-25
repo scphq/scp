@@ -2,29 +2,52 @@ import { describe, expect, test } from "bun:test"
 import type { Envelope } from "@scp-dev/core"
 import { RelayUsage } from "./common"
 import { firstRun, framed, idleSeconds, parseHoldRef, refProblem, resumable, resumeBase, resumeSession, wokeBy } from "./hold"
+import { harnessArgv } from "./spawn"
 
 const uuid = () => "11111111-2222-3333-4444-555555555555"
 
 describe("a held worker's resume", () => {
-  test("codex exec resumes as exec resume <session>, its prompt last; an ephemeral or prompt-less codex and claude do not", () => {
+  test("codex exec resumes as exec resume <session>, its prompt last; an ephemeral codex, a codex subcommand and claude do not", () => {
     expect(resumeBase(["codex", "exec", "-m", "o4", "-i", "shot.png", "do it"], "019a-s")).toEqual(["codex", "exec", "resume", "-m", "o4", "019a-s"])
     expect(resumeBase(["env", "A=1", "codex", "exec", "go"], "019a-s")).toEqual(["env", "A=1", "codex", "exec", "resume", "019a-s"])
     expect(resumeBase(["codex", "exec", "--ephemeral", "go"], "019a-s")).toBeUndefined()
-    expect(resumeBase(["codex", "exec"], "019a-s")).toBeUndefined()
+    expect(resumeBase(["codex", "exec", "resume", "--last", "go"], "019a-s")).toBeUndefined()
+    expect(resumeBase(["codex", "review", "go"], "019a-s")).toBeUndefined()
     expect(resumeBase(["claude", "-p", "go"], "019a-s")).toBeUndefined()
     expect(resumeBase(["codex", "exec", "go"], "bad session")).toBeUndefined()
     expect([resumable(["/opt/bin/codex", "exec", "go"]), resumable(["claude", "-p", "go"])]).toEqual(["codex", undefined])
   })
 
-  test("agy resumes with --conversation <id> -p; grok with --resume <id>, its allow rules, -p; neither when interactive", () => {
+  test("codex exec with common flags or a prompt on stdin resumes with the flags resume takes, its own before resume", () => {
+    const flags = ["-m", "gpt-x", "-c", "k=v", "--skip-git-repo-check", "--json", "-C", "/w"]
+    expect(resumeBase(["codex", "exec", ...flags, "go"], "019a-s")).toEqual([
+      "codex",
+      "exec",
+      "-C",
+      "/w",
+      "resume",
+      "-m",
+      "gpt-x",
+      "-c",
+      "k=v",
+      "--skip-git-repo-check",
+      "--json",
+      "019a-s",
+    ])
+    expect(resumeBase(["codex", "exec", "--skip-git-repo-check"], "019a-s")).toEqual(["codex", "exec", "resume", "--skip-git-repo-check", "019a-s"])
+    expect(resumeBase(["codex", "exec", "-m", "gpt-x", "-"], "019a-s")).toEqual(["codex", "exec", "resume", "-m", "gpt-x", "019a-s"])
+    expect(resumeBase(["codex", "-c", "k=v", "exec", "--", "-"], "019a-s")).toEqual(["codex", "-c", "k=v", "exec", "resume", "019a-s"])
+  })
+
+  test("agy resumes with --conversation <id> -p; grok with --resume <id> -p, its allow rules added at launch; neither when interactive", () => {
     expect(resumeBase(["agy", "-p", "hi", "--model", "m"], "conv-1")).toEqual(["agy", "--model", "m", "--conversation", "conv-1", "-p"])
     expect(resumeBase(["agy", "-i", "hi"], "conv-1")).toBeUndefined()
     expect(resumeBase(["agy", "--model", "m"], "conv-1")).toBeUndefined()
-    const grok = resumeBase(["grok", "-p", "hi", "-s", "old"], "sess-1")!
-    expect(grok.slice(0, 3)).toEqual(["grok", "--resume", "sess-1"])
-    expect(grok).toContain("--allow")
-    expect(grok.at(-1)).toBe("-p")
-    expect(grok).not.toContain("old")
+    expect(resumeBase(["grok", "-p", "hi", "-s", "old"], "sess-1")).toEqual(["grok", "--resume", "sess-1", "-p"])
+    const resumed = harnessArgv([...resumeBase(["grok", "-p", "hi"], "sess-1")!, "message"], {})
+    expect(resumed.slice(0, 5)).toEqual(["grok", "--resume", "sess-1", "-p", "message"])
+    expect(resumed.slice(5)).toEqual(firstRun(["grok", "-p", "hi"], uuid).command.slice(5))
+    expect(resumed[5]).toBe("--allow")
     expect(resumeBase(["grok", "-p", "hi", "--always-approve"], "sess-1")).toEqual(["grok", "--always-approve", "--resume", "sess-1", "-p"])
     expect(resumeBase(["grok", "-c"], "sess-1")).toBeUndefined()
   })
@@ -90,6 +113,11 @@ describe("a held worker's resume", () => {
     expect(refProblem(JSON.stringify(ref))).toBeUndefined()
     expect(refProblem("x".repeat(513))).toContain("over 512")
     expect(refProblem(JSON.stringify({ ...ref, argv: ["codex", "-c", "token=ghp_aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2y"] }))).toContain("credential")
+    const grok = firstRun(["grok", "-p", "remember this"], uuid)
+    const argv = ["/opt/homebrew/bin/grok", ...resumeBase(["grok", "-p", "remember this"], grok.session!)!.slice(1)]
+    const held = { harness: "grok", session: grok.session, cwd: `/${"d".repeat(120)}`, argv, idle_s: 600, parent: `me/${"p".repeat(60)}` }
+    expect(refProblem(JSON.stringify(held))).toBeUndefined()
+    expect(parseHoldRef(JSON.stringify(held))).toEqual(held as never)
   })
 
   test("--idle takes seconds, a duration or Infinity, and 0 for no hold", () => {

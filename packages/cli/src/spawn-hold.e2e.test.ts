@@ -19,7 +19,8 @@ afterEach(async () => {
 
 /**
  * a stand-in for codex exec: it finds the scp server in its -c overrides, asks that shim who it is, reports a session id through codex's
- * SessionStart hook on its first run, records its run, and waits for a go file while a gate file exists
+ * SessionStart hook on its first run (or, with $FAKE_CODEX_THREAD, only prints that thread in codex's stderr header), records its run, and
+ * waits for a go file while a gate file exists
  */
 const fakeCodex = (rec: string) => `
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
@@ -59,7 +60,9 @@ if (server.command) {
   const answer = text.split("\\n").filter(Boolean).map((line) => JSON.parse(line)).find((m) => m.id === 1)
   address = /address: (\\S+)/.exec(answer?.result?.content?.[0]?.text ?? "")?.[1] ?? null
 }
-if (!argv.includes("resume")) {
+if (process.env.FAKE_CODEX_THREAD) {
+  if (!argv.includes("resume")) console.error("OpenAI Codex\\n--------\\nsession id: " + process.env.FAKE_CODEX_THREAD + "\\n--------")
+} else if (!argv.includes("resume")) {
   const hook = Bun.spawn([process.execPath, "--no-env-file", CLI, "hook", "codex", "SessionStart"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env: process.env })
   hook.stdin.write(JSON.stringify({ hook_event_name: "SessionStart", session_id: "sess-" + process.env.SCP_NAME, cwd: process.cwd(), source: "startup" }))
   hook.stdin.end()
@@ -308,6 +311,46 @@ test("a worker with a parent is durable by default: after $SCP_IDLE_AFTER_S it h
   await until(async () => (await f.view("hd"))?.presence === "hibernated", 15_000, "the woken worker to hibernate again")
 })
 
+test("a codex exec worker whose hooks report no session is durable by the thread its output names, with its flags kept on resume", async () => {
+  const f = await fixture()
+  const thread = "0199a213-81c0-7800-8aa1-bbab2a035a53"
+  f.env.SCP_IDLE_AFTER_S = "2"
+  f.env.FAKE_CODEX_THREAD = thread
+  const runner = f.spawn("--name", "ht", "--", "codex", "exec", "--skip-git-repo-check", "-m", "m1", "-c", "k=v", "remember HERON")
+  expect((await f.next("ht")).body.text).toBe("worker me/ht finished (exit 0)\n\nrun 1 done\n\nme/ht stays resumable: message it to resume its session")
+  await waitFor(() => !alive(runner), 15_000, "the runner to hibernate and exit")
+  expect(await f.view("ht")).toMatchObject({ presence: "hibernated", wake: "hook:spawn", revivable: true })
+  expect(await f.lead.request<{ deliveries: { state?: string }[] }>("send", { to: "ht", body: "the codeword?" })).toMatchObject({
+    deliveries: [{ state: "running", hibernated: true }],
+  })
+  expect((await f.next("ht")).body.text).toBe("worker me/ht finished (exit 0)\n\nrun 2 done")
+  const resumed = f.runs()[1]!.argv
+  const own = resumed
+    .slice(resumed.indexOf("resume") + 1)
+    .filter((word, i, all) => !word.startsWith("mcp_servers.") && !(word === "-c" && all[i + 1]?.startsWith("mcp_servers.")))
+  expect(own.slice(0, -1)).toEqual(["--skip-git-repo-check", "-m", "m1", "-c", "k=v", thread])
+  expect(own.at(-1)).toContain("the codeword?")
+  await f.lead.request("spawn_end", { endpoint: "ht" })
+})
+
+test("a grok -p worker is durable: its ref leaves out the allow rules launch adds, and a message revives its session", async () => {
+  const f = await fixture()
+  f.env.SCP_IDLE_AFTER_S = "2"
+  const runner = f.spawn("--name", "hg", "--", "grok", "-p", "remember HERON")
+  expect((await f.next("hg")).body.text).toEndWith("me/hg stays resumable: message it to resume its session")
+  await waitFor(() => !alive(runner), 15_000, "the runner to hibernate and exit")
+  expect(await f.view("hg")).toMatchObject({ presence: "hibernated", wake: "hook:spawn", revivable: true })
+  await f.lead.request("send", { to: "hg", body: "the codeword?" })
+  await f.next("hg")
+  const [opened, again] = f.turns()
+  const session = opened!.args[opened!.args.indexOf("-s") + 1]!
+  expect(again!.args.slice(0, 3)).toEqual(["--resume", session, "-p"])
+  expect(again!.args[3]).toContain("the codeword?")
+  expect(again!.args.slice(4)).toEqual(opened!.args.slice(4))
+  expect(again!.address).toBe("me/hg")
+  await f.lead.request("spawn_end", { endpoint: "hg" })
+})
+
 test("a woken durable worker ended during its run still hands that run back, then stays let go", async () => {
   const f = await fixture()
   f.gate()
@@ -386,10 +429,10 @@ test("headless agy and grok workers stay resumable: a message resumes the conver
   const session = opened!.args[opened!.args.indexOf("-s") + 1]!
   expect(session).toMatch(/^[0-9a-f-]{36}$/)
   expect(opened!.args.slice(0, 2)).toEqual(["-p", "hi"])
-  expect(again!.args.slice(0, 2)).toEqual(["--resume", session])
-  expect(again!.args).toContain("--allow")
-  expect(again!.args.at(-2)).toBe("-p")
-  expect(again!.args.at(-1)).toContain("grok again")
+  expect(again!.args.slice(0, 3)).toEqual(["--resume", session, "-p"])
+  expect(again!.args[3]).toContain("grok again")
+  expect(again!.args.slice(4)).toEqual(opened!.args.slice(4))
+  expect(again!.args[4]).toBe("--allow")
   expect([opened!.address, again!.address]).toEqual(["me/gk", "me/gk"])
   await f.lead.request("spawn_end", { endpoint: "gk" })
   await waitFor(() => !alive(grok), 10_000, "grok's runner to exit")
