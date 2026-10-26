@@ -675,6 +675,26 @@ describe("bridge", () => {
     expect(on("sleeper")?.presence).toBe("online")
   })
 
+  test("a historic child that comes back is mirrored after its historic parent, so the hub places it under it", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a", { historicAfterS: 1 })
+    const b = await machine(fake, "b", { token: OTHER_TOKEN })
+    const ids = ["lead", "app"].map((handle) => a.core.claim({ handle, harness: "claude-code" }).endpoint.id)
+    a.core.adopt({ kind: "human", tty: true }, { endpoint: "app", parent: "lead" }, { tty: true })
+    for (const id of ids) a.core.disconnect(id)
+    await Bun.sleep(1100)
+    const before = a.bridge!.status().since
+    fake.drop("ada", "a")
+    await waitFor(() => a.bridge!.status().since !== before && a.bridge!.status().connected, "a to relink")
+    const on = (handle: string) => b.core.remoteViews().find((v) => v.machine === "a" && v.address.endsWith(`/${handle}`))
+    expect(on("app")).toBeUndefined()
+    const human = a.core.list().find((v) => v.kind === "human")!
+    a.core.send(human.id, { to: "me/app", body: "back to work" })
+    a.bridge!.changed(ids[1]!)
+    expect(await waitFor(() => (on("app")?.parent_ep === "lead" ? on("app") : undefined), "a/app under a/lead on b")).toMatchObject({ depth: 1 })
+    expect(on("lead")?.presence).toBe("offline")
+  })
+
   test("a full machines table keeps the bridge retrying with the hub's reason, and it links once a slot frees", async () => {
     const fake = hubServer(undefined, { machines: 4 })
     const clients = []
