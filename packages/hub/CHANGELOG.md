@@ -1,5 +1,11 @@
 # @scp-dev/hub
 
+## 0.12.0
+
+### Minor Changes
+
+- 78c00d4: `HUB_LIMITS` no longer caps machines, endpoints, sockets or stored bytes by default, and the new `hubLimits(env)` applies an `SCP_LIMITS` JSON object over the defaults for embedders.
+
 ## 0.11.2
 
 ### Patch Changes
