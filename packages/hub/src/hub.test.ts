@@ -7,6 +7,7 @@ import {
   GRAPH_MINUTES,
   GRAPH_MINUTES_MAX,
   HUB_LIMITS as DEFAULT_HUB_LIMITS,
+  hubLimits,
   type HubConn,
   type HubGrant,
   type HubLimits,
@@ -29,6 +30,10 @@ const TEST_RATES = {
 }
 const HUB_LIMITS = {
   ...DEFAULT_HUB_LIMITS,
+  machines: 16,
+  endpoints: 512,
+  sockets: 64,
+  storedBytes: 256 * 1024 * 1024,
   callsPerMinute: 120,
   bridgeCallsPerMinute: 600,
   accountCallsPerMinute: 1200,
@@ -640,6 +645,14 @@ describe("auth and lifecycle", () => {
     for (let i = 3; i < HUB_LIMITS.bridgeCallsPerMinute; i++) await ok(laptop, "list")
     expect(await fails(laptop, "list")).toBe("rate_limited")
     expect(laptop.closedWith).toBeNull()
+  })
+
+  test("capacity caps are off by default, and hubLimits applies SCP_LIMITS", () => {
+    for (const key of ["machines", "endpoints", "sockets", "storedBytes"] as const) expect(DEFAULT_HUB_LIMITS[key]).toBe(Infinity)
+    const limits = hubLimits({ SCP_LIMITS: JSON.stringify({ endpoints: 20000, machines: 0, httpWaitS: null }) })
+    expect([limits.endpoints, limits.machines, limits.httpWaitS]).toEqual([20000, Infinity, DEFAULT_HUB_LIMITS.httpWaitS])
+    expect(hubLimits({})).toEqual({ ...DEFAULT_HUB_LIMITS })
+    expect(() => hubLimits({ SCP_LIMITS: JSON.stringify({ nope: 1 }) })).toThrow("unknown limit nope")
   })
 
   test("an Infinity limit admits past the default cap; a duration must stay finite", async () => {

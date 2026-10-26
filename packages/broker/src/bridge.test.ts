@@ -676,9 +676,9 @@ describe("bridge", () => {
   })
 
   test("a full machines table keeps the bridge retrying with the hub's reason, and it links once a slot frees", async () => {
-    const fake = hubServer()
+    const fake = hubServer(undefined, { machines: 4 })
     const clients = []
-    for (let i = 0; i < HUB_LIMITS.machines; i++) {
+    for (let i = 0; i < 4; i++) {
       const raw = await rawSocket(fake, TOKEN)
       expect((await raw("hello", { protocol: PROTOCOL, machine: `m${i}`, claim: { handle: "x", harness: "cli" } })).error).toBeUndefined()
       clients.push(raw)
@@ -686,7 +686,7 @@ describe("bridge", () => {
     const q = await machine(fake, "q")
     await Bun.sleep(300)
     expect(q.bridge!.status().connected).toBe(false)
-    expect(q.bridge!.status().last_error).toContain(`at most ${HUB_LIMITS.machines} machines`)
+    expect(q.bridge!.status().last_error).toContain(`at most ${4} machines`)
     expect((await clients[0]!("machines_rm", { name: "m0" })).error).toBeUndefined()
     await waitFor(() => q.bridge!.status().connected, "q to link once a slot freed")
     expect(q.bridge!.status().last_error).toBeNull()

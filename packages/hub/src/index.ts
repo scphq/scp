@@ -22,6 +22,7 @@ export {
   type GraphNode,
   type HubGraph,
   HUB_DURATIONS,
+  hubLimits,
   HUB_LIMITS,
   HUB_WAKE,
   LOCAL_EVENT_KINDS,
