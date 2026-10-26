@@ -185,6 +185,8 @@ export function startBridge(options: BridgeOptions): Bridge {
   const mirrorLocal = options.mirrorLocal !== false
   const localFlushMs = options.localFlushMs ?? 1000
   let localQueue: object[] = []
+  /** handles of this machine the hub may show reachable: the last full mirror's reachable rows, later deltas, and what hello listed not offline */
+  let known = new Set<string>()
   let localTimer: ReturnType<typeof setTimeout> | undefined
 
   const setState = (up: boolean, error: string | null) => {
@@ -297,6 +299,7 @@ export function startBridge(options: BridgeOptions): Bridge {
     core.setAliases([account])
     core.setOthers(account, Array.isArray(hello.others) ? hello.others.filter((name): name is string => typeof name === "string") : [])
     ready = true
+    known = new Set(hello.endpoints.filter((view) => view.machine === machine && view.presence !== "offline").map((view) => handleIn(view.address)))
     applyRemote(hello.endpoints, true)
     await Promise.all(fullMirror().map((params) => request("mirror", params)))
     await request("watch")
@@ -333,7 +336,7 @@ export function startBridge(options: BridgeOptions): Bridge {
   function mirrored(view: EndpointView): boolean {
     if (view.kind === "system" || core.machineOf(view.id) !== null) return false
     const subject = {
-      handle: view.kind === "human" ? "" : view.address.slice(view.address.lastIndexOf("/") + 1),
+      handle: view.kind === "human" ? "" : handleIn(view.address),
       harness: view.harness,
       kind: view.kind,
       labels: view.labels,
@@ -359,8 +362,35 @@ export function startBridge(options: BridgeOptions): Bridge {
     }
   }
 
+  /** what a peer can still reach: not offline, a human, active within historicAfterS, or woken by a message */
+  function reachable(view: EndpointView): boolean {
+    return view.kind !== "agent" || view.presence !== "offline" || view.historic !== true || view.revivable === true || (view.wake ?? "none") !== "none"
+  }
+
+  /**
+   * the full mirror: the reachable rows and their parents, plus what the hub may still show reachable so it learns otherwise. Historic agents
+   * that are offline with no wake are left out
+   */
   function localViews(): object[] {
-    return core.list({ historic: true }).filter(mirrored).map(outward)
+    const views = core.list({ historic: true }).filter(mirrored)
+    const byAddress = new Map(views.map((view) => [view.address, view]))
+    const kept = new Set<EndpointView>()
+    for (const view of views) {
+      if (!reachable(view)) continue
+      for (let at: EndpointView | undefined = view; at && !kept.has(at); at = at.parent ? byAddress.get(at.parent) : undefined) kept.add(at)
+    }
+    const sent = views.filter((view) => kept.has(view) || known.has(handleIn(view.address)))
+    known = new Set([...kept].map((view) => handleIn(view.address)))
+    return sent.map(outward)
+  }
+
+  /** a delta goes out for a row a peer can reach or the hub may still show reachable; one it sent offline and historic is no longer known */
+  function delta(view: EndpointView): boolean {
+    if (!mirrored(view)) return false
+    const handle = handleIn(view.address)
+    if (reachable(view)) known.add(handle)
+    else if (!known.delete(handle)) return false
+    return true
   }
 
   /**
@@ -390,7 +420,7 @@ export function startBridge(options: BridgeOptions): Bridge {
   function handleOf(endpoint: string): string | null {
     const view = core.whoami(endpoint)
     if (!mirrored(view)) return null
-    return view.kind === "human" ? "" : view.address.slice(view.address.lastIndexOf("/") + 1)
+    return view.kind === "human" ? "" : handleIn(view.address)
   }
 
   /** a hub address (`<account>/<machine>/<handle>` or `<account>/<handle>`) as the local core writes it */
@@ -643,7 +673,7 @@ export function startBridge(options: BridgeOptions): Bridge {
     } catch {
       return
     }
-    if (mirrored(view)) fireAndForget("mirror", { endpoints: [outward(view)], full: false })
+    if (delta(view)) fireAndForget("mirror", { endpoints: [outward(view)], full: false })
   }
 
   async function mirrorNow(endpoints: string[]): Promise<boolean> {
@@ -651,7 +681,9 @@ export function startBridge(options: BridgeOptions): Bridge {
     const views = endpoints.flatMap((id) => {
       try {
         const view = core.whoami(id)
-        return mirrored(view) ? [outward(view)] : []
+        if (!mirrored(view)) return []
+        known.add(handleIn(view.address))
+        return [outward(view)]
       } catch {
         return []
       }
@@ -673,8 +705,11 @@ export function startBridge(options: BridgeOptions): Bridge {
     } catch {
       return
     }
-    if (mirrored(view)) fireAndForget("mirror", { endpoints: [{ ...outward(view), was }], full: false })
-    else resync()
+    if (mirrored(view)) {
+      known.delete(was)
+      known.add(handleIn(view.address))
+      fireAndForget("mirror", { endpoints: [{ ...outward(view), was }], full: false })
+    } else resync()
   }
 
   function resync() {
@@ -764,4 +799,9 @@ export function startBridge(options: BridgeOptions): Bridge {
 
   connect()
   return { forward, changed, mirrorNow, resync, renamed, activity, local, contacts, machineWake, status, relink, stop }
+}
+
+/** the handle an address ends in ("" for a human's `<...>/`) */
+function handleIn(address: string): string {
+  return address.slice(address.lastIndexOf("/") + 1)
 }

@@ -82,6 +82,23 @@ describe("endpoint retention", () => {
     expect(exists(asked.id)).toBe(true)
   })
 
+  test("a child that sent a message stays until that message expires, read or not, then goes", () => {
+    const { core, clock, hook, sub, end, exists } = setup()
+    const root = hook(9)
+    const child = sub(9, "eeee55")
+    core.send(child.id, { to: root.address, body: "done" })
+    core.ack(
+      root.id,
+      core.inbox(root.id).map((message) => message.seq),
+    )
+    end([9], 3)
+    core.sweep()
+    expect(exists(child.id)).toBe(true)
+    clock.now += LIMITS.ttlDefaultS * 1000
+    core.sweep()
+    expect(exists(child.id)).toBe(false)
+  })
+
   test("a parent whose child still runs stays; once the child is retired, the parent goes too", () => {
     const { core, hook, end, exists } = setup()
     const root = hook(9)

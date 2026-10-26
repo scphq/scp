@@ -49,6 +49,7 @@ async function machine(
     forwardWaitMs?: number
     credentials?: () => Promise<string | null>
     root?: string
+    historicAfterS?: number
   } = {},
 ): Promise<Broker> {
   const root = options.root ?? mkdtempSync(join(tmpdir(), `relay-bridge-${name}-`))
@@ -61,6 +62,7 @@ async function machine(
     log: () => {},
     now: options.now,
     presenceEveryMs: options.presenceEveryMs,
+    historicAfterS: options.historicAfterS,
     bridge: {
       url: fake.url,
       token: options.token ?? TOKEN,
@@ -634,6 +636,43 @@ describe("bridge", () => {
     expect(frames).toBeGreaterThanOrEqual(3)
     expect(flapped).toEqual([])
     expect(a.bridge!.status().connected).toBe(true)
+  })
+
+  test("a full mirror leaves out offline historic agents, so 600 of them and 50 live ones link under a 512 endpoint cap", async () => {
+    const fake = hubServer(undefined, { endpoints: 512 })
+    const a = await machine(fake, "a", { historicAfterS: 3 })
+    const b = await machine(fake, "b", { token: OTHER_TOKEN })
+    for (let i = 0; i < 600; i++) a.core.disconnect(a.core.claim({ handle: `old${i}`, harness: "claude-code" }).endpoint.id)
+    await Bun.sleep(3100)
+    for (let i = 0; i < 50; i++) a.core.disconnect(a.core.claim({ handle: `new${i}`, harness: "claude-code" }).endpoint.id)
+    const before = a.bridge!.status().since
+    fake.drop("ada", "a")
+    await waitFor(() => a.bridge!.status().since !== before && a.bridge!.status().connected, "a to relink")
+    const fresh = () => b.core.remoteViews().filter((v) => v.machine === "a" && v.address.includes("/new")).length
+    await waitFor(() => fresh() === 50, "a's 50 live endpoints on b")
+    expect(b.core.remoteViews().filter((v) => v.machine === "a" && v.address.includes("/old"))).toEqual([])
+    expect(a.bridge!.status().last_error).toBeNull()
+  })
+
+  test("a historic agent that comes back is mirrored again, and a resync keeps leaving out the rest", async () => {
+    const fake = hubServer()
+    const a = await machine(fake, "a", { historicAfterS: 1 })
+    const b = await machine(fake, "b", { token: OTHER_TOKEN })
+    for (const handle of ["sleeper", "other"]) a.core.disconnect(a.core.claim({ handle, harness: "claude-code" }).endpoint.id)
+    await Bun.sleep(1100)
+    const before = a.bridge!.status().since
+    fake.drop("ada", "a")
+    await waitFor(() => a.bridge!.status().since !== before && a.bridge!.status().connected, "a to relink")
+    const on = (handle: string) => b.core.remoteViews().find((v) => v.machine === "a" && v.address.endsWith(`/${handle}`))
+    await agent(a, "probe")
+    await waitFor(() => on("probe"), "the probe on b")
+    expect(on("sleeper")).toBeUndefined()
+    await agent(a, "sleeper")
+    expect((await waitFor(() => on("sleeper"), "the sleeper back on b")).presence).toBe("online")
+    a.bridge!.resync()
+    await Bun.sleep(200)
+    expect(on("other")).toBeUndefined()
+    expect(on("sleeper")?.presence).toBe("online")
   })
 
   test("a full machines table keeps the bridge retrying with the hub's reason, and it links once a slot frees", async () => {

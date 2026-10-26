@@ -249,9 +249,10 @@ impl AccountHub {
         }
         false
     }
-    pub(super) fn endpoint_room(&self, rows: &[Endpoint]) -> Result<()> {
-        if let Some(cap) = self.limits.cap("endpoints")
-            && (rows
+    /// refuses `adding` more rows past the endpoint cap, naming the count it would reach
+    pub(super) fn endpoint_room(&self, rows: &[Endpoint], adding: u64) -> Result<()> {
+        if let Some(cap) = self.limits.cap("endpoints") {
+            let held = rows
                 .iter()
                 .filter(|e| e.kind != "system" && !e.handle.starts_with("_gone_"))
                 .count() as u64
@@ -259,13 +260,16 @@ impl AccountHub {
                     !rows
                         .iter()
                         .any(|e| e.kind == "human" && e.machine.is_empty()),
-                ))
-                >= cap
-        {
-            return Err(Error::new(
-                "too_large",
-                &format!("at most {cap} endpoints on this relay"),
-            ));
+                );
+            if held + adding > cap {
+                return Err(Error::new(
+                    "too_large",
+                    &format!(
+                        "at most {cap} endpoints on this relay, and this needs {}; the deployment raises the endpoints key of SCP_LIMITS",
+                        held + adding
+                    ),
+                ));
+            }
         }
         Ok(())
     }

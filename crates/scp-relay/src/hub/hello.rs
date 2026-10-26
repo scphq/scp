@@ -269,7 +269,7 @@ impl AccountHub {
                 );
             }
             if !human && selected.is_none() {
-                self.endpoint_room(&endpoints)?;
+                self.endpoint_room(&endpoints, 1)?;
             }
             let mut f = selected.as_ref().map(fields).unwrap_or_else(|| json!({"tree":name,"parent_ep":null,"parent_addr":null,"depth":0,"rules":null,"caps":null,"title":null,"wake":null,"incarnation":null}));
             f["harness"] = if human { Value::Null } else { json!(harness) };

@@ -9,7 +9,13 @@ impl AccountHub {
             .ok_or_else(|| invalid("endpoints must be a list"))?;
         let cap = self.limits.cap("endpoints").unwrap_or(1_000_000);
         if list.len() as u64 > cap {
-            return Err(Error::new("too_large", &format!("at most {cap} endpoints")));
+            return Err(Error::new(
+                "too_large",
+                &format!(
+                    "at most {cap} endpoints on this relay, and this mirror carries {}; the deployment raises the endpoints key of SCP_LIMITS",
+                    list.len()
+                ),
+            ));
         }
         let mut parsed = BTreeMap::new();
         for v in list {
@@ -81,6 +87,20 @@ impl AccountHub {
             .map(|(raw, _)| string(raw, "was").to_string())
             .filter(|was| !was.is_empty())
             .collect();
+        let added = parsed
+            .iter()
+            .filter(|(name, (raw, _))| {
+                let was = string(raw, "was");
+                !original.iter().any(|e| {
+                    e.machine == c.machine
+                        && (e.handle == **name
+                            || (handle(was) && e.handle == was && e.token_hash.is_none()))
+                })
+            })
+            .count() as u64;
+        if added > 0 {
+            self.endpoint_room(&endpoints, added)?;
+        }
         for (name, (raw, mut f)) in parsed {
             seen.insert(name.clone());
             if seen.len() > 65536 {
@@ -109,7 +129,7 @@ impl AccountHub {
                 .as_ref()
                 .and_then(|old| endpoints.iter().position(|e| e.id == old.id));
             if old.is_none() {
-                self.endpoint_room(&endpoints)?;
+                self.endpoint_room(&endpoints, 1)?;
             }
             if old.as_ref().is_some_and(|e| e.token_hash.is_some()) {
                 continue;

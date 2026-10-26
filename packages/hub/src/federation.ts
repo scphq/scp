@@ -728,7 +728,13 @@ export class FederatedCore extends RelayCore {
   mirror(machine: string, views: unknown, options: { full?: boolean; auth?: RelayAuth; seen?: Set<string> } = {}): MirrorChange[] {
     this.checkMachine(machine)
     if (!Array.isArray(views)) throw new RelayError("invalid_params", "endpoints must be a list")
-    if (views.length > (this.endpointCap ?? 4096)) throw new RelayError("too_large", `at most ${this.endpointCap ?? 4096} endpoints`)
+    if (views.length > (this.endpointCap ?? 4096))
+      throw new RelayError(
+        "too_large",
+        this.endpointCap === null
+          ? "at most 4096 endpoints"
+          : `at most ${this.endpointCap} endpoints on this relay, and this mirror carries ${views.length}; the deployment raises the endpoints key of SCP_LIMITS`,
+      )
     const parsed = [...new Map(views.map((view) => this.parseView(view)).map((view) => [view.handle, view])).values()]
     const auth = options.auth ?? null
     return this.tx(() => {
@@ -737,6 +743,10 @@ export class FederatedCore extends RelayCore {
       const seen = options.seen ?? new Set<string>()
       const batch: { view: ParsedView; id: string; before: FederatedRow | undefined }[] = []
       const renamed = new Map<string, string>()
+      const added = parsed.filter(
+        (view) => !this.byRemote(`${machine}/${view.handle}`) && (view.was === null || !this.byRemote(`${machine}/${view.was}`)),
+      ).length
+      if (added) this.checkCap(added)
       for (const view of parsed) {
         const remote = `${machine}/${view.handle}`
         seen.add(remote)
@@ -1965,7 +1975,8 @@ export class FederatedCore extends RelayCore {
     return this.insertRemote(remote, kind, harness, auth, this.now())
   }
 
-  private checkCap(): void {
+  /** refuses `adding` more rows past the endpoint cap, naming the count it would reach */
+  private checkCap(adding = 1): void {
     if (this.endpointCap === null) return
     const live = one<{ n: number }>(
       this.sql,
@@ -1973,7 +1984,11 @@ export class FederatedCore extends RelayCore {
       GONE_PREFIX.length,
       GONE_PREFIX,
     )!.n
-    if (live >= this.endpointCap) throw new RelayError("too_large", `at most ${this.endpointCap} endpoints on this relay`)
+    if (live + adding > this.endpointCap)
+      throw new RelayError(
+        "too_large",
+        `at most ${this.endpointCap} endpoints on this relay, and this needs ${live + adding}; the deployment raises the endpoints key of SCP_LIMITS`,
+      )
   }
 
   private checkMachine(machine: string): void {
