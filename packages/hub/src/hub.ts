@@ -1,4 +1,4 @@
-import { RATE_LIMITS, wireLimits } from "@scp-dev/core"
+import { parseLimits, RATE_LIMITS, wireLimits } from "@scp-dev/core"
 import { MCP_PROTOCOLS, REMOTE_TOOLS, type ToolResult, ToolInputError, str as mcpString, text as mcpText, validHandle } from "@scp-dev/core"
 import { remoteTool, type McpCall } from "./mcp-tools"
 import {
@@ -275,16 +275,16 @@ export const HUB_LIMITS = {
   contactPerHour: Infinity,
   contactPerDay: Infinity,
   contactPerDayMax: Infinity,
-  machines: 16,
-  endpoints: 512,
-  sockets: 64,
+  machines: Infinity,
+  endpoints: Infinity,
+  sockets: Infinity,
   frameBytes: 262_144,
   callsPerMinute: Infinity,
   bridgeCallsPerMinute: Infinity,
   accountCallsPerMinute: Infinity,
   acksPerMinute: Infinity,
   accountAcksPerMinute: Infinity,
-  storedBytes: 256 * 1024 * 1024,
+  storedBytes: Infinity,
   clientMachineIdleS: 14 * 86_400,
   idlePurgeS: 30 * 86_400,
   httpWaitS: 25,
@@ -296,6 +296,11 @@ export const HUB_LIMITS = {
 } as const
 
 export type HubLimits = { [K in keyof typeof HUB_LIMITS]: number }
+
+/** `HUB_LIMITS` with the JSON object in `env.SCP_LIMITS` applied: a positive integer sets a cap, `0` or `null` lifts it */
+export function hubLimits(env: { SCP_LIMITS?: string | undefined }): HubLimits {
+  return { ...HUB_LIMITS, ...(env.SCP_LIMITS ? parseLimits(JSON.parse(env.SCP_LIMITS), Object.keys(HUB_LIMITS), "SCP_LIMITS", HUB_DURATIONS) : {}) }
+}
 
 export const HUB_DURATIONS = [
   "clientMachineIdleS",
