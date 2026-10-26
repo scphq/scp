@@ -159,6 +159,12 @@ describe("mirror", () => {
     core.mirror("desk", [view("me/a")])
     core.claimOn("ci", { handle: "b" })
     expect(code(() => core.mirror("desk", [view("me/c"), view("me/d")]))).toBe("too_large")
+    expect(() => core.mirror("desk", [view("me/c"), view("me/d")])).toThrow(
+      /^at most 3 endpoints on this relay, and this needs \d+; the deployment raises the endpoints key of SCP_LIMITS$/,
+    )
+    expect(() => core.mirror("desk", [view("me/c"), view("me/d"), view("me/e"), view("me/f")])).toThrow(
+      "at most 3 endpoints on this relay, and this mirror carries 4; the deployment raises the endpoints key of SCP_LIMITS",
+    )
   })
 })
 

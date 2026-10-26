@@ -271,7 +271,7 @@ async fn machine_and_endpoint_caps_allow_updates_and_rollback_failed_claims() {
     let response = hub.rpc(g.clone(), claim("host", "two")).await;
     assert_eq!(
         response["error"]["message"],
-        "at most 2 endpoints on this relay"
+        "at most 2 endpoints on this relay, and this needs 3; the deployment raises the endpoints key of SCP_LIMITS"
     );
     assert!(
         hub.rpc(g.clone(), claim("host", "one"))
@@ -357,7 +357,10 @@ async fn mirror_caps_count_other_machines_and_preserve_existing_rows() {
             false,
         )
         .await;
-    assert_eq!(response["error"]["message"], "at most 3 endpoints");
+    assert_eq!(
+        response["error"]["message"],
+        "at most 3 endpoints on this relay, and this mirror carries 4; the deployment raises the endpoints key of SCP_LIMITS"
+    );
     let response = hub.rpc(g, claim("other", "agent")).await;
     assert_eq!(code(&response), "too_large");
 }

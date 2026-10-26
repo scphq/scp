@@ -51,7 +51,9 @@ describe.each(targetNames)("%s hub limits conformance", (name) => {
       name,
       async ({ bridge }) => {
         const wire = await bridge("acme", "alpha", [view("first")]);
-        expect((await wire.call("mirror", { endpoints: [view("second"), view("third")], full: false })).error?.data.code).toBe("too_large");
+        const refused = (await wire.call("mirror", { endpoints: [view("second"), view("third")], full: false })).error;
+        expect(refused?.data.code).toBe("too_large");
+        expect(refused?.message).toMatch(/^at most 2 endpoints on this relay, and this needs \d+; the deployment raises the endpoints key of SCP_LIMITS$/);
       },
       { endpoints: 2 },
     );
