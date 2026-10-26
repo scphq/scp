@@ -1,5 +1,11 @@
 # @scp-dev/spec
 
+## 0.6.0
+
+### Minor Changes
+
+- 5bec4a0: Agent names survive client restarts: a session resumed in process rehomes its fresh endpoint onto its named one, a forked Claude Code session claims the session it forks as `harness_origin` and takes that endpoint back, and a resume takes back a row whose harness process no longer runs inside a broker restart's grace window. New `relink` method and `swarm relink [--dry-run]` repair endpoints stranded earlier, for the human at a terminal.
+
 ## 0.5.0
 
 ### Minor Changes
