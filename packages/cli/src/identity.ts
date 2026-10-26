@@ -701,6 +701,23 @@ export const CODEX_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 export const CODEX_THREAD_KEY = "codex:"
 
 /**
+ * the session a Claude Code command line forks: with `--fork-session`, the id `--resume` (`-r`) names, or the `<id>.jsonl` transcript path it
+ * names; undefined for any other
+ */
+export function forkOrigin(args: string | undefined): string | undefined {
+  const words = args?.split(/\s+/) ?? []
+  if (!words.includes("--fork-session")) return undefined
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!
+    const value = word.startsWith("--resume=") ? word.slice("--resume=".length) : word === "--resume" || word === "-r" ? words[i + 1] : undefined
+    if (value === undefined || value.startsWith("-")) continue
+    const id = basename(value).replace(/\.jsonl$/, "")
+    return HARNESS_SESSION.test(id) ? id : undefined
+  }
+  return undefined
+}
+
+/**
  * the claim a shim or hook makes for this harness session; a muse process a launcher left a session and launcher for claims as $SCP_SESSION
  * and $SCP_HARNESS_PID would. A codex thread an app server hosts beside others (the desktop app, an IDE's) claims by its thread, `codex:<id>`
  */
@@ -731,6 +748,8 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
       : provider === "codex"
         ? [input.harnessSession, input.env.CODEX_THREAD_ID, input.env.SCP_CODEX_THREAD].find((id) => id !== undefined && CODEX_THREAD.test(id))
         : undefined
+  const forked = provider === "claude-code" ? forkOrigin(ps()?.get(pid)?.args) : undefined
+  const origin = forked !== harnessSession ? forked : undefined
   const threaded =
     harnessSession !== undefined &&
     (harness === "codex" || harness === "codex-desktop") &&
@@ -750,5 +769,6 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     ...(threaded ? { lineage: keys.filter((key) => key !== own && key !== `pid:${pid}`) } : keys.length ? { lineage: keys } : {}),
     ...(grant ? { grant } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),
+    ...(origin ? { harness_origin: origin } : {}),
   }
 }

@@ -17,6 +17,7 @@ export {
   type EndpointRow,
   type LocalAgent,
   type MessageRow,
+  type Relinked,
   type WakeJob,
 } from "./core"
 export * from "./protocol"

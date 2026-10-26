@@ -311,6 +311,9 @@ agent sessions:
   ${CLI_NAME} name <handle> --take-over [--endpoint EP]   take the handle from an offline endpoint: it is retired and its
                                                  children, links and unread mail move over (the same harness session, such as
                                                  a resumed one, needs no flag); for the human at a terminal
+  ${CLI_NAME} relink [--dry-run]                 put each auto-named session back on the offline named endpoint of the harness
+                                                 session it resumed or forked, as name --take-over does; --dry-run only lists
+                                                 the pairs; for the human at a terminal
   ${CLI_NAME} join [<handle>] --under <parent>   link the session under the agent <parent> (one it may message), as if
                                                  <parent> had spawned it: it shows under <parent> in list --tree, the dashboard
                                                  and the graph, and takes on a worker's scope (the policy's child_default: by
@@ -446,6 +449,7 @@ const VERBS: Record<string, Option[]> = {
   end: IDENTITY,
   machine: [...IDENTITY, "secret-env", "clear"],
   name: [...IDENTITY, "endpoint", "take-over"],
+  relink: [...IDENTITY, "dry-run"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
   reply: IDENTITY,
   ack: [...IDENTITY, "all"],
@@ -1180,6 +1184,18 @@ async function runVerb(
       })
       if (asJson) json(view)
       else out(before && before !== view.address ? `${before} is now ${view.address}` : `${view.address}`)
+      return 0
+    }
+    case "relink": {
+      if (positionals.length) throw new RelayUsage(`${CLI_NAME} relink takes no arguments: ${CLI_NAME} relink [--dry-run]`)
+      const dryRun = values["dry-run"] === true
+      const result = await client.request<{ relinked: { from: string; to: string; by: string; retired?: string }[] }>("relink", dryRun ? { dry_run: true } : {})
+      if (asJson) json(result)
+      else {
+        for (const pair of result.relinked) out(`me/${pair.from} -> me/${pair.to} (by ${pair.by})`)
+        const n = result.relinked.length
+        out(n === 0 ? "nothing to relink" : `${dryRun ? "would relink" : "relinked"} ${n} ${n === 1 ? "session" : "sessions"}`)
+      }
       return 0
     }
     case "adopt": {

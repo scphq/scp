@@ -37,6 +37,7 @@
     "policy_check",
     "prompted",
     "receipts",
+    "relink",
     "rename",
     "rules",
     "rules_lift",

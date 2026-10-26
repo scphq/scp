@@ -1004,13 +1004,14 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           throw new RelayError("invalid_params", "join is {handle?, under?}")
         const under = (join as { under?: unknown } | undefined)?.under
         const before = join === undefined ? core.claimViews(params.claim) : new Map(core.list({ all: true }).map((view) => [view.id, view]))
-        const { endpoint, subagent, created } =
+        const { endpoint, subagent, created, rehomed } =
           join === undefined
             ? core.claim((params.claim ?? {}) as Claim, { transient: true })
             : {
                 endpoint: core.joinSession((params.claim ?? {}) as Claim, (join as { handle?: unknown }).handle, under),
                 subagent: undefined,
                 created: undefined,
+                rehomed: undefined,
               }
         s.data.endpoint = endpoint.id
         s.data.transient = true
@@ -1018,8 +1019,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         if (typeof key === "string") s.data.process = key
         const was = before.get(endpoint.id)?.address
         if (join !== undefined) membership(endpoint, core.sessionOf(endpoint.id), true, was?.slice(was.lastIndexOf("/") + 1))
+        if (rehomed) membership(endpoint, core.sessionOf(endpoint.id), true, rehomed.from)
         const tookOver = join !== undefined && [...before.values()].some((view) => view.id !== endpoint.id && view.address === endpoint.address)
-        if (tookOver || (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent)) bridge?.resync()
+        if (rehomed || tookOver || (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent)) bridge?.resync()
         else if ((before.get(endpoint.id)?.presence ?? known.get(endpoint.id) ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
         return {
           endpoint,
@@ -1221,6 +1223,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         membership(renamed.endpoint, renamed.session, true, renamed.from)
         if (renamed.retired) bridge?.resync()
         return renamed.endpoint
+      }
+      case "relink": {
+        const relinked = core.relink(actorOf(s), params.dry_run !== undefined ? { dry_run: params.dry_run } : {})
+        for (const pair of relinked.relinked) if (pair.retired) membership(core.whoami(pair.endpoint), core.sessionOf(pair.endpoint), true, pair.from)
+        if (relinked.relinked.some((pair) => pair.retired)) bridge?.resync()
+        return relinked
       }
       case "adopt": {
         const actor = actorOf(s)

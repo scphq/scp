@@ -88,6 +88,7 @@ export const OPTIONS = {
   peek: { type: "string" },
   endpoint: { type: "string" },
   "take-over": { type: "boolean" },
+  "dry-run": { type: "boolean" },
   live: { type: "boolean" },
   parent: { type: "string" },
   via: { type: "string" },
