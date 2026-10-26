@@ -289,6 +289,8 @@ export interface Claim {
   process?: string
   /** the harness's own stable session id (Claude Code's): a resumed session in a new harness process takes back the offline endpoint of that id */
   harness_session?: string
+  /** the harness session this one continues, as a fork of it: a claim that resumes no endpoint by `harness_session` takes back this one's */
+  harness_origin?: string
   /** process keys of the claimant's harness process and its ancestors, nearest first: the nearest endpoint holding one places the claim under it */
   lineage?: string[]
   /** a `krt_` grant from `spawn-env`: places the claim at or below its lineage placement, with the grant's caps and groups */

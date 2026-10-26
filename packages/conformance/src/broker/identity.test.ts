@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { waitFor } from "../targets";
-import { brokerSuite } from "./suite";
+import { brokerSuite, type Start } from "./suite";
 import { refusal, type View } from "./wire";
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`;
@@ -302,4 +302,42 @@ brokerSuite("broker resumed sessions", (start) => {
       expect((await human.request<{ rows: { event: string }[] }>("log", { scope: true })).rows.some((r) => r.event === "scope_reset")).toBe(false);
     });
   }
+  /** the named endpoint `lead` of harness session resume-a with unread mail, offline, and a fresh session that holds `other` */
+  async function stranded(start: Start) {
+    const broker = await start();
+    const old = await broker.agent("app", "claude-code", {}, { ...session(process.pid), harness_session: "resume-a" });
+    const hook = await broker.hook({ handle: "app", ...session(process.pid), harness_session: "resume-a" });
+    await hook.request("event", { kind: "tool", session_id: "resume-a" });
+    await old.request("rename", { handle: "lead" });
+    const human = await broker.human();
+    await human.request("send", { to: "lead", body: "while away" });
+    await old.request("leave");
+    await old.close();
+    await waitFor(
+      async () => (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === old.id)?.presence === "offline",
+      "session offline",
+    );
+    const fresh = await broker.agent("other", "claude-code", {}, { ...session(1), harness_session: "fresh-a" });
+    return { broker, human, fresh };
+  }
+
+  test("a hook reporting a session resumed in process rehomes its fresh endpoint onto the named one", async () => {
+    const { broker, fresh } = await stranded(start);
+    const resumed = await broker.hook({ handle: "other", ...session(1), harness_session: "resume-a" });
+    expect(resumed.hello.endpoint).toMatchObject({ id: fresh.id, address: "me/lead" });
+    expect(await fresh.request("inbox")).toMatchObject({ messages: [{ body: { text: "while away" } }] });
+  });
+
+  test("relink lists and applies the pairs for the human at a terminal only", async () => {
+    const { broker, human, fresh } = await stranded(start);
+    const hook = await broker.hook({ handle: "other", ...session(1), harness_session: "fresh-a" });
+    await hook.request("event", { kind: "tool", session_id: "resume-a" });
+    expect(await refusal(fresh.request("relink", {}))).toBe("scope_refused");
+    expect(await refusal((await broker.human(false)).request("relink", {}))).toBe("scope_refused");
+    const pair = { endpoint: fresh.id, from: "other", to: "lead", by: "session" };
+    expect(await human.request("relink", { dry_run: true })).toEqual({ relinked: [pair] });
+    expect(await fresh.request("whoami")).toMatchObject({ address: "me/other" });
+    expect(await human.request("relink", {})).toMatchObject({ relinked: [pair] });
+    expect(await fresh.request("whoami")).toMatchObject({ address: "me/lead" });
+  });
 });

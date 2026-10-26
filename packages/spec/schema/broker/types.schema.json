@@ -1726,6 +1726,9 @@
         "harness_session": {
           "type": "string"
         },
+        "harness_origin": {
+          "type": "string"
+        },
         "lineage": {
           "type": "array",
           "items": {

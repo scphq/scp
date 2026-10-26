@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "relink",
+  "title": "relink",
+  "$defs": {
+    "Params": {
+      "type": "object",
+      "properties": {
+        "dry_run": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "relinked": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "by": {
+                "enum": [
+                  "session",
+                  "origin"
+                ]
+              },
+              "retired": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "endpoint",
+              "from",
+              "to",
+              "by"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "relinked"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
