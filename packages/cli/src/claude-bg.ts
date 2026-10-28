@@ -128,7 +128,7 @@ export interface PlanInput {
   states: Map<string, BgState>
   /** the sessions `claude attach` holds, by id, name or session id */
   attached: Set<string>
-  /** the process table, `ps -Ao pid=,ppid=,args=`; null when unread, which keeps every live session */
+  /** the process table, `ps -Ao pid=,ppid=,lstart=,args=`; null when unread, which keeps every live session */
   processes: string | null
   now: number
   config: BgConfig
@@ -218,13 +218,19 @@ export function plan(input: PlanInput): Action[] {
       keep("the caller's own session", agent)
       continue
     }
-    if (live && entry.status !== "idle") {
+    const polling = live && input.processes !== null && onlyPollsInbox(input.processes, entry.pid!)
+    const waits = polling && entry.status === "busy" && onlyPollsInbox(input.processes!, entry.pid!, Date.parse(agent.worked_at))
+    if (live && entry.status !== "idle" && !waits) {
       keep(entry.status ?? "busy", agent)
       continue
     }
     const commands = live ? commandsOf(input.processes, entry.pid!) : null
     if (commands) {
       keep(commands, agent)
+      continue
+    }
+    if (polling && agent.unread) {
+      keep("polling its inbox, which has unread mail", agent)
       continue
     }
     const idleMs = input.now - Date.parse(agent.worked_at)
@@ -249,7 +255,7 @@ export function plan(input: PlanInput): Action[] {
       continue
     }
     if (!(idleMs >= threshold * 1000)) {
-      keep(`idle ${Math.max(0, Math.floor(idleMs / 1000))} s of ${threshold} s`, agent)
+      keep(`${polling ? "polling its inbox, " : ""}idle ${Math.max(0, Math.floor(idleMs / 1000))} s of ${threshold} s`, agent)
       continue
     }
     actions.push({ kind: "stop", id, entry, agent, ...(record ? { record } : {}) })
@@ -401,7 +407,7 @@ const firstLine = (text: string): string =>
 
 export interface ClaudeBgDeps {
   exec?: Exec
-  /** the process table, `ps -Ao pid=,ppid=,args=`; null when it cannot be read */
+  /** the process table, `ps -Ao pid=,ppid=,lstart=,args=`; null when it cannot be read */
   ps?: () => Promise<string | null>
   /** this process and its ancestors; null when the process table cannot be read */
   ancestors?: () => Promise<Set<number> | null>
@@ -451,36 +457,120 @@ export function ancestorsOf(table: string, pid: number): Set<number> {
   return chain
 }
 
-/** a Bash tool shell of Claude Code: it sources a shell snapshot and lives until its command exits */
-const BASH_TOOL_SHELL = "/shell-snapshots/snapshot-"
+/** a Bash tool shell of Claude Code: it sources a shell snapshot, or without one ends by writing its cwd, and lives until its command exits */
+const BASH_TOOL_SHELL = /\/shell-snapshots\/snapshot-| && pwd -P >\| \S*\/claude-[0-9a-f]+-cwd$/
+const SHELLS = new Set(["sh", "bash", "zsh", "dash"])
+/** the commands an inbox poll loop may run besides the inbox wait itself, and the filters it may run only on a pipe */
+const POLL_WORDS = new Set("while until do done if then else elif fi true false : break continue exit echo printf test [ [[ sleep seq".split(" "))
+/** the filters a poll loop may pipe into, each with the operands it takes besides files: a pattern, a jq filter, two sets */
+const PIPE_WORDS = new Map(Object.entries({ grep: 1, jq: 1, tr: 2, head: 0, tail: 0, wc: 0, cut: 0 }))
+type Proc = { pid: number; args: string; started?: number }
+/** a `ps` row: pid, ppid, then optionally its C locale `lstart`, then its arguments */
+const PS_ROW = /^\s*(\d+)\s+(\d+)\s+(?:([A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4})\s+)?(.*)$/
+/** the file tests of `test`, `[` and `[[`: a loop on one watches the filesystem, not mail */
+const FILE_TEST = /^-([a-hkprstuwxGLNOS]|nt|ot|ef)$/
+
+const base = (word: string | undefined): string => word?.replace(/^\\/, "").split("/").at(-1) ?? ""
+/** `swarm inbox ... --wait`, also through node or bun and the CLI's `cli.js`, or under `timeout <duration>` */
+function inboxWait(words: string[]): boolean {
+  const from = base(words[0]) === "timeout" ? 2 : 0
+  const at = from + (["node", "bun"].includes(base(words[from])) ? 1 : 0)
+  const cli = base(words[at])
+  return (cli === CLI_NAME || cli === "cli.js") && words[at + 1] === "inbox" && words.slice(at + 2).some((word) => /^--wait(=|$)/.test(word))
+}
 
 /**
- * whether a command Claude Code's Bash tool started still runs under `pid` in a `ps -Ao pid=,ppid=,args=` table: a descendant shell that
- * sources a shell snapshot. MCP servers, hooks and other helpers do not count
+ * whether a Bash tool command polls the inbox and does nothing else: each simple command in the text it evaluates is an inbox wait, a
+ * shell keyword, test, echo or sleep, or a text filter on a pipe with no file operand. Anything else, a script, a file read or a `gh` call,
+ * watches more than mail
  */
-export function runsCommand(table: string, pid: number): boolean {
-  const children = new Map<number, { pid: number; args: string }[]>()
+export function pollsInbox(args: string): boolean {
+  const quoted = /\beval '((?:[^']|'"'"')*)'/.exec(args)
+  const raw = quoted ? quoted[1]!.replaceAll(`'"'"'`, "'") : args
+  if (/(^|[^<])<\s*(?!\/dev\/null\b)[^\s<(]/.test(raw)) return false
+  const text = raw.replace(/\d*[<>]+[|&]?\s*[^\s;&|()<>]*/g, " ")
+  const parts = text.split(/(\|\||&&|\$\(|[;|&\n()`{}])/)
+  let waits = 0
+  for (let at = 0; at < parts.length; at += 2) {
+    const words = parts[at]!.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []
+    while (words.length && (/^[A-Za-z_]\w*=/.test(words[0]!) || ["do", "then", "else", "elif", "while", "until", "if", "!"].includes(words[0]!))) words.shift()
+    if (!words.length || words[0] === "for") continue
+    if (inboxWait(words)) waits++
+    else if (PIPE_WORDS.has(words[0]!)) {
+      if (parts[at - 1] !== "|" || words.slice(1).filter((word) => !/^-|^\d+$/.test(word)).length > PIPE_WORDS.get(words[0]!)!) return false
+    } else if (!POLL_WORDS.has(words[0]!)) return false
+    else if (["test", "[", "[["].includes(words[0]!) && words.some((word) => FILE_TEST.test(word))) return false
+  }
+  return waits > 0
+}
+
+/** the Bash tool shells under `pid` in a `ps -Ao pid=,ppid=,lstart=,args=` table, each with the processes under it */
+function commandShells(table: string, pid: number): { shell: Proc; under: Proc[] }[] {
+  const children = new Map<number, Proc[]>()
   for (const line of table.split("\n")) {
-    const row = /^\s*(\d+)\s+(\d+)\s*(.*)$/.exec(line)
+    const row = PS_ROW.exec(line)
     if (!row) continue
     const parent = Number(row[2])
-    children.set(parent, [...(children.get(parent) ?? []), { pid: Number(row[1]), args: row[3]! }])
+    const started = row[3] ? Date.parse(row[3]) : Number.NaN
+    children.set(parent, [...(children.get(parent) ?? []), { pid: Number(row[1]), args: row[4]!, ...(Number.isNaN(started) ? {} : { started }) }])
   }
+  const below = (root: number): Proc[] => {
+    const found: Proc[] = []
+    const queue = [root]
+    const seen = new Set(queue)
+    while (queue.length)
+      for (const child of children.get(queue.pop()!) ?? []) {
+        if (seen.has(child.pid)) continue
+        seen.add(child.pid)
+        found.push(child)
+        queue.push(child.pid)
+      }
+    return found
+  }
+  const shells: { shell: Proc; under: Proc[] }[] = []
   const queue = [pid]
   const seen = new Set(queue)
   while (queue.length)
     for (const child of children.get(queue.pop()!) ?? []) {
-      if (child.args.includes(BASH_TOOL_SHELL)) return true
       if (seen.has(child.pid)) continue
       seen.add(child.pid)
-      queue.push(child.pid)
+      if (BASH_TOOL_SHELL.test(child.args)) shells.push({ shell: child, under: below(child.pid) })
+      else queue.push(child.pid)
     }
-  return false
+  return shells
 }
 
-/** why the process tree keeps a live session: a command still runs under it, or the table is unread */
+/**
+ * whether a command Claude Code's Bash tool started still runs under `pid` in a `ps -Ao pid=,ppid=,lstart=,args=` table: a descendant shell that
+ * sources a shell snapshot. MCP servers, hooks and other helpers do not count
+ */
+export function runsCommand(table: string, pid: number): boolean {
+  return commandShells(table, pid).length > 0
+}
+
+/**
+ * whether every command running under `pid` is an inbox poll loop ({@link pollsInbox}) that waits on the inbox right now: under its shell
+ * runs a `swarm inbox --wait` and nothing but that and subshells of the same command. False with no command at all. With `after`, one of
+ * them also started at or after it: a loop the turn started after the session's last hook, so the turn waits on it rather than on a model
+ * that runs beside a `run_in_background` loop, whose launch fires a hook after the loop starts
+ */
+export function onlyPollsInbox(table: string, pid: number, after?: number): boolean {
+  const shells = commandShells(table, pid)
+  return (
+    shells.length > 0 &&
+    (after === undefined || shells.some(({ shell }) => shell.started !== undefined && shell.started >= after)) &&
+    shells.every(
+      ({ shell, under }) =>
+        pollsInbox(shell.args) &&
+        under.some((one) => inboxWait(one.args.trim().split(/\s+/))) &&
+        under.every((one) => inboxWait(one.args.trim().split(/\s+/)) || (SHELLS.has(base(one.args.split(/\s+/)[0])) && one.args === shell.args)),
+    )
+  )
+}
+
+/** why the process tree keeps a live session: a command still runs under it, or the table is unread; null also while it only polls its inbox */
 const commandsOf = (table: string | null, pid: number): string | null =>
-  table === null ? "ps failed, so running commands are unknown" : runsCommand(table, pid) ? "running a background command" : null
+  table === null ? "ps failed, so running commands are unknown" : runsCommand(table, pid) && !onlyPollsInbox(table, pid) ? "running a background command" : null
 
 const psAncestors = (env: Env, exec: Exec) => async (): Promise<Set<number> | null> => {
   const run = await exec("ps", ["-Ao", "pid=,ppid="], { timeoutMs: LIST_TIMEOUT_MS, env })
@@ -488,7 +578,7 @@ const psAncestors = (env: Env, exec: Exec) => async (): Promise<Set<number> | nu
 }
 
 const psTable = (env: Env, exec: Exec) => async (): Promise<string | null> => {
-  const run = await exec("ps", ["-Ao", "pid=,ppid=,args="], { timeoutMs: LIST_TIMEOUT_MS, env })
+  const run = await exec("ps", ["-Ao", "pid=,ppid=,lstart=,args="], { timeoutMs: LIST_TIMEOUT_MS, env: { ...env, LC_ALL: "C" } })
   return run.code === 0 ? run.out : null
 }
 
@@ -540,11 +630,14 @@ const runOf = (claude: Claude, env: Env, now: () => number, ps: () => Promise<st
  * still runs under its process
  */
 async function moved(target: Target, port: BgPort, run: Run): Promise<string | null> {
-  if (changed(await port.agents(), target.agent)) return "it got work"
+  const agents = await port.agents()
+  if (changed(agents, target.agent)) return "it got work"
   const table = await run.ps()
   if (table === null) return "ps failed, so attached sessions are unknown"
   if (attachedTo(target.entry, attachTargets(table))) return "attached"
-  return typeof target.entry.pid === "number" ? commandsOf(table, target.entry.pid) : null
+  if (typeof target.entry.pid !== "number") return null
+  if (onlyPollsInbox(table, target.entry.pid) && agents.find((one) => one.id === target.agent.id)?.unread) return "polling its inbox, which has unread mail"
+  return commandsOf(table, target.entry.pid)
 }
 
 /**
@@ -565,7 +658,7 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
   }
   writeState(run.env, id, { sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle: agent.handle })
   await port.hibernate(agent, ref)
-  const why = (await moved(target, port, run)) ?? (await stillIdle(claude, id, entry))
+  const why = (await moved(target, port, run)) ?? (await stillIdle(claude, target, run))
   if (why) {
     await port.unhibernate(agent)
     restore()
@@ -597,12 +690,16 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
 }
 
 /**
- * null while `claude agents` still shows the session idle with the planned pid, read right before `claude stop`; a turn that starts in the
- * moment between this read and the stop is not caught
+ * null while `claude agents` still shows the session idle with the planned pid, or busy only polling its inbox by a process table read
+ * after it, right before `claude stop`; a turn that starts in the moment between these reads and the stop is not caught
  */
-async function stillIdle(claude: Claude, id: string, entry: ClaudeEntry): Promise<string | null> {
+async function stillIdle(claude: Claude, { id, entry, agent }: Target, run: Run): Promise<string | null> {
   const listed = (await listEntries(claude, true))?.find((one) => one.id === id)
-  return listed?.status === "idle" && listed.pid === entry.pid ? null : `claude shows it ${listed ? (listed.status ?? "busy") : "unlisted"}`
+  if (!listed || listed.pid !== entry.pid || typeof entry.pid !== "number") return `claude shows it ${listed ? (listed.status ?? "busy") : "unlisted"}`
+  if (listed.status === "idle") return null
+  if (listed.status !== "busy") return `claude shows it ${listed.status ?? "busy"}`
+  const table = await run.ps()
+  return table !== null && onlyPollsInbox(table, entry.pid, Date.parse(agent.worked_at)) ? null : "claude shows it busy"
 }
 
 /** null while `claude agents` lists the session with no process, read right before `claude rm` */

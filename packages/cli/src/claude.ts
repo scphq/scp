@@ -399,7 +399,8 @@ ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop t
                                                  now, then remove the historic ones: never a root, the caller's own session, one with live
                                                  workers or subagents, or one claude attach holds, that is not exactly
                                                  idle or that still runs a Bash tool command (kept: running a background
-                                                 command), and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
+                                                 command), though a session busy only polling its inbox in a loop counts as idle,
+                                                 and never claude rm --discard-unpushed or --force-remove-worktree. --older-than
                                                  (30m, 2h, 1d) replaces the thresholds; --stop-only removes nothing. Needs the broker
 ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of the endpoints of the
                                                  sessions ${CLI_NAME} claude --bg did not start; stops, removes and respawns nothing

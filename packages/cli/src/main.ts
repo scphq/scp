@@ -113,7 +113,8 @@ usage:
   ${CLI_NAME} reply <id> [text|-]                reply to message <id>: to its sender, in its thread, marking it read; <id> may
                                                  also be another's message in a thread you sent or got a message in
   ${CLI_NAME} inbox [--wait S] [--keep]          your unread messages, then marked read (--keep leaves them unread); --wait waits up
-                                                 to S seconds (max 50)
+                                                 to S seconds (max 50), for one short wait: never poll in a loop, since
+                                                 messages reach you at your next turn or wake you, so end your turn instead
   ${CLI_NAME} ack <id|seq>... | --all            mark messages read, by message id or seq; --all marks every unread one
   ${CLI_NAME} show <id>                          one message delivered to you, whole, read or not; it stays as it is (a hook
                                                  shows a long message cut, ending in [truncated, N more chars: ${CLI_NAME} show <id>])
