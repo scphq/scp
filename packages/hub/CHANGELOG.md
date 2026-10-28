@@ -1,5 +1,14 @@
 # @scp-dev/hub
 
+## 0.12.2
+
+### Patch Changes
+
+- 673d1be: A bridge's full mirror leaves out historic agents that are offline, not revivable and carry no wake, so a broker with thousands of old rows links under a hub's endpoint cap; it still sends the parents of the rows it keeps, and once more a left-out row it mirrored reachable on this link, so the hub marks it offline. A historic agent that comes back is mirrored at its next change, after any of its parents the link has not mirrored, so the hub places it. A hub's endpoint cap refusal names the cap and the count the claim or mirror would reach, and points at the `endpoints` key of `SCP_LIMITS`. The spec says how long retention keeps a child that sent a message (until the message expires) and a root (until handle reuse).
+- Updated dependencies [673d1be]
+- Updated dependencies [4f8d617]
+  - @scp-dev/core@0.17.1
+
 ## 0.12.1
 
 ### Patch Changes

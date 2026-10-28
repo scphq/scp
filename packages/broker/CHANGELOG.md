@@ -1,5 +1,16 @@
 # @scp-dev/broker
 
+## 0.12.1
+
+### Patch Changes
+
+- 673d1be: A bridge's full mirror leaves out historic agents that are offline, not revivable and carry no wake, so a broker with thousands of old rows links under a hub's endpoint cap; it still sends the parents of the rows it keeps, and once more a left-out row it mirrored reachable on this link, so the hub marks it offline. A historic agent that comes back is mirrored at its next change, after any of its parents the link has not mirrored, so the hub places it. A hub's endpoint cap refusal names the cap and the count the claim or mirror would reach, and points at the `endpoints` key of `SCP_LIMITS`. The spec says how long retention keeps a child that sent a message (until the message expires) and a root (until handle reuse).
+- 4f8d617: A background session that a harness daemon hosts, and resumes or revives in a process of its own, keeps its name, place and mail: a claim with no grant that lineage places nowhere takes back the released row of the same harness session, a holder whose process ended counts as released, and a session's own hook endpoint is never its lineage parent. `swarm claude --bg --resume` reuses the name, grant and parent request of the session's previous mount, also when the resume forks a new session id. `swarm relink` puts an auto-named root back on the endpoint its grant named and placed, and a takeover by a root moves it under that row's parent, bound by that row's caps as well as its own, and takes the grant that row spent. A shim whose session's hook endpoint is still connected is never placed under that endpoint.
+- Updated dependencies [673d1be]
+- Updated dependencies [4f8d617]
+  - @scp-dev/core@0.17.1
+  - @scp-dev/hub@0.12.2
+
 ## 0.12.0
 
 ### Minor Changes

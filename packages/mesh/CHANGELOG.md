@@ -1,5 +1,15 @@
 # @scp-dev/mesh
 
+## 0.1.18
+
+### Patch Changes
+
+- Updated dependencies [673d1be]
+- Updated dependencies [4f8d617]
+  - @scp-dev/broker@0.12.1
+  - @scp-dev/core@0.17.1
+  - @scp-dev/hub@0.12.2
+
 ## 0.1.17
 
 ### Patch Changes
