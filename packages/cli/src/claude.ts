@@ -180,6 +180,23 @@ function liveAgents(bin: string, env: Env): Agent[] {
   }
 }
 
+/**
+ * the name, grant and parent request the scp mount of the background session `--resume` names ran with, from `<short id>.json`: a resumed
+ * session, or a fork of it under a new id, claims them again rather than the caller's
+ */
+function priorMount(args: string[], env: Env): Record<"SCP_NAME" | "SCP_GRANT" | "SCP_UNDER", string> | undefined {
+  const short = /^[0-9a-f]{8}/.exec(resumeTarget(args) ?? "")?.[0]
+  if (!short) return undefined
+  try {
+    const vars = JSON.parse(readFileSync(join(bgDir(env), `${short}.json`), "utf8"))?.mcpServers?.scp?.env
+    if (!vars || typeof vars !== "object") return undefined
+    const of = (key: string) => (typeof vars[key] === "string" ? (vars[key] as string) : "")
+    return { SCP_NAME: of("SCP_NAME"), SCP_GRANT: of("SCP_GRANT"), SCP_UNDER: of("SCP_UNDER") }
+  } catch {
+    return undefined
+  }
+}
+
 /** whether claude's options resume or continue a stored session */
 export const resumes = (args: string[]): boolean =>
   optionsOf(args).some((arg) => ["-c", "--continue", "-r", "--resume", "--from-pr"].includes(arg) || arg.startsWith("--resume="))
@@ -340,6 +357,8 @@ export async function claudeCommand(
   if (!bin) throw new RelayUsage("claude is not on PATH")
   if (bg) {
     const attribution = await attribute("claude", { name, root, under, resume: resumes(args) }, env, cwd, err, deps.attribute)
+    const prior = attribution || root ? undefined : priorMount(args, env)
+    if (prior) return backgroundCommand(name ?? (prior.SCP_NAME || undefined), args, { ...env, ...prior }, cwd, bin, out)
     return backgroundCommand(name, args, attributed(env, attribution), cwd, bin, out, attribution)
   }
   const resume = resumeTarget(args)

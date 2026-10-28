@@ -538,6 +538,8 @@ interface ClaimScope {
   ticket?: string
   /** the claimant's nearest harness process, the end of its shell's walk (`self`), when that walk begins its lineage */
   nearest?: string
+  /** the endpoint only the claimant's own session's hooks hold: never its lineage parent */
+  hooks?: EndpointRow
   /** a hook's claim for a subagent of the endpoint `root` */
   subagent?: { id: string; type?: string; stop?: true; root: string }
 }
@@ -1157,10 +1159,12 @@ export class RelayCore {
           )
         : undefined
     const reviving = row && revivable(row) && this.localRow(row) && row.connections === 0 ? row : undefined
+    if (row && !transient && row.token_hash === null && row.session === fields.session) scope.hooks = row
     let session = fields.session
     let stopBlocks: number | null = null
     let moved: number[] = []
     let exactFrom: EndpointRow | undefined
+    let returning: string | undefined
     const open = !row || presenceOf(row, now) === "offline"
     if (row && presenceOf(row, now) === "offline") {
       this.sql.all(`UPDATE endpoints SET session = NULL WHERE id = ?`, row.id)
@@ -1185,15 +1189,10 @@ export class RelayCore {
         if (!held) {
           this.sql.all(`UPDATE endpoints SET handle = ? WHERE id = ?`, handle, hooks.id)
           settled = true
-        } else if (
-          held.kind === "agent" &&
-          !revivable(held) &&
-          held.connections === 0 &&
-          presenceOf(held, now) === "offline" &&
-          harnessFits(held.harness, harness)
-        ) {
-          if (this.restarts(held, this.placement(scope, now).parent, fields.process) || this.redeems(held, scope, { harness, ...fields })) {
+        } else if (held.kind === "agent" && !revivable(held) && this.released(held, now) && harnessFits(held.harness, harness)) {
+          if (this.returns(held, this.placement(scope, now, undefined, hooks).parent, scope, { harness, ...fields }, hooks)) {
             ;({ moved, stopBlocks } = this.leaveHooks(hooks, held.id))
+            returning = held.id
             row = undefined
             settled = true
           }
@@ -1241,18 +1240,18 @@ export class RelayCore {
       } else if (
         held.kind === "agent" &&
         !revivable(held) &&
-        ((held.connections === 0 && presenceOf(held, now) === "offline") || (!transient && this.outlived(held))) &&
+        ((held.connections === 0 && this.released(held, now)) || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
         !otherSession(held, fields.harness_session, fields.process) &&
         held.id !== scope.subagent?.root &&
         !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
       ) {
         own = transient && held.process !== null && fields.process !== null && sameHarness(held.process, fields.process)
-        const ended = held.hook_ended !== null || (held.last_seen ?? held.created_at) < now - LIMITS.restartGraceS * 1000
-        if (
-          (!transient || own || ended) &&
-          (this.restarts(held, this.placement(scope, now).parent, fields.process) || this.redeems(held, scope, { harness, ...fields }))
-        )
+        const ended =
+          held.hook_ended !== null ||
+          (held.last_seen ?? held.created_at) < now - LIMITS.restartGraceS * 1000 ||
+          (held.process !== null && !this.running(held.process))
+        if (held.id === returning || ((!transient || own || ended) && this.returns(held, this.placement(scope, now).parent, scope, { harness, ...fields })))
           row = held
       } else if (
         scope.exact &&
@@ -1374,7 +1373,7 @@ export class RelayCore {
         this.localRow(row) &&
         (harnessFits(row.harness, harness) || sameProvider(row.harness, harness)) &&
         ((transient && revivable(row)) ||
-          (this.released(row, now) && (this.restarts(row, parent, fields.process) || this.redeems(row, scope, { harness, ...fields })))),
+          (this.released(row, now) && this.returns(row, parent, scope, { harness, ...fields, harness_session: harnessSession }))),
     )
   }
 
@@ -1499,9 +1498,9 @@ export class RelayCore {
    * endpoint or one above it is one its process passed down, and places nothing. An expired, revoked or spent grant refuses only a claim with
    * no lineage; lineage places any other, and the grant is ignored
    */
-  private placement(scope: ClaimScope, now: number, exclude?: EndpointRow): Placement {
+  private placement(scope: ClaimScope, now: number, exclude?: EndpointRow, hooks?: EndpointRow): Placement {
     if (scope.subagent) return { parent: this.byId(scope.subagent.root) ?? null, grant: null, refused: null }
-    const lineage = this.lineageParent(scope.lineage, exclude)
+    const lineage = this.lineageParent(scope.lineage, exclude ?? hooks, scope.hooks)
     if (scope.grant === null) return { parent: lineage, grant: null, refused: null }
     const grant = one<GrantRow>(this.sql, `SELECT * FROM grants WHERE token_hash = ?`, scope.grant)
     const spender = this.spentGrant(scope)?.used_by
@@ -1523,12 +1522,13 @@ export class RelayCore {
   }
 
   /** the first lineage key some agent endpoint holds as its process, the shallowest (then oldest) of them; full keys only */
-  private lineageParent(lineage: string[], exclude?: EndpointRow): EndpointRow | null {
-    return this.lineageRows(lineage, exclude)[0] ?? null
+  private lineageParent(lineage: string[], ...exclude: (EndpointRow | undefined)[]): EndpointRow | null {
+    return this.lineageRows(lineage, ...exclude)[0] ?? null
   }
 
   /** the agent endpoints holding the first lineage key any of them holds, shallowest (then oldest) first */
-  private lineageRows(lineage: string[], exclude?: EndpointRow): EndpointRow[] {
+  private lineageRows(lineage: string[], ...exclude: (EndpointRow | undefined)[]): EndpointRow[] {
+    const out = exclude.flatMap((row) => (row ? [row.id] : []))
     if (this.defaults().verifyLineage === true) return []
     for (const key of lineage) {
       if (!PROCESS_KEY.test(key)) continue
@@ -1537,7 +1537,7 @@ export class RelayCore {
           `SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY COALESCE(depth, 0), created_at, id`,
           key,
         )
-        .filter((row) => !exclude || (row.id !== exclude.id && !this.ancestorsOf(row).includes(exclude.id)))
+        .filter((row) => !out.length || (!out.includes(row.id) && !this.ancestorsOf(row).some((id) => out.includes(id))))
       if (rows.length) return rows
     }
     return []
@@ -1551,6 +1551,21 @@ export class RelayCore {
   private outlived(row: EndpointRow): boolean {
     const pid = Number(/^pid:(\d+):/.exec(row.process ?? "")?.[1])
     return row.connections > 0 && pid > 0 && this.localRow(row) && !this.alive(pid)
+  }
+
+  /**
+   * whether a claim placed under `parent` takes `row` back: restarted where it sits, redeemed with its grant, or the same harness session
+   * resumed in a process nothing places, as a harness daemon runs its background sessions, which keeps its place
+   */
+  private returns(
+    row: EndpointRow,
+    parent: EndpointRow | null,
+    scope: ClaimScope,
+    claimant: { harness: string; cwd: string | null; process: string | null; harness_session?: string | null },
+    hooks?: EndpointRow,
+  ): boolean {
+    if (this.restarts(row, parent, claimant.process) || this.redeems(row, scope, claimant, hooks)) return true
+    return parent === null && scope.grant === null && !!claimant.harness_session && row.harness_session === claimant.harness_session
   }
 
   private restarts(row: EndpointRow, parent: EndpointRow | null, process: string | null): boolean {
@@ -1586,10 +1601,15 @@ export class RelayCore {
    * whether the claim re-claims `row` with the grant `row` spent: from `row`'s own process or one of its ancestors, or with no lineage from
    * `row`'s harness and the cwd its claims connect from
    */
-  private redeems(row: EndpointRow, scope: ClaimScope, claimant: { harness: string; cwd: string | null; process: string | null }): boolean {
+  private redeems(
+    row: EndpointRow,
+    scope: ClaimScope,
+    claimant: { harness: string; cwd: string | null; process: string | null },
+    hooks?: EndpointRow,
+  ): boolean {
     const spent = this.spentGrant(scope)
     if (spent?.used_by !== row.id) return false
-    const lineage = this.lineageParent(scope.lineage)
+    const lineage = this.lineageParent(scope.lineage, hooks, scope.hooks)
     if (!lineage) return harnessFits(row.harness, claimant.harness) && spent.spent_cwd !== null && spent.spent_cwd === claimant.cwd
     return this.restarts(row, lineage, claimant.process) || this.ancestorsOf(row).includes(lineage.id)
   }
@@ -2340,9 +2360,9 @@ export class RelayCore {
   }
 
   /**
-   * the human at a terminal puts each auto-named local agent back on the released named endpoint of its harness session, else of the session
-   * it forks, where that one sits where the agent sits: taken over as a hook's rehome takes it, each at most once (a session match first, then
-   * a live agent, then the latest seen). `dry_run` only lists the pairs; a refused one is skipped, audited `relink_refused`
+   * the human at a terminal puts each auto-named local agent back on the released endpoint named by a rename or a grant of its harness session, else of the session
+   * it forks, where that one sits where the agent sits or the agent is an unplaced root: taken over as a hook's rehome takes it, each at
+   * most once (a session match first, then a live agent, then the latest seen). `dry_run` only lists the pairs; a refused one is skipped, audited `relink_refused`
    */
   relink(actor: ScopeActor, params: { dry_run?: unknown } = {}): { relinked: Relinked[] } {
     if (params.dry_run !== undefined && typeof params.dry_run !== "boolean") throw new RelayError("invalid_params", "dry_run is true or false")
@@ -2356,13 +2376,17 @@ export class RelayCore {
           `SELECT * FROM endpoints WHERE kind = 'agent' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' AND (session IS NULL OR substr(session, 1, 4) != 'sub:')`,
         )
         .filter((row) => this.localRow(row))
+      const granted = new Set(
+        this.sql.all<{ id: string }>(`SELECT e.id FROM endpoints e JOIN grants g ON g.used_by = e.id AND g.name = e.handle`).map((r) => r.id),
+      )
+      const chosen = new Set(rows.filter((row) => row.named !== null || granted.has(row.id)).map((row) => row.id))
       const pairs: { row: EndpointRow; held: EndpointRow; by: "session" | "origin" }[] = []
       for (const row of rows) {
-        if (row.named !== null || (row.harness_session === null && row.harness_origin === null)) continue
+        if (chosen.has(row.id) || (row.harness_session === null && row.harness_origin === null)) continue
         for (const held of rows) {
-          if (held.named === null || held.id === row.id || held.harness_session === null || !this.released(held, now)) continue
+          if (!chosen.has(held.id) || held.id === row.id || held.harness_session === null || !this.released(held, now)) continue
           if (!harnessFits(held.harness, row.harness ?? "cli") && !sameProvider(held.harness, row.harness ?? "cli")) continue
-          if (held.parent_ep !== row.parent_ep && !(row.parent_ep === null && row.parent_addr === null && held.linked !== null)) continue
+          if (held.parent_ep !== row.parent_ep && !(row.parent_ep === null && row.parent_addr === null)) continue
           const by = held.harness_session === row.harness_session ? "session" : held.harness_session === row.harness_origin ? "origin" : null
           if (by) pairs.push({ row, held, by })
         }
@@ -2451,19 +2475,36 @@ export class RelayCore {
     this.audit("rename", row.id, null, { from, to: handle })
   }
 
+  /** `row`, a root, and its subtree moved to where a grant placed `held`: under its parent, bound by its caps as well as its own */
+  private placeAs(row: EndpointRow, held: EndpointRow): void {
+    if (this.ancestorsOf(held).includes(row.id))
+      throw new RelayError("scope_refused", `${this.address(held)} sits under ${this.address(row)}: a session cannot go under its own descendant`)
+    const depth = held.depth ?? 1
+    const deepest = one<{ d: number | null }>(this.sql, `SELECT MAX(depth) AS d FROM endpoints WHERE tree = ?`, row.id)?.d ?? 0
+    if (deepest + depth > LIMITS.depthMax)
+      throw new RelayError("scope_refused", `${this.address(row)} would sit deeper than ${LIMITS.depthMax} where ${this.address(held)} sits`)
+    const tree = held.tree ?? held.parent_ep
+    this.sql.all(`UPDATE endpoints SET tree = ?, depth = depth + ? WHERE tree = ?`, tree, depth, row.id)
+    this.sql.all(`UPDATE endpoints SET tree = ?, parent_ep = ?, depth = ? WHERE id = ?`, tree, held.parent_ep, depth, row.id)
+    const [own, its] = [this.capsOf(row), this.capsOf(held)]
+    this.saveCaps(row.id, { ...own, caps: [...own.caps, ...its.caps], allow: { ...its.allow, ...own.allow } })
+    this.scopeMemo?.ancestors.clear()
+    this.scopeMemo?.limited.clear()
+  }
+
   /**
    * `row` takes over `held`, an offline local agent, and retires it: `held`'s subtree, unread mail, grants, groups and harness session move to
-   * `row`, which takes `held`'s hand-made link when it is an unlinked root itself. Its handle is then free for `row`
+   * `row`, which takes `held`'s place, a hand-made link or a grant's, when it is an unlinked root itself. Its handle is then free for `row`
    */
   private takeOver(row: EndpointRow, held: EndpointRow, by: "human" | "session"): string {
     if (this.ancestorsOf(row).includes(held.id))
       throw new RelayError("scope_refused", `${this.address(row)} sits under ${this.address(held)}: it cannot take over its own ancestor`)
-    if (row.parent_ep === null && row.parent_addr === null && held.linked !== null && held.parent_addr !== null)
+    if (row.parent_ep === null && row.parent_addr === null && held.parent_addr !== null)
       this.sql.all(`UPDATE endpoints SET parent_addr = ?, linked = ? WHERE id = ?`, held.parent_addr, held.linked, row.id)
     else if (row.parent_ep === null && row.parent_addr === null && held.linked !== null && held.parent_ep !== null) {
       const parent = this.byId(held.parent_ep)
       if (parent) this.link(row, parent, { by: this.address(row), auth: by })
-    }
+    } else if (row.parent_ep === null && row.parent_addr === null && held.parent_ep !== null && this.byId(held.parent_ep)) this.placeAs(row, held)
     const place = this.byId(row.id)!
     const shift = (place.depth ?? 0) - (held.depth ?? 0)
     const below = `WITH RECURSIVE below(id) AS (SELECT id FROM endpoints WHERE parent_ep = ? UNION SELECT e.id FROM endpoints e JOIN below b ON e.parent_ep = b.id)`
@@ -2475,6 +2516,7 @@ export class RelayCore {
     this.sql.all(`UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL`, row.id, held.id)
     this.sql.all(`UPDATE grants SET issuer = ? WHERE issuer = ?`, row.id, held.id)
     this.sql.all(`UPDATE grants SET under = ? WHERE under = ?`, row.id, held.id)
+    this.sql.all(`UPDATE grants SET used_by = ? WHERE used_by = ?`, row.id, held.id)
     this.sql.all(
       `DELETE FROM spawn_via AS old WHERE spawner = ? AND EXISTS (SELECT 1 FROM spawn_via AS newer WHERE newer.spawner = ? AND newer.name = old.name AND newer.created_at > old.created_at)`,
       held.id,
