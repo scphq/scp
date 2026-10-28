@@ -1,5 +1,17 @@
 # @scp-dev/broker
 
+## 0.13.0
+
+### Minor Changes
+
+- f65ee3e: Make the loop guards (hopMax, threadMax, ping-pong) configurable through limits and off by default, including the cross-account hop and thread caps. The hop is still computed and carried; hello and status report an off guard as null.
+
+### Patch Changes
+
+- Updated dependencies [f65ee3e]
+  - @scp-dev/core@0.18.0
+  - @scp-dev/hub@0.13.0
+
 ## 0.12.1
 
 ### Patch Changes

@@ -1,5 +1,17 @@
 # @scp-dev/cli
 
+## 0.18.2
+
+### Patch Changes
+
+- fa0fd3c: The idle stop and `swarm claude prune` no longer keep a Claude Code background session whose only running Bash tool command is an inbox poll loop (`swarm inbox --wait` in a loop with nothing but shell keywords, `echo`, `sleep` and piped filters without file operands): it counts as idle, even while Claude Code shows it busy, unless its endpoint has unread mail; any other command, such as a CI watch loop, still keeps it. Bash tool shells started without a shell snapshot also count as running commands. `swarm inbox --help` says messages arrive by themselves, so never poll in a loop.
+- Updated dependencies [f65ee3e]
+- Updated dependencies [fa0fd3c]
+  - @scp-dev/core@0.18.0
+  - @scp-dev/broker@0.13.0
+  - @scp-dev/hub@0.13.0
+  - @scp-dev/mcp@0.5.9
+
 ## 0.18.1
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # @scp-dev/mcp
 
+## 0.5.9
+
+### Patch Changes
+
+- fa0fd3c: The server instructions say messages reach an agent by themselves, at its next turn or by a wake, so it should never poll `relay_inbox` or `swarm inbox` in a loop but end its turn; `wait_s` is for one short wait.
+- Updated dependencies [f65ee3e]
+  - @scp-dev/core@0.18.0
+  - @scp-dev/broker@0.13.0
+
 ## 0.5.8
 
 ### Patch Changes
