@@ -1,5 +1,11 @@
 # scp-relay
 
+## 0.4.0
+
+### Minor Changes
+
+- f65ee3e: Make the relay loop guards (hopMax, threadMax, ping-pong) configurable and off by default.
+
 ## 0.3.1
 
 ### Patch Changes
