@@ -1,5 +1,14 @@
 # @scp-dev/broker
 
+## 0.13.1
+
+### Patch Changes
+
+- 5c998c2: The broker stays responsive under heavy load: indexed audit lookups, a primary-key wake check instead of a per-pass endpoint scan, refused-claim retries that back off instead of flooding, a one-day retention for refusal noise, a larger SQLite cache, and no synchronous `ps` on the main loop.
+- Updated dependencies [5c998c2]
+  - @scp-dev/core@0.18.1
+  - @scp-dev/hub@0.13.1
+
 ## 0.13.0
 
 ### Minor Changes
