@@ -656,9 +656,11 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   }
 
   async function pushChannel(): Promise<void> {
+    let failures = 0
     while (!stopped && (channelClient || inbox)) {
       try {
         const { messages, hold } = await call<{ messages: Envelope[]; hold?: string | null }>("inbox", { wait_s: LIMITS.injectHoldS, offer: true })
+        failures = 0
         for (const message of messages) {
           if (stopped || message.seq === undefined || channelPushed.has(message.seq)) continue
           channelPushed.add(message.seq)
@@ -693,7 +695,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       } catch (error) {
         if (stopped) return
         log(`${CLI_NAME} mcp: channel poll failed: ${error instanceof Error ? error.message : String(error)}`)
-        await sleep(error instanceof RelayError ? 5000 : 1000)
+        await sleep(channelRetryMs(error, failures++))
       }
     }
   }
@@ -826,4 +828,13 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     client?.close()
     client = undefined
   }
+}
+
+const RETRY_MAX_MS = 300_000
+
+/** the channel poll's pause after its `failures`-th failure in a row: a refusal (a refused claim or grant) doubles up to RETRY_MAX_MS */
+export function channelRetryMs(error: unknown, failures: number): number {
+  if (!(error instanceof RelayError)) return 1000
+  if (error.code !== "unauthorized") return 5000
+  return Math.min(5000 * 2 ** Math.min(failures, 16), RETRY_MAX_MS)
 }
