@@ -244,8 +244,8 @@ const STARTS_MAX_BUFFER = 16 * 1024 * 1024
 /** every process's start time by pid, from one `ps` read that began at `at` */
 let starts: { at: number; byPid: Map<number, string> } | undefined
 let reading: Promise<void> | undefined
-/** the pids whose start missed or mismatched the table, and when: the answer waits for a table read after that */
-const doubted = new Map<number, number>()
+/** when each harness-instance key (`<pid>:<start>`) first missed or mismatched the table: its answer waits for a table read after that */
+const doubted = new Map<string, number>()
 
 /** the `ps -A -o pid=,lstart=` output (C locale) as start times by pid, runs of whitespace as `-` */
 export function parseStarts(text: string): Map<number, string> {
@@ -293,15 +293,16 @@ function startedAt(pid: number, expected: string): string | undefined {
   if (!table || table.at <= now - STARTS_TTL_MS) void readStarts()
   if (!table) return undefined
   const start = table.byPid.get(pid)
+  const key = `${pid}:${expected}`
   if (start === expected) {
-    doubted.delete(pid)
+    doubted.delete(key)
     return start
   }
-  const since = doubted.get(pid)
+  const since = doubted.get(key)
   if (since !== undefined && table.at > since) return start
   if (since === undefined) {
     if (doubted.size > 1024) doubted.clear()
-    doubted.set(pid, now)
+    doubted.set(key, now)
   }
   void readStarts()
   return undefined
