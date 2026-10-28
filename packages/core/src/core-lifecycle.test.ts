@@ -153,6 +153,21 @@ describe("historic agents", () => {
     expect(core.snapshot().activity).toEqual([])
   })
 
+  test("a hibernated agent idle for historicAfterS leaves the default list, and comes back with historic or Infinity", () => {
+    for (const historicAfterS of [LIMITS.historicAfterS, Number.POSITIVE_INFINITY]) {
+      const { core, clock, ids, claim } = setup({ historicAfterS })
+      claim("sleeper", 1)
+      claim("awake", 2)
+      core.hibernate(HUMAN, { endpoint: "sleeper", wake: "vm-sleep" })
+      clock.now += LIMITS.historicAfterS * 1000
+      core.touch(ids.awake!)
+      const listed = core.list().map((view) => view.address)
+      expect(listed.includes("me/sleeper")).toBe(historicAfterS === Number.POSITIVE_INFINITY)
+      expect(listed).toContain("me/awake")
+      expect(core.list({ historic: true }).map((view) => view.address)).toContain("me/sleeper")
+    }
+  })
+
   test("a call or a read counts as activity; Infinity makes no agent historic", () => {
     const { core, clock, ids, claim, send } = setup()
     claim("a", 1)

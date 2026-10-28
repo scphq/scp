@@ -571,6 +571,16 @@ export class FederatedCore extends RelayCore {
     return remote && row.connections > 0 && (mirrored === "online" || mirrored === "idle") ? { ...view, presence: mirrored } : view
   }
 
+  /** another machine's rows are active by what it mirrors, and any row by activity seen here in memory */
+  protected override activeSql(since: number): { sql: string; params: SqlValue[] } {
+    const base = super.activeSql(since)
+    const seen = [...this.observed].flatMap(([id, at]) => (at >= since ? [id] : []))
+    return {
+      sql: `(remote IS NOT NULL OR ${base.sql}${seen.length ? ` OR id IN (${seen.map(() => "?").join(", ")})` : ""})`,
+      params: [...base.params, ...seen],
+    }
+  }
+
   protected override recentAlso(): string {
     return "(remote IS NOT NULL AND mirrored_presence = 'hibernated')"
   }

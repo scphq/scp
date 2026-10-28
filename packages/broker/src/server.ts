@@ -1,6 +1,6 @@
 import { RATE_LIMITS, parseLimits, wireLimits, type RateLimits } from "@scp-dev/core"
 import { AsyncLocalStorage } from "node:async_hooks"
-import { spawnSync } from "node:child_process"
+import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
 import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, rmdirSync, unlinkSync } from "node:fs"
 import { createServer, type Server } from "node:net"
@@ -239,30 +239,73 @@ function running(pid: number): boolean {
 }
 
 const STARTS_TTL_MS = 5000
-const starts = new Map<number, { start: string | undefined; at: number }>()
+const STARTS_TIMEOUT_MS = 10_000
+const STARTS_MAX_BUFFER = 16 * 1024 * 1024
+/** every process's start time by pid, from one `ps` read that began at `at` */
+let starts: { at: number; byPid: Map<number, string> } | undefined
+let reading: Promise<void> | undefined
+/** when each harness-instance key (`<pid>:<start>`) first missed or mismatched the table: its answer waits for a table read after that */
+const doubted = new Map<string, number>()
+
+/** the `ps -A -o pid=,lstart=` output (C locale) as start times by pid, runs of whitespace as `-` */
+export function parseStarts(text: string): Map<number, string> {
+  const byPid = new Map<number, string>()
+  for (const line of text.split("\n")) {
+    const match = /^\s*(\d+)\s+(\S.*?)\s*$/.exec(line)
+    if (!match) continue
+    const start = match[2]!.replace(/\s+/g, "-")
+    if (/^[A-Za-z0-9:-]{1,64}$/.test(start)) byPid.set(Number(match[1]), start)
+  }
+  return byPid
+}
+
+/** reads the process table again in the background, one read at a time */
+function readStarts(): Promise<void> {
+  reading ??= new Promise<void>((resolve) => {
+    const at = Date.now()
+    try {
+      execFile(
+        "ps",
+        ["-A", "-o", "pid=,lstart="],
+        { timeout: STARTS_TIMEOUT_MS, maxBuffer: STARTS_MAX_BUFFER, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" } },
+        (error, stdout) => {
+          if (!error) starts = { at, byPid: parseStarts(stdout) }
+          reading = undefined
+          resolve()
+        },
+      )
+    } catch {
+      reading = undefined
+      resolve()
+    }
+  })
+  return reading
+}
 
 /**
- * when `pid` started, as a harness-instance key spells it (`ps -o lstart=` in the C locale, runs of whitespace as `-`), cached a few seconds
- * while it matches `expected`; a mismatch is read again, so a pid reused since never fails against the old start
+ * when `pid` started, as a harness-instance key spells it (`ps -o lstart=` in the C locale, runs of whitespace as `-`), from a process table
+ * read in the background at most every few seconds, so the broker's loop never waits on ps. A pid the table misses or has with another start
+ * is unknown until a table read that began after it was seen, so a pid reused since never fails against the old start
  */
 function startedAt(pid: number, expected: string): string | undefined {
   const now = Date.now()
-  const cached = starts.get(pid)
-  if (cached && cached.at > now - STARTS_TTL_MS && cached.start === expected) return cached.start
-  let start: string | undefined
-  try {
-    const out = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000,
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" },
-    })
-    const text = out.status === 0 && !out.error ? (out.stdout?.toString() ?? "").trim().replace(/\s+/g, "-") : ""
-    start = /^[A-Za-z0-9:-]{1,64}$/.test(text) ? text : undefined
-  } catch {}
-  if (start === undefined) return undefined
-  if (starts.size > 1024) starts.clear()
-  starts.set(pid, { start, at: now })
-  return start
+  const table = starts
+  if (!table || table.at <= now - STARTS_TTL_MS) void readStarts()
+  if (!table) return undefined
+  const start = table.byPid.get(pid)
+  const key = `${pid}:${expected}`
+  if (start === expected) {
+    doubted.delete(key)
+    return start
+  }
+  const since = doubted.get(key)
+  if (since !== undefined && table.at > since) return start
+  if (since === undefined) {
+    if (doubted.size > 1024) doubted.clear()
+    doubted.set(key, now)
+  }
+  void readStarts()
+  return undefined
 }
 
 /** who a connection acts for, for the calls only the harness process holding an endpoint may make through its hooks */

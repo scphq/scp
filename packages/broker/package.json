@@ -34,7 +34,8 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts src/testing.ts --format esm --dts --clean --external bun:sqlite",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "bench": "bun bench/broker-perf.ts"
   },
   "dependencies": {
     "@scp-dev/core": "workspace:*",
