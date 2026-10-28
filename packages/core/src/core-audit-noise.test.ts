@@ -42,6 +42,17 @@ describe("audit noise", () => {
     expect(has(claim)).toBe(true)
   })
 
+  test("a backlog of old refusals drains a bounded chunk per sweep", () => {
+    const { core, db, insert, count } = setup()
+    db.transaction(() => {
+      for (let i = 0; i < 6000; i++) insert("scope_refused", Date.now() - 2 * DAY)
+    })()
+    core.sweep()
+    expect(count("scope_refused")).toBe(1000)
+    core.sweep()
+    expect(count("scope_refused")).toBe(0)
+  })
+
   test("the audit stays append-only for every row the noise retention does not cover", () => {
     const { db, insert } = setup()
     const claim = insert("claim", Date.now() - 2 * DAY)

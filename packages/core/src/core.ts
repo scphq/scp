@@ -96,6 +96,8 @@ export const GONE_PREFIX = "_gone_"
 const NOISE_EVENTS = ["scope_refused"]
 const NOISE_KEEP_S = 86_400
 const REFUSAL_DEDUPE_S = 60
+/** the noise rows one sweep deletes at most, so a backlog drains over several sweeps instead of stalling one */
+const NOISE_PRUNE_ROWS = 5000
 const SQL_NOW_MS = `CAST(strftime('%s', 'now') AS INTEGER) * 1000`
 const NOISE_SQL = NOISE_EVENTS.map((event) => `'${event}'`).join(", ")
 
@@ -422,6 +424,7 @@ export type Shown = { has(id: string): boolean }
 
 interface PassMemo {
   listed?: EndpointRow[]
+  via?: Map<string, ViaRecord[]>
   members?: Map<string, string[]>
   rows: Map<string, EndpointRow | undefined>
   scopes: Map<string, ScopeSubject>
@@ -2697,6 +2700,10 @@ export class RelayCore {
 
   /** the local agents, retired and in-process subagent rows aside, as the broker's own tasks read them */
   localAgents(): LocalAgent[] {
+    return this.pass(() => this.localAgentsNow())
+  }
+
+  private localAgentsNow(): LocalAgent[] {
     const now = this.now()
     const rows = this.sql
       .all<EndpointRow>(
@@ -2719,6 +2726,17 @@ export class RelayCore {
     const handedBack = new Set(
       this.sql.all<{ used_by: string }>(`SELECT DISTINCT used_by FROM grants WHERE used_by IS NOT NULL AND handback IS NOT NULL`).map((row) => row.used_by),
     )
+    const unread = new Map(
+      this.sql
+        .all<{ endpoint: string; at: number | null }>(
+          `SELECT d.endpoint AS endpoint, MAX(m.created_at) AS at FROM deliveries d JOIN messages m ON m.id = d.message_id
+           WHERE d.acked_at IS NULL AND d.expires_at > ? GROUP BY d.endpoint`,
+          now,
+        )
+        .map((row) => [row.endpoint, row.at]),
+    )
+    const memo = this.passMemo
+    if (memo) for (const row of rows) memo.rows.set(row.id, row)
     return rows.map((row) => {
       const parent = row.parent_ep ? this.byId(row.parent_ep) : undefined
       return {
@@ -2738,8 +2756,8 @@ export class RelayCore {
         mail_at: iso(row.mail_at),
         connections: row.connections,
         hibernate: row.hibernate,
-        unread: this.hasUnread(row.id),
-        unread_at: iso(this.unreadAt(row.id)),
+        unread: unread.has(row.id),
+        unread_at: iso(unread.get(row.id) ?? null),
         handed_back: handedBack.has(row.id),
       }
     })
@@ -4140,18 +4158,6 @@ export class RelayCore {
     )
   }
 
-  /** when the newest unread message to `endpoint` was sent, or null */
-  private unreadAt(endpoint: string): number | null {
-    return (
-      one<{ at: number | null }>(
-        this.sql,
-        `SELECT MAX(m.created_at) AS at FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ?`,
-        endpoint,
-        this.now(),
-      )?.at ?? null
-    )
-  }
-
   hasUnread(endpoint: string, after = 0): boolean {
     return (
       one(this.sql, `SELECT 1 FROM deliveries WHERE endpoint = ? AND acked_at IS NULL AND expires_at > ? AND seq > ? LIMIT 1`, endpoint, this.now(), after) !==
@@ -4306,7 +4312,9 @@ export class RelayCore {
       now - LIMITS.handleBoundS * 1000,
     )
     this.sql.all(`DELETE FROM audit WHERE at <= ${SQL_NOW_MS} - ${LIMITS.auditKeepS * 1000}`)
-    this.sql.all(`DELETE FROM audit WHERE event IN (${NOISE_SQL}) AND at <= ${SQL_NOW_MS} - ${NOISE_KEEP_S * 1000}`)
+    this.sql.all(
+      `DELETE FROM audit WHERE id IN (SELECT id FROM audit WHERE event IN (${NOISE_SQL}) AND at <= ${SQL_NOW_MS} - ${NOISE_KEEP_S * 1000} LIMIT ${NOISE_PRUNE_ROWS})`,
+    )
     this.sql.all(`DELETE FROM grants WHERE expires_at <= ? AND (used_by IS NULL OR used_by NOT IN (SELECT id FROM endpoints))`, now)
     this.sql.all(`DELETE FROM tree_events WHERE at <= ?`, now - 3600 * 1000)
     this.sql.all(`DELETE FROM group_members WHERE endpoint NOT IN (SELECT id FROM endpoints)`)
@@ -5360,7 +5368,20 @@ export class RelayCore {
   }
 
   private viaFor(row: EndpointRow): ViaRecord | undefined {
-    return this.sql.all<ViaRecord>(`SELECT * FROM spawn_via WHERE address = ? ORDER BY created_at DESC`, this.address(row)).find((r) => this.viaOwned(row, r))
+    return this.viaAt(this.address(row)).find((r) => this.viaOwned(row, r))
+  }
+
+  /** the spawn_via records of `address`, newest first; a read pass reads the table once */
+  private viaAt(address: string): ViaRecord[] {
+    const memo = this.passMemo
+    if (!memo) return this.sql.all<ViaRecord>(`SELECT * FROM spawn_via WHERE address = ? ORDER BY created_at DESC`, address)
+    if (!memo.via) {
+      const via = new Map<string, ViaRecord[]>()
+      for (const record of this.viaRecords()) if (record.address !== null) via.set(record.address, [...(via.get(record.address) ?? []), record])
+      if (this.passMemo === memo) memo.via = via
+      return via.get(address) ?? []
+    }
+    return memo.via.get(address) ?? []
   }
 
   viaRecordFor(address: string): ViaRecord | undefined {
@@ -6329,7 +6350,7 @@ export class RelayCore {
 
   /** the listed rows `list` may show without `all`: a superset of its filter, so the rest of the table is never read */
   private recent(cutoff: number): EndpointRow[] {
-    return this.sql
+    const rows = this.sql
       .all<EndpointRow>(
         `SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
          AND (connections > 0 OR kind = 'human' OR COALESCE(last_seen, 0) >= ? OR wake IS NOT NULL OR hibernate IS NOT NULL OR substr(session, 1, 4) = 'sub:' OR ${this.recentAlso()})
@@ -6337,6 +6358,9 @@ export class RelayCore {
         cutoff,
       )
       .filter((row) => this.listable(row))
+    const memo = this.passMemo
+    if (memo) for (const row of rows) memo.rows.set(row.id, row)
+    return rows
   }
 
   /** a further SQL condition for {@link recent}: a subclass's rows that list as hibernated by a column of its own */
