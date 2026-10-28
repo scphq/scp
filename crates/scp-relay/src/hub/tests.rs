@@ -169,6 +169,12 @@ async fn claim_resume_long_poll_and_deduplication() {
     assert_eq!(inbox[1]["result"]["messages"].as_array().unwrap().len(), 1);
     let conflict=hub.call(&account,&id,request(4,"forward",json!({"from":"sender","params":{"to":"direct/agent","body":"different","client_id":"stable"}})),false).await;
     assert_eq!(conflict["error"]["data"]["code"], "invalid_params");
+    account
+        .lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":64}"#)
+        .unwrap();
     let hop=hub.call(&account,&id,request(5,"forward",json!({"from":"sender","hop_floor":65,"params":{"to":"direct/agent","body":"loop"}})),false).await;
     assert_eq!(hop["error"]["data"]["code"], "loop_guard");
 }

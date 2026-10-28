@@ -26,7 +26,7 @@ SCP defines that layer: identity of endpoints, the message envelope, delivery in
 4. **Scoped by lineage.** Endpoints form trees that follow spawn parentage and grants. Reach is limited by rules and caps, widened only from above, and clipped to the widener's own reach.
 5. **Untrusted by construction.** Every delivered body is wrapped as data written by another party, never as instructions from the user and never as permission or approval.
 6. **Federated.** The brokers of one account link through the account's hub; two accounts link only through mutually consented contacts.
-7. **Bounded.** Hop limits, thread limits, pair and tree rate limits and ping-pong pauses stop runaway loops.
+7. **Bounded.** Size and capacity limits bound every sender; hop and thread limits, pair and tree rate limits and ping-pong pauses can be turned on to stop runaway loops.
 8. **Observable without content.** Refusals, scope changes, peeks and judge decisions are audited. Message bodies are never written to the audit log.
 
 ### 1.3 Non-goals
@@ -520,8 +520,8 @@ The broker MUST apply these checks in this order; the first failure refuses the 
 | 14 | At most `LIMITS.fanOutTotal` (64) distinct recipients. | `too_large` |
 | 15 | A named thread of the form `msg_*` exists. | `not_found` |
 | 16 | Idempotency (section 7.7). | `invalid_params` |
-| 17 | `hop` at most `LIMITS.hopMax`. | `loop_guard` |
-| 18 | An existing thread is continued only by a member, and has fewer than `LIMITS.threadMax` messages. | `not_found`, `loop_guard` |
+| 17 | `hop` at most `hopMax`, when set. | `loop_guard` |
+| 18 | An existing thread is continued only by a member, and has fewer than `threadMax` messages, when set. | `not_found`, `loop_guard` |
 | 19 | Daily cap. | `rate_limited` |
 | 20 | Per recipient: pair pause, pair burst, pair per minute and per hour, policy, inbox capacity. | `loop_guard`, `rate_limited`, `policy_refused`, `inbox_full` |
 | 21 | Tree rate, group rate. | `loop_guard`, `rate_limited` |
@@ -549,7 +549,7 @@ On success the broker stores the message once and one delivery per recipient, ac
 
 - A send with `reply_to` inherits the parent message's thread. Otherwise `thread` names the thread: an existing thread id is used as is; a member message id, or a unique suffix of one of at least 4 characters, selects that message's thread; an unknown `msg_*` name is `not_found`; any other name of at most 64 characters starts a thread of that name. Without `thread`, a new id `thr_...` is created.
 - An endpoint is a member of a thread when it sent a message in it or received a delivery in it.
-- A thread holds at most `LIMITS.threadMax` (200) messages; further sends are `loop_guard`.
+- With `threadMax` set, a thread holds at most that many messages; further sends are `loop_guard`. It is off by default.
 
 ### 7.6 Replies
 
@@ -1191,11 +1191,11 @@ A broker MAY load a policy document with the schema below. Where the document li
 
 - A message's `hop` is the larger of the parent message's hop plus one and the sender's causal hop. The causal hop is the sender's received hop plus one when the sender last received a message within `LIMITS.causalWindowS` (120 s), else 0. The received hop is the highest hop among the messages received since the sender last went `LIMITS.causalWindowS` without receiving one. A message counts as received when it is read through inbox, offer, injection, a held stop or stop wait, or returned as the reply to `ask` or `ask_wait`.
 - Sends by the local human at a terminal have hop 0. A hub applies the hop rule to every sender.
-- A hop above `LIMITS.hopMax` (64) is refused `loop_guard`.
+- With `hopMax` set (off by default), a hop above it is refused `loop_guard`. With it off, the hop is still computed, stored and carried.
 
 ### 12.2 Rates and pauses
 
-Send and peek rates are off by default. A positive integer enables a cap; `null`, `0` or an absent key disables it. `treePauseS` is a duration, default 600 seconds; `null`, `0` or an absent key retains that default. The broker reads the `limits` object in `$XDG_CONFIG_HOME/scp/config.json` (or `$HOME/.config/scp/config.json`), then a positive legacy `SCP_DAILY_CAP` overrides `userPerDay`, then the JSON object `SCP_LIMITS` overrides individual keys. Unknown keys and invalid values fail startup. Hub deployments accept the send and contact keys through their limits configuration and may read `SCP_LIMITS`. Safety and capacity guards remain enabled.
+Send and peek rates and the loop guards (`hopMax`, `threadMax`, `pingPongAlternations`) are off by default. A positive integer enables a cap; `null`, `0` or an absent key disables it. `treePauseS`, `pingPongWindowS` and `pingPongBlockS` are durations, default 600 seconds, that apply only while the guard they time is on; `null`, `0` or an absent key retains the default. The broker reads the `limits` object in `$XDG_CONFIG_HOME/scp/config.json` (or `$HOME/.config/scp/config.json`), then a positive legacy `SCP_DAILY_CAP` overrides `userPerDay`, then the JSON object `SCP_LIMITS` overrides individual keys. Unknown keys and invalid values fail startup. Hub deployments accept the send and contact keys through their limits configuration and may read `SCP_LIMITS`. Size and capacity guards remain enabled.
 
 `hello` and status report effective rates alongside `LIMITS`, with disabled caps explicitly `null`. Clients MUST tolerate absent or null rate keys.
 
@@ -1204,15 +1204,16 @@ Send and peek rates are off by default. A positive integer enables a cap; `null`
 | Daily cap | All agent and terminal-less human senders of a broker together; on a hub, every sender but the relay | `userPerDay` per 24 h, off by default | `rate_limited`, `retry_after` 3600 |
 | Pair burst | Both directions of a pair | `pairBurst` (off by default) per `LIMITS.pairBurstWindowS` (10 s) | `rate_limited` |
 | Pair rate | One direction of a pair | `pairPerMinute`, `pairPerHour` (off by default) | `rate_limited` |
-| Ping-pong | A pair | `LIMITS.pingPongAlternations` (100) sender alternations within `LIMITS.pingPongWindowS` (600 s) | pause `LIMITS.pingPongBlockS` (600 s), then `loop_guard` |
+| Hop | One causal chain | `hopMax` (off by default) | `loop_guard` |
+| Ping-pong | A pair | `pingPongAlternations` (off by default) sender alternations within `pingPongWindowS` (600 s) | pause `pingPongBlockS` (600 s), then `loop_guard` |
 | Tree rate | Messages from agents of one tree, counted once per non-human or not yet joined recipient | `treePerMinute`, `treePerHour` (off by default) | the send that would pass a cap is refused `loop_guard` and the tree is paused `treePauseS` (600 s) |
 | Group rate | One group | `groupPerMinute` (off by default) | `rate_limited` |
-| Thread | One thread | `LIMITS.threadMax` (200) messages | `loop_guard` |
+| Thread | One thread | `threadMax` (off by default) messages | `loop_guard` |
 | Inbox | One recipient | `LIMITS.inboxMax` (1000) unacknowledged; for an address not joined yet, all its deliveries. A sender's first reply to a message the recipient sent it is exempt | `inbox_full` |
 
 - `retry_after` for windowed limits is the time until the oldest counted event leaves the window (at least 1 s); for pauses, the time remaining.
 - The ping-pong check runs after a send is committed: the send that crosses the threshold succeeds, the pair is paused, its events are cleared, the pause is audited and the human is notified. A tree pause also notifies the human and the tree's root. Messages to the human pass a tree pause.
-- Relay notices and handbacks bypass all guards. A notice has hop 0; a handback carries the worker's causal hop, at most `LIMITS.hopMax`, and counts toward the daily cap when a worker sent it.
+- Relay notices and handbacks bypass all guards. A notice has hop 0; a handback carries the worker's causal hop, at most `hopMax` when set, and counts toward the daily cap when a worker sent it.
 - Pair, tree and group events are kept for one hour.
 
 ---
@@ -1282,7 +1283,7 @@ Peek lets an authorised viewer read a short, redacted digest of an agent's recen
 
 **Presence.** The bridge sends `mirror {endpoints, full: false}` deltas on claim, release and status change, and a full resync on rules, caps, groups or title changes. The hub relays endpoint changes to the other bridges and presence to watchers. A live mirrored row shows the presence its machine sent last, not one its `last_seen` decays to on the hub or another machine. When a bridge closes, its rows go offline unless a newer bridge is live; a row mirrored `hibernated` stays hibernated with its `hook:<provider>` wake, so a delivery to it can call the machine waker (section 19.3). A mirror's `presence` is `online`, `idle`, `offline` or `hibernated`; its `wake` is a known wake or `hook:<provider>`. A hub's view of a hibernated row it is waking carries `waking: true` (section 19.3), a field and not a presence, so the presence values on the wire stay these four and a bridge or client that does not know the field ignores it. Presence across machines converges at the next delta or full sync. After a rename (section 6.12) the delta carries `was`, the previous handle: the hub, and each bridge it relays the change to, renames that machine's row in place, keeping its id and queued messages, so the old handle does not stay behind as a live row. After a join under, an adopt or an unlink the bridge sends a full resync, so the hub and the other machines place the endpoint and its subtree under the new parent (or at the root) from the mirrored `parent_ep` and `depth`, and show a parent on another machine from the mirrored `parent_addr`.
 
-**Forwarding.** A send whose recipients are all on other machines goes to the bridge; mixing local and remote recipients is `invalid_params`. Before forwarding the broker checks local scope and policy, refuses `private` data unless the bridge is configured to allow it (`data_class_refused`), re-scans for credentials, applies idempotency and requires the sender to be mirrored (`policy_refused`). It sends `forward {from: <handle>, params, hop_floor, tty?}` with attachments removed. `from` is the sender's bare handle (a `/` in it is `invalid_params`, an unmirrored handle `not_found`). `params` are SendParams (section 7.3) with `to` rewritten to `<machine>/<handle>` (or `<machine>/me` for a human), `client_id` generated when absent and `attachments` and `wait_s` removed; the hub also accepts the other address forms of section 6.3 relative to the bridge's machine. `hop_floor` is an integer from 0 to 1000, the sender's causal hop as its broker computes it (section 12.1), default 0. `tty` is true only for the local human at a terminal. The hub resolves the sender on the bridge's own machine, caps the hop floor at `LIMITS.hopMax + 1`, counts the sender as having received at hop `hop_floor - 1` so its own hop rule yields at least the floor, checks scope against mirrored rules and caps, and stores the delivery. The answer is the SendResult of section 7.3, or an error carrying `data.code` and `retry_after`.
+**Forwarding.** A send whose recipients are all on other machines goes to the bridge; mixing local and remote recipients is `invalid_params`. Before forwarding the broker checks local scope and policy, refuses `private` data unless the bridge is configured to allow it (`data_class_refused`), re-scans for credentials, applies idempotency and requires the sender to be mirrored (`policy_refused`). It sends `forward {from: <handle>, params, hop_floor, tty?}` with attachments removed. `from` is the sender's bare handle (a `/` in it is `invalid_params`, an unmirrored handle `not_found`). `params` are SendParams (section 7.3) with `to` rewritten to `<machine>/<handle>` (or `<machine>/me` for a human), `client_id` generated when absent and `attachments` and `wait_s` removed; the hub also accepts the other address forms of section 6.3 relative to the bridge's machine. `hop_floor` is an integer from 0 to 1000, the sender's causal hop as its broker computes it (section 12.1), default 0. `tty` is true only for the local human at a terminal. The hub resolves the sender on the bridge's own machine, caps the hop floor at `hopMax + 1` when `hopMax` is set, counts the sender as having received at hop `hop_floor - 1` so its own hop rule yields at least the floor, checks scope against mirrored rules and caps, and stores the delivery. The answer is the SendResult of section 7.3, or an error carrying `data.code` and `retry_after`.
 
 **Local traffic.** A delivery the broker makes between two endpoints of its own machine never reaches the hub. Unless the bridge is configured with `mirror_local: false` (default on), the broker reports its metadata so the hub can count and draw it: every second at most, it sends the notification `local_events {events}` with up to 200 events `{from, to, kind, at, id, thread}`. `from` and `to` are handles on the bridge's machine (at most 64 recipients), only of mirrored endpoints; `kind` is `message`, `request`, `reply`, `status`, `handback` or `spawn`; `at` is the delivery time in milliseconds; `id` and `thread` are the first 32 hex characters of the SHA-256 of the message and thread ids. Bodies, notes, labels and titles are never sent. The broker buffers at most 1000 events between batches and drops the rest; an unlinked bridge sends nothing. The hub skips events naming unknown endpoints, clamps `at` to the last 5 minutes, keeps the sender and recipient pairs for an hour for the graph's message edges, and streams each event to watchers and the dashboard as a `message` fleet event with `local: true` and the reporting `machine`.
 
@@ -1324,7 +1325,7 @@ A hub reads contacts, allowlists and the egress and ingress gates from its host 
 ### 14.5 Cross-account messages
 
 - **Addressing.** Exactly one recipient `<account>/<machine>/<handle>` or `<account>/<machine>/me`. No lists, groups or tree selectors. Only mirrored endpoints of a bridged machine may send across accounts.
-- **Sender hub**, in order: body at most 16 KiB (`too_large`); no attachments and nothing `private` (`data_class_refused`); hop at most 8 (`loop_guard`); an active contact whose direction permits sending; the sender mirrored and on its own allowlist; the reply grant or out-scope admission; rate counters; credential scan; egress judge gate; counters again; delivery to the peer hub. Every unresolvable case (no contact, not allowlisted, scope refusal) is `not_found`.
+- **Sender hub**, in order: body at most 16 KiB (`too_large`); no attachments and nothing `private` (`data_class_refused`); hop at most `hopMax`, when set (`loop_guard`); an active contact whose direction permits sending; the sender mirrored and on its own allowlist; the reply grant or out-scope admission; rate counters; credential scan; egress judge gate; counters again; delivery to the peer hub. Every unresolvable case (no contact, not allowlisted, scope refusal) is `not_found`.
 - **Receiver hub**, in order: an active contact whose direction permits receiving; the target mirrored and on this side's allowlist; the reply grant or in-scope admission; an honest sender address; size, hop and expiry; deduplication on (sending account, `client_id`); counters; credential scan; ingress judge gate; counters again; storage and `deliver` to the target machine's bridge.
 - **Envelope.** `from` is `{address, endpoint, user: <peer>, auth: "contact", machine?, claims {harness, model: null}, rel: "contact:<peer>", account: <peer>, human?}`; `data_class` is `public`; `attachments` is empty. The sender's address is `<account>/me` only for its human at a terminal, else `<account>/<machine>/<handle>`. The `client_id` is a hash of the sender's address `<account>/<machine>/<handle>`, the target's address and the original `client_id`.
 - **Reply grant.** Each outgoing message carries a grant: a keyed hash, under a per-account secret, of the message id, the sender's address, the peer and an expiry. A reply from exactly the addressed endpoint echoes it; the receiving hub checks it in constant time and requires it unexpired. A valid grant bypasses scope admission on both sides and sets the reply's thread and hop (parent hop plus one). Allowlists and rate limits still apply.
@@ -1340,8 +1341,8 @@ A hub reads contacts, allowlists and the egress and ingress gates from its host 
 | Pair (sender, target) | off (`contactPerMinute`) | minute | `rate_limited` |
 | Pair | off (`contactPerHour`) | hour | `rate_limited` |
 | Contact | off (`contactPerDay`, ceiling `contactPerDayMax`) | UTC day | `rate_limited`, `retry_after` to UTC midnight |
-| Thread | 50 messages | 24 h (sender), stored messages (receiver) | `loop_guard` |
-| Hop | 8 | | `loop_guard` |
+| Thread | off (`threadMax`) | 24 h (sender), stored messages (receiver) | `loop_guard` |
+| Hop | off (`hopMax`) | | `loop_guard` |
 | Body | 16 KiB | | `too_large` |
 
 - Minute and hour caps are the minimum of the relay cap, the contact's own limit and the sender's declared limit, with missing values unlimited. A finite relay `contactPerDay` is a floor: the contact's own daily limit may raise it up to `contactPerDayMax`. With the relay daily cap off, the contact's own daily limit applies, or the day is unlimited. The sender's declared daily limit lowers the result in both cases.
@@ -1386,7 +1387,7 @@ This section is experimental and non-normative: it describes the phase-1 mesh wi
 
 **Receiver authority.**
 
-- The receiving broker does what the hub does in section 14.2, then runs its own send path: at most 600 forwards per minute per link (`rate_limited`), an unusable local policy is `policy_refused`, `hop_floor` outside 0..1000 or any server-set field is `invalid_params`, the sender must be in the peer's stored record (`not_found`), every recipient must be on the receiving machine (`not_found`, no multi-hop), and `hop_floor` is capped at `LIMITS.hopMax + 1`.
+- The receiving broker does what the hub does in section 14.2, then runs its own send path: at most 600 forwards per minute per link (`rate_limited`), an unusable local policy is `policy_refused`, `hop_floor` outside 0..1000 or any server-set field is `invalid_params`, the sender must be in the peer's stored record (`not_found`), every recipient must be on the receiving machine (`not_found`, no multi-hop), and `hop_floor` is capped at `hopMax + 1` when `hopMax` is set.
 - Scope with both sides' rules and caps, loop guards, policy, inbox cap and the local judge (section 15) then run exactly as for a local send. `from.auth` is `account+bridge` in this phase.
 
 ### 14.9 Remote MCP endpoint
@@ -1822,7 +1823,7 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
     "attachments": { "type": "array", "maxItems": 16,
                      "items": { "type": "object", "required": ["kind", "path"],
                                 "properties": { "kind": { "const": "path" }, "path": { "type": "string" } } } },
-    "hop": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "hop": { "type": "integer", "minimum": 0 },
     "created_at": { "type": "string", "format": "date-time" },
     "expires_at": { "type": "string", "format": "date-time" },
     "require_reply": { "const": true },
@@ -1865,11 +1866,11 @@ Hub methods: client `hello`, `whoami`, `send`, `ask`, `ask_wait`, `inbox`, `ack`
 | `attachments` | 16 | `ttlDefaultS` | 604800 (7 d) |
 | `ttlMaxS` | 2592000 (30 d) | `purgeAfterS` | 604800 |
 | `inboxMax` | 1000 | `inboxPage` | 100 |
-| `waitMaxS` | 50 | `hopMax` | 64 |
-| `threadMax` | 200 | `causalWindowS` | 120 |
+| `waitMaxS` | 50 | `hopMax` | null (off) |
+| `threadMax` | null (off) | `causalWindowS` | 120 |
 | `pairBurst` | null (off) | `pairBurstWindowS` | 10 |
 | `pairPerMinute` | null (off) | `pairPerHour` | null (off) |
-| `userPerDay` | null (off) | `pingPongAlternations` | 100 |
+| `userPerDay` | null (off) | `pingPongAlternations` | null (off) |
 | `pingPongWindowS` | 600 | `pingPongBlockS` | 600 |
 | `onlineWithinS` | 60 | `hookOnlineS` | 300 |
 | `hookIdleS` | 1800 | `hookEndedGraceS` | 30 |

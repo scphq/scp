@@ -170,10 +170,12 @@ impl Counters {
                 until_tomorrow(now),
             ));
         }
-        if self.threads[thread].n >= 50 {
+        if let Some(limit) = limits.cap("threadMax")
+            && self.threads[thread].n as u64 >= limit
+        {
             return Err(Error::new(
                 "loop_guard",
-                &format!("thread {thread} reached 50 messages across accounts"),
+                &format!("thread {thread} reached {limit} messages across accounts"),
             ));
         }
         Ok(())
@@ -298,7 +300,7 @@ mod tests {
     use scp_relay_store::ContactConfig;
     fn relay_limits() -> crate::http::Limits {
         let mut limits = crate::http::Limits::default();
-        limits.apply_json(r#"{"contactPerMinute":10,"contactPerHour":100,"contactPerDay":200,"contactPerDayMax":2000}"#).unwrap();
+        limits.apply_json(r#"{"contactPerMinute":10,"contactPerHour":100,"contactPerDay":200,"contactPerDayMax":2000,"threadMax":50}"#).unwrap();
         limits
     }
     #[test]

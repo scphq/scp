@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { expect, test } from "bun:test"
 import { RelayCore } from "./core"
-import { LIMITS, RelayError, type ScopeActor } from "./protocol"
+import { RelayError, type ScopeActor } from "./protocol"
 import type { Sql, SqlValue } from "./sql"
 
 const TEST_RATES = {
@@ -15,6 +15,7 @@ const TEST_RATES = {
   groupPerMinute: 60,
   peekPairPerMinute: 6,
   peekTargetPerHour: 60,
+  pingPongAlternations: 100,
 }
 
 function bunSql(db: Database): Sql {
@@ -202,7 +203,7 @@ test("the widening steps apply in order, each with its audit row", () => {
   expect(send("b1", "app-main")).toBe("not_found")
 
   clock.now += 3601 * 1000
-  for (let i = 0; i <= LIMITS.pingPongAlternations; i++, clock.now += 4000) expect(i % 2 ? send("a3", "a2") : send("a2", "a3")).toBeUndefined()
+  for (let i = 0; i <= TEST_RATES.pingPongAlternations; i++, clock.now += 4000) expect(i % 2 ? send("a3", "a2") : send("a2", "a3")).toBeUndefined()
   expect(send("a2", "a3")).toBe("loop_guard")
 
   clock.now += 61 * 1000

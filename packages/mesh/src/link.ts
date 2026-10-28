@@ -1,5 +1,16 @@
 import type { Bridge, BridgeStatus, LinkContext } from "@scp-dev/broker"
-import { type EndpointView, findSecret, LIMITS, matches, newId, PROTOCOL, RelayError, SERVER_FIELDS, type SendParams, type SendResult } from "@scp-dev/core"
+import {
+  type EndpointView,
+  findSecret,
+  HOP_FLOOR_MAX,
+  matches,
+  newId,
+  PROTOCOL,
+  RelayError,
+  SERVER_FIELDS,
+  type SendParams,
+  type SendResult,
+} from "@scp-dev/core"
 import { WebSocket, WebSocketServer } from "ws"
 import { type AccountKey, type MeshConfig, parseHostPort } from "./config"
 import { accountId, canonicalJson, type KeyPair, newNonce, SIGN_DOMAIN, signPayload, validPublicKey, verifyPayload } from "./keys"
@@ -297,7 +308,8 @@ export function startMesh(options: MeshOptions): MeshLink {
     if (typeof outer.from !== "string") throw new RelayError("invalid_params", "from must be a string")
     const inner = { ...object(outer.params, "params") }
     const asked = outer.hop_floor === undefined ? 0 : outer.hop_floor
-    if (!Number.isInteger(asked) || (asked as number) < 0 || (asked as number) > 1000) throw new RelayError("invalid_params", "hop_floor is a hop count")
+    if (!Number.isInteger(asked) || (asked as number) < 0 || (asked as number) > HOP_FLOOR_MAX)
+      throw new RelayError("invalid_params", "hop_floor is a hop count")
     for (const field of SERVER_FIELDS) if (field in inner) throw new RelayError("invalid_params", `${field} is set by the relay, not the sender`)
     delete inner.attachments
     delete inner.wait_s
@@ -313,7 +325,7 @@ export function startMesh(options: MeshOptions): MeshLink {
     for (const to of Array.isArray(inner.to) ? inner.to : [inner.to]) {
       if (core.foreignAccount(to) !== null || core.route(to) !== null) throw new RelayError("not_found", `no endpoint ${String(to)} on this machine`)
     }
-    const floor = Math.min(asked as number, LIMITS.hopMax + 1)
+    const floor = Math.min(asked as number, core.rates.hopMax + 1)
     if (floor > 0) core.markReceived(sender, floor - 1)
     return send(sender, inner as unknown as SendParams, { tty: outer.tty === true })
   }

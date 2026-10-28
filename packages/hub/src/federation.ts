@@ -16,6 +16,7 @@ import {
   GONE_PREFIX,
   groupCapKey,
   HUMAN_HANDLE,
+  HOP_FLOOR_MAX,
   LIMITS,
   MESSAGE_KINDS,
   type MessageRow,
@@ -1090,10 +1091,12 @@ export class FederatedCore extends RelayCore {
 
   // hops
 
-  /** the hop a message from this endpoint would get from what it received lately */
+  /** the hop a message from this endpoint would get from what it received lately, at most {@link HOP_FLOOR_MAX} as a forward carries it */
   causalHop(endpoint: string): number {
     const row = this.mustEndpoint(endpoint)
-    return row.last_received_at !== null && row.last_received_at >= this.now() - LIMITS.causalWindowS * 1000 ? (row.last_received_hop ?? 0) + 1 : 0
+    return row.last_received_at !== null && row.last_received_at >= this.now() - LIMITS.causalWindowS * 1000
+      ? Math.min((row.last_received_hop ?? 0) + 1, HOP_FLOOR_MAX)
+      : 0
   }
 
   /** records that an endpoint received a message of `hop`, as reading its inbox does */
@@ -1779,7 +1782,7 @@ export class FederatedCore extends RelayCore {
       message.attachments.some((a) => a?.kind !== "path" || typeof a.path !== "string" || !a.path.startsWith("/"))
     )
       throw bad("attachments")
-    if (!Number.isInteger(message.hop) || message.hop < 0 || message.hop > LIMITS.hopMax) throw bad("hop")
+    if (!Number.isInteger(message.hop) || message.hop < 0) throw bad("hop")
     const from = message.from
     if (!from || typeof from.address !== "string" || typeof from.user !== "string" || !from.claims || !AUTHS.includes(from.auth)) throw bad("sender")
     if (from.claims.tty !== undefined && typeof from.claims.tty !== "boolean") throw bad("sender")

@@ -153,8 +153,8 @@ export interface XLimitConfig {
 
 export const XLIMITS: Readonly<XLimitConfig> = {
   bodyBytes: 16 * 1024,
-  hopMax: 8,
-  threadMax: 50,
+  hopMax: Infinity,
+  threadMax: Infinity,
   pairPerMinute: Infinity,
   pairPerHour: Infinity,
   accountPerDay: Infinity,

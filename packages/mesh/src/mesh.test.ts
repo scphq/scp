@@ -4,7 +4,7 @@ import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Broker, type BrokerOptions, RelayClient, startBroker } from "@scp-dev/broker"
-import { type EndpointView, type Envelope, FakeJudgeClient, LIMITS, RelayError, type SendResult, SERVER_FIELDS } from "@scp-dev/core"
+import { type EndpointView, type Envelope, FakeJudgeClient, RelayError, type SendResult, SERVER_FIELDS } from "@scp-dev/core"
 import { WebSocket } from "ws"
 import type { AccountKey, MeshConfig } from "./config"
 import { accountId, canonicalJson, generateKeyPair, type KeyPair, newNonce, SIGN_DOMAIN, signPayload, verifyPayload } from "./keys"
@@ -341,7 +341,8 @@ describe("mesh brokers", () => {
     writeFileSync(b.policyPath, JSON.stringify({ rules: [] }))
     expect((await forward({ body: "allowed", attachments: [{ path: "/missing" }], wait_s: 100 })).error).toBeUndefined()
     expect((await review.request<Inbox>("inbox")).messages.map((row) => row.body.text)).toEqual(["allowed"])
-    expect((await forward({}, { hop_floor: LIMITS.hopMax + 1 })).error?.data.code).toBe("loop_guard")
+    expect((await forward({ body: "deep" }, { hop_floor: 1000 })).error).toBeUndefined()
+    expect((await forward({}, { hop_floor: 1001 })).error?.data.code).toBe("invalid_params")
   })
 
   test("frames after authentication are sealed, and a replayed, altered or cleartext frame closes the link", async () => {

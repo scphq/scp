@@ -37,8 +37,7 @@ impl AccountHub {
                         .ok_or_else(|| invalid("hop_floor is a hop count"))?,
                 };
                 if hop > 0 {
-                    self.received(&sender.id, &[json!({"hop":hop.min(65)-1})])
-                        .await?;
+                    self.received(&sender.id, &[json!({"hop":hop-1})]).await?;
                 }
                 let mut origin = c.clone();
                 origin.tty = p["tty"] == true;

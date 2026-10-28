@@ -1,4 +1,4 @@
-import { parseLimits, RATE_LIMITS, wireLimits } from "@scp-dev/core"
+import { HOP_FLOOR_MAX, parseLimits, RATE_DURATIONS, RATE_LIMITS, wireLimits } from "@scp-dev/core"
 import { MCP_PROTOCOLS, REMOTE_TOOLS, type ToolResult, ToolInputError, str as mcpString, text as mcpText, validHandle } from "@scp-dev/core"
 import { remoteTool, type McpCall } from "./mcp-tools"
 import {
@@ -309,7 +309,7 @@ export const HUB_DURATIONS = [
   "mcpWaitS",
   "revalidateMs",
   "deniedS",
-  "treePauseS",
+  ...RATE_DURATIONS,
 ] as const satisfies readonly (keyof HubLimits)[]
 
 const SWEEP_MS = 10 * 60_000
@@ -526,6 +526,8 @@ export class RelayHub {
   private contactCaps() {
     return {
       ...XLIMITS,
+      hopMax: this.limits.hopMax,
+      threadMax: this.limits.threadMax,
       pairPerMinute: this.limits.contactPerMinute,
       pairPerHour: this.limits.contactPerHour,
       accountPerDay: this.limits.contactPerDay,
@@ -1427,10 +1429,11 @@ export class RelayHub {
         const send = { ...object(params.params, "params") }
         serverFields(send)
         const asked = params.hop_floor ?? 0
-        if (!Number.isInteger(asked) || (asked as number) < 0 || (asked as number) > 1000) throw new RelayError("invalid_params", "hop_floor is a hop count")
+        if (!Number.isInteger(asked) || (asked as number) < 0 || (asked as number) > HOP_FLOOR_MAX)
+          throw new RelayError("invalid_params", "hop_floor is a hop count")
         if ([send.to].flat().some((to) => core.foreignAccount(to) !== null)) return this.xsend(sender, send, { tty: params.tty === true, hop: asked as number })
         delete send.attachments
-        const floor = Math.min(asked as number, LIMITS.hopMax + 1)
+        const floor = Math.min(asked as number, core.rates.hopMax + 1)
         if (floor > 0) core.markReceived(sender, floor - 1)
         const gate = this.judgeGate()
         const origin = { tty: params.tty === true }
@@ -1513,10 +1516,10 @@ export class RelayHub {
     const kind = (send.kind ?? "message") as MessageKind
     if (!MESSAGE_KINDS.includes(kind)) throw new RelayError("invalid_params", `kind must be one of ${MESSAGE_KINDS.join(", ")}`)
     if (send.reply_to !== undefined && typeof send.reply_to !== "string") throw new RelayError("invalid_params", "reply_to is a message id")
-    if (origin.hop > XLIMITS.hopMax)
+    if (origin.hop > this.limits.hopMax)
       throw new RelayError(
         "loop_guard",
-        `this message would be hop ${origin.hop} of a chain across accounts (limit ${XLIMITS.hopMax}); stop and report to your user`,
+        `this message would be hop ${origin.hop} of a chain across accounts (limit ${this.limits.hopMax}); stop and report to your user`,
       )
     const contact = await link.contactByHandle(target.account)
     if (!contact || contact.dir === "in" || contact.peerHandle !== target.account) throw missing()
@@ -1531,8 +1534,11 @@ export class RelayHub {
     const now = this.now()
     const thread = granted?.thread ?? cleanText(send.thread, "thread", 64) ?? newId("thr", now)
     const hop = Math.max(origin.hop, granted ? answered!.hop + 1 : 0)
-    if (hop > XLIMITS.hopMax)
-      throw new RelayError("loop_guard", `this message would be hop ${hop} of a chain across accounts (limit ${XLIMITS.hopMax}); stop and report to your user`)
+    if (hop > this.limits.hopMax)
+      throw new RelayError(
+        "loop_guard",
+        `this message would be hop ${hop} of a chain across accounts (limit ${this.limits.hopMax}); stop and report to your user`,
+      )
     this.xcounters.check(contact, me.remote, address, thread)
     const secret = findSecret(send.body)
     if (secret) throw new RelayError("secret_refused", `the message looks like it carries a credential (${secret}); send a reference instead`)
@@ -1635,7 +1641,7 @@ export class RelayHub {
     if (!honestSender(msg.from)) throw new RelayError("invalid_params", "the sender is not one its relay may name")
     const bytes = new TextEncoder().encode(msg.body).length
     if (bytes > XLIMITS.bodyBytes) throw new RelayError("too_large", `a message from another account is at most ${XLIMITS.bodyBytes} bytes`)
-    if (msg.hop > XLIMITS.hopMax) throw new RelayError("loop_guard", `hop ${msg.hop} is past the limit across accounts (${XLIMITS.hopMax})`)
+    if (msg.hop > this.limits.hopMax) throw new RelayError("loop_guard", `hop ${msg.hop} is past the limit across accounts (${this.limits.hopMax})`)
     if (msg.expires_at <= this.now()) throw new RelayError("invalid_params", "the message expired")
     const earlier = core.xduplicate(fromAccountId, msg.client_id)
     if (earlier) return { id: earlier.id, state: earlier.acked ? "delivered" : "queued", duplicate: true }
@@ -1752,8 +1758,8 @@ export class RelayHub {
     if (counts.hour >= perHour)
       throw new RelayError("rate_limited", `${perHour} messages from ${msg.from.address} to ${msg.to} an hour`, retry(counts.hourAt, 3_600_000))
     if (counts.day >= perDay) throw new RelayError("rate_limited", `${perDay} messages from ${contact.peerHandle} today`, untilTomorrow(now))
-    if (core.xthreadCount(target.remote, msg.thread) >= XLIMITS.threadMax)
-      throw new RelayError("loop_guard", `thread ${msg.thread} reached ${XLIMITS.threadMax} messages across accounts`)
+    if (core.xthreadCount(target.remote, msg.thread) >= this.limits.threadMax)
+      throw new RelayError("loop_guard", `thread ${msg.thread} reached ${this.limits.threadMax} messages across accounts`)
     const cap = this.limits.storedBytes
     if (this.storedNow() + bytes > cap) throw new RelayError("inbox_full", `the receiving account's relay holds its cap of ${cap} bytes of messages`)
     const unread = core.xunread(target)

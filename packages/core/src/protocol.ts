@@ -17,13 +17,9 @@ export const LIMITS = {
   inboxMax: 1000,
   inboxPage: 100,
   waitMaxS: 50,
-  hopMax: 64,
-  threadMax: 200,
+  /** how long after an agent received a message its next send counts as caused by it, one hop further down the chain */
   causalWindowS: 120,
   pairBurstWindowS: 10,
-  pingPongAlternations: 100,
-  pingPongWindowS: 600,
-  pingPongBlockS: 600,
   onlineWithinS: 60,
   hookOnlineS: 300,
   hookIdleS: 1800,
@@ -94,11 +90,23 @@ export const RATE_LIMITS = {
   groupPerMinute: Infinity,
   peekPairPerMinute: Infinity,
   peekTargetPerHour: Infinity,
+  /** loop guards: the longest causal hop chain, the most messages in one thread, the back-and-forth alternations that pause a pair */
+  hopMax: Infinity,
+  threadMax: Infinity,
+  pingPongAlternations: Infinity,
+  pingPongWindowS: 600,
+  pingPongBlockS: 600,
 } as const
+
+/** the limits that are durations: 0 or null keeps their default, they apply only while the limit they time is on */
+export const RATE_DURATIONS = ["treePauseS", "pingPongWindowS", "pingPongBlockS"] as const satisfies readonly (keyof typeof RATE_LIMITS)[]
+
+/** the largest hop_floor a forward carries; a deeper chain is forwarded at this floor */
+export const HOP_FLOOR_MAX = 1000
 
 export type RateLimits = { [K in keyof typeof RATE_LIMITS]: number }
 
-export function parseLimits(raw: unknown, keys: readonly string[], source: string, durations: readonly string[] = ["treePauseS"]): Record<string, number> {
+export function parseLimits(raw: unknown, keys: readonly string[], source: string, durations: readonly string[] = RATE_DURATIONS): Record<string, number> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${source}: limits must be a JSON object`)
   const parsed: Record<string, number> = {}
   for (const [key, value] of Object.entries(raw)) {

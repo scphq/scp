@@ -36,10 +36,22 @@ impl AccountHub {
     ) -> Result<()> {
         let history = self
             .store
-            .messages(&self.account_id, Some(thread), 0, 201)
+            .messages(
+                &self.account_id,
+                Some(thread),
+                0,
+                self.limits
+                    .cap("threadMax")
+                    .map_or(201, |n| usize::try_from(n).unwrap_or(usize::MAX).max(201)),
+            )
             .await?;
-        if history.len() >= 200 {
-            return Err(Error::new("loop_guard", "thread reached 200 messages"));
+        if let Some(limit) = self.limits.cap("threadMax")
+            && history.len() as u64 >= limit
+        {
+            return Err(Error::new(
+                "loop_guard",
+                &format!("thread reached {limit} messages"),
+            ));
         }
         if let Some(limit) = self.limits.cap("userPerDay")
             && self
@@ -208,9 +220,30 @@ impl AccountHub {
         recipients: &[Endpoint],
         now: i64,
     ) -> Result<Vec<(String, Option<String>)>> {
+        let Some(limit) = self.limits.cap("pingPongAlternations") else {
+            return Ok(Vec::new());
+        };
+        let window = i64::try_from(
+            self.limits
+                .duration("pingPongWindowS", 600)
+                .saturating_mul(1000),
+        )
+        .unwrap_or(i64::MAX);
+        let block = i64::try_from(
+            self.limits
+                .duration("pingPongBlockS", 600)
+                .saturating_mul(1000),
+        )
+        .unwrap_or(i64::MAX);
         let all = self
             .store
-            .pairs(&self.account_id, None, None, now - 600000, false)
+            .pairs(
+                &self.account_id,
+                None,
+                None,
+                now.saturating_sub(window),
+                false,
+            )
             .await?;
         let mut changes = Vec::new();
         for e in recipients.iter().filter(|e| e.id != sender.id) {
@@ -224,10 +257,10 @@ impl AccountHub {
                 .collect();
             senders.push(&sender.id);
             let alternations = senders.windows(2).filter(|w| w.first() != w.get(1)).count();
-            if alternations >= 100 {
+            if alternations as u64 >= limit {
                 changes.push((
                     pair_key(&sender.id, &e.id),
-                    Some(json!(now + 600000).to_string()),
+                    Some(json!(now.saturating_add(block)).to_string()),
                 ));
             }
         }
