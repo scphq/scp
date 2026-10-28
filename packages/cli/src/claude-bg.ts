@@ -147,10 +147,27 @@ export interface PlanInput {
  * the endpoint of a session: the one its hooks named with its session id, else the one its record claims, unless that one runs another
  * session; without a record only its session id names it
  */
+const keyIndex = new WeakMap<AgentFacts[], { sessions: Map<string, AgentFacts>; handles: Map<string, AgentFacts> }>()
+
+/** the first agent of each harness session and of each handle, indexed once per agents list */
+function keysOf(agents: AgentFacts[]): { sessions: Map<string, AgentFacts>; handles: Map<string, AgentFacts> } {
+  let index = keyIndex.get(agents)
+  if (!index) {
+    index = { sessions: new Map(), handles: new Map() }
+    for (const agent of agents) {
+      if (agent.harness_session !== null && !index.sessions.has(agent.harness_session)) index.sessions.set(agent.harness_session, agent)
+      if (!index.handles.has(agent.handle)) index.handles.set(agent.handle, agent)
+    }
+    keyIndex.set(agents, index)
+  }
+  return index
+}
+
 function endpointOf(entry: ClaudeEntry, record: BgRecord | undefined, agents: AgentFacts[]): AgentFacts | undefined {
-  const bySession = entry.sessionId ? agents.find((agent) => agent.harness_session === entry.sessionId) : undefined
+  const index = keysOf(agents)
+  const bySession = entry.sessionId ? index.sessions.get(entry.sessionId) : undefined
   if (bySession || !record) return bySession
-  const byHandle = record.handle === undefined ? undefined : agents.find((agent) => agent.handle === record.handle)
+  const byHandle = record.handle === undefined ? undefined : index.handles.get(record.handle)
   return byHandle && (byHandle.harness_session === null || byHandle.harness_session === entry.sessionId) ? byHandle : undefined
 }
 
@@ -162,9 +179,27 @@ const attachedTo = (entry: ClaudeEntry, attached: Set<string>): boolean =>
  * list, and its in-process subagents of its current session not done
  */
 export function liveChildren(agent: AgentFacts, agents: AgentFacts[]): number {
-  const local = agents.filter((one) => one.parent === agent.address)
+  const local = childrenOf(agents).get(agent.address) ?? []
   const live = local.filter((one) => !one.historic && (one.presence === "online" || one.state === "working")).length
   return live + Math.max(0, agent.children - local.length) + agent.subagents
+}
+
+const childIndex = new WeakMap<AgentFacts[], Map<string, AgentFacts[]>>()
+
+/** the agents by parent address, indexed once per agents list */
+function childrenOf(agents: AgentFacts[]): Map<string, AgentFacts[]> {
+  let index = childIndex.get(agents)
+  if (!index) {
+    index = new Map()
+    for (const one of agents) {
+      if (one.parent === null) continue
+      const siblings = index.get(one.parent)
+      if (siblings) siblings.push(one)
+      else index.set(one.parent, [one])
+    }
+    childIndex.set(agents, index)
+  }
+  return index
 }
 
 /** a worker with no workers of its own: the only kind ever removed */
@@ -326,6 +361,23 @@ export function historicAfterS(env: Env): number | undefined {
   return value === 0 ? undefined : value
 }
 
+/** a parsed file, kept while its inode, size and modification time stay the same */
+type Cached<T> = { ino: number; size: number; mtimeMs: number; value: T }
+
+/** `parse` of the file at `path`, read again only once the file changed; a broker task rereads the same files every run */
+function cachedRead<T>(cache: Map<string, Cached<T>>, path: string, parse: (path: string) => T): T {
+  const stat = statSync(path)
+  const hit = cache.get(path)
+  if (hit && hit.ino === stat.ino && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.value
+  const value = parse(path)
+  if (cache.size > 16_384) cache.clear()
+  cache.set(path, { ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, value })
+  return value
+}
+
+const recordCache = new Map<string, Cached<BgRecord>>()
+const stateCache = new Map<string, Cached<BgState | undefined>>()
+
 /** the sessions `swarm claude --bg` started, by short id */
 export function readRecords(env: Env): Map<string, BgRecord> {
   const dir = bgDir(env)
@@ -340,10 +392,13 @@ export function readRecords(env: Env): Map<string, BgRecord> {
     const id = name.slice(0, -".json".length)
     if (!name.endsWith(".json") || !SHORT_ID.test(id)) continue
     try {
-      const file = realpathSync(join(dir, name))
-      const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { env?: { SCP_NAME?: unknown } } } }
-      const handle = config.mcpServers?.scp?.env?.SCP_NAME
-      records.set(id, { file, ...(typeof handle === "string" && handle ? { handle } : {}) })
+      const record = cachedRead(recordCache, join(dir, name), (path) => {
+        const file = realpathSync(path)
+        const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { env?: { SCP_NAME?: unknown } } } }
+        const handle = config.mcpServers?.scp?.env?.SCP_NAME
+        return { file, ...(typeof handle === "string" && handle ? { handle } : {}) }
+      })
+      records.set(id, record)
     } catch {}
   }
   return records
@@ -353,8 +408,10 @@ const statePath = (env: Env, id: string) => join(bgDir(env), `${id}.state.json`)
 
 export function readState(env: Env, id: string): BgState | undefined {
   try {
-    const state = JSON.parse(readFileSync(statePath(env, id), "utf8")) as BgState
-    return typeof state?.sessionId === "string" && typeof state.cwd === "string" ? state : undefined
+    return cachedRead(stateCache, statePath(env, id), (path) => {
+      const state = JSON.parse(readFileSync(path, "utf8")) as BgState
+      return typeof state?.sessionId === "string" && typeof state.cwd === "string" ? state : undefined
+    })
   } catch {
     return undefined
   }
@@ -768,10 +825,13 @@ const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind 
  * whether a worker may be due for a stop or a removal, read from the broker alone, so an idle broker never runs claude; only one
  * `swarm claude --bg` started (`recorded`) is ever removed
  */
-function maybeDue(agent: AgentFacts, agents: AgentFacts[], state: BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
+function maybeDue(agent: AgentFacts, agents: AgentFacts[], stateOf: () => BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
   if (agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) return true
   if (!agent.parent || liveChildren(agent, agents) > 0) return false
-  if (recorded && config.remove && agent.historic && leaf(agent)) return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
+  if (recorded && config.remove && agent.historic && leaf(agent)) {
+    const state = stateOf()
+    return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
+  }
   if (agent.hibernate === CLAUDE_BG_PROVIDER) return false
   return now - Date.parse(agent.worked_at) >= stopAfter(agent, config) * 1000
 }
@@ -795,20 +855,19 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         const id = agent.harness_session !== null ? sessions.get(agent.harness_session) : undefined
         return claudeAgent(agent) && (id === undefined || !records.has(id))
       }
-      if (!records.size && !context.agents().some(unrecorded)) return
+      let agents = context.agents()
+      if (!records.size && !agents.some(unrecorded)) return
       const config = bgConfig(env)
       const now = deps.now ?? Date.now
       const handles = new Map([...records].flatMap(([id, record]) => (record.handle ? [[record.handle, id] as const] : [])))
       const idOf = (agent: AgentFacts) =>
         agent.harness_session !== null ? (sessions.get(agent.harness_session) ?? handles.get(agent.handle)) : handles.get(agent.handle)
-      const isDue = () => {
-        const agents = context.agents()
-        return agents.some((agent) => {
+      const isDue = () =>
+        agents.some((agent) => {
           const id = idOf(agent)
-          if (id !== undefined && records.has(id)) return maybeDue(agent, agents, readState(env, id), config, now(), true)
+          if (id !== undefined && records.has(id)) return maybeDue(agent, agents, () => readState(env, id), config, now(), true)
           return unrecorded(agent) && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0
         })
-      }
       if (listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return
       const claude = claudeOf(env, deps)
       if (!claude) return
@@ -822,6 +881,7 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         if (entry.kind === "background" && entry.id && SHORT_ID.test(entry.id) && entry.sessionId) {
           sessions.set(entry.sessionId, entry.id)
         }
+      agents = context.agents()
       if (!isDue()) return
       const ps = deps.ps ?? psTable(claude.env, claude.exec)
       const table = await ps()

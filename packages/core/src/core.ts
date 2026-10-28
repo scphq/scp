@@ -1892,7 +1892,7 @@ export class RelayCore {
     const viewer = filters.viewer === undefined ? undefined : this.mustEndpoint(filters.viewer)
     const shown = viewer ? this.visibility(viewer) : undefined
     const peeker = viewer ?? (filters.peekable === true ? this.byHandle(HUMAN_HANDLE)! : undefined)
-    return (filters.all ? this.listed() : this.recent(cutoff))
+    return (filters.all ? this.listed() : this.recent(cutoff, filters.historic === true ? undefined : now - this.historicAfterS * 1000))
       .filter(
         (row) =>
           filters.all ||
@@ -6348,19 +6348,33 @@ export class RelayCore {
     return rows
   }
 
-  /** the listed rows `list` may show without `all`: a superset of its filter, so the rest of the table is never read */
-  private recent(cutoff: number): EndpointRow[] {
+  /**
+   * the listed rows `list` may show without `all`: a superset of its filter, so the rest of the table is never read; with `activeSince`, no
+   * agent whose activity ({@link activeAt}) is all before it, as a historic one is
+   */
+  private recent(cutoff: number, activeSince?: number): EndpointRow[] {
+    const active = activeSince === undefined || !Number.isFinite(activeSince) ? undefined : this.activeSql(activeSince)
     const rows = this.sql
       .all<EndpointRow>(
         `SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
          AND (connections > 0 OR kind = 'human' OR COALESCE(last_seen, 0) >= ? OR wake IS NOT NULL OR hibernate IS NOT NULL OR substr(session, 1, 4) = 'sub:' OR ${this.recentAlso()})
+         ${active ? `AND (kind != 'agent' OR ${active.sql})` : ""}
          ORDER BY kind DESC, handle`,
         cutoff,
+        ...(active?.params ?? []),
       )
       .filter((row) => this.listable(row))
     const memo = this.passMemo
     if (memo) for (const row of rows) memo.rows.set(row.id, row)
     return rows
+  }
+
+  /** an SQL condition that holds for every row whose {@link activeAt} is `since` or later: a superset, so a subclass's activity is never lost */
+  protected activeSql(since: number): { sql: string; params: SqlValue[] } {
+    return {
+      sql: "MAX(created_at, COALESCE(last_seen, 0), COALESCE(hook_seen, 0), COALESCE(last_received_at, 0), COALESCE(mail_at, 0)) >= ?",
+      params: [since],
+    }
   }
 
   /** a further SQL condition for {@link recent}: a subclass's rows that list as hibernated by a column of its own */
