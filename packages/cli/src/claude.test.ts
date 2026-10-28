@@ -169,6 +169,27 @@ describe("swarm claude", () => {
     await expect(claudeCommand(["attach"], env, () => {}, f.home)).rejects.toThrow("takes a background session")
   })
 
+  test("--bg --resume claims the name, grant and parent request the session's mount had, also when the resume forks a new id", async () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const caller = { ...f.env, SCP_NAME: "lead", SCP_GRANT: "krt_lead" }
+    await claudeCommand(["--bg", "--name", "w1"], { ...f.env, SCP_GRANT: "krt_w1", SCP_UNDER: "me/lead" }, () => {}, f.home, { out: () => {} })
+    const mountOf = () => JSON.parse(readFileSync(join(bgDir(caller), "1a2b3c4d.json"), "utf8")).mcpServers.scp.env
+    const lines: string[] = []
+    const session = "1a2b3c4d-0000-4000-8000-000000000000"
+    expect(await claudeCommand(["--bg", "--resume", session], caller, () => {}, f.home, { out: (line) => lines.push(line) })).toBe(0)
+    expect(f.args().split("\n").slice(0, 5)).toEqual(["--resume", session, "--bg", "--name", "w1"])
+    expect(mountOf()).toEqual({ SCP_NAME: "w1", SCP_GRANT: "krt_w1", SCP_UNDER: "me/lead" })
+    expect(lines).toEqual([expect.stringContaining("is me/w1 on SCP")])
+    const forked = { mcpServers: { scp: { env: { SCP_NAME: "w2", SCP_GRANT: "krt_w2", SCP_UNDER: "" } } } }
+    writeFileSync(join(bgDir(caller), "0f0f0f0f.json"), JSON.stringify(forked))
+    await claudeCommand(["--bg", "--resume=0f0f0f0f"], caller, () => {}, f.home, { out: () => {} })
+    expect(mountOf()).toEqual({ SCP_NAME: "w2", SCP_GRANT: "krt_w2", SCP_UNDER: "" })
+    await claudeCommand(["--bg", "--name", "w3", "--resume", "0f0f0f0f"], caller, () => {}, f.home, { out: () => {} })
+    expect(mountOf()).toEqual({ SCP_NAME: "w3", SCP_GRANT: "krt_w2", SCP_UNDER: "" })
+    await claudeCommand(["--bg", "--resume", "deadbeef"], caller, () => {}, f.home, { out: () => {} })
+    expect(mountOf()).toEqual({ SCP_NAME: "lead", SCP_GRANT: "krt_lead", SCP_UNDER: "" })
+  })
+
   test("--resume of a live background session attaches to it instead of starting a second claude", async () => {
     const f = fixture(["mcp", "--harness", "claude", "--channels"])
     const session = "1a2b3c4d-0000-4000-8000-000000000000"

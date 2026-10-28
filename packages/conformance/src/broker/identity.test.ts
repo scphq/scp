@@ -328,6 +328,30 @@ brokerSuite("broker resumed sessions", (start) => {
     expect(await fresh.request("inbox")).toMatchObject({ messages: [{ body: { text: "while away" } }] });
   });
 
+  test("a session a harness daemon resumes in a new process keeps its grant's name, place and mail", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead", "claude-code", {}, session(2));
+    const { token } = await lead.request<{ token: string }>("grant", { name: "w1", scope: "parent" });
+    const daemon = (pid: number) => ({ process: key(pid), session: key(pid), lineage: [key(pid), key(3)], harness_session: "bg-a" });
+    const hook = await broker.hook({ handle: "claude-app", ...daemon(process.pid) });
+    const w1 = await broker.agent("w1", "claude-code", {}, { ...daemon(process.pid), grant: token });
+    expect(w1.hello.endpoint).toMatchObject({ address: "me/w1", parent: "me/lead" });
+    await hook.request("event", { kind: "tool", session_id: "bg-a" });
+    await lead.request("send", { to: "w1", body: "while away" });
+    await w1.close();
+    await hook.request("event", { kind: "session_end" });
+    await hook.close();
+    await waitFor(
+      async () => (await lead.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === w1.id)?.presence === "offline",
+      "session offline",
+    );
+    const back = await broker.hook({ handle: "claude-app", ...daemon(1) });
+    expect(back.hello.endpoint).toMatchObject({ id: w1.id, address: "me/w1", parent: "me/lead" });
+    const shim = await broker.agent("claude-app", "claude-code", {}, daemon(1));
+    expect(shim.hello.endpoint).toMatchObject({ id: w1.id, address: "me/w1", parent: "me/lead" });
+    expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "while away" } }] });
+  });
+
   test("relink lists and applies the pairs for the human at a terminal only", async () => {
     const { broker, human, fresh } = await stranded(start);
     const hook = await broker.hook({ handle: "other", ...session(1), harness_session: "fresh-a" });
