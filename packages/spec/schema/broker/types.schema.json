@@ -131,8 +131,7 @@
         },
         "hop": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 64
+          "minimum": 0
         },
         "created_at": {
           "$ref": "#/$defs/Timestamp"
@@ -2282,12 +2281,18 @@
           "const": 50
         },
         "hopMax": {
-          "type": "integer",
-          "const": 64
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "threadMax": {
-          "type": "integer",
-          "const": 200
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "causalWindowS": {
           "type": "integer",
@@ -2326,16 +2331,19 @@
           "minimum": 1
         },
         "pingPongAlternations": {
-          "type": "integer",
-          "const": 100
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
         },
         "pingPongWindowS": {
           "type": "integer",
-          "const": 600
+          "minimum": 1
         },
         "pingPongBlockS": {
           "type": "integer",
-          "const": 600
+          "minimum": 1
         },
         "onlineWithinS": {
           "type": "integer",
@@ -2564,11 +2572,8 @@
         "inboxMax",
         "inboxPage",
         "waitMaxS",
-        "hopMax",
-        "threadMax",
         "causalWindowS",
         "pairBurstWindowS",
-        "pingPongAlternations",
         "pingPongWindowS",
         "pingPongBlockS",
         "onlineWithinS",

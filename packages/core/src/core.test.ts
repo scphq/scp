@@ -18,17 +18,22 @@ const TEST_RATES = {
   groupPerMinute: 60,
   peekPairPerMinute: 6,
   peekTargetPerHour: 60,
+  hopMax: 64,
+  threadMax: 200,
+  pingPongAlternations: 100,
+  pingPongWindowS: 600,
+  pingPongBlockS: 600,
 }
 
 function bunSql(db: Database): Sql {
   return { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] }
 }
 
-function setup(start = 1_800_000_000_000, alive?: (pid: number) => boolean) {
+function setup(start = 1_800_000_000_000, alive?: (pid: number) => boolean, limits: Partial<typeof TEST_RATES> = TEST_RATES) {
   const clock = { now: start }
   const db = new Database(":memory:")
   const core = new RelayCore(bunSql(db), {
-    limits: TEST_RATES,
+    limits,
     ...(alive ? { alive } : {}),
     now: () => clock.now,
     hash: (value) => new Bun.CryptoHasher("sha256").update(value).digest("hex"),
@@ -330,16 +335,57 @@ describe("safety", () => {
         error = caught as RelayError
       }
     }
-    expect(LIMITS.hopMax).toBe(64)
-    expect(last.hop).toBe(LIMITS.hopMax)
+    expect(last.hop).toBe(TEST_RATES.hopMax)
     expect(error?.code).toBe("loop_guard")
     expect(error?.message).toBe(
-      `this reply would be hop ${LIMITS.hopMax + 1} of a reply chain (limit ${LIMITS.hopMax}): agents may be answering each other in a loop; stop and report to your user`,
+      `this reply would be hop ${TEST_RATES.hopMax + 1} of a reply chain (limit ${TEST_RATES.hopMax}): agents may be answering each other in a loop; stop and report to your user`,
     )
-    const [refuser, other] = LIMITS.hopMax % 2 ? ["me/a", "me/b"] : ["me/b", "me/a"]
+    const [refuser, other] = TEST_RATES.hopMax % 2 ? ["me/a", "me/b"] : ["me/b", "me/a"]
     const row = core.log().at(-1)!
     expect(row).toMatchObject({ event: "refuse", endpoint: refuser })
-    expect(row.detail).toEqual({ code: "loop_guard", message: error!.message, to: [other], hop: LIMITS.hopMax + 1, limit: LIMITS.hopMax, thread: last.thread })
+    expect(row.detail).toEqual({
+      code: "loop_guard",
+      message: error!.message,
+      to: [other],
+      hop: TEST_RATES.hopMax + 1,
+      limit: TEST_RATES.hopMax,
+      thread: last.thread,
+    })
+  })
+
+  test("loop guards are off by default: no hop, thread or ping-pong limit refuses, and the hop still counts", () => {
+    const { core, clock } = setup(undefined, undefined, {})
+    expect(core.rates).toMatchObject({ hopMax: Infinity, threadMax: Infinity, pingPongAlternations: Infinity, pingPongWindowS: 600, pingPongBlockS: 600 })
+    const a = core.claim({ handle: "a" }).endpoint.id
+    const b = core.claim({ handle: "b" }).endpoint.id
+    let last = core.send(a, { to: "b", body: "0", kind: "request" }, { tty: true })
+    for (let i = 1, turn = b; i <= 250; i++, turn = turn === a ? b : a) {
+      clock.now += 4000
+      last = core.send(turn, { to: turn === a ? "b" : "a", body: "re", kind: "reply", reply_to: last.id }, { tty: true })
+    }
+    expect(last.hop).toBe(250)
+    expect(core.log().some((row) => row.event === "loop_guard" || (row.detail as { code?: string } | null)?.code === "loop_guard")).toBe(false)
+  })
+
+  test("each loop guard turns on alone when configured", () => {
+    const hops = setup(undefined, undefined, { hopMax: 3 })
+    const ha = hops.core.claim({ handle: "a" }).endpoint.id
+    const hb = hops.core.claim({ handle: "b" }).endpoint.id
+    let last = hops.core.send(ha, { to: "b", body: "0", kind: "request" })
+    for (let i = 1; i <= 3; i++) last = hops.core.send(i % 2 ? hb : ha, { to: i % 2 ? "a" : "b", body: "re", kind: "reply", reply_to: last.id })
+    expect(last.hop).toBe(3)
+    expect(code(() => hops.core.send(ha, { to: "b", body: "re", kind: "reply", reply_to: last.id }))).toBe("loop_guard")
+    const threads = setup(undefined, undefined, { threadMax: 3 })
+    const ta = threads.core.claim({ handle: "a" }).endpoint.id
+    threads.core.claim({ handle: "b" })
+    const first = threads.core.send(ta, { to: "b", body: "0" })
+    for (let i = 0; i < 2; i++) threads.core.send(ta, { to: "b", body: "more", thread: first.thread })
+    expect(code(() => threads.core.send(ta, { to: "b", body: "over", thread: first.thread }))).toBe("loop_guard")
+    const pongs = setup(undefined, undefined, { pingPongAlternations: 4 })
+    const pa = pongs.core.claim({ handle: "a" }).endpoint.id
+    const pb = pongs.core.claim({ handle: "b" }).endpoint.id
+    for (let i = 0; i < 5; i++) pongs.core.send(i % 2 ? pb : pa, { to: i % 2 ? "a" : "b", body: String(i) })
+    expect(code(() => pongs.core.send(pa, { to: "b", body: "again" }))).toBe("loop_guard")
   })
 
   test("nothing is refused for being a reply: a reply to a reply and a second reply to a request both pass", () => {
@@ -381,7 +427,7 @@ describe("safety", () => {
     const human = core.claimHuman(true)
     const a = core.claim({ handle: "a" })
     let last: string | undefined
-    for (let round = 0; round <= LIMITS.hopMax / 2; round++) {
+    for (let round = 0; round <= TEST_RATES.hopMax / 2; round++) {
       clock.now += 70_000
       const asked = core.send(human.id, { to: "a", body: `q${round}`, kind: "request", ...(last ? { reply_to: last } : {}) }, { tty: true })
       expect(asked.hop).toBe(0)
@@ -417,7 +463,7 @@ describe("safety", () => {
       })
     }
     expect(refused).toBe("loop_guard")
-    expect(rounds).toBe(LIMITS.hopMax / 2 + 1)
+    expect(rounds).toBe(TEST_RATES.hopMax / 2 + 1)
   })
 
   test("two endpoints going back and forth get paused and the human inbox is told", () => {
@@ -432,12 +478,12 @@ describe("safety", () => {
       if (!result) sent++
     }
     expect(result).toBe("loop_guard")
-    expect(sent).toBe(LIMITS.pingPongAlternations + 1)
+    expect(sent).toBe(TEST_RATES.pingPongAlternations + 1)
     const human = core.claimHuman(true)
     const [notice] = core.inbox(human.id)
     expect(notice!.body.text).toContain("paused messages between me/a and me/b")
     expect(notice!.from.address).toBe("me/relay")
-    clock.now += (LIMITS.pingPongBlockS + 1) * 1000
+    clock.now += (TEST_RATES.pingPongBlockS + 1) * 1000
     expect(code(() => core.send(a.endpoint.id, { to: "b", body: "after the pause" }))).toBeUndefined()
   })
 
@@ -543,7 +589,7 @@ describe("safety", () => {
     for (let i = 0; i < 200 && !code(() => core.send(i % 2 ? b : a, { to: i % 2 ? "a" : "b", body: `ball ${i}` })); i++) clock.now += 4000
     const paused = core.why(human, "a", "b")
     expect(paused.allowed).toBe(false)
-    expect(paused.pair?.paused_until).toBe(new Date(clock.now - 4000 + LIMITS.pingPongBlockS * 1000).toISOString())
+    expect(paused.pair?.paused_until).toBe(new Date(clock.now - 4000 + TEST_RATES.pingPongBlockS * 1000).toISOString())
     expect(paused.reasons).toContain(`paused until ${paused.pair?.paused_until}: me/a and me/b went back and forth too often`)
     expect(paused.pair?.refused?.code).toBe("loop_guard")
   })

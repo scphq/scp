@@ -1137,7 +1137,7 @@ async fn configured_pair_and_tree_windows_and_pause() {
 }
 
 #[tokio::test]
-async fn default_rates_allow_more_than_two_thousand_messages() {
+async fn default_rates_and_loop_guards_allow_more_than_two_thousand_messages() {
     let (hub, g) = fixture().await;
     let (account, sender, target) = guard_endpoints(&hub, &g).await;
     let now = crate::now_ms();
@@ -1147,7 +1147,7 @@ async fn default_rates_allow_more_than_two_thousand_messages() {
                 &g.user_id,
                 scp_relay_store::Message {
                     id: format!("seed{n}"),
-                    thread: format!("thread{n}"),
+                    thread: "shared".into(),
                     reply_to: None,
                     kind: "message".into(),
                     from_ep: sender.id.clone(),
@@ -1167,11 +1167,19 @@ async fn default_rates_allow_more_than_two_thousand_messages() {
             &g.user_id,
             HubWrite {
                 pairs: (0..2001)
-                    .map(|_| {
+                    .map(|n| {
                         (
                             scp_relay_store::PairEvent {
-                                from_ep: sender.id.clone(),
-                                to_ep: target.id.clone(),
+                                from_ep: if n % 2 == 0 {
+                                    sender.id.clone()
+                                } else {
+                                    target.id.clone()
+                                },
+                                to_ep: if n % 2 == 0 {
+                                    target.id.clone()
+                                } else {
+                                    sender.id.clone()
+                                },
                                 at: now,
                             },
                             false,
@@ -1189,7 +1197,7 @@ async fn default_rates_allow_more_than_two_thousand_messages() {
             .send_guards(
                 &sender,
                 std::slice::from_ref(&target),
-                "fresh",
+                "shared",
                 None,
                 "message",
                 now,
@@ -1197,10 +1205,20 @@ async fn default_rates_allow_more_than_two_thousand_messages() {
             .await
             .unwrap();
     }
+    assert!(
+        account
+            .ping_pong(&sender, std::slice::from_ref(&target), now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     drop(account);
     let hello = hub.rpc(g, observer_hello()).await;
     let report = &hello["result"]["limits"];
     for key in [
+        "hopMax",
+        "threadMax",
+        "pingPongAlternations",
         "userPerDay",
         "pairBurst",
         "pairPerMinute",
@@ -1214,6 +1232,279 @@ async fn default_rates_allow_more_than_two_thousand_messages() {
     ] {
         assert!(report.get(key).unwrap().is_null(), "{key}");
     }
+    assert_eq!(report["pingPongWindowS"], 600);
+    assert_eq!(report["pingPongBlockS"], 600);
+    assert_eq!(report["causalWindowS"], 120);
     assert_eq!(report["treePauseS"], 600);
     assert_eq!(report["pairBurstWindowS"], 10);
+}
+
+#[tokio::test]
+async fn hop_and_thread_guards_are_opt_in() {
+    let (hub, g) = fixture().await;
+    let (account, sender, target) = guard_endpoints(&hub, &g).await;
+    let mut account = account.lock().await;
+    let c = Connection {
+        grant: Some(g),
+        ..Connection::default()
+    };
+    let mut parent = Value::Null;
+    for hop in 0..220 {
+        let mut params = json!({"to":"host/target","body":"chain"});
+        if !parent.is_null() {
+            params["reply_to"] = parent.clone();
+        }
+        let sent = account
+            .send_message(&c, &sender.id, &params, 0, false)
+            .await
+            .unwrap();
+        assert_eq!(sent["hop"], hop);
+        parent = sent["id"].clone();
+    }
+    let params = json!({"to":"host/target","body":"chain","reply_to":parent});
+    account.limits.apply_json(r#"{"hopMax":64}"#).unwrap();
+    let error = account
+        .send_message(&c, &sender.id, &params, 0, false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "loop_guard");
+    assert_eq!(error.message, "message exceeds the hop limit of 64");
+    account
+        .limits
+        .apply_json(r#"{"hopMax":null,"threadMax":220}"#)
+        .unwrap();
+    let error = account
+        .send_message(&c, &sender.id, &params, 0, false)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "loop_guard");
+    assert_eq!(error.message, "thread reached 220 messages");
+    account.limits.apply_json(r#"{"threadMax":0}"#).unwrap();
+    let sent = account
+        .send_message(&c, &sender.id, &params, 0, false)
+        .await
+        .unwrap();
+    assert_eq!(sent["hop"], 220);
+    let sent = account
+        .send_message(
+            &c,
+            &sender.id,
+            &json!({"to":"host/target","body":"floor"}),
+            12345,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["hop"], 12345);
+    let stored = account
+        .store
+        .message(&account.account_id, sent["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored.envelope).unwrap()["hop"],
+        12345
+    );
+    account
+        .send_guards(
+            &sender,
+            std::slice::from_ref(&target),
+            "fresh",
+            None,
+            "message",
+            crate::now_ms(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ping_pong_detection_and_durations_are_opt_in() {
+    let (hub, g) = fixture().await;
+    let (account, sender, target) = guard_endpoints(&hub, &g).await;
+    let now = crate::now_ms();
+    hub.store
+        .hub_write(
+            &g.user_id,
+            HubWrite {
+                pairs: (0..100)
+                    .map(|n| {
+                        (
+                            scp_relay_store::PairEvent {
+                                from_ep: if n % 2 == 0 {
+                                    sender.id.clone()
+                                } else {
+                                    target.id.clone()
+                                },
+                                to_ep: if n % 2 == 0 {
+                                    target.id.clone()
+                                } else {
+                                    sender.id.clone()
+                                },
+                                at: now - 20_000 + n,
+                            },
+                            false,
+                        )
+                    })
+                    .collect(),
+                ..HubWrite::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = account.lock().await;
+    let recipients = std::slice::from_ref(&target);
+    assert!(
+        account
+            .ping_pong(&sender, recipients, now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    account
+        .limits
+        .apply_json(r#"{"pingPongAlternations":100,"pingPongWindowS":10,"pingPongBlockS":30}"#)
+        .unwrap();
+    assert!(
+        account
+            .ping_pong(&sender, recipients, now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    account
+        .limits
+        .apply_json(r#"{"pingPongWindowS":60}"#)
+        .unwrap();
+    let changes = account.ping_pong(&sender, recipients, now).await.unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<i64>(changes[0].1.as_deref().unwrap()).unwrap(),
+        now + 30_000
+    );
+    account
+        .send_message(
+            &Connection::default(),
+            &sender.id,
+            &json!({"to":"host/target","body":"ping"}),
+            0,
+            false,
+        )
+        .await
+        .unwrap();
+    let notices = hub.store.messages(&g.user_id, None, now, 10).await.unwrap();
+    assert!(
+        notices
+            .iter()
+            .any(|m| m.envelope.contains("0.5 minutes") && m.envelope.contains("100 times"))
+    );
+    let blocked_until = account
+        .store
+        .state(&g.user_id, &changes[0].0)
+        .await
+        .unwrap()
+        .unwrap();
+    let blocked_at = serde_json::from_str::<i64>(&blocked_until).unwrap() - 30_000;
+    let error = account
+        .send_guards(&sender, recipients, "fresh", None, "message", blocked_at)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "loop_guard");
+    assert_eq!(error.retry, Some(30));
+    account
+        .send_guards(
+            &sender,
+            recipients,
+            "fresh",
+            None,
+            "message",
+            blocked_at + 30_000,
+        )
+        .await
+        .unwrap();
+    account
+        .limits
+        .apply_json(r#"{"pingPongAlternations":null}"#)
+        .unwrap();
+    assert!(
+        account
+            .ping_pong(&sender, recipients, now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(account);
+    let hello = hub.rpc(g, observer_hello()).await;
+    assert_eq!(hello["result"]["limits"]["pingPongWindowS"], 60);
+    assert_eq!(hello["result"]["limits"]["pingPongBlockS"], 30);
+}
+
+#[tokio::test]
+async fn forwarded_hops_keep_their_value_and_validate_unsigned_integers() {
+    let (hub, g) = fixture().await;
+    let (account, id, _rx) = bridge(&hub, &g, "host").await;
+    let mirrored = hub
+        .call(
+            &account,
+            &id,
+            request(
+                2,
+                "mirror",
+                json!({"endpoints":[view("sender"),view("target")]}),
+            ),
+            false,
+        )
+        .await;
+    assert!(mirrored["error"].is_null(), "{mirrored}");
+    for hop in [
+        json!(-1),
+        json!(1.5),
+        json!(true),
+        json!("3"),
+        json!(1001),
+        Value::Null,
+    ] {
+        let refused = hub.call(&account, &id, request(3, "forward", json!({"from":"sender","hop_floor":hop,"params":{"to":"host/target","body":"hop"}})), false).await;
+        assert_eq!(code(&refused), "invalid_params", "{refused}");
+    }
+    for hop in [999, 1000] {
+        let sent = hub.call(&account, &id, request(4, "forward", json!({"from":"sender","hop_floor":hop,"params":{"to":"host/target","body":"hop"}})), false).await;
+        assert_eq!(sent["result"]["hop"], hop, "{sent}");
+        let stored = hub
+            .store
+            .message(&g.user_id, sent["result"]["id"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored.envelope).unwrap()["hop"],
+            hop
+        );
+        let next = hub
+            .call(
+                &account,
+                &id,
+                request(
+                    5,
+                    "forward",
+                    json!({"from":"sender","params":{"to":"host/target","body":"causal"}}),
+                ),
+                false,
+            )
+            .await;
+        assert_eq!(next["result"]["hop"], hop, "{next}");
+    }
+    account.lock().await.limits.apply_json(r#"{"hopMax":64,"threadMax":200,"pingPongAlternations":100,"pingPongWindowS":12,"pingPongBlockS":34}"#).unwrap();
+    let hello = hub.rpc(g, observer_hello()).await;
+    let report = &hello["result"]["limits"];
+    for (key, value) in [
+        ("hopMax", 64),
+        ("threadMax", 200),
+        ("pingPongAlternations", 100),
+        ("pingPongWindowS", 12),
+        ("pingPongBlockS", 34),
+    ] {
+        assert_eq!(report[key], value, "{key}");
+    }
 }

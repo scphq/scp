@@ -20,6 +20,8 @@ import {
   idleAfterS,
   plan,
   readState,
+  onlyPollsInbox,
+  pollsInbox,
   runsCommand,
   refSession,
   reviveRef,
@@ -44,6 +46,20 @@ const helpers = [
 const running = `${helpers}  4400  4242 /bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-1-a.sh 2>/dev/null || true && eval 'bash suite.sh' < /dev/null && pwd -P >| /tmp/c-cwd
   4401  4400 bash suite.sh
 `
+const loop = `while true; do out=$(swarm inbox --wait 50 2>&1); if echo "$out" | grep -q "relay-message"; then echo "$out"; break; fi; echo "$out" | grep -q "no unread messages" || sleep 10; done`
+const shell = (command: string) =>
+  `/bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh-1-a.sh 2>/dev/null || true && eval '${command.replaceAll("'", `'"'"'`)}' < /dev/null && pwd -P >| /tmp/claude-ab12-cwd`
+/** `ps` `lstart` in the C locale */
+const lstart = (ms: number) => {
+  const [day, month, date, year, time] = new Date(ms).toString().split(" ")
+  return `${day} ${month} ${String(Number(date)).padStart(2)} ${time} ${year}`
+}
+/** the tree with only an inbox poll loop running under the session, waiting on the inbox, started `started` ms ago */
+const pollingSince = (started: number) => `${helpers}  4500  4242 ${lstart(now - started)}     ${shell(loop)}
+  4501  4500 ${lstart(now - 1000)} node /opt/scp/bin/swarm inbox --wait 50
+`
+/** a loop the turn started after the endpoint's last hook (`agent()` worked an hour ago) */
+const polling = pollingSince(1_800_000)
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
@@ -267,6 +283,12 @@ describe("planning", () => {
     ["running a background command", { processes: running }],
     ["running a background command", { processes: running, agents: [agent({ historic: true })] }],
     ["ps failed, so running commands are unknown", { processes: null }],
+    ["running a background command", { processes: `${polling}  4400  4242 /bin/zsh -c source /s/shell-snapshots/snapshot-zsh-2-b.sh && eval 'sleep 900'\n` }],
+    ["busy", { entries: [entry({ status: "busy" })], processes: running.replace("bash suite.sh' <", `${loop}' <`) }],
+    ["polling its inbox, which has unread mail", { agents: [agent({ unread: true, unread_at: new Date(now - 1000).toISOString() })], processes: polling }],
+    ["polling its inbox, which has unread mail", { entries: [entry({ status: "busy" })], agents: [agent({ unread: true })], processes: polling }],
+    ["polling its inbox, idle 1 s of 600 s", { agents: [agent({ worked_at: new Date(now - 1000).toISOString() })], processes: polling }],
+    ["waiting", { entries: [entry({ status: "waiting" })], processes: polling }],
     ["busy", { entries: [entry({ status: "busy" })] }],
     ["blocked", { entries: [entry({ status: "blocked" })] }],
     ["waiting", { entries: [entry({ status: "waiting" })] }],
@@ -370,6 +392,57 @@ test("finds a Bash tool command at any depth under a session, never in its helpe
   expect(runsCommand(running.replace("4400  4242", "4400  4301"), 4242)).toBe(true)
   expect(runsCommand(running, 4300)).toBe(false)
   expect(runsCommand("bad line\n4400 4242\n", 4242)).toBe(false)
+})
+
+test("tells an inbox poll loop from any command that watches more than mail", () => {
+  for (const command of [
+    loop,
+    "swarm inbox --wait 50",
+    `for i in $(seq 1 70); do o=$(swarm inbox --wait=50 --keep --json 2>/dev/null); [ "$o" != "" ] && { echo "$o"; exit 0; }; done; echo idle-timeout`,
+    `while :; do node /opt/scp/dist/cli.js inbox --wait 50 | head -5; sleep 5; done`,
+    "while true; do timeout 60 swarm inbox --wait 45 --keep --json | grep -q seq && break; done",
+  ])
+    expect([command, pollsInbox(shell(command))]).toEqual([command, true])
+  for (const command of [
+    "swarm inbox",
+    "bash inbox_wait.sh",
+    "while true; do gh pr checks 12 | grep -q pending || break; swarm inbox --wait 50; done",
+    "while true; do swarm inbox --wait 50; grep -q done build.log && break; done",
+    "until [ -f done ]; do sleep 30; done",
+    "while [ ! -f /tmp/build.done ]; do swarm inbox --wait 50; done",
+    "while [[ -s out.log ]]; do swarm inbox --wait 50; done",
+    "while read -r line; do swarm inbox --wait 50; done < queue.txt",
+    "while true; do swarm inbox --wait 50 | grep -q COMPLETE build.log && break; done",
+    "while true; do swarm inbox --wait 50 | tail -n 5 out.log; done",
+    "swarm send lead hi; swarm inbox --wait 50",
+  ])
+    expect([command, pollsInbox(shell(command))]).toEqual([command, false])
+})
+
+test("finds a session that only polls its inbox, and keeps every other command", () => {
+  const ci = `${helpers}  4400  4242 ${shell("while gh run view 7 | grep -q in_progress; do sleep 60; done")}\n  4401  4400 sleep 60\n`
+  const script = `${helpers}  4400  4242 ${shell("~/tmp/inbox_wait.sh")}\n  4401  4400 /bin/bash /home/u/tmp/inbox_wait.sh\n  4402  4401 node /opt/scp/bin/swarm inbox --wait 50\n`
+  const subshell = polling.replace("  4501  4500", `  4502  4500 ${shell(loop)}\n  4501  4502`)
+  expect(onlyPollsInbox(polling, 4242)).toBe(true)
+  expect(onlyPollsInbox(subshell, 4242)).toBe(true)
+  expect(onlyPollsInbox(polling.replace("swarm inbox --wait 50\n", "python3 -c pass\n"), 4242)).toBe(false)
+  expect(onlyPollsInbox(`${polling}  4400  4242 ${shell("bun test")}\n`, 4242)).toBe(false)
+  expect(onlyPollsInbox(ci, 4242)).toBe(false)
+  expect(onlyPollsInbox(script, 4242)).toBe(false)
+  expect(onlyPollsInbox(helpers, 4242)).toBe(false)
+  expect(runsCommand(`${helpers}  4400  4242 /bin/zsh -c -l setopt X && eval 'sleep 9' < /dev/null && pwd -P >| /tmp/claude-e367-cwd\n`, 4242)).toBe(true)
+  expect(plan(input({ processes: polling }))).toMatchObject([{ kind: "stop", id }])
+  expect(plan(input({ processes: polling, entries: [entry({ status: "busy" })] }))).toMatchObject([{ kind: "stop", id }])
+  expect(plan(input({ processes: polling, agents: [agent({ unread: true })] }))).toMatchObject([{ kind: "keep" }])
+  const beside = pollingSince(7_200_000)
+  expect(onlyPollsInbox(beside, 4242)).toBe(true)
+  expect(plan(input({ processes: beside }))).toMatchObject([{ kind: "stop", id }])
+  expect(plan(input({ processes: beside, entries: [entry({ status: "busy" })] }))).toMatchObject([{ kind: "keep", reason: "busy" }])
+  expect(plan(input({ processes: polling.replace(/^( {2}4500 {2}4242) .{24}/m, "$1"), entries: [entry({ status: "busy" })] }))).toMatchObject([
+    { kind: "keep", reason: "busy" },
+  ])
+  expect(plan(input({ processes: ci, entries: [entry({ status: "busy" })] }))).toMatchObject([{ kind: "keep", reason: "busy" }])
+  expect(plan(input({ processes: ci }))).toMatchObject([{ kind: "keep", reason: "running a background command" }])
 })
 
 test("walks a process's ancestors, stopping at pid 1 and on a cycle", () => {
@@ -654,6 +727,22 @@ describe("acting on a changed worker", () => {
       expect(f.facts.hibernate).toBeNull()
       expect(readState(f.env, id)).toBeUndefined()
       if (seen) expect(f.events).toContainEqual(["log", `swarm claude: kept ${id} (me/w1): running a background command`])
+    }
+  })
+  test("stops a busy worker that only polls its inbox, unless its loop ends or mail arrives right before the stop", async () => {
+    for (const end of ["none", "loop", "mail"] as const) {
+      const f = fixture()
+      f.record()
+      f.save([entry({ cwd: f.home, status: "busy" })])
+      let reads = 0
+      f.deps.ps = async () => (end === "loop" && reads++ >= 2 ? helpers : polling)
+      if (end === "mail") f.onHibernate = () => mail(f.facts)
+      await f.run()
+      expect([end, f.calls().map((call) => call.argv[0])]).toEqual([
+        end,
+        end === "none" ? ["agents", "agents", "stop"] : end === "loop" ? ["agents", "agents"] : ["agents"],
+      ])
+      if (end !== "none") expect(f.facts.hibernate).toBeNull()
     }
   })
   test("keeps a worker when the process table cannot be read right before the stop", async () => {

@@ -313,21 +313,31 @@ describe("bridges", () => {
     expect(desk.pushes("deliver")).toHaveLength(1)
   })
 
-  test("hop_floor raises the hop, and a floor past the limit is a loop_guard", async () => {
-    const { bridge, ok, fails } = setup()
+  test("hop_floor raises the hop, and a floor past a configured hopMax is a loop_guard", async () => {
+    const { bridge, ok, fails } = setup({ limits: { hopMax: 64 } })
     const laptop = await bridge("laptop", [{ address: "me/impl" }])
     await bridge("desk", [{ address: "me/review" }])
     expect((await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "a" }, hop_floor: 5 })).hop).toBe(5)
-    expect(await fails(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "b" }, hop_floor: LIMITS.hopMax + 1 })).toBe("loop_guard")
+    expect(await fails(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "b" }, hop_floor: 65 })).toBe("loop_guard")
   })
 
-  test("hop_floor is clamped to one past the hop limit", async () => {
-    const { bridge, rpc } = setup()
+  test("hop_floor is clamped to one past a configured hop limit", async () => {
+    const { bridge, rpc } = setup({ limits: { hopMax: 64 } })
     const laptop = await bridge("laptop", [{ address: "me/impl" }])
     await bridge("desk", [{ address: "me/review" }])
     const refused = await rpc(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "b" }, hop_floor: 1000 })
     expect(refused.error?.data?.code).toBe("loop_guard")
-    expect(refused.error?.message).toContain(`would be hop ${LIMITS.hopMax + 1} `)
+    expect(refused.error?.message).toContain("would be hop 65 ")
+  })
+
+  test("loop guards are off by default: a forward at the hop_floor maximum is delivered at that hop", async () => {
+    const { bridge, connect, ok, fails } = setup()
+    const laptop = await bridge("laptop", [{ address: "me/impl" }])
+    await bridge("desk", [{ address: "me/review" }])
+    expect((await ok(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "deep" }, hop_floor: 1000 })).hop).toBe(1000)
+    expect(await fails(laptop, "forward", { from: "impl", params: { to: "desk/review", body: "past" }, hop_floor: 1001 })).toBe("invalid_params")
+    const info = await ok(connect(), "hello", { protocol: PROTOCOL, observe: true })
+    expect(info.limits).toMatchObject({ hopMax: null, threadMax: null, pingPongAlternations: null, pingPongWindowS: 600, pingPongBlockS: 600 })
   })
 
   test("the scrubber and server-set fields apply to forwards", async () => {

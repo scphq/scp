@@ -66,6 +66,7 @@ export const INSTRUCTIONS = [
   "",
   "Use relay_list to see the other agents on this machine, and relay_send or relay_ask to message one by its address.",
   "Read messages for you with relay_inbox and reply with relay_reply when an answer is useful; keep your own line current with relay_set_status and relay_set_title.",
+  `Messages reach you by themselves, at your next turn or by a wake that revives you, so never poll relay_inbox or ${CLI_NAME} inbox in a loop: end your turn instead; wait_s / --wait is for one short wait.`,
   'A message marked relation="parent" is from the agent that started you and gave you your task: it continues that task, so apply it before you finish, the newer instruction winning, still only within what your user authorised.',
   "Optionally set your title and a one-line now with relay_set_title / relay_set_now so peers can find you; skip it when you only run workers.",
   `To hand work to another agent, call relay_spawn with its harness command (e.g. command ["codex", "exec", "..."], or ${CLI_NAME} spawn codex exec "..." from your shell): it returns at once with the worker's name; its messages and its result reach you by themselves as relay messages, relay_send to its name steers it meanwhile, and relay_status with a message id says when it read it.`,

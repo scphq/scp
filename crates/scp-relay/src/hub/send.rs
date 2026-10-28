@@ -256,7 +256,7 @@ impl AccountHub {
             .as_i64()
             .is_some_and(|at| at >= now - 120000)
         {
-            sf["received_hop"].as_u64().unwrap_or(0) + 1
+            sf["received_hop"].as_u64().unwrap_or(0).saturating_add(1)
         } else {
             0
         };
@@ -264,12 +264,15 @@ impl AccountHub {
             .as_ref()
             .and_then(|m| serde_json::from_str::<Value>(&m.envelope).ok())
             .and_then(|v| v["hop"].as_u64())
-            .map_or(0, |h| h + 1);
-        let hop = floor.min(65).max(causal).max(parent_hop);
-        if !notice && hop > 64 {
+            .map_or(0, |h| h.saturating_add(1));
+        let hop = floor.max(causal).max(parent_hop);
+        if !notice
+            && let Some(limit) = self.limits.cap("hopMax")
+            && hop > limit
+        {
             return Err(Error::new(
                 "loop_guard",
-                "message exceeds the hop limit of 64",
+                &format!("message exceeds the hop limit of {limit}"),
             ));
         }
         let thread = parent
@@ -426,7 +429,11 @@ impl AccountHub {
             self.post_notice(
                 None,
                 true,
-                "relay paused a pair for 10 minutes because it went back and forth 100 times.",
+                &format!(
+                    "relay paused a pair for {} minutes because it went back and forth {} times.",
+                    self.limits.duration("pingPongBlockS", 600) as f64 / 60.0,
+                    self.limits.cap("pingPongAlternations").unwrap_or(0),
+                ),
                 HubWrite::default(),
             )
             .await?;

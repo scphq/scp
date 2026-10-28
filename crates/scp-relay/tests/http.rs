@@ -542,8 +542,14 @@ async fn process_sigterm_flushes_socket_close() {
             &store,
             "--limit",
             "pairBurst=3",
+            "--limit",
+            "hopMax=64",
+            "--limit",
+            "threadMax=0",
+            "--limit",
+            "pingPongBlockS=0",
         ])
-        .env("SCP_LIMITS", r#"{"pairBurst":1,"userPerDay":7}"#)
+        .env("SCP_LIMITS", r#"{"pairBurst":1,"userPerDay":7,"hopMax":8,"threadMax":200,"pingPongAlternations":100,"pingPongWindowS":12,"pingPongBlockS":34}"#)
         .env("SCP_RELAY_LIMIT", "pairBurst=2")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -608,6 +614,11 @@ async fn process_sigterm_flushes_socket_close() {
     let hello: Value = serde_json::from_str(hello.to_text().unwrap()).unwrap();
     assert_eq!(hello["result"]["limits"]["pairBurst"], 3);
     assert_eq!(hello["result"]["limits"]["userPerDay"], 7);
+    assert_eq!(hello["result"]["limits"]["hopMax"], 64);
+    assert!(hello["result"]["limits"]["threadMax"].is_null());
+    assert_eq!(hello["result"]["limits"]["pingPongAlternations"], 100);
+    assert_eq!(hello["result"]["limits"]["pingPongWindowS"], 12);
+    assert_eq!(hello["result"]["limits"]["pingPongBlockS"], 600);
     let killed = tokio::process::Command::new("kill")
         .args(["-TERM", &process.id().unwrap().to_string()])
         .status()

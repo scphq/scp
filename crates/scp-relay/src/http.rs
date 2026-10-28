@@ -35,6 +35,11 @@ impl Default for Limits {
                 ("acksPerMinute", None),
                 ("accountAcksPerMinute", None),
                 ("userPerDay", None),
+                ("hopMax", None),
+                ("threadMax", None),
+                ("pingPongAlternations", None),
+                ("pingPongWindowS", Some(600)),
+                ("pingPongBlockS", Some(600)),
                 ("pairBurst", None),
                 ("pairPerMinute", None),
                 ("pairPerHour", None),
@@ -62,14 +67,16 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    /// Apply key=value; zero or Infinity disables caps. Durations must be positive.
+    /// Apply key=value; zero, null or Infinity disables caps. Durations remain finite.
     pub fn apply(&mut self, raw: &str) -> std::result::Result<(), String> {
         let (key, value) = raw.split_once('=').ok_or("limit must be key=value")?;
         if !self.0.contains_key(key) {
             return Err(format!("unknown limit: {key}"));
         }
         let duration = Self::is_duration(key);
-        let parsed = if value == "Infinity" && !duration {
+        let parsed = if Self::is_ping_pong_duration(key) && matches!(value, "0" | "null") {
+            Some(600)
+        } else if matches!(value, "Infinity" | "null") && !duration {
             None
         } else {
             let n = value
@@ -83,6 +90,9 @@ impl Limits {
         self.0.insert(key.into(), parsed);
         Ok(())
     }
+    fn is_ping_pong_duration(key: &str) -> bool {
+        matches!(key, "pingPongWindowS" | "pingPongBlockS")
+    }
     fn is_duration(key: &str) -> bool {
         matches!(
             key,
@@ -93,6 +103,8 @@ impl Limits {
                 | "revalidateMs"
                 | "deniedS"
                 | "treePauseS"
+                | "pingPongWindowS"
+                | "pingPongBlockS"
         )
     }
     /// Apply an SCP_LIMITS JSON object, rejecting unknown keys and invalid values.
@@ -114,7 +126,9 @@ impl Limits {
                 })?;
                 (n > 0).then_some(n)
             };
-            if !Self::is_duration(key) || cap.is_some() {
+            if Self::is_ping_pong_duration(key) {
+                configured.0.insert(key.clone(), Some(cap.unwrap_or(600)));
+            } else if !Self::is_duration(key) || cap.is_some() {
                 configured.0.insert(key.clone(), cap);
             }
         }
@@ -665,5 +679,57 @@ mod default_tests {
         assert_eq!(limits.cap("userPerDay"), None);
         assert!(limits.apply("treePauseS=0").is_err());
         assert!(limits.apply("treePauseS=Infinity").is_err());
+    }
+    #[test]
+    fn loop_limits_and_ping_pong_durations() {
+        let mut limits = Limits::default();
+        let counts = ["hopMax", "threadMax", "pingPongAlternations"];
+        let durations = ["pingPongWindowS", "pingPongBlockS"];
+        for key in counts {
+            assert_eq!(limits.cap(key), None, "{key}");
+        }
+        for key in durations {
+            assert_eq!(limits.duration(key, 0), 600, "{key}");
+        }
+        limits.apply_json(r#"{"hopMax":64,"threadMax":200,"pingPongAlternations":100,"pingPongWindowS":12,"pingPongBlockS":34}"#).unwrap();
+        assert_eq!(limits.cap("hopMax"), Some(64));
+        assert_eq!(limits.cap("threadMax"), Some(200));
+        assert_eq!(limits.cap("pingPongAlternations"), Some(100));
+        assert_eq!(limits.duration("pingPongWindowS", 0), 12);
+        assert_eq!(limits.duration("pingPongBlockS", 0), 34);
+        for value in ["0", "null"] {
+            for key in counts {
+                limits.apply_json(&format!(r#"{{"{key}":5}}"#)).unwrap();
+                limits
+                    .apply_json(&format!(r#"{{"{key}":{value}}}"#))
+                    .unwrap();
+                assert_eq!(limits.cap(key), None, "{key}");
+                limits.apply(&format!("{key}=5")).unwrap();
+                limits.apply(&format!("{key}={value}")).unwrap();
+                assert_eq!(limits.cap(key), None, "{key}");
+            }
+            for key in durations {
+                limits.apply_json(&format!(r#"{{"{key}":5}}"#)).unwrap();
+                limits
+                    .apply_json(&format!(r#"{{"{key}":{value}}}"#))
+                    .unwrap();
+                assert_eq!(limits.duration(key, 0), 600, "{key}");
+                limits.apply(&format!("{key}=5")).unwrap();
+                limits.apply(&format!("{key}={value}")).unwrap();
+                assert_eq!(limits.duration(key, 0), 600, "{key}");
+            }
+        }
+        for key in counts.into_iter().chain(durations) {
+            for value in ["-1", "1.5", "true", r#""Infinity""#] {
+                assert!(
+                    limits
+                        .apply_json(&format!(r#"{{"{key}":{value}}}"#))
+                        .is_err()
+                );
+            }
+        }
+        for key in durations {
+            assert!(limits.apply(&format!("{key}=Infinity")).is_err());
+        }
     }
 }
