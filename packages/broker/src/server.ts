@@ -311,6 +311,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     db = openDatabase(join(dir, "relay.db"))
     db.exec("PRAGMA journal_mode = WAL")
     db.exec("PRAGMA busy_timeout = 5000")
+    db.exec("PRAGMA cache_size = -65536")
+    db.exec("PRAGMA mmap_size = 268435456")
     chmodSync(join(dir, "relay.db"), 0o600)
     const sql: Sql = db
     const machine = options.machine ?? options.bridge?.machine
@@ -394,6 +396,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
   const sweeper = setInterval(() => {
     core.sweep()
     judge.sweep()
+    try {
+      db.exec("PRAGMA wal_checkpoint(PASSIVE)")
+    } catch {}
   }, SWEEP_MS)
   const known = new Map<string, Presence>()
   const wakes = new Map<string, string | null | undefined>()

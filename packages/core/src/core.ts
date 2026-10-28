@@ -92,6 +92,17 @@ export const TITLE_CHARS = 64
 export const SYSTEM_HANDLE = "_relay"
 export const GONE_PREFIX = "_gone_"
 
+/** audit events a retrying client repeats: kept NOISE_KEEP_S, not LIMITS.auditKeepS, and one identical row per REFUSAL_DEDUPE_S */
+const NOISE_EVENTS = ["scope_refused"]
+const NOISE_KEEP_S = 86_400
+const REFUSAL_DEDUPE_S = 60
+const SQL_NOW_MS = `CAST(strftime('%s', 'now') AS INTEGER) * 1000`
+const NOISE_SQL = NOISE_EVENTS.map((event) => `'${event}'`).join(", ")
+
+const AUDIT_NO_DELETE = `CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit
+    WHEN OLD.at > ${SQL_NOW_MS} - ${LIMITS.auditKeepS * 1000} AND NOT (OLD.event IN (${NOISE_SQL}) AND OLD.at <= ${SQL_NOW_MS} - ${NOISE_KEEP_S * 1000})
+    BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END`
+
 const MIGRATION = [
   `CREATE TABLE IF NOT EXISTS endpoints (
     id TEXT PRIMARY KEY,
@@ -215,9 +226,17 @@ const MIGRATION = [
   `CREATE TABLE IF NOT EXISTS peek_turns (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL, at INTEGER NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS peek_turns_endpoint ON peek_turns (endpoint, id)`,
   `CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END`,
-  `CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit
-    WHEN OLD.at > CAST(strftime('%s', 'now') AS INTEGER) * 1000 - ${LIMITS.auditKeepS * 1000}
-    BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END`,
+  AUDIT_NO_DELETE,
+]
+
+/** indexes for the per-request and periodic lookups, so none scans every endpoint or the whole audit */
+const HOT_INDEXES = [
+  `CREATE INDEX IF NOT EXISTS audit_event ON audit (event, endpoint, id)`,
+  `CREATE INDEX IF NOT EXISTS audit_ref ON audit (event, ref)`,
+  `CREATE INDEX IF NOT EXISTS endpoints_hooked ON endpoints (process) WHERE hook_seen IS NOT NULL AND process IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS endpoints_wake ON endpoints (waker_left) WHERE wake IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS endpoints_status ON endpoints (status_state) WHERE status_state IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS endpoints_revive ON endpoints (wake_tried) WHERE hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL`,
 ]
 
 export interface EndpointRow {
@@ -636,7 +655,8 @@ export class RelayCore {
   private passMemo: PassMemo | null = null
   /** subagent titles from their parents' hooks, by `<parent id> <subagent id>`, until the subagent's first claim */
   private readonly subagentTitles = new Map<string, string>()
-  private readonly deferred = new WeakMap<RelayError, { endpoint: string | null; detail: Record<string, unknown> }>()
+  private readonly deferred = new WeakMap<RelayError, { endpoint: string | null; detail: Record<string, unknown>; once?: boolean }>()
+  private readonly noise = new Map<string, number>()
 
   protected readonly sql: Sql
 
@@ -805,6 +825,13 @@ export class RelayCore {
         HUMAN_HANDLE,
         this.now(),
       )
+    }
+    for (const index of HOT_INDEXES) this.sql.all(index)
+    const trigger = one<{ sql: string }>(this.sql, `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'audit_no_delete'`)
+    const flat = (sql: string | undefined) => sql?.replace("IF NOT EXISTS ", "").replace(/\s+/g, " ")
+    if (flat(trigger?.sql) !== flat(AUDIT_NO_DELETE)) {
+      this.sql.all(`DROP TRIGGER IF EXISTS audit_no_delete`)
+      this.sql.all(AUDIT_NO_DELETE)
     }
     this.migrateTreePreset()
   }
@@ -1623,7 +1650,7 @@ export class RelayCore {
   /** a claim whose grant is refused fails; its audit row is written after the rollback */
   private grantRefused(scope: ClaimScope, reason: string): RelayError {
     const error = new RelayError("unauthorized", `grant refused: ${reason}`)
-    this.deferred.set(error, { endpoint: null, detail: { target: scope.handle, reason } })
+    this.deferred.set(error, { endpoint: null, detail: { target: scope.handle, reason }, once: true })
     return error
   }
 
@@ -2893,11 +2920,10 @@ export class RelayCore {
    */
   private settleRevived(now: number, endpoint?: string): void {
     const rows = this.sql.all<{ id: string }>(
-      `SELECT id FROM endpoints WHERE kind = 'agent' AND hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL AND hook_ended IS NULL
-       AND hook_seen >= wake_tried AND wake_tried <= ? AND (? IS NULL OR id = ?)`,
+      `SELECT id FROM endpoints WHERE ${endpoint === undefined ? "" : "id = ? AND "}kind = 'agent' AND hibernate IS NOT NULL AND revive IS NOT NULL
+       AND wake_ticket IS NOT NULL AND hook_ended IS NULL AND hook_seen >= wake_tried AND wake_tried <= ?`,
+      ...(endpoint === undefined ? [] : [endpoint]),
       now - LIMITS.restartGraceS * 1000,
-      endpoint ?? null,
-      endpoint ?? null,
     )
     for (const row of rows) this.wakeDone(row.id, "session_start")
   }
@@ -4279,7 +4305,8 @@ export class RelayCore {
        AND id NOT IN (SELECT spawner FROM spawn_via)`,
       now - LIMITS.handleBoundS * 1000,
     )
-    this.sql.all(`DELETE FROM audit WHERE at <= CAST(strftime('%s', 'now') AS INTEGER) * 1000 - ${LIMITS.auditKeepS * 1000}`)
+    this.sql.all(`DELETE FROM audit WHERE at <= ${SQL_NOW_MS} - ${LIMITS.auditKeepS * 1000}`)
+    this.sql.all(`DELETE FROM audit WHERE event IN (${NOISE_SQL}) AND at <= ${SQL_NOW_MS} - ${NOISE_KEEP_S * 1000}`)
     this.sql.all(`DELETE FROM grants WHERE expires_at <= ? AND (used_by IS NULL OR used_by NOT IN (SELECT id FROM endpoints))`, now)
     this.sql.all(`DELETE FROM tree_events WHERE at <= ?`, now - 3600 * 1000)
     this.sql.all(`DELETE FROM group_members WHERE endpoint NOT IN (SELECT id FROM endpoints)`)
@@ -5481,7 +5508,7 @@ export class RelayCore {
       one(
         this.sql,
         `SELECT 1 FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE m.from_ep = ? AND d.endpoint = ? AND m.created_at >= ?
-         AND m.id NOT IN (SELECT ref FROM audit WHERE event = 'spawn_exit' AND ref IS NOT NULL) LIMIT 1`,
+         AND NOT EXISTS (SELECT 1 FROM audit a WHERE a.event = 'spawn_exit' AND a.ref = m.id) LIMIT 1`,
         spender.id,
         me.id,
         grant.created_at,
@@ -5874,7 +5901,7 @@ export class RelayCore {
     const decision = this.decide(this.scopeWorld(from, false), from, to, replyTo, unverified === true)
     if (decision.allowed) return
     const refusal = decision.reasons.at(-1)!
-    this.audit("scope_refused", from.id, null, { from: this.address(from), to: this.address(to), dir: decision.dir, reason: refusal })
+    this.auditOnce("scope_refused", from.id, { from: this.address(from), to: this.address(to), dir: decision.dir, reason: refusal })
     if (from.kind === "agent" && this.authority(from, to)) throw new RelayError("scope_refused", refusal)
     throw unreachable(address)
   }
@@ -6167,7 +6194,8 @@ export class RelayCore {
       return this.tx(fn)
     } catch (error) {
       const row = error instanceof RelayError ? this.deferred.get(error) : undefined
-      if (row && this.scopeDepth === 1) this.audit("scope_refused", row.endpoint, null, row.detail)
+      if (row?.once && this.scopeDepth === 1) this.auditOnce("scope_refused", row.endpoint, row.detail)
+      else if (row && this.scopeDepth === 1) this.audit("scope_refused", row.endpoint, null, row.detail)
       throw error
     } finally {
       this.scopeDepth--
@@ -6755,6 +6783,20 @@ export class RelayCore {
 
   protected audit(event: string, endpoint: string | null, ref: string | null, detail: Record<string, unknown>): void {
     this.sql.all(`INSERT INTO audit (at, event, endpoint, ref, detail) VALUES (?, ?, ?, ?, ?)`, this.now(), event, endpoint, ref, JSON.stringify(detail))
+  }
+
+  /** {@link audit}, skipping a row identical to one written within REFUSAL_DEDUPE_S, as a client retrying a refused claim or send repeats it */
+  protected auditOnce(event: string, endpoint: string | null, detail: Record<string, unknown>): void {
+    if (!this.repeated(`${event}\n${endpoint ?? ""}\n${JSON.stringify(detail)}`)) this.audit(event, endpoint, null, detail)
+  }
+
+  private repeated(key: string): boolean {
+    const now = this.now()
+    const last = this.noise.get(key)
+    if (last !== undefined && now - last < REFUSAL_DEDUPE_S * 1000) return true
+    if (this.noise.size >= 4096) this.noise.clear()
+    this.noise.set(key, now)
+    return false
   }
 
   /** the row an address names, or undefined */
