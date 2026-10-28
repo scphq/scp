@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { RelayCore } from "./core"
-import { parseLimits, RATE_LIMITS, wireLimits } from "./protocol"
+import { parseLimits, RATE_DURATIONS, RATE_LIMITS, wireLimits } from "./protocol"
 
 const keys = Object.keys(RATE_LIMITS)
 
@@ -12,6 +12,12 @@ describe("rate configuration", () => {
     expect(parseLimits({ treePauseS: 0 }, keys, "test")).toEqual({})
     expect(parseLimits({ treePauseS: 20 }, keys, "test")).toEqual({ treePauseS: 20 })
     expect(parseLimits({}, keys, "test")).toEqual({})
+    expect(parseLimits({ hopMax: 64, threadMax: null, pingPongAlternations: 0, pingPongWindowS: 0, pingPongBlockS: 30 }, keys, "test")).toEqual({
+      hopMax: 64,
+      threadMax: Infinity,
+      pingPongAlternations: Infinity,
+      pingPongBlockS: 30,
+    })
   })
 
   test("duration keys keep defaults when null or zero", () => {
@@ -49,7 +55,7 @@ describe("rate configuration", () => {
         inbox.map((m) => m.seq!),
       )
     }
-    expect(wireLimits(core.rates)).toEqual(Object.fromEntries(keys.map((key) => [key, key === "treePauseS" ? 600 : null])))
+    expect(wireLimits(core.rates)).toEqual(Object.fromEntries(keys.map((key) => [key, (RATE_DURATIONS as readonly string[]).includes(key) ? 600 : null])))
     db.close()
   }, 120_000)
 })

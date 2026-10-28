@@ -157,10 +157,10 @@ brokerSuite("broker limits and hardening", (start) => {
     expect((await human.request<{ rows: { id: number }[] }>("log", { limit: 2 })).rows.map((r) => r.id)).toEqual(all.slice(-2));
   });
 
-  test("causal hop crosses new threads and refuses the sixty-fifth hop", async () => {
-    const broker = await start();
+  test("causal hop crosses new threads and refuses the hop past hopMax", async () => {
+    const broker = await start({ limits: { hopMax: 8 } });
     let sender = await broker.agent("hop0");
-    for (let i = 1; i <= 65; i++) {
+    for (let i = 1; i <= 9; i++) {
       const receiver = await broker.agent(`hop${i}`);
       const sent = await sender.request<{ hop: number }>("send", { to: `hop${i}`, body: "causal" });
       expect(sent.hop).toBe(i - 1);
@@ -172,6 +172,21 @@ brokerSuite("broker limits and hardening", (start) => {
     const log = await human.request<{ rows: { event: string }[] }>("log", { limit: 5 });
     expect(log.rows.some((r) => r.event === "refuse" || r.event === "loop_guard")).toBe(true);
   }, 30_000);
+
+  test("loop guards are off by default: a long causal chain and a ping-pong pair go through", async () => {
+    const broker = await start();
+    let sender = await broker.agent("hop0");
+    for (let i = 1; i <= 70; i++) {
+      const receiver = await broker.agent(`hop${i}`);
+      const sent = await sender.request<{ hop: number }>("send", { to: `hop${i}`, body: "causal" });
+      expect(sent.hop).toBe(i - 1);
+      await receiver.request("inbox");
+      sender = receiver;
+    }
+    const a = await broker.agent("ping");
+    const b = await broker.agent("pong");
+    for (let i = 0; i < 110; i++) await (i % 2 ? b : a).request("send", { to: i % 2 ? "ping" : "pong", body: String(i) });
+  }, 60_000);
 
   test("shutdown closes attached watchers and long polls cleanly", async () => {
     const broker = await start();

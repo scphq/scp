@@ -127,6 +127,7 @@ describe("broker wire schemas", () => {
     const rates = [...table.matchAll(/`(\w+)` \| null/g)].map((match) => match[1]!);
     const configurable = [...table.slice(0, table.indexOf("| Name |")).matchAll(/`(\w+)`/g)].map((match) => match[1]!).filter((key) => key in limits);
     expect(configurable.sort()).toEqual(["endpointRetireMax", "endpointRetireS", "historicAfterS"]);
+    const durations = ["treePauseS", "pingPongWindowS", "pingPongBlockS"];
     const schema = JSON.parse(readFileSync(join(schemaDir, "types.schema.json"), "utf8")).$defs.Limits;
     expect([...schema.required].sort()).toEqual(Object.keys(limits).sort());
     expect(validate("types.schema.json#/$defs/Limits", { ...limits, engineLimit: 42 })).toEqual([]);
@@ -135,15 +136,15 @@ describe("broker wire schemas", () => {
       delete missing[key];
       expect(validate("types.schema.json#/$defs/Limits", missing).length, key).toBeGreaterThan(0);
       const changed = validate("types.schema.json#/$defs/Limits", { ...limits, [key]: limits[key]! + 1 });
-      if (configurable.includes(key) || key === "treePauseS") {
+      if (configurable.includes(key) || durations.includes(key)) {
         expect(changed, key).toEqual([]);
         const nullable = validate("types.schema.json#/$defs/Limits", { ...limits, [key]: null });
-        if (key === "treePauseS") expect(nullable.length, key).toBeGreaterThan(0);
+        if (durations.includes(key)) expect(nullable.length, key).toBeGreaterThan(0);
         else expect(nullable, key).toEqual([]);
         expect(validate("types.schema.json#/$defs/Limits", { ...limits, [key]: 0 }).length, key).toBeGreaterThan(0);
       } else expect(changed.length, key).toBeGreaterThan(0);
     }
-    expect(rates.length).toBe(9);
+    expect(rates.length).toBe(12);
     for (const key of rates) {
       expect(schema.required).not.toContain(key);
       for (const value of [null, 1, 42]) expect(validate("types.schema.json#/$defs/Limits", { ...limits, [key]: value }), key).toEqual([]);

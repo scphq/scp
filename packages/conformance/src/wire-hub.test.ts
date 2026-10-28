@@ -379,19 +379,43 @@ describe.each(targetNames)("%s hub wire scenarios", (name) => {
     });
   });
 
-  test("hop_floor beyond the hop maximum is loop_guard", async () => {
+  test("hopMax is off by default: hop_floor at the wire maximum is delivered", async () => {
     await fixture(target, async ({ connect, bridge }) => {
       const a = await connect();
       const info = await a.hello({ machine: "alpha", bridge: true });
+      expect((info.limits as { hopMax: number | null }).hopMax).toBeNull();
       await a.result("mirror", { endpoints: [view("source")], full: true });
       const b = await bridge("beta", [view("target")]);
-      const hopMax = (info.limits as { hopMax: number }).hopMax;
-      expect(Number.isInteger(hopMax)).toBe(true);
-      expect((await a.call("forward", { from: "source", params: { to: "beta/target", body: "too many hops" }, hop_floor: hopMax + 1 })).error?.data.code).toBe(
-        "loop_guard",
-      );
-      expect(await b.result("subscribe", { after: 0 })).toEqual({ replayed: 0, next: 0 });
+      await b.result("subscribe", { after: 0 });
+      const sent = await a.result<{ id: string; hop: number }>("forward", {
+        from: "source",
+        params: { to: "beta/target", body: "long chain" },
+        hop_floor: 1000,
+      });
+      expect(sent.hop).toBe(1000);
+      expect((await delivered(b, sent.id)).message).toMatchObject({ hop: 1000 });
     });
+  });
+
+  test("hop_floor beyond a configured hopMax is loop_guard", async () => {
+    const hopTarget = new ProcessTarget(name);
+    try {
+      await hopTarget.start({ hopMax: 8 });
+      await fixture(hopTarget, async ({ connect, bridge }) => {
+        const a = await connect();
+        const info = await a.hello({ machine: "alpha", bridge: true });
+        await a.result("mirror", { endpoints: [view("source")], full: true });
+        const b = await bridge("beta", [view("target")]);
+        const hopMax = (info.limits as { hopMax: number }).hopMax;
+        expect(hopMax).toBe(8);
+        expect(
+          (await a.call("forward", { from: "source", params: { to: "beta/target", body: "too many hops" }, hop_floor: hopMax + 1 })).error?.data.code,
+        ).toBe("loop_guard");
+        expect(await b.result("subscribe", { after: 0 })).toEqual({ replayed: 0, next: 0 });
+      });
+    } finally {
+      await hopTarget.stop();
+    }
   });
 
   test("a recipient whose mirrored inbound rules exclude the sender is not_found", async () => {

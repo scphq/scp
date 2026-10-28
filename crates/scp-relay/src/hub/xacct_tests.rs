@@ -268,6 +268,11 @@ async fn cross_limits_and_deduplication() {
             .await["error"]["data"]["code"],
         "data_class_refused"
     );
+    r.a.lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":8}"#)
+        .unwrap();
     let hop = r
         .hub
         .call(
@@ -773,4 +778,114 @@ async fn forged_expired_and_redirected_reply_grants_fail_closed() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn cross_account_hop_and_thread_guards_are_opt_in() {
+    let r = linked(None).await;
+    let mut parent = Value::Null;
+    let mut thread = Value::Null;
+    for hop in 0..110 {
+        let mut params = json!({});
+        if !parent.is_null() {
+            params["reply_to"] = parent.clone();
+        }
+        let sent = r.send(hop % 2 == 1, params).await;
+        assert!(sent["error"].is_null(), "{sent}");
+        assert_eq!(sent["result"]["hop"], hop);
+        if thread.is_null() {
+            thread = sent["result"]["thread"].clone();
+        }
+        assert_eq!(sent["result"]["thread"], thread);
+        parent = sent["result"]["id"].clone();
+    }
+    let reply = json!({"reply_to":parent});
+    r.a.lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":64}"#)
+        .unwrap();
+    let refused = r.send(false, reply.clone()).await;
+    assert_eq!(refused["error"]["data"]["code"], "loop_guard");
+    assert_eq!(
+        refused["error"]["message"],
+        "message exceeds the hop limit of 64 across accounts"
+    );
+    r.a.lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":null}"#)
+        .unwrap();
+    r.b.lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":64}"#)
+        .unwrap();
+    let refused = r.send(false, reply.clone()).await;
+    assert_eq!(refused["error"]["data"]["code"], "loop_guard");
+    assert_eq!(
+        refused["error"]["message"],
+        "hop is past the limit across accounts (64)"
+    );
+    r.b.lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":0,"threadMax":55}"#)
+        .unwrap();
+    let refused = r.send(false, reply.clone()).await;
+    assert_eq!(refused["error"]["data"]["code"], "loop_guard");
+    assert_eq!(
+        refused["error"]["message"],
+        format!(
+            "thread {} reached 55 messages across accounts",
+            thread.as_str().unwrap()
+        )
+    );
+    r.b.lock()
+        .await
+        .limits
+        .apply_json(r#"{"threadMax":null}"#)
+        .unwrap();
+    r.a.lock()
+        .await
+        .limits
+        .apply_json(r#"{"threadMax":55}"#)
+        .unwrap();
+    let refused = r.send(false, reply.clone()).await;
+    assert_eq!(refused["error"]["data"]["code"], "loop_guard");
+    assert_eq!(
+        refused["error"]["message"],
+        format!(
+            "thread {} reached 55 messages across accounts",
+            thread.as_str().unwrap()
+        )
+    );
+    r.a.lock()
+        .await
+        .limits
+        .apply_json(r#"{"threadMax":0}"#)
+        .unwrap();
+    let sent = r.send(false, reply).await;
+    assert_eq!(sent["result"]["hop"], 110, "{sent}");
+    let high = r.hub.call(&r.a, &r.ai, request(9, "forward", json!({"from":"root","hop_floor":1000,"params":{"to":"beta/desk/root","body":"high"}})), false).await;
+    assert_eq!(high["result"]["hop"], 1000, "{high}");
+    r.a.lock()
+        .await
+        .limits
+        .apply_json(r#"{"hopMax":8}"#)
+        .unwrap();
+    let refused = r
+        .hub
+        .call(
+            &r.a,
+            &r.ai,
+            request(
+                9,
+                "forward",
+                json!({"from":"root","hop_floor":9,"params":{"to":"beta/desk/root","body":"high"}}),
+            ),
+            false,
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["code"], "loop_guard");
 }

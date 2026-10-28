@@ -1,4 +1,4 @@
-import { RATE_LIMITS, type RateLimits } from "./protocol"
+import { RATE_DURATIONS, RATE_LIMITS, type RateLimits } from "./protocol"
 import { RUNNER_NAME, runnerReply, type ViaRecord } from "./runner"
 import { canonicalPolicy, GROUP_NAME, matches, type Policy, policyRefusal, type PolicySubject, type ScopeSubject, validSelector } from "./policy"
 import {
@@ -664,7 +664,7 @@ export class RelayCore {
     for (const key of Object.keys(RATE_LIMITS) as (keyof RateLimits)[]) {
       if (rates[key] == null || rates[key] === 0) rates[key] = RATE_LIMITS[key]
     }
-    if (!Number.isFinite(rates.treePauseS) || rates.treePauseS <= 0) throw new RangeError("treePauseS must be a positive duration")
+    for (const key of RATE_DURATIONS) if (!Number.isFinite(rates[key]) || rates[key] <= 0) throw new RangeError(`${key} must be a positive duration`)
     this.rates = rates
     this.alive = options.alive ?? (() => true)
     this.startOf = options.startOf
@@ -3036,27 +3036,27 @@ export class RelayCore {
     const thread = parent?.thread ?? requestedThread ?? newId("thr", now)
     const causal = sender.last_received_at !== null && sender.last_received_at >= now - LIMITS.causalWindowS * 1000 ? (sender.last_received_hop ?? 0) + 1 : 0
     const hop = senderTty === 1 && !this.capEverySender ? 0 : Math.max(parent ? parent.hop + 1 : 0, causal)
-    if (hop > LIMITS.hopMax) {
+    if (hop > this.rates.hopMax) {
       const chain = parent ? `this reply would be hop ${hop} of a reply chain` : `this message would be hop ${hop} of a chain of agent messages`
       throw this.refuse(
         from,
         "loop_guard",
-        `${chain} (limit ${LIMITS.hopMax}): agents may be answering each other in a loop; stop and report to your user`,
+        `${chain} (limit ${this.rates.hopMax}): agents may be answering each other in a loop; stop and report to your user`,
         undefined,
         {
           to: addressed,
           hop,
-          limit: LIMITS.hopMax,
+          limit: this.rates.hopMax,
           thread,
         },
       )
     }
     const inThread = one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM messages WHERE thread = ?`, thread)!.n
     if (inThread > 0 && !parent && !this.member(thread, from)) throw new RelayError("not_found", `no thread ${thread} to continue`)
-    if (inThread >= LIMITS.threadMax)
-      throw this.refuse(from, "loop_guard", `thread ${thread} reached ${LIMITS.threadMax} messages`, undefined, {
+    if (inThread >= this.rates.threadMax)
+      throw this.refuse(from, "loop_guard", `thread ${thread} reached ${this.rates.threadMax} messages`, undefined, {
         to: addressed,
-        limit: LIMITS.threadMax,
+        limit: this.rates.threadMax,
         thread,
       })
     const today = !Number.isFinite(this.rates.userPerDay)
@@ -5473,7 +5473,9 @@ export class RelayCore {
           grant.created_at,
         )
       : undefined
-    const full = (thread: string) => one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM messages WHERE thread = ?`, thread)!.n >= LIMITS.threadMax
+    const full = (thread: string) =>
+      Number.isFinite(this.rates.threadMax) &&
+      one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM messages WHERE thread = ?`, thread)!.n >= this.rates.threadMax
     const thread = [last?.thread, stable].find((t): t is string => t !== undefined && !full(t))
     if (!thread) return null
     const sent =
@@ -5516,7 +5518,7 @@ export class RelayCore {
       if (spender.wake === "spawn-resume") body.push(heldLine(this.address(spender), spender.hold_ref !== null))
     }
     const causal = spender && spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
-    const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, LIMITS.hopMax) : 0
+    const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, this.rates.hopMax) : 0
     const { id } = this.post(spender ?? this.byHandle(SYSTEM_HANDLE)!, me, body.filter(Boolean).join("\n\n"), { kind: "message", thread, hop })
     this.sql.all(`UPDATE grants SET handback = ? WHERE token_hash = ?`, id, grant.token_hash)
     return id
@@ -5544,7 +5546,9 @@ export class RelayCore {
     replyTo?: string,
   ): string | null {
     if (!one(this.sql, `UPDATE grants SET run = ? WHERE token_hash = ? AND COALESCE(run, 1) < ? RETURNING token_hash`, run, grant.token_hash, run)) return null
-    const full = (thread: string) => one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM messages WHERE thread = ?`, thread)!.n >= LIMITS.threadMax
+    const full = (thread: string) =>
+      Number.isFinite(this.rates.threadMax) &&
+      one<{ n: number }>(this.sql, `SELECT COUNT(*) AS n FROM messages WHERE thread = ?`, thread)!.n >= this.rates.threadMax
     const woke =
       replyTo === undefined
         ? undefined
@@ -5572,7 +5576,7 @@ export class RelayCore {
     ]
     const now = this.now()
     const causal = spender.last_received_at !== null && spender.last_received_at >= now - LIMITS.causalWindowS * 1000
-    const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, LIMITS.hopMax) : 0
+    const hop = causal ? Math.min((spender.last_received_hop ?? 0) + 1, this.rates.hopMax) : 0
     return this.post(spender, me, body.filter(Boolean).join("\n\n"), { kind: "message", thread, hop, ...(anchor ? { replyTo: anchor.id } : {}) }).id
   }
 
@@ -6665,7 +6669,7 @@ export class RelayCore {
   }
 
   private detectPingPong(a: EndpointRow, b: EndpointRow): void {
-    if (a.id === b.id) return
+    if (a.id === b.id || !Number.isFinite(this.rates.pingPongAlternations)) return
     const now = this.now()
     const events = this.sql.all<{ from_ep: string }>(
       `SELECT from_ep FROM pair_events WHERE ((from_ep = ? AND to_ep = ?) OR (from_ep = ? AND to_ep = ?)) AND at > ? ORDER BY at, rowid`,
@@ -6673,17 +6677,17 @@ export class RelayCore {
       b.id,
       b.id,
       a.id,
-      now - LIMITS.pingPongWindowS * 1000,
+      now - this.rates.pingPongWindowS * 1000,
     )
     let alternations = 0
     for (let i = 1; i < events.length; i++) if (events[i]!.from_ep !== events[i - 1]!.from_ep) alternations++
-    if (alternations < LIMITS.pingPongAlternations) return
-    const until = now + LIMITS.pingPongBlockS * 1000
+    if (alternations < this.rates.pingPongAlternations) return
+    const until = now + this.rates.pingPongBlockS * 1000
     this.sql.all(`INSERT OR REPLACE INTO blocks (pair, until) VALUES (?, ?)`, pairKey(a.id, b.id), until)
     this.sql.all(`DELETE FROM pair_events WHERE (from_ep = ? AND to_ep = ?) OR (from_ep = ? AND to_ep = ?)`, a.id, b.id, b.id, a.id)
     this.audit("loop_guard", a.id, null, { with: this.address(b), alternations, until: iso(until) })
     this.notice(
-      `relay paused messages between ${this.address(a)} and ${this.address(b)} for ${LIMITS.pingPongBlockS / 60} minutes: they went back and forth ${alternations} times in ${LIMITS.pingPongWindowS / 60} minutes.`,
+      `relay paused messages between ${this.address(a)} and ${this.address(b)} for ${this.rates.pingPongBlockS / 60} minutes: they went back and forth ${alternations} times in ${this.rates.pingPongWindowS / 60} minutes.`,
     )
   }
 

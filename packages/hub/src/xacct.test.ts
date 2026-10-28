@@ -106,7 +106,7 @@ const root = (handle: string, extra: Record<string, unknown> = {}) => ({
 })
 
 /** two accounts, alice and bob, each a hub on its own database, linked as contacts through a fake link that calls the other hub */
-type Options = { link?: boolean; storedBytes?: number; machineWake?: HubDeps["machineWake"]; wake?: HubDeps["wake"] }
+type Options = { link?: boolean; storedBytes?: number; limits?: HubDeps["limits"]; machineWake?: HubDeps["machineWake"]; wake?: HubDeps["wake"] }
 
 function setup(options: Options = {}) {
   const clock = { now: START }
@@ -158,6 +158,7 @@ function setup(options: Options = {}) {
         contactPerDay: 200,
         contactPerDayMax: 2000,
         ...(options.storedBytes === undefined ? {} : { storedBytes: options.storedBytes }),
+        ...options.limits,
       },
       ...(options.link === false ? {} : { crossAccount: link }),
       ...(options.machineWake ? { machineWake: options.machineWake } : {}),
@@ -381,8 +382,8 @@ describe("cross-account messages between two account relays", () => {
     expect(bob.gate.calls.filter((c) => c.side === "ingress")).toHaveLength(1)
   })
 
-  test("caps: one recipient, 16 KiB, no attachments or private class, hop 8, 10 a minute per pair, a thread of 50", async () => {
-    const { alice, laptop, clock } = await linked()
+  test("caps: one recipient, 16 KiB, no attachments or private class, a configured hop 8, 10 a minute per pair, a configured thread of 50", async () => {
+    const { alice, laptop, clock } = await linked({ limits: { hopMax: 8, threadMax: 50 } })
     expect(await alice.fails(laptop, "forward", forward(["bob/desk/review", "bob/desk/lead"] as unknown as string, "x"))).toBe("invalid_params")
     expect(await alice.fails(laptop, "forward", forward(["bob/desk/review", "group:team"] as unknown as string, "x"))).toBe("invalid_params")
     expect(await alice.fails(laptop, "forward", forward("bob/desk/review", "x".repeat(16 * 1024 + 1)))).toBe("too_large")
@@ -403,6 +404,15 @@ describe("cross-account messages between two account relays", () => {
     }
     clock.now += 7 * 60_000
     expect(await alice.fails(laptop, "forward", forward("bob/desk/review", "t50", { thread: "thr_long" }))).toBe("loop_guard")
+  })
+
+  test("cross-account hop and thread limits are off by default", async () => {
+    const { alice, laptop, clock } = await linked()
+    expect((await alice.ok(laptop, "forward", forward("bob/desk/review", "deep", {}, "impl", { hop_floor: 1000 }))).hop).toBe(1000)
+    for (let i = 0; i < 60; i++) {
+      clock.now += 7 * 60_000
+      await alice.ok(laptop, "forward", forward("bob/desk/review", `t${i}`, { thread: "thr_long" }))
+    }
   })
 
   test("200 messages a day per account, raised by the contact's per_day up to 2000", async () => {

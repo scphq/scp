@@ -383,10 +383,12 @@ impl AccountHub {
         if send.get("reply_to").is_some_and(|v| !v.is_string()) {
             return Err(invalid("reply_to is a message id"));
         }
-        if origin_hop > 8 {
+        if let Some(limit) = self.limits.cap("hopMax")
+            && origin_hop > limit
+        {
             return Err(Error::new(
                 "loop_guard",
-                "message exceeds the hop limit of 8 across accounts",
+                &format!("message exceeds the hop limit of {limit} across accounts"),
             ));
         }
         let peer = self
@@ -453,12 +455,14 @@ impl AccountHub {
                 .as_ref()
                 .and_then(|x| serde_json::from_str::<Value>(&x.message).ok())
                 .and_then(|m| m["hop"].as_u64())
-                .map_or(0, |h| h + 1),
+                .map_or(0, |h| h.saturating_add(1)),
         );
-        if hop > 8 {
+        if let Some(limit) = self.limits.cap("hopMax")
+            && hop > limit
+        {
             return Err(Error::new(
                 "loop_guard",
-                "message exceeds the hop limit of 8 across accounts",
+                &format!("message exceeds the hop limit of {limit} across accounts"),
             ));
         }
         self.xcounters
@@ -683,10 +687,12 @@ impl AccountHub {
                 "a message from another account is at most 16384 bytes",
             ));
         }
-        if msg.hop > 8 {
+        if let Some(limit) = self.limits.cap("hopMax")
+            && msg.hop > limit
+        {
             return Err(Error::new(
                 "loop_guard",
-                "hop is past the limit across accounts (8)",
+                &format!("hop is past the limit across accounts ({limit})"),
             ));
         }
         if msg.expires_at <= crate::now_ms() {
@@ -868,15 +874,19 @@ impl AccountHub {
                 xcounters::until_tomorrow(now),
             ));
         }
-        if inbox
-            .iter()
-            .filter(|x| x.endpoint == to && x.thread == msg.thread)
-            .count()
-            >= 50
+        if let Some(limit) = self.limits.cap("threadMax")
+            && inbox
+                .iter()
+                .filter(|x| x.endpoint == to && x.thread == msg.thread)
+                .count() as u64
+                >= limit
         {
             return Err(Error::new(
                 "loop_guard",
-                &format!("thread {} reached 50 messages across accounts", msg.thread),
+                &format!(
+                    "thread {} reached {limit} messages across accounts",
+                    msg.thread
+                ),
             ));
         }
         let cap = self.limits.cap("storedBytes").unwrap_or(u64::MAX);
