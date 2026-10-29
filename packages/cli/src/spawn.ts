@@ -997,7 +997,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   let values = parsed.values
   const { command } = parsed
   const bytes = values["handback-bytes"] === undefined ? undefined : handbackBytes(values["handback-bytes"] as string)
-  if (!values.help) durableCheck(values, command, cwd, (await import("./claude-bg")).idleAfterS(process.env))
+  if (!values.help) durableCheck(values, command, cwd, await spawnIdleDefault())
   const runner = process.env[SPAWN_RUNNER]
   delete process.env[SPAWN_RUNNER]
   if (typeof values.via === "string") return (await import("./remote-spawn")).viaSpawn(values, command, cwd)
@@ -1067,7 +1067,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
     handshake && ((failed?: { message: string; code: number }) => handshake(failed ? { error: failed.message, code: failed.code } : { name, pid: process.pid }))
   const launch = (argv: string[], extra: Parameters<typeof runHarness>[2] = {}, runEnv: Record<string, string> = env) =>
     runHarness(harnessArgv(argv, runEnv), runEnv, { group: runner !== undefined, ...(closedStdin(argv) ? { stdin: "ignore" as const } : {}), ...extra })
-  const idleS = spawnIdle(values, runner !== undefined, (await import("./claude-bg")).idleAfterS(process.env))
+  const idleS = spawnIdle(values, runner !== undefined, await spawnIdleDefault())
   const harness = idleS > 0 ? resumable(command) : undefined
   const signals = harness ? watchSignals() : undefined
   const agyDir = harness === "agy" ? mkdtempSync(join(privateDir(join(relayDir(env), "agy")), "spawn-")) : undefined
@@ -1149,8 +1149,11 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
   }
 }
 
+/** the spawn hold without --idle: `$SCP_SPAWN_IDLE_AFTER_S`, `spawn.idle_after_s`, `$SCP_IDLE_AFTER_S`, `lifecycle.idle_after_s`, else ${SPAWN_IDLE_S} s */
+const spawnIdleDefault = async (): Promise<number> => (await import("./claude-bg")).spawnIdleAfterS(process.env) ?? SPAWN_IDLE_S
+
 /**
- * how long spawn holds a worker it can resume: --idle, else `lifecycle.idle_after_s` (default ${SPAWN_IDLE_S} s) when detached or --durable,
+ * how long spawn holds a worker it can resume: --idle, else `spawn.idle_after_s` (default ${SPAWN_IDLE_S} s) when detached or --durable,
  * else (in the foreground) not at all
  */
 export function spawnIdle(values: Values, detached: boolean, idleAfter: number): number {
@@ -1218,7 +1221,9 @@ function durableCheck(values: Values, command: string[], cwd: string, idleAfter:
   if (values.durable === true && values["no-durable"] === true) throw new RelayUsage("--durable and --no-durable conflict")
   if (values.durable !== true) return
   if (idle === 0)
-    throw new RelayUsage("--durable holds the worker: it does not go with an idle time of 0 (--idle, $SCP_IDLE_AFTER_S or lifecycle.idle_after_s)")
+    throw new RelayUsage(
+      "--durable holds the worker: it does not go with an idle time of 0 (--idle, $SCP_SPAWN_IDLE_AFTER_S, spawn.idle_after_s, $SCP_IDLE_AFTER_S or lifecycle.idle_after_s)",
+    )
   const harness = resumable(command)
   const base = harness ? resumeBase(command, "0".repeat(64)) : undefined
   if (!harness || !base)
