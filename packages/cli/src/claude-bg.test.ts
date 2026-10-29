@@ -18,6 +18,7 @@ import {
   claudeWakeCommand,
   historicAfterS,
   idleAfterS,
+  spawnIdleAfterS,
   plan,
   readState,
   onlyPollsInbox,
@@ -482,18 +483,40 @@ describe("configuration", () => {
     expect(bgConfig(f.env)).toEqual({ stopAfterS: Infinity, idleAfterS: 600, remove: false })
     expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: "900", SCP_CLAUDE_BG_REMOVE: "1" })).toEqual({ stopAfterS: 900, idleAfterS: 600, remove: true })
   })
-  test("reads the idle threshold from its primary names before their claude_bg aliases, the environment first", () => {
+  test("reads the claude bg idle threshold from its own names before the shared ones, the environment first at each level", () => {
     const f = fixture()
     const idle = (env: Record<string, string>) => bgConfig({ ...f.env, ...env }).idleAfterS
     expect([idle({}), idleAfterS(f.env)]).toEqual([600, 600])
-    expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(1200)
-    expect(idle({ SCP_IDLE_AFTER_S: "Infinity", SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(Infinity)
-    configure(f.env, { claude_bg: { idle_after_s: "1h" } })
-    expect(idle({})).toBe(3600)
-    configure(f.env, { claude_bg: { idle_after_s: "1h" }, lifecycle: { idle_after_s: 300 } })
+    expect(idle({ SCP_IDLE_AFTER_S: "5m" })).toBe(300)
+    expect(idle({ SCP_IDLE_AFTER_S: "Infinity", SCP_CLAUDE_BG_IDLE_AFTER_S: "20m" })).toBe(1200)
+    configure(f.env, { lifecycle: { idle_after_s: 300 } })
     expect([idle({}), idleAfterS(f.env)]).toEqual([300, 300])
-    expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "90" })).toBe(90)
+    expect(idle({ SCP_IDLE_AFTER_S: "90" })).toBe(90)
     expect(idle({ SCP_IDLE_AFTER_S: "bogus" })).toBe(300)
+    configure(f.env, { claude_bg: { idle_after_s: "1h" }, lifecycle: { idle_after_s: 300 } })
+    expect([idle({}), idle({ SCP_IDLE_AFTER_S: "90" }), idleAfterS(f.env)]).toEqual([3600, 3600, 3600])
+    expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "90" })).toBe(90)
+    expect(idle({ SCP_CLAUDE_BG_IDLE_AFTER_S: "bogus" })).toBe(3600)
+  })
+  test("reads the spawn hold from its own names before the shared ones, never from claude_bg", () => {
+    const f = fixture()
+    const hold = (env: Record<string, string>) => spawnIdleAfterS({ ...f.env, ...env })
+    expect(hold({})).toBeUndefined()
+    expect(hold({ SCP_CLAUDE_BG_IDLE_AFTER_S: "Infinity" })).toBeUndefined()
+    expect(hold({ SCP_IDLE_AFTER_S: "5m" })).toBe(300)
+    expect(hold({ SCP_IDLE_AFTER_S: "Infinity", SCP_SPAWN_IDLE_AFTER_S: "20m" })).toBe(1200)
+    configure(f.env, { lifecycle: { idle_after_s: 300 } })
+    expect([hold({}), hold({ SCP_IDLE_AFTER_S: "90" })]).toEqual([300, 90])
+    configure(f.env, { spawn: { idle_after_s: "1h" }, lifecycle: { idle_after_s: 300 } })
+    expect([hold({}), hold({ SCP_IDLE_AFTER_S: "90" }), hold({ SCP_SPAWN_IDLE_AFTER_S: "0" })]).toEqual([3600, 3600, 0])
+  })
+  test("claude_bg.idle_after_s Infinity never stops a background worker and leaves spawn holds finite", () => {
+    const f = fixture()
+    configure(f.env, { claude_bg: { idle_after_s: "Infinity" } })
+    expect([idleAfterS(f.env), spawnIdleAfterS(f.env)]).toEqual([Infinity, undefined])
+    configure(f.env, { claude_bg: { idle_after_s: "Infinity" }, lifecycle: { idle_after_s: "15m" } })
+    expect([idleAfterS(f.env), spawnIdleAfterS(f.env)]).toEqual([Infinity, 900])
+    expect([idleAfterS({ ...f.env, SCP_IDLE_AFTER_S: "60" }), spawnIdleAfterS({ ...f.env, SCP_IDLE_AFTER_S: "60" })]).toEqual([Infinity, 60])
   })
   test("reads the historic threshold from the environment, else config.json", () => {
     const f = fixture()

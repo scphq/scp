@@ -405,7 +405,8 @@ ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop t
 ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of the endpoints of the
                                                  sessions ${CLI_NAME} claude --bg did not start; stops, removes and respawns nothing
   The broker does the same on its own, for the workers ${CLI_NAME} claude --bg started: idle without work one stops after
-  $SCP_IDLE_AFTER_S (config.json lifecycle.idle_after_s; 600 s, Infinity never), a done (or handed back) one after
+  $SCP_CLAUDE_BG_IDLE_AFTER_S (config.json claude_bg.idle_after_s), else the shared $SCP_IDLE_AFTER_S (lifecycle.idle_after_s;
+  600 s, Infinity never), a done (or handed back) one after
   $SCP_CLAUDE_BG_STOP_AFTER_S (120 s) when sooner, and it is removed once historic unless
   $SCP_CLAUDE_BG_REMOVE=0; config.json claude_bg {stop_after_s, remove} sets those. $SCP_HISTORIC_AFTER_S (historic_after_s) sets
   when an agent turns historic.
