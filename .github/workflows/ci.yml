@@ -255,9 +255,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build the relay
+      - name: Build the relay and the native broker
         working-directory: crates
-        run: cargo build --locked --bin scp-relay
+        run: cargo build --locked --bin scp-relay --bin scp-broker
+
+      - name: Broker conformance against rust
+        env:
+          SCP_BROKER_BIN: ${{ github.workspace }}/crates/target/debug/scp-broker
+          SCP_BROKER_TARGETS: rust
+        run: bun test packages/conformance/src/broker
 
       # ts always runs; the two variables add rust-sqlite and rust-pg.
       - name: Conformance against ts, rust-sqlite and rust-pg

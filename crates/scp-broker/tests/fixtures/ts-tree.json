@@ -1,0 +1,125 @@
+{
+  "seed": [
+    {
+      "query": "DELETE FROM relay_migrations",
+      "params": []
+    },
+    {
+      "query": "INSERT INTO endpoints (id, handle, kind, created_at, rules, caps) VALUES (?, ?, 'agent', 0, ?, ?)",
+      "params": [
+        "ep_old",
+        "worker",
+        "{\"in\":[\"tree:self\"],\"out\":[\"tree:self\"]}",
+        "{\"caps\":[{\"id\":\"cap1\",\"dir\":\"out\",\"sels\":[{\"sel\":\"tree:self\"}]},{\"id\":\"cap2\",\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\",\"via\":\"ep_parent\"}]}],\"allow\":{\"empty\":[],\"kept\":[{\"sel\":\"tree:self\"}]},\"lifted\":[\"cap3\"],\"unused\":true}"
+      ]
+    },
+    {
+      "query": "INSERT INTO endpoints (id, handle, kind, created_at, rules) VALUES ('ep_mixed', 'mixed', 'agent', 0, ?)",
+      "params": [
+        "{\"in\":[\"tree:self\",\"tree:parent\"],\"out\":[\"tree:self\"]}"
+      ]
+    },
+    {
+      "query": "INSERT INTO grants (token_hash, issuer, under, caps, used_by, revoked_at, created_at, expires_at) VALUES (?, 'ep_old', ?, ?, ?, ?, 0, 9999999999999)",
+      "params": [
+        "live",
+        "ep_old",
+        "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\"}]}]",
+        null,
+        null
+      ]
+    },
+    {
+      "query": "INSERT INTO grants (token_hash, issuer, under, caps, used_by, revoked_at, created_at, expires_at) VALUES (?, 'ep_old', ?, ?, ?, ?, 0, 9999999999999)",
+      "params": [
+        "missing",
+        "ep_missing",
+        "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\"}]}]",
+        null,
+        null
+      ]
+    },
+    {
+      "query": "INSERT INTO grants (token_hash, issuer, under, caps, used_by, revoked_at, created_at, expires_at) VALUES (?, 'ep_old', ?, ?, ?, ?, 0, 9999999999999)",
+      "params": [
+        "used",
+        "ep_old",
+        "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\"}]}]",
+        "ep_old",
+        null
+      ]
+    },
+    {
+      "query": "INSERT INTO grants (token_hash, issuer, under, caps, used_by, revoked_at, created_at, expires_at) VALUES (?, 'ep_old', ?, ?, ?, ?, 0, 9999999999999)",
+      "params": [
+        "revoked",
+        "ep_old",
+        "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\"}]}]",
+        null,
+        1
+      ]
+    }
+  ],
+  "after": {
+    "endpoints": [
+      {
+        "id": "ep_old",
+        "rules": "{\"in\":[\"tree:parent\",\"tree:descendants\"],\"out\":[\"tree:parent\",\"tree:descendants\"]}",
+        "caps": "{\"caps\":[{\"id\":\"cap1\",\"dir\":\"out\",\"sels\":[{\"sel\":\"tree:parent\"},{\"sel\":\"tree:descendants\"}]},{\"id\":\"cap2\",\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\",\"via\":\"ep_parent\"}]}],\"allow\":{\"kept\":[{\"sel\":\"tree:self\"}]},\"lifted\":[\"cap3\"]}"
+      },
+      {
+        "id": "ep_mixed",
+        "rules": "{\"in\":[\"tree:self\",\"tree:parent\"],\"out\":[\"tree:parent\",\"tree:descendants\"]}",
+        "caps": null
+      }
+    ],
+    "grants": [
+      {
+        "token_hash": "live",
+        "caps": "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:parent\"},{\"sel\":\"tree:descendants\"}]}]"
+      },
+      {
+        "token_hash": "missing",
+        "caps": "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:parent\"},{\"sel\":\"tree:descendants\"}]}]"
+      },
+      {
+        "token_hash": "used",
+        "caps": "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\"}]}]"
+      },
+      {
+        "token_hash": "revoked",
+        "caps": "[{\"dir\":\"in\",\"sels\":[{\"sel\":\"tree:self\"}]}]"
+      }
+    ],
+    "audit": [
+      {
+        "at": 1700000000000,
+        "event": "scope_migrate",
+        "endpoint": "ep_old",
+        "ref": null,
+        "detail": "{\"target\":\"me/worker\",\"lists\":[{\"list\":\"own rules\",\"dir\":\"in\",\"before\":[\"tree:self\"],\"after\":[\"tree:parent\",\"tree:descendants\"]},{\"list\":\"own rules\",\"dir\":\"out\",\"before\":[\"tree:self\"],\"after\":[\"tree:parent\",\"tree:descendants\"]},{\"list\":\"cap cap1\",\"dir\":\"out\",\"before\":[\"tree:self\"],\"after\":[\"tree:parent\",\"tree:descendants\"]}]}"
+      },
+      {
+        "at": 1700000000000,
+        "event": "scope_migrate",
+        "endpoint": "ep_mixed",
+        "ref": null,
+        "detail": "{\"target\":\"me/mixed\",\"lists\":[{\"list\":\"own rules\",\"dir\":\"out\",\"before\":[\"tree:self\"],\"after\":[\"tree:parent\",\"tree:descendants\"]}]}"
+      },
+      {
+        "at": 1700000000000,
+        "event": "scope_migrate",
+        "endpoint": "ep_old",
+        "ref": null,
+        "detail": "{\"target\":\"me/worker\",\"grant\":true,\"lists\":[{\"list\":\"grant\",\"dir\":\"in\",\"before\":[\"tree:self\"],\"after\":[\"tree:parent\",\"tree:descendants\"]}]}"
+      },
+      {
+        "at": 1700000000000,
+        "event": "scope_migrate",
+        "endpoint": "ep_missing",
+        "ref": null,
+        "detail": "{\"target\":\"ep_missing\",\"grant\":true,\"lists\":[{\"list\":\"grant\",\"dir\":\"in\",\"before\":[\"tree:self\"],\"after\":[\"tree:parent\",\"tree:descendants\"]}]}"
+      }
+    ]
+  }
+}
