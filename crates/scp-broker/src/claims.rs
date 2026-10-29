@@ -136,6 +136,23 @@ pub fn lineage_keys(value: Option<&Value>) -> Result<Vec<String>, RpcError> {
         .collect())
 }
 
+pub fn revivable(row: &Row) -> bool {
+    text(row, "kind") == Some("agent")
+        && text(row, "hibernate").is_some()
+        && text(row, "revive").is_some()
+}
+
+pub fn busy_since(row: &Row, since: i64, created: bool, now: i64, grace_ms: i64) -> bool {
+    let seen = integer(row, "hook_seen").unwrap_or(0);
+    seen > since || (created && seen >= now - grace_ms)
+}
+
+struct Claimed {
+    row: Row,
+    resume: Option<String>,
+    retired: Option<String>,
+}
+
 #[derive(Clone)]
 struct Fields {
     model: Option<String>,
@@ -146,6 +163,7 @@ struct Fields {
     process: Option<String>,
     harness_session: Option<String>,
     harness_origin: Option<String>,
+    harness_handoff: bool,
 }
 #[derive(Clone)]
 struct Scope {
@@ -533,7 +551,7 @@ impl Core {
         fields: &Fields,
         scope: &Scope,
         transient: bool,
-    ) -> Result<(Row, Option<String>), RpcError> {
+    ) -> Result<Claimed, RpcError> {
         self.end_exited().await?;
         let mut row = if let Some(session) = &fields.session {
             self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
@@ -906,6 +924,7 @@ impl Core {
             }
         }
         let mut result = self.must_endpoint(id).await?;
+        let mut rehomed = false;
         if transient
             && !exact
             && let Some(session) = &fields.harness_session
@@ -931,13 +950,102 @@ impl Core {
                         self.store.all("UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ?",&[opt(Some(session)),if text(&held,"harness_session")==Some(session){opt(text(&held,"harness_transcript"))}else{SqlValue::Null},opt(Some(id))]).await?;
                         self.retake(&result, &held, false).await?;
                         result = self.must_endpoint(id).await?;
+                        rehomed = true;
                     }
                     break;
                 }
             }
         }
+        let retired = if !rehomed && !exact && fields.harness_handoff {
+            self.hand_off(&result, harness, fields, created).await?
+        } else {
+            None
+        };
+        if retired.is_some() {
+            result = self.must_endpoint(id).await?;
+        }
         self.state.addresses.insert(id.into(), address(&result));
-        Ok((result, resume))
+        Ok(Claimed {
+            row: result,
+            resume,
+            retired,
+        })
+    }
+    async fn hand_off(
+        &mut self,
+        row: &Row,
+        harness: &str,
+        fields: &Fields,
+        created: bool,
+    ) -> Result<Option<String>, RpcError> {
+        let (Some(origin), Some(session)) = (&fields.harness_origin, &fields.harness_session)
+        else {
+            return Ok(None);
+        };
+        if session == origin
+            || text(row, "kind") != Some("agent")
+            || integer(row, "named").is_some()
+            || text(row, "harness_origin") != Some(origin)
+            || text(row, "session").is_some_and(|s| s.starts_with("sub:"))
+        {
+            return Ok(None);
+        }
+        let id = text(row, "id").ok_or_else(RpcError::internal)?;
+        let since = integer(row, "created_at").unwrap_or(0);
+        let held = self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND id != ? AND created_at < ? AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY named IS NULL, COALESCE(last_seen,created_at) DESC", &[opt(Some(origin)),opt(Some(id)),SqlValue::Int(since)]).await?
+            .into_iter().find(|held| !revivable(held) && (harness_fits(text(held,"harness"),harness) || same_provider(text(held,"harness"),harness)));
+        let Some(held) = held else {
+            return Ok(None);
+        };
+        if busy_since(
+            &held,
+            since,
+            created,
+            now_ms(),
+            self.limits.get("restartGraceS").unwrap_or(60) as i64 * 1000,
+        ) {
+            return Ok(None);
+        }
+        self.store.all("SAVEPOINT handoff", &[]).await?;
+        let result = async {
+            self.store
+                .all(
+                    "UPDATE endpoints SET harness_session = ? WHERE id = ?",
+                    &[opt(Some(session)), opt(Some(id))],
+                )
+                .await?;
+            self.retake(&self.must_endpoint(id).await?, &held, false)
+                .await
+        }
+        .await;
+        if result.is_err() {
+            self.store.all("ROLLBACK TO handoff", &[]).await?;
+        }
+        self.store.all("RELEASE handoff", &[]).await?;
+        let retired = match result {
+            Ok(retired) => retired,
+            Err(error) => {
+                let Some(data) = error.data else {
+                    return Err(error);
+                };
+                self.audit(
+                    "handoff_refused",
+                    Some(id),
+                    None,
+                    json!({"from":text(row,"handle"),"to":text(&held,"handle"),"code":data.code}),
+                )
+                .await?;
+                return Ok(None);
+            }
+        };
+        self.audit(
+            "handoff",
+            Some(id),
+            None,
+            json!({"from":text(row,"handle"),"to":text(&held,"handle"),"retired":retired}),
+        )
+        .await?;
+        Ok(Some(retired))
     }
     async fn reset_claim(&self, row: &Row, scope: &Scope, kind: &str) -> Result<(), RpcError> {
         let id = text(row, "id").ok_or_else(RpcError::internal)?;
@@ -965,7 +1073,7 @@ impl Core {
         claim: &Map<String, Value>,
         transient: bool,
         self_keys: Option<&Value>,
-    ) -> Result<(Row, Option<String>), RpcError> {
+    ) -> Result<Claimed, RpcError> {
         let harness =
             clean_text(claim.get("harness"), "harness", 32)?.unwrap_or_else(|| "cli".into());
         if !valid_harness(&harness) {
@@ -987,6 +1095,7 @@ impl Core {
             process: clean_text(claim.get("process"), "process", 128)?,
             harness_session: clean_text(claim.get("harness_session"), "harness_session", 128)?,
             harness_origin: clean_text(claim.get("harness_origin"), "harness_origin", 128)?,
+            harness_handoff: claim.get("harness_handoff") == Some(&Value::Bool(true)),
         };
         if fields
             .process
@@ -1025,6 +1134,12 @@ impl Core {
                     "the claim carries a credential",
                 ));
             }
+        }
+        if claim
+            .get("harness_handoff")
+            .is_some_and(|v| !v.is_boolean())
+        {
+            return Err(RpcError::invalid_params("harness_handoff is true or false"));
         }
         let lineage = lineage_keys(claim.get("lineage"))?;
         let keys = lineage_keys(self_keys)?;
@@ -1067,23 +1182,24 @@ impl Core {
                 }
             }
         }
-        let (row, resume) = self.claim_row(&harness, &fields, &scope, transient).await?;
+        let claimed = self.claim_row(&harness, &fields, &scope, transient).await?;
+        let row = &claimed.row;
         if let Some(under) = clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty())
-            && text(&row, "parent_ep").is_none()
+            && text(row, "parent_ep").is_none()
         {
             match self.lookup(&under).await {
                 Ok(parent) => {
-                    self.link_endpoint(&row, &parent, "session").await?;
+                    self.link_endpoint(row, &parent, "session").await?;
                 }
                 Err(error) => {
-                    self.audit("claim_under_refused",text(&row,"id"),None,json!({"target":address(&row),"under":under,"code":error.data.map(|v|v.code)})).await?;
+                    self.audit("claim_under_refused",text(row,"id"),None,json!({"target":address(row),"under":under,"code":error.data.map(|v|v.code)})).await?;
                 }
             }
         }
-        Ok((
-            self.must_endpoint(text(&row, "id").unwrap_or("")).await?,
-            resume,
-        ))
+        Ok(Claimed {
+            row: self.must_endpoint(text(row, "id").unwrap_or("")).await?,
+            ..claimed
+        })
     }
 }
 fn suffixed(handle: &str, n: usize) -> String {
@@ -1173,11 +1289,12 @@ pub async fn hello_claim(
             return Ok(core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None));
         }
     }
-    let (row, resume) = crate::store::transaction(
+    let claimed = crate::store::transaction(
         core.store.clone(),
         hello_transaction(core, conn, params, transient),
     )
     .await?;
+    let row = claimed.row;
     let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
     let mode = if transient {
         Mode::Transient
@@ -1189,6 +1306,9 @@ pub async fn hello_claim(
         Mode::Agent
     };
     core.state.bind(conn, Some(id.clone()), mode);
+    if let Some(retired) = claimed.retired {
+        core.state.close_endpoint(&retired, conn);
+    }
     core.state.addresses.insert(id, address(&row));
     if let Some(c) = core.state.connections.get_mut(&conn) {
         c.brief = params.get("brief") == Some(&Value::Bool(true));
@@ -1203,7 +1323,7 @@ pub async fn hello_claim(
             .and_then(Value::as_str)
             .map(str::to_owned);
     }
-    Ok(core.hello_result(core.view(&row).await?, resume))
+    Ok(core.hello_result(core.view(&row).await?, claimed.resume))
 }
 
 fn bind_lineage(
@@ -1229,7 +1349,7 @@ async fn hello_transaction(
     _conn: ConnectionId,
     params: &Map<String, Value>,
     transient: bool,
-) -> Result<(Row, Option<String>), RpcError> {
+) -> Result<Claimed, RpcError> {
     if !transient {
         if let Some(resume) = params.get("resume").and_then(Value::as_str) {
             let row=core.store.all("SELECT * FROM endpoints WHERE token_hash = ? AND substr(handle,1,5) != 'gone:'",&[opt(Some(&hash(resume)))]).await?.into_iter().next().ok_or_else(||RpcError::new(ErrorCode::Unauthorized,"unknown resume token"))?;
@@ -1241,12 +1361,20 @@ async fn hello_transaction(
                 )
                 .await?;
             core.audit("resume", Some(id), None, json!({})).await?;
-            return Ok((core.must_endpoint(id).await?, None));
+            return Ok(Claimed {
+                row: core.must_endpoint(id).await?,
+                resume: None,
+                retired: None,
+            });
         }
         if params.get("human") == Some(&Value::Bool(true)) {
             let row=core.store.all("UPDATE endpoints SET connections = connections + 1,last_seen = ? WHERE handle = '_human' RETURNING *",&[SqlValue::Int(now_ms())]).await?.into_iter().next().ok_or_else(RpcError::internal)?;
             core.audit("claim",text(&row,"id"),None,json!({"handle":"","harness":"human","tty":params.get("tty")==Some(&Value::Bool(true))})).await?;
-            return Ok((row, None));
+            return Ok(Claimed {
+                row,
+                resume: None,
+                retired: None,
+            });
         }
     }
     let empty = Map::new();
@@ -1258,22 +1386,24 @@ async fn hello_transaction(
         let join = join
             .as_object()
             .ok_or_else(|| RpcError::invalid_params("join is {handle?, under?}"))?;
-        let (row, _) = core.claim_agent(claim, true, None).await?;
+        let claimed = core.claim_agent(claim, true, None).await?;
+        let row = &claimed.row;
         if let Some(handle) = join
             .get("handle")
             .filter(|v| !v.is_null() && v.as_str() != Some(""))
         {
-            core.rename_row(&row, handle, false, false).await?;
+            core.rename_row(row, handle, false, false).await?;
         }
-        let row = core.must_endpoint(text(&row, "id").unwrap_or("")).await?;
+        let row = core.must_endpoint(text(row, "id").unwrap_or("")).await?;
         if let Some(under) = join.get("under").and_then(Value::as_str) {
             let parent = core.lookup(under).await?;
             core.link_endpoint(&row, &parent, "session").await?;
         }
-        return Ok((
-            core.must_endpoint(text(&row, "id").unwrap_or("")).await?,
-            None,
-        ));
+        return Ok(Claimed {
+            row: core.must_endpoint(text(&row, "id").unwrap_or("")).await?,
+            resume: None,
+            retired: claimed.retired,
+        });
     }
     core.claim_agent(claim, transient, params.get("self")).await
 }

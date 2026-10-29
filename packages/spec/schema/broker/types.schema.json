@@ -1728,6 +1728,9 @@
         "harness_origin": {
           "type": "string"
         },
+        "harness_handoff": {
+          "type": "boolean"
+        },
         "lineage": {
           "type": "array",
           "items": {

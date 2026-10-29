@@ -366,6 +366,8 @@ export interface Relinked {
   from: string
   to: string
   by: "session" | "origin"
+  /** the endpoint taken is still held by its origin's idle harness process, as a background hand-off leaves it: applied only with `live` */
+  live?: true
   retired?: string
 }
 
@@ -943,7 +945,14 @@ export class RelayCore {
   claim(
     claim: Claim,
     options: { transient?: boolean; self?: unknown } = {},
-  ): { endpoint: EndpointView; token?: string; created?: true; subagent?: true; rehomed?: { from: string } } {
+  ): {
+    endpoint: EndpointView
+    token?: string
+    created?: true
+    subagent?: true
+    rehomed?: { from: string }
+    handedOff?: { from: string; retired: string }
+  } {
     const subagent = subagentOf(claim.subagent)
     const harness = cleanText(claim.harness, "harness", 32) ?? "cli"
     if (!validHarness(harness)) throw new RelayError("invalid_params", `harness ${JSON.stringify(harness)} is not a valid name`)
@@ -968,6 +977,8 @@ export class RelayCore {
       .map((v) => (v ? findSecret(v) : null))
       .find(Boolean)
     if (leaked) throw new RelayError("secret_refused", `the claim looks like it carries a credential (${leaked})`)
+    if (claim.harness_handoff !== undefined && typeof claim.harness_handoff !== "boolean")
+      throw new RelayError("invalid_params", "harness_handoff is true or false")
     if (claim.grant !== undefined && (typeof claim.grant !== "string" || !GRANT_TOKEN.test(claim.grant)))
       throw new RelayError("invalid_params", "grant is a krt_ token")
     if (claim.ticket !== undefined && (typeof claim.ticket !== "string" || !WAKE_TICKET.test(claim.ticket)))
@@ -1011,9 +1022,57 @@ export class RelayCore {
       if (bound) Object.assign(scope, { grant: bound.token_hash, handle: bound.name ?? wanted })
       const claimed = this.claimRow(scope.handle, harness, fields, options.transient === true, scope)
       const rehomed = options.transient === true && !scope.exact ? this.rehome(claimed.endpoint.id, harness, fields, scope) : undefined
-      const placed = rehomed ? { ...claimed, endpoint: this.view(this.byId(claimed.endpoint.id)!), rehomed } : claimed
+      const handedOff =
+        claim.harness_handoff === true && !scope.exact && !rehomed ? this.handOff(claimed.endpoint.id, harness, fields, claimed.created === true) : undefined
+      const placed =
+        rehomed || handedOff
+          ? { ...claimed, endpoint: this.view(this.byId(claimed.endpoint.id)!), ...(rehomed ? { rehomed } : {}), ...(handedOff ? { handedOff } : {}) }
+          : claimed
       return under === null ? placed : this.claimUnder(placed, under)
     })
+  }
+
+  /**
+   * a background hand-off's claim: the harness moved session `fields.harness_origin` to a background process of its own, whose auto-named
+   * endpoint `id` was created after the origin's. The origin's endpoint is taken over as a rehome takes it, also while its old harness process
+   * still holds it, unless that process is busy: its hooks reported since `id` was created, or, at the claim that created `id`, within
+   * ${LIMITS.restartGraceS} s before it. A refusal keeps the claim as it is, audited `handoff_refused`; the retired id, whose connections the
+   * broker closes
+   */
+  private handOff(
+    id: string,
+    harness: string,
+    fields: { harness_session: string | null; harness_origin: string | null },
+    created: boolean,
+  ): { from: string; retired: string } | undefined {
+    const row = this.byId(id)
+    const origin = fields.harness_origin
+    if (!row || origin === null || fields.harness_session === null || fields.harness_session === origin) return undefined
+    if (row.kind !== "agent" || row.named !== null || row.harness_origin !== origin || row.session?.startsWith("sub:") || !this.localRow(row)) return undefined
+    const now = this.now()
+    const held = this.sql
+      .all<EndpointRow>(
+        `SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND id != ? AND created_at < ? AND (session IS NULL OR substr(session, 1, 4) != 'sub:')
+         AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY named IS NULL, COALESCE(last_seen, created_at) DESC`,
+        origin,
+        row.id,
+        row.created_at,
+      )
+      .find((held) => this.localRow(held) && !revivable(held) && (harnessFits(held.harness, harness) || sameProvider(held.harness, harness)))
+    if (!held || busySince(held, row.created_at, created, now)) return undefined
+    const from = row.handle
+    try {
+      this.tx(() => {
+        this.sql.all(`UPDATE endpoints SET harness_session = ? WHERE id = ?`, fields.harness_session, row.id)
+        this.retake(this.byId(row.id)!, held, false)
+      })
+    } catch (error) {
+      if (!(error instanceof RelayError)) throw error
+      this.audit("handoff_refused", row.id, null, { from, to: held.handle, code: error.code })
+      return undefined
+    }
+    this.audit("handoff", row.id, null, { from, to: held.handle, retired: held.id })
+    return { from, retired: held.id }
   }
 
   /**
@@ -2152,11 +2211,13 @@ export class RelayCore {
 
   /**
    * a session joins on demand: its hook claim registers or takes back its endpoint, marked seen now even right after a leave, and `handle`,
-   * when given, renames it in place ({@link rename}'s rules). Nothing is kept when the rename is refused
+   * when given, renames it in place ({@link rename}'s rules). Nothing is kept when the rename is refused. `handedOff` hears a background
+   * hand-off the claim made
    */
-  joinSession(claim: Claim, handle?: unknown, under?: unknown): EndpointView {
+  joinSession(claim: Claim, handle?: unknown, under?: unknown, handedOff?: (moved: { from: string; retired: string }) => void): EndpointView {
     return this.scopeTx(() => {
-      const { endpoint } = this.claim(claim, { transient: true })
+      const { endpoint, handedOff: moved } = this.claim(claim, { transient: true })
+      if (moved) handedOff?.(moved)
       const row = this.mustEndpoint(endpoint.id)
       if (handle !== undefined && handle !== null && handle !== "") this.renameRow(row, handle, false)
       this.sql.all(`UPDATE endpoints SET hook_seen = ?, hook_ended = NULL WHERE id = ?`, this.now(), row.id)
@@ -2392,10 +2453,13 @@ export class RelayCore {
   /**
    * the human at a terminal puts each auto-named local agent back on the released endpoint named by a rename or a grant of its harness session, else of the session
    * it forks, where that one sits where the agent sits or the agent is an unplaced root: taken over as a hook's rehome takes it, each at
-   * most once (a session match first, then a live agent, then the latest seen). `dry_run` only lists the pairs; a refused one is skipped, audited `relink_refused`
+   * most once (a session match first, then a live agent, then the latest seen). An endpoint still held by the harness process of the session
+   * the agent forks, idle since the agent's endpoint was created, pairs too, as a background hand-off the claim did not catch: `live`, applied only
+   * with `live` (else listed unapplied), its old connections closed. `dry_run` only lists the pairs; a refused one is skipped, audited `relink_refused`
    */
-  relink(actor: ScopeActor, params: { dry_run?: unknown } = {}): { relinked: Relinked[] } {
+  relink(actor: ScopeActor, params: { dry_run?: unknown; live?: unknown } = {}): { relinked: Relinked[] } {
     if (params.dry_run !== undefined && typeof params.dry_run !== "boolean") throw new RelayError("invalid_params", "dry_run is true or false")
+    if (params.live !== undefined && typeof params.live !== "boolean") throw new RelayError("invalid_params", "live is true or false")
     return this.scopeTx(() => {
       const me = this.actorRow(actor)
       if (actor.kind !== "human") throw new RelayError("scope_refused", "only the human at a terminal relinks endpoints")
@@ -2410,31 +2474,35 @@ export class RelayCore {
         this.sql.all<{ id: string }>(`SELECT e.id FROM endpoints e JOIN grants g ON g.used_by = e.id AND g.name = e.handle`).map((r) => r.id),
       )
       const chosen = new Set(rows.filter((row) => row.named !== null || granted.has(row.id)).map((row) => row.id))
-      const pairs: { row: EndpointRow; held: EndpointRow; by: "session" | "origin" }[] = []
+      const pairs: { row: EndpointRow; held: EndpointRow; by: "session" | "origin"; live: boolean }[] = []
       for (const row of rows) {
         if (chosen.has(row.id) || (row.harness_session === null && row.harness_origin === null)) continue
         for (const held of rows) {
-          if (!chosen.has(held.id) || held.id === row.id || held.harness_session === null || !this.released(held, now)) continue
+          if (!chosen.has(held.id) || held.id === row.id || held.harness_session === null) continue
           if (!harnessFits(held.harness, row.harness ?? "cli") && !sameProvider(held.harness, row.harness ?? "cli")) continue
           if (held.parent_ep !== row.parent_ep && !(row.parent_ep === null && row.parent_addr === null)) continue
           const by = held.harness_session === row.harness_session ? "session" : held.harness_session === row.harness_origin ? "origin" : null
-          if (by) pairs.push({ row, held, by })
+          if (!by) continue
+          if (this.released(held, now)) pairs.push({ row, held, by, live: false })
+          else if (by === "origin" && held.created_at < row.created_at && !revivable(held) && !busySince(held, row.created_at, false, now))
+            pairs.push({ row, held, by, live: true })
         }
       }
       const live = (row: EndpointRow) => (presenceOf(row, now) === "offline" ? 1 : 0)
       pairs.sort(
         (a, b) =>
+          Number(a.live) - Number(b.live) ||
           (a.by === "session" ? 0 : 1) - (b.by === "session" ? 0 : 1) ||
           live(a.row) - live(b.row) ||
           (b.row.last_seen ?? b.row.created_at) - (a.row.last_seen ?? a.row.created_at),
       )
       const taken = new Set<string>()
       const relinked: Relinked[] = []
-      for (const { row, held, by } of pairs) {
+      for (const { row, held, by, live } of pairs) {
         if (taken.has(row.id) || taken.has(held.id)) continue
         taken.add(row.id).add(held.id)
-        const pair = { endpoint: row.id, from: row.handle, to: held.handle, by }
-        if (params.dry_run === true) {
+        const pair = { endpoint: row.id, from: row.handle, to: held.handle, by, ...(live ? { live: true as const } : {}) }
+        if (params.dry_run === true || (live && params.live !== true)) {
           relinked.push(pair)
           continue
         }
@@ -2445,7 +2513,7 @@ export class RelayCore {
           this.audit("relink_refused", row.id, null, { from: pair.from, to: pair.to, code: error.code })
           continue
         }
-        this.audit("relink", row.id, null, { from: pair.from, to: pair.to, retired: held.id, by })
+        this.audit("relink", row.id, null, { from: pair.from, to: pair.to, retired: held.id, by, ...(live ? { live: true } : {}) })
         relinked.push({ ...pair, retired: held.id })
       }
       return { relinked }
@@ -7287,6 +7355,15 @@ function wakeOf(row: EndpointRow): Wake | null {
 }
 
 /** a connection's presence by its last request; without one, a hook's by the last time a hook reported */
+/**
+ * whether the harness process holding a background session's origin endpoint `held` still runs that session: its hooks reported after the
+ * fork's endpoint was created at `since`, or, at the claim that `created` it, within LIMITS.restartGraceS before
+ */
+function busySince(held: EndpointRow, since: number, created: boolean, now: number): boolean {
+  const seen = held.hook_seen ?? 0
+  return seen > since || (created && seen >= now - LIMITS.restartGraceS * 1000)
+}
+
 function presenceOf(row: EndpointRow, now: number): Presence {
   if (row.connections > 0) return (row.last_seen ?? 0) >= now - LIMITS.onlineWithinS * 1000 ? "online" : "idle"
   if (!row.hook_seen) return "offline"

@@ -364,4 +364,35 @@ brokerSuite("broker resumed sessions", (start) => {
     expect(await human.request("relink", {})).toMatchObject({ relinked: [pair] });
     expect(await fresh.request("whoami")).toMatchObject({ address: "me/lead" });
   });
+
+  for (const via of ["claim", "join"] as const) {
+    test(`a background hand-off takes the name its idle origin still holds, with its child and mail, and detaches the origin (hook ${via})`, async () => {
+      const broker = await start();
+      const human = await broker.human();
+      const origin = { ...session(process.pid), harness_session: "origin-a" };
+      const old = await broker.agent("app", "claude-code", {}, origin);
+      const hook = await broker.hook({ handle: "app", ...origin });
+      await hook.request("event", { kind: "tool", session_id: "origin-a" });
+      await hook.close();
+      await old.request("rename", { handle: "lead" });
+      const worker = await broker.agent("worker", "codex", {}, { ...session(40), lineage: [key(40), key(process.pid)] });
+      await human.request("send", { to: "lead", body: "while away" });
+      const fork = { ...session(1), harness_session: "fork-a", harness_origin: "origin-a", harness_handoff: true };
+      const started = await broker.hook({ handle: "app", ...fork });
+      expect(started.hello.endpoint).toMatchObject({ address: "me/app" });
+      const parallel = await broker.hook({ handle: "side", ...session(2), harness_session: "fork-b", harness_origin: "origin-a" });
+      expect(parallel.hello.endpoint).toMatchObject({ address: "me/side" });
+      await Bun.sleep(5);
+      const moved = await broker.hook({ handle: "app", ...fork }, via === "join" ? { join: {} } : {});
+      expect(moved.hello.endpoint).toMatchObject({ id: started.hello.endpoint?.id, address: "me/lead" });
+      await waitFor(() => old.closed, "origin connection closed");
+      expect((await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === parallel.hello.endpoint?.id)).toMatchObject({
+        address: "me/side",
+      });
+      expect(await worker.request("whoami")).toMatchObject({ parent: "me/lead" });
+      const shim = await broker.agent("app", "claude-code", {}, fork);
+      expect(shim.hello.endpoint).toMatchObject({ id: started.hello.endpoint?.id, address: "me/lead" });
+      expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "while away" } }] });
+    });
+  }
 });

@@ -1,6 +1,6 @@
 use crate::claims::{
-    clean_labels, clean_text, harness_fits, harness_session, hash, process_key, same_harness,
-    same_provider, token, valid_handle,
+    busy_since, clean_labels, clean_text, harness_fits, harness_session, hash, process_key,
+    revivable, same_harness, same_provider, token, valid_handle,
 };
 use crate::core::{Core, integer, now_ms, text, timestamp};
 use crate::proto::{ErrorCode, RpcError};
@@ -483,13 +483,16 @@ impl Core {
         if params.get("dry_run").is_some_and(|v| !v.is_boolean()) {
             return Err(RpcError::invalid_params("dry_run is true or false"));
         }
+        if params.get("live").is_some_and(|v| !v.is_boolean()) {
+            return Err(RpcError::invalid_params("live is true or false"));
+        }
         if !self.at_terminal(conn) {
             return Err(RpcError::new(
                 ErrorCode::ScopeRefused,
                 "only the human at a terminal relinks endpoints",
             ));
         }
-        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND substr(handle,1,5) != 'gone:' AND (session IS NULL OR substr(session,1,4) != 'sub:') ORDER BY COALESCE(last_seen,created_at) DESC",&[]).await?;
+        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (session IS NULL OR substr(session,1,4) != 'sub:') ORDER BY COALESCE(last_seen,created_at) DESC",&[]).await?;
         let grants = self
             .store
             .all(
@@ -505,6 +508,7 @@ impl Core {
             })
             .filter_map(|r| text(r, "id").map(str::to_owned))
             .collect();
+        let now = now_ms();
         let mut pairs = Vec::new();
         for row in &rows {
             if chosen.contains(text(row, "id").unwrap_or("")) {
@@ -512,7 +516,6 @@ impl Core {
             }
             for held in &rows {
                 if !chosen.contains(text(held, "id").unwrap_or(""))
-                    || !self.released(held).await
                     || (!harness_fits(text(held, "harness"), text(row, "harness").unwrap_or("cli"))
                         && !same_provider(
                             text(held, "harness"),
@@ -535,20 +538,39 @@ impl Core {
                     None
                 };
                 if let Some(by) = by {
-                    pairs.push((row.clone(), held.clone(), by));
+                    let live = !self.released(held).await;
+                    if live
+                        && (by != "origin"
+                            || integer(held, "created_at").unwrap_or(0)
+                                >= integer(row, "created_at").unwrap_or(0)
+                            || revivable(held)
+                            || busy_since(
+                                held,
+                                integer(row, "created_at").unwrap_or(0),
+                                false,
+                                now,
+                                self.limits.get("restartGraceS").unwrap_or(60) as i64 * 1000,
+                            ))
+                    {
+                        continue;
+                    }
+                    pairs.push((row.clone(), held.clone(), by, live));
                 }
             }
         }
-        pairs.sort_by_key(|(row, _, by)| {
+        pairs.sort_by_key(|(row, _, by, live)| {
             (
+                *live,
                 *by != "session",
-                presence(row, now_ms()) == "offline",
-                -integer(row, "last_seen").unwrap_or(0),
+                presence(row, now) == "offline",
+                -integer(row, "last_seen")
+                    .or_else(|| integer(row, "created_at"))
+                    .unwrap_or(0),
             )
         });
         let mut taken = HashSet::new();
         let mut relinked = Vec::new();
-        for (row, held, by) in pairs {
+        for (row, held, by, live) in pairs {
             let id = text(&row, "id").unwrap_or("");
             let retired = text(&held, "id").unwrap_or("");
             if taken.contains(id) || taken.contains(retired) {
@@ -558,10 +580,31 @@ impl Core {
             taken.insert(retired.to_owned());
             let mut pair =
                 json!({"endpoint":id,"from":text(&row,"handle"),"to":text(&held,"handle"),"by":by});
-            if params.get("dry_run") != Some(&Value::Bool(true)) {
-                self.retake(&row, &held, true).await?;
+            if live {
+                pair["live"] = json!(true);
+            }
+            if params.get("dry_run") != Some(&Value::Bool(true))
+                && (!live || params.get("live") == Some(&Value::Bool(true)))
+            {
+                if let Err(error) =
+                    crate::store::transaction(self.store.clone(), self.retake(&row, &held, true))
+                        .await
+                {
+                    let Some(data) = error.data else {
+                        return Err(error);
+                    };
+                    self.audit(
+                        "relink_refused",
+                        Some(id),
+                        None,
+                        json!({"from":pair["from"],"to":pair["to"],"code":data.code}),
+                    )
+                    .await?;
+                    continue;
+                }
                 pair["retired"] = json!(retired);
                 self.audit("relink", Some(id), None, pair.clone()).await?;
+                self.state.close_endpoint(retired, conn);
             }
             relinked.push(pair);
         }
