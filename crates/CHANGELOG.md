@@ -1,5 +1,11 @@
 # scp-relay
 
+## 0.4.1
+
+### Patch Changes
+
+- 87f659b: The relay crates share a new `scp-dev-core` crate for protocol constants, limits parsing, handle and address rules, and scope decisions.
+
 ## 0.4.0
 
 ### Minor Changes
