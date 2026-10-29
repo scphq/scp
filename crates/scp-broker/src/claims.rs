@@ -430,7 +430,29 @@ impl Core {
         } else {
             self.placement(scope, &[]).await?.parent
         };
+        let spender = if let Some(grant) = &scope.grant {
+            Some(
+                self.store
+                    .all(
+                        "SELECT used_by FROM grants WHERE token_hash = ? AND used_by IS NOT NULL AND revoked_at IS NULL",
+                        &[opt(Some(grant))],
+                    )
+                    .await?
+                    .first()
+                    .and_then(|row| text(row, "used_by"))
+                    .unwrap_or("")
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         for row in rows {
+            if spender
+                .as_deref()
+                .is_some_and(|id| Some(id) != text(&row, "id"))
+            {
+                continue;
+            }
             if instead.is_some_and(|r| text(r, "id") == text(&row, "id")) {
                 continue;
             }
@@ -1151,43 +1173,37 @@ pub async fn hello_claim(
             return Ok(core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None));
         }
     }
-    core.store.all("BEGIN IMMEDIATE", &[]).await?;
-    let result = hello_transaction(core, conn, params, transient).await;
-    match result {
-        Ok((row, resume)) => {
-            core.store.all("COMMIT", &[]).await?;
-            let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
-            let mode = if transient {
-                Mode::Transient
-            } else if text(&row, "kind") == Some("human") {
-                Mode::Human {
-                    tty: params.get("tty") == Some(&Value::Bool(true)),
-                }
-            } else {
-                Mode::Agent
-            };
-            core.state.bind(conn, Some(id.clone()), mode);
-            core.state.addresses.insert(id, address(&row));
-            if let Some(c) = core.state.connections.get_mut(&conn) {
-                c.brief = params.get("brief") == Some(&Value::Bool(true));
-                c.cwd = params
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .or_else(|| text(&row, "cwd"))
-                    .map(str::to_owned);
-                c.process = params
-                    .get("claim")
-                    .and_then(|v| v.get("process"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-            }
-            Ok(core.hello_result(core.view(&row).await?, resume))
+    let (row, resume) = crate::store::transaction(
+        core.store.clone(),
+        hello_transaction(core, conn, params, transient),
+    )
+    .await?;
+    let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
+    let mode = if transient {
+        Mode::Transient
+    } else if text(&row, "kind") == Some("human") {
+        Mode::Human {
+            tty: params.get("tty") == Some(&Value::Bool(true)),
         }
-        Err(error) => {
-            core.store.all("ROLLBACK", &[]).await?;
-            Err(error)
-        }
+    } else {
+        Mode::Agent
+    };
+    core.state.bind(conn, Some(id.clone()), mode);
+    core.state.addresses.insert(id, address(&row));
+    if let Some(c) = core.state.connections.get_mut(&conn) {
+        c.brief = params.get("brief") == Some(&Value::Bool(true));
+        c.cwd = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .or_else(|| text(&row, "cwd"))
+            .map(str::to_owned);
+        c.process = params
+            .get("claim")
+            .and_then(|v| v.get("process"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
     }
+    Ok(core.hello_result(core.view(&row).await?, resume))
 }
 
 fn bind_lineage(

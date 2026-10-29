@@ -7,6 +7,8 @@ use scp_broker::paths::{Paths, account_home};
 use scp_broker::proto::Limits;
 use scp_broker::server::{Broker, BrokerOptions};
 
+const EXPERIMENTAL: &str = "SCP_BROKER_EXPERIMENTAL";
+
 #[derive(Parser)]
 #[command(name = "scp-broker")]
 struct Cli {
@@ -47,6 +49,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         command: Command::Daemon { idle, policy },
     } = Cli::parse();
     let env: BTreeMap<String, String> = std::env::vars().collect();
+    if env.get(EXPERIMENTAL).map(String::as_str) != Some("1") {
+        return Err(format!(
+            "this native broker is experimental: list and log do not filter by visibility yet, so any session sees every endpoint and the whole audit log. Set {EXPERIMENTAL}=1 to run it anyway, never as a shared broker"
+        )
+        .into());
+    }
     let path_env = env.clone();
     let (paths, policy_file) = tokio::task::spawn_blocking(move || {
         let paths = Paths::from_env(&path_env)?;

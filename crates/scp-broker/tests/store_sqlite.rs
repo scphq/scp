@@ -5,6 +5,76 @@ use scp_broker::store::{SqlValue, Storage};
 use support::{TempStore, json_rows};
 
 #[tokio::test]
+async fn transactions_roll_back_errors_and_cancellation_before_reusing_writer() {
+    use scp_broker::store::{StoreError, transaction};
+    use std::sync::Arc;
+
+    let temp = TempStore::new().await;
+    let store = Arc::new(temp.store);
+    store
+        .all("CREATE TABLE counts (value INTEGER)", &[])
+        .await
+        .expect("table");
+    let error = transaction(store.clone(), async {
+        store.all("INSERT INTO counts VALUES (1)", &[]).await?;
+        Err::<(), _>(StoreError::Database("refused".into()))
+    })
+    .await
+    .expect_err("rollback");
+    assert!(error.to_string().contains("refused"));
+
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let task_store = store.clone();
+    let task_ready = ready.clone();
+    let task = tokio::spawn(async move {
+        transaction(task_store.clone(), async {
+            task_store.all("INSERT INTO counts VALUES (2)", &[]).await?;
+            task_ready.notify_one();
+            std::future::pending::<()>().await;
+            Ok::<(), StoreError>(())
+        })
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), ready.notified())
+        .await
+        .expect("write started");
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        transaction(store.clone(), async {
+            store.all("INSERT INTO counts VALUES (3)", &[]).await?;
+            Ok::<(), StoreError>(())
+        }),
+    )
+    .await
+    .expect("writer released")
+    .expect("commit");
+    assert_eq!(
+        store
+            .read("SELECT value FROM counts", &[])
+            .await
+            .expect("committed rows")[0]["value"],
+        SqlValue::Int(3)
+    );
+    assert_eq!(
+        store
+            .read("SELECT COUNT(*) AS n FROM counts", &[])
+            .await
+            .expect("count")[0]["n"],
+        SqlValue::Int(1)
+    );
+    Arc::try_unwrap(store)
+        .ok()
+        .expect("sole store")
+        .close()
+        .await
+        .expect("close");
+    tokio::fs::remove_dir_all(temp.dir).await.expect("cleanup");
+}
+
+#[tokio::test]
 async fn positional_values_round_trip_on_writer_and_readers() {
     let temp = TempStore::new().await;
     let values = [

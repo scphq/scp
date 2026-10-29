@@ -102,6 +102,28 @@ impl Core {
         params: &Map<String, Value>,
         tty: bool,
     ) -> Result<Value, RpcError> {
+        self.send_message(from, recipients, params, tty, false)
+            .await
+    }
+
+    pub(crate) async fn send_link_request(
+        &mut self,
+        from: &str,
+        to: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        self.send_message(from, &[to.to_owned()], params, false, true)
+            .await
+    }
+
+    async fn send_message(
+        &mut self,
+        from: &str,
+        recipients: &[String],
+        params: &Map<String, Value>,
+        tty: bool,
+        link: bool,
+    ) -> Result<Value, RpcError> {
         validate_send(params, &self.limits)?;
         let sender = self.must_endpoint(from).await?;
         let body = params
@@ -137,7 +159,13 @@ impl Core {
         // Scope decisions and messaging guards run before the write transaction.
         let now = now_ms();
         let id = new_id("msg", now);
-        let expires = now.saturating_add(self.limit("ttlDefaultS", 604800).saturating_mul(1000));
+        let kind = if link { "request" } else { "message" };
+        let ttl = if link {
+            86400
+        } else {
+            self.limit("ttlDefaultS", 604800)
+        };
+        let expires = now.saturating_add(ttl.saturating_mul(1000));
         let to = params
             .get("to")
             .map(|value| match value {
@@ -150,11 +178,11 @@ impl Core {
                 _ => String::new(),
             })
             .unwrap_or_default();
-        self.store.all("BEGIN IMMEDIATE", &[]).await?;
-        let result: Result<Value, RpcError> = async {
-            self.store.all("INSERT INTO messages (id,thread,reply_to,kind,from_ep,to_addr,body,mime,data_class,attachments,hop,created_at,expires_at,sender_tty) VALUES (?,?,NULL,'message',?,?,?,'text/markdown','public','[]',0,?,?,?)", &[
-                string(&id), string(&thread), string(from), string(to), string(body), SqlValue::Int(now), SqlValue::Int(expires),
+        let result = crate::store::transaction(self.store.clone(), async {
+            self.store.all("INSERT INTO messages (id,thread,reply_to,kind,from_ep,to_addr,body,mime,data_class,attachments,hop,created_at,expires_at,sender_tty,link_parent) VALUES (?,?,NULL,?,?,?,?,'text/markdown','public','[]',0,?,?,?,?)", &[
+                string(&id), string(&thread), string(kind), string(from), string(to), string(body), SqlValue::Int(now), SqlValue::Int(expires),
                 if text(&sender,"kind") == Some("human") { SqlValue::Int(i64::from(tty)) } else { SqlValue::Null },
+                if link { string(address(&sender)) } else { SqlValue::Null },
             ]).await?;
             let mut deliveries = Vec::new();
             for recipient in &targets {
@@ -166,27 +194,15 @@ impl Core {
                 let offline = presence(recipient,now) == "offline" && now - integer(recipient,"last_seen").unwrap_or(0).max(integer(recipient,"hook_seen").unwrap_or(0)) >= 30_000;
                 deliveries.push(json!({"endpoint":endpoint,"address":view["address"],"seq":seq,"offline":offline,"last_seen":view["last_seen"]}));
             }
-            self.audit("send",Some(from),Some(&id),json!({"to":targets.iter().map(address).collect::<Vec<_>>(),"kind":"message","bytes":body.len(),"hop":0,"thread":thread,"data_class":"public"})).await?;
-            Ok(json!({"id":id,"thread":thread,"hop":0,"deliveries":deliveries}))
-        }.await;
-        match result {
-            Ok(result) => {
-                if let Err(error) = self.store.all("COMMIT", &[]).await {
-                    let _ = self.store.all("ROLLBACK", &[]).await;
-                    return Err(error.into());
-                }
-                for target in &targets {
-                    if let Some(id) = text(target, "id") {
-                        self.state.wake(id);
-                    }
-                }
-                Ok(result)
-            }
-            Err(error) => {
-                let _ = self.store.all("ROLLBACK", &[]).await;
-                Err(error)
+            self.audit("send",Some(from),Some(&id),json!({"to":targets.iter().map(address).collect::<Vec<_>>(),"kind":kind,"bytes":body.len(),"hop":0,"thread":thread,"data_class":"public"})).await?;
+            Ok::<_, RpcError>(json!({"id":id,"thread":thread,"hop":0,"deliveries":deliveries}))
+        }).await?;
+        for target in &targets {
+            if let Some(id) = text(target, "id") {
+                self.state.wake(id);
             }
         }
+        Ok(result)
     }
 
     pub async fn inbox(
@@ -238,6 +254,9 @@ impl Core {
             to.into()
         };
         let mut envelope = json!({"seq":integer(row,"seq"),"id":text(row,"id"),"thread":text(row,"thread"),"reply_to":text(row,"reply_to"),"kind":text(row,"kind"),"from":from,"to":to,"body":{"text":text(row,"body"),"mime":text(row,"mime")},"data_class":text(row,"data_class"),"attachments":serde_json::from_str::<Value>(text(row,"attachments").unwrap_or("[]")).map_err(|_|RpcError::internal())?,"hop":integer(row,"hop").unwrap_or(0),"created_at":integer(row,"created_at").and_then(timestamp),"expires_at":integer(row,"expires_at").and_then(timestamp)});
+        if let Some(parent) = text(row, "link_parent") {
+            envelope["link"] = json!({"parent":parent});
+        }
         if integer(row, "require_reply") == Some(1) {
             envelope["require_reply"] = json!(true);
         }

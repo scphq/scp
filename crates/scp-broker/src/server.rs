@@ -347,9 +347,8 @@ async fn serve_connection(
             }
         }
     }
-    requests.abort_all();
-    while requests.join_next().await.is_some() {}
     core.lock().await.disconnect(conn).await;
+    while requests.join_next().await.is_some() {}
     drop(output);
     let mut writer_task = writer_task;
     if tokio::time::timeout(Duration::from_secs(2), &mut writer_task)
@@ -357,5 +356,127 @@ async fn serve_connection(
         .is_err()
     {
         writer_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Row, SqlValue, Storage, StoreResult, Transaction};
+    use async_trait::async_trait;
+    use std::sync::atomic::AtomicBool;
+
+    struct PausedStore {
+        inner: Arc<dyn Storage>,
+        pause: AtomicBool,
+        written: Notify,
+        finish: Notify,
+    }
+
+    #[async_trait]
+    impl Storage for PausedStore {
+        async fn all(&self, statement: &str, params: &[SqlValue]) -> StoreResult<Vec<Row>> {
+            let result = if let Some(transaction) = crate::store::active(self) {
+                transaction.lock().await.all(statement, params).await
+            } else {
+                self.inner.all(statement, params).await
+            };
+            if statement.starts_with("INSERT INTO endpoints")
+                && self.pause.swap(false, Ordering::SeqCst)
+            {
+                self.written.notify_one();
+                self.finish.notified().await;
+            }
+            result
+        }
+
+        async fn read(&self, statement: &str, params: &[SqlValue]) -> StoreResult<Vec<Row>> {
+            self.inner.read(statement, params).await
+        }
+
+        async fn begin(&self) -> StoreResult<Box<dyn Transaction>> {
+            self.inner.begin().await
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_mid_hello_finishes_and_next_hello_persists() {
+        let dir =
+            std::env::temp_dir().join(format!("scp-disconnect-{:032x}", rand::random::<u128>()));
+        tokio::fs::create_dir(&dir).await.expect("directory");
+        let paths = Paths::new(dir.clone());
+        let store = Arc::new(SqliteStore::open(&paths.database).expect("store"));
+        let mut core = Core::new(
+            store.clone(),
+            Limits::default(),
+            paths.clone(),
+            dir.join("policy.json"),
+        )
+        .await
+        .expect("core");
+        let paused = Arc::new(PausedStore {
+            inner: store.clone(),
+            pause: AtomicBool::new(true),
+            written: Notify::new(),
+            finish: Notify::new(),
+        });
+        core.store = paused.clone();
+        let core = Arc::new(Mutex::new(core));
+        let (_stop, stopping) = watch::channel(false);
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
+        let mut connection = tokio::spawn(serve_connection(server, core.clone(), stopping.clone()));
+        client.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"first\"}}}\n").await.expect("hello");
+        tokio::time::timeout(Duration::from_secs(2), paused.written.notified())
+            .await
+            .expect("hello wrote inside transaction");
+        drop(client);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut connection)
+                .await
+                .is_err()
+        );
+        paused.finish.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), connection)
+            .await
+            .expect("connection finishes")
+            .expect("connection task");
+
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
+        let connection = tokio::spawn(serve_connection(server, core.clone(), stopping));
+        client.write_all(b"{\"id\":2,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"second\"}}}\n").await.expect("next hello");
+        let mut response = String::new();
+        use tokio::io::AsyncBufReadExt;
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::io::BufReader::new(&mut client).read_line(&mut response),
+        )
+        .await
+        .expect("next response")
+        .expect("read response");
+        let response: Value = serde_json::from_str(&response).expect("response JSON");
+        assert_eq!(response["result"]["endpoint"]["address"], "me/second");
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), connection)
+            .await
+            .expect("next connection finishes")
+            .expect("next connection task");
+        drop(core);
+        drop(paused);
+        Arc::try_unwrap(store)
+            .ok()
+            .expect("sole store")
+            .close()
+            .await
+            .expect("close store");
+        let reopened = SqliteStore::open(&paths.database).expect("reopen");
+        let rows = reopened.read("SELECT handle,connections FROM endpoints WHERE handle IN ('first','second') ORDER BY handle", &[]).await.expect("persisted endpoints");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(crate::core::text(&rows[0], "handle"), Some("first"));
+        assert!(
+            rows.iter()
+                .all(|row| crate::core::integer(row, "connections") == Some(0))
+        );
+        reopened.close().await.expect("close reopened store");
+        tokio::fs::remove_dir_all(dir).await.expect("cleanup");
     }
 }

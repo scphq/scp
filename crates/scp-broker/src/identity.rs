@@ -50,20 +50,16 @@ impl Core {
                 "only a local agent endpoint can be renamed",
             ));
         }
-        self.store.all("BEGIN IMMEDIATE", &[]).await?;
-        let result = self
-            .rename_row(
+        crate::store::transaction(
+            self.store.clone(),
+            self.rename_row(
                 &target,
                 params.get("handle").unwrap_or(&Value::Null),
                 human,
                 params.get("take_over") == Some(&Value::Bool(true)),
-            )
-            .await;
-        if let Err(error) = result {
-            self.store.all("ROLLBACK", &[]).await?;
-            return Err(error);
-        }
-        self.store.all("COMMIT", &[]).await?;
+            ),
+        )
+        .await?;
         self.view(
             &self
                 .must_endpoint(text(&target, "id").unwrap_or(""))
@@ -166,13 +162,26 @@ impl Core {
     pub async fn link_endpoint(&self, row: &Row, parent: &Row, auth: &str) -> Result<(), RpcError> {
         let id = text(row, "id").ok_or_else(RpcError::internal)?;
         let parent_id = text(parent, "id").ok_or_else(RpcError::internal)?;
-        if text(parent, "kind") != Some("agent")
-            || id == parent_id
-            || self.ancestors(parent).await?.iter().any(|v| v == id)
-        {
+        if text(parent, "kind") != Some("agent") {
+            return Err(RpcError::invalid_params("the parent is an agent endpoint"));
+        }
+        if text(row, "parent_ep") == Some(parent_id) {
+            return Ok(());
+        }
+        if id == parent_id || self.ancestors(parent).await?.iter().any(|v| v == id) {
             return Err(RpcError::new(
                 ErrorCode::ScopeRefused,
                 "an endpoint cannot sit under its own descendant",
+            ));
+        }
+        if text(row, "parent_ep").is_some() || text(row, "parent_addr").is_some() {
+            return Err(RpcError::new(
+                ErrorCode::ScopeRefused,
+                format!(
+                    "{} already sits under {}; unlink it first",
+                    address(row),
+                    self.parent_address(row).await?
+                ),
             ));
         }
         let depth = integer(parent, "depth").unwrap_or(0) + 1;
@@ -356,7 +365,7 @@ impl Core {
         .await
     }
     pub async fn adopt(
-        &self,
+        &mut self,
         conn: ConnectionId,
         params: &Map<String, Value>,
     ) -> Result<Value, RpcError> {
@@ -385,6 +394,65 @@ impl Core {
                 "an agent adopts only under itself",
             ));
         }
+        if text(&target, "kind") != Some("agent") {
+            return Err(RpcError::invalid_params(
+                "only a local agent endpoint can be linked",
+            ));
+        }
+        let c = self.connection(conn)?;
+        if text(&me, "kind") != Some("human") && !self.at_terminal(conn) {
+            let reason = if text(&target, "id") == text(&me, "id") {
+                Some("an agent cannot adopt itself".to_owned())
+            } else if self
+                .ancestors(&me)
+                .await?
+                .iter()
+                .any(|id| Some(id.as_str()) == text(&target, "id"))
+            {
+                Some(format!(
+                    "{} sits above you: an agent cannot adopt its own ancestor",
+                    address(&target)
+                ))
+            } else if text(&target, "session").is_some_and(|session| session.starts_with("sub:")) {
+                Some(format!(
+                    "{} is a subagent's endpoint: it stays under its root",
+                    address(&target)
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(self
+                    .scope_refused(
+                        conn,
+                        json!({"target":address(&target),"reason":"adopt"}),
+                        &reason,
+                    )
+                    .await?);
+            }
+            let mut result =
+                json!({"endpoint":self.view(&target).await?,"parent":address(&parent)});
+            if text(&target, "parent_ep") == text(&me, "id") {
+                return Ok(result);
+            }
+            if text(&target, "parent_ep").is_some() || text(&target, "parent_addr").is_some() {
+                if c.lineage.is_some() && !c.own {
+                    return Err(self.scope_refused(conn, json!({"target":address(&target),"reason":"adopt"}), "only the session itself may ask a child that sits under another parent to link").await?);
+                }
+                let under = self.parent_address(&target).await?;
+                let parent = address(&parent);
+                let params = json!({"to":address(&target),"body":format!("{parent} asks you to link under it as its worker. You sit under {under} now: you can accept only once you are a root again. To accept, run swarm link accept <id> with this message's id, or swarm join --under {parent} (relay_link_accept {{id}} or relay_join {{under: \"{parent}\"}}).")});
+                let sent = self
+                    .send_link_request(
+                        text(&me, "id").ok_or_else(RpcError::internal)?,
+                        text(&target, "id").ok_or_else(RpcError::internal)?,
+                        params.as_object().ok_or_else(RpcError::internal)?,
+                    )
+                    .await?;
+                result["requested"] = sent["id"].clone();
+                return Ok(result);
+            }
+        }
         self.link_endpoint(
             &target,
             &parent,
@@ -398,6 +466,14 @@ impl Core {
         Ok(
             json!({"endpoint":self.view(&self.must_endpoint(text(&target,"id").unwrap_or("")).await?).await?,"parent":address(&parent)}),
         )
+    }
+    async fn parent_address(&self, row: &Row) -> Result<String, RpcError> {
+        if let Some(parent) = text(row, "parent_ep")
+            && let Some(parent) = self.by_id(parent).await?
+        {
+            return Ok(address(&parent));
+        }
+        Ok(text(row, "parent_addr").unwrap_or("another agent").into())
     }
     pub async fn relink(
         &mut self,
