@@ -6,7 +6,7 @@ resolver = "3"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/scphq/scp"
-version = "0.4.1"
+version = "0.4.2"
 
 [workspace.dependencies]
 tokio = { version = "=1.47.1", features = ["full"] }
