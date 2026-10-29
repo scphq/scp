@@ -3,7 +3,13 @@ import { resolve } from "node:path";
 
 export const relayRoot = resolve(import.meta.dir, "..");
 export const relayAnchor = "crates/package.json";
-export const relayCrates = ["scp-relay-server", "scp-relay-store"] as const;
+export const relayCrates = ["scp-dev-core", "scp-relay-server", "scp-relay-store"] as const;
+const pins = [
+  ["crates/scp-relay/Cargo.toml", "scp-relay-store"],
+  ["crates/scp-relay/Cargo.toml", "scp-core"],
+  ["crates/scp-relay-store/Cargo.toml", "scp-core"],
+] as const;
+const pinEntry = (dep: string) => new RegExp(`^(${dep} = .*version = ")([^"]+)`, "m");
 export const platformKeys = ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu", "linux-x64-musl", "win32-x64"] as const;
 const semver = /^\d+\.\d+\.\d+$/;
 const read = (root: string, path: string) => readFileSync(resolve(root, path), "utf8");
@@ -21,13 +27,12 @@ export function checkVersion(root = relayRoot): void {
   const workspace = read(root, "crates/Cargo.toml")
     .match(/\[workspace\.package\]([\s\S]*?)(?=\n\[|$)/)?.[1]
     .match(/^version = "([^"]+)"/m)?.[1];
-  const pin = read(root, "crates/scp-relay/Cargo.toml").match(/^scp-relay-store = .*version = "([^"]+)"/m)?.[1];
   const lock = read(root, "crates/Cargo.lock");
   const wrapper = json(root, "crates/npm/relay-server/package.json");
   const dashboard = json(root, "packages/dashboard/package.json");
   if (
     workspace !== version ||
-    pin !== `=${version}` ||
+    pins.some(([path, dep]) => read(root, path).match(pinEntry(dep))?.[2] !== `=${version}`) ||
     relayCrates.some((name) => lock.match(lockEntry(name))?.[2] !== version) ||
     wrapper.version !== version ||
     dashboard.version !== version
@@ -42,8 +47,7 @@ export function syncVersion(root = relayRoot): string {
   const version = relayVersion(root);
   const cargo = read(root, "crates/Cargo.toml");
   write(root, "crates/Cargo.toml", cargo.replace(/(\[workspace\.package\][\s\S]*?^version = ")[^"]+/m, `$1${version}`));
-  const server = read(root, "crates/scp-relay/Cargo.toml");
-  write(root, "crates/scp-relay/Cargo.toml", server.replace(/^(scp-relay-store = .*version = ")[^"]+/m, `$1=${version}`));
+  for (const [path, dep] of pins) write(root, path, read(root, path).replace(pinEntry(dep), `$1=${version}`));
   const lock = relayCrates.reduce((text, name) => text.replace(lockEntry(name), `$1${version}`), read(root, "crates/Cargo.lock"));
   write(root, "crates/Cargo.lock", lock);
   const wrapper = json(root, "crates/npm/relay-server/package.json");

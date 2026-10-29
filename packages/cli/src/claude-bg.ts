@@ -331,22 +331,27 @@ const section = (file: Record<string, unknown>, key: string): Record<string, unk
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {}
 }
 
-/** `$SCP_IDLE_AFTER_S` (alias `$SCP_CLAUDE_BG_IDLE_AFTER_S`), else `lifecycle.idle_after_s` (alias `claude_bg.idle_after_s`), else 600 s */
+/** `$<own>`, else `<section>.idle_after_s`, else the shared `$SCP_IDLE_AFTER_S`, else `lifecycle.idle_after_s`; undefined when none is set */
+function idleSetting(env: Env, file: Record<string, unknown>, own: string, key: string): number | undefined {
+  return seconds(env[own]) ?? seconds(section(file, key).idle_after_s) ?? seconds(env.SCP_IDLE_AFTER_S) ?? seconds(section(file, "lifecycle").idle_after_s)
+}
+
+/** how long a Claude Code background worker may idle: `$SCP_CLAUDE_BG_IDLE_AFTER_S`, else `claude_bg.idle_after_s`, else the shared default, else 600 s */
 export const idleAfterS = (env: Env): number => bgConfig(env).idleAfterS
 
+/** how long a spawn holds a resumable worker: `$SCP_SPAWN_IDLE_AFTER_S`, else `spawn.idle_after_s`, else the shared default; undefined when none is set */
+export const spawnIdleAfterS = (env: Env): number | undefined => idleSetting(env, configFile(env), "SCP_SPAWN_IDLE_AFTER_S", "spawn")
+
 /**
- * `$SCP_CLAUDE_BG_STOP_AFTER_S`, `$SCP_IDLE_AFTER_S` (alias `$SCP_CLAUDE_BG_IDLE_AFTER_S`) and `$SCP_CLAUDE_BG_REMOVE`, else
- * `claude_bg.stop_after_s`, `lifecycle.idle_after_s` (alias `claude_bg.idle_after_s`) and `claude_bg.remove` in config.json, else 120 s,
- * 600 s and true
+ * `$SCP_CLAUDE_BG_STOP_AFTER_S` and `$SCP_CLAUDE_BG_REMOVE`, else `claude_bg.stop_after_s` and `claude_bg.remove` in config.json, else 120 s
+ * and true; the idle time as `idleAfterS` says
  */
 export function bgConfig(env: Env): BgConfig {
   const file = configFile(env)
   const bg = section(file, "claude_bg")
-  const lifecycle = section(file, "lifecycle")
   return {
     stopAfterS: seconds(env.SCP_CLAUDE_BG_STOP_AFTER_S) ?? seconds(bg.stop_after_s) ?? STOP_AFTER_S,
-    idleAfterS:
-      seconds(env.SCP_IDLE_AFTER_S) ?? seconds(env.SCP_CLAUDE_BG_IDLE_AFTER_S) ?? seconds(lifecycle.idle_after_s) ?? seconds(bg.idle_after_s) ?? IDLE_AFTER_S,
+    idleAfterS: idleSetting(env, file, "SCP_CLAUDE_BG_IDLE_AFTER_S", "claude_bg") ?? IDLE_AFTER_S,
     remove: flag(env.SCP_CLAUDE_BG_REMOVE) ?? flag(bg.remove) ?? true,
   }
 }

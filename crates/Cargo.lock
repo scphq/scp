@@ -1353,7 +1353,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1648,7 +1648,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scp-broker"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -1668,6 +1668,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scp-dev-core"
+version = "0.4.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "scp-hook"
 version = "0.1.0"
 dependencies = [
@@ -1679,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1692,6 +1701,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "reqwest",
+ "scp-dev-core",
  "scp-relay-store",
  "serde",
  "serde_json",
@@ -1707,10 +1717,11 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-store"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "rand 0.8.5",
+ "scp-dev-core",
  "serde",
  "serde_json",
  "sqlx",

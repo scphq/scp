@@ -1,4 +1,5 @@
 use super::*;
+use scp_core::address::{Segments, segments};
 use validation::{handle, pattern};
 
 fn selector(v: &Value) -> bool {
@@ -443,13 +444,12 @@ impl AccountHub {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| invalid("an address is machine/handle, user/handle, or a handle"))?
             .trim();
-        let parts: Vec<&str> = s.split('/').collect();
         let own = |s: &str| matches!(s, "me" | "local") || s == self.account_name();
-        let (m, h) = match parts.as_slice() {
-            [h] => (machine, *h),
-            [a, h] if own(a) => (if h.is_empty() { "" } else { machine }, *h),
-            [m, h] => (*m, *h),
-            [a, m, h] if own(a) => (*m, *h),
+        let (m, h) = match segments(s) {
+            Some(Segments::One(h)) => (machine, h),
+            Some(Segments::Two(a, h)) if own(a) => (if h.is_empty() { "" } else { machine }, h),
+            Some(Segments::Two(m, h)) => (m, h),
+            Some(Segments::Three(a, m, h)) if own(a) => (m, h),
             _ => return Err(Error::new("not_found", "no endpoint at address")),
         };
         let h = if h == "me" { "" } else { h };

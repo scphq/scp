@@ -402,6 +402,10 @@ test("--durable refuses a command it cannot resume, and --idle takes seconds, du
     const result = f.swarm("spawn", "--bg", ...args)
     expect([result.status, result.stderr]).toEqual([125, expect.stringContaining(text)])
   }
+  f.env.SCP_IDLE_AFTER_S = "60"
+  f.env.SCP_SPAWN_IDLE_AFTER_S = "0"
+  const zero = f.swarm("spawn", "--bg", "--durable", "--", "codex", "exec", "go")
+  expect([zero.status, zero.stderr]).toEqual([125, expect.stringContaining("does not go with an idle time of 0")])
   expect(f.runs()).toEqual([])
 })
 

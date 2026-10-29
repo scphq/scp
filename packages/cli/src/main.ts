@@ -210,7 +210,8 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  A codex exec, agy -p, grok -p or muse exec worker stays resumable after it exits (wake
                                                  spawn-resume): spawn holds its endpoint, and each message to it resumes the same
                                                  session, every run handing back again as a reply. --idle S (default
-                                                 lifecycle.idle_after_s or $SCP_IDLE_AFTER_S, 600 s, when detached, none in the
+                                                 $SCP_SPAWN_IDLE_AFTER_S or spawn.idle_after_s, else $SCP_IDLE_AFTER_S or
+                                                 lifecycle.idle_after_s, else 600 s, when detached, none in the
                                                  foreground; Infinity: until ended; 0: never held) lets it go after S quiet seconds;
                                                  ${CLI_NAME} end <worker> lets it go now. A held worker with a parent hibernates
                                                  instead of letting go, even when spawn dies: a message then resumes it through the

@@ -49,7 +49,7 @@
     },
     "crates": {
       "name": "scp-relay",
-      "version": "0.4.0",
+      "version": "0.4.1",
     },
     "packages/broker": {
       "name": "@scp-dev/broker",
@@ -64,7 +64,7 @@
     },
     "packages/cli": {
       "name": "@scp-dev/cli",
-      "version": "0.18.3",
+      "version": "0.18.4",
       "bin": {
         "swarm": "./dist/cli.js",
       },
@@ -82,11 +82,11 @@
         "tsup": "^8.5.1",
       },
       "optionalDependencies": {
-        "@scp-dev/native-darwin-arm64": "0.18.3",
-        "@scp-dev/native-darwin-x64": "0.18.3",
-        "@scp-dev/native-linux-arm64-gnu": "0.18.3",
-        "@scp-dev/native-linux-x64-gnu": "0.18.3",
-        "@scp-dev/native-linux-x64-musl": "0.18.3",
+        "@scp-dev/native-darwin-arm64": "0.18.4",
+        "@scp-dev/native-darwin-x64": "0.18.4",
+        "@scp-dev/native-linux-arm64-gnu": "0.18.4",
+        "@scp-dev/native-linux-x64-gnu": "0.18.4",
+        "@scp-dev/native-linux-x64-musl": "0.18.4",
       },
     },
     "packages/conformance": {
@@ -107,7 +107,7 @@
     },
     "packages/dashboard": {
       "name": "@scp-dev/dashboard",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "bin": {
         "scp-dashboard": "dist/server.js",
       },

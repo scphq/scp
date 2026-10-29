@@ -1,12 +1,12 @@
 [workspace]
-members = ["scp-relay-store", "scp-relay", "scp-hook", "scp-broker"]
+members = ["scp-core", "scp-relay-store", "scp-relay", "scp-hook", "scp-broker"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/scphq/scp"
-version = "0.4.0"
+version = "0.4.1"
 
 [workspace.dependencies]
 tokio = { version = "=1.47.1", features = ["full"] }

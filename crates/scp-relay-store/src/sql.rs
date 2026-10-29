@@ -1,4 +1,5 @@
 use crate::*;
+use scp_core::protocol::LIMITS;
 use serde::de::DeserializeOwned;
 use sqlx::{
     Row,
@@ -312,12 +313,12 @@ impl Transaction {
             self.execute("DELETE FROM messages WHERE account_id=$1 AND id IN (SELECT x.id FROM xinbox x LEFT JOIN xcursor c ON c.account_id=x.account_id AND c.endpoint=x.endpoint WHERE x.account_id=$1 AND x.at<=$2 AND (x.expires_at<=$3 OR (c.at<=$2 AND x.seq<=c.acked_seq) OR (c.old_at<=$2 AND x.seq<=c.old_seq)))",args![a,now.saturating_sub(86400000),now]).await?;
             self.execute(
                 "DELETE FROM messages WHERE account_id=$1 AND expires_at<=$2",
-                args![a, now.saturating_sub(604800000)],
+                args![a, now.saturating_sub(LIMITS.purge_after_s as i64 * 1000)],
             )
             .await?;
             self.execute(
                 "DELETE FROM idempotency WHERE account_id=$1 AND created_at<$2",
-                args![a, now.saturating_sub(86400000)],
+                args![a, now.saturating_sub(LIMITS.idempotency_s as i64 * 1000)],
             )
             .await?;
             for table in ["pair_events", "local_events"] {

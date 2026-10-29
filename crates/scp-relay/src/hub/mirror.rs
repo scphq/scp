@@ -399,7 +399,7 @@ fn parse(v: &Value, grant: Option<&Grant>) -> Result<(String, Value)> {
     if f["title"] == "" {
         f["title"] = Value::Null;
     }
-    if !f["harness"].is_null() && !pattern!(r"^[a-z0-9][a-z0-9-]{0,31}$", string(&f, "harness")) {
+    if !f["harness"].is_null() && !scp_core::protocol::valid_harness(string(&f, "harness")) {
         return Err(invalid("invalid harness"));
     }
     f["labels"] = labels(v.get("labels"), grant)?;
@@ -459,7 +459,8 @@ fn parse(v: &Value, grant: Option<&Grant>) -> Result<(String, Value)> {
             .filter(|v| {
                 v.as_str().is_some_and(|s| {
                     include_str!("wakes.txt").lines().any(|wake| wake == s)
-                        || pattern!(r"^hook:[a-z0-9][a-z0-9-]{0,31}$", s)
+                        || s.strip_prefix("hook:")
+                            .is_some_and(scp_core::protocol::valid_harness)
                 })
             })
             .cloned()

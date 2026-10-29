@@ -92,9 +92,7 @@ macro_rules! pattern {
     }};
 }
 pub(super) use pattern;
-pub(super) fn handle(s: &str) -> bool {
-    pattern!(r"^[a-z0-9][a-z0-9._-]{0,62}$", s) && !matches!(s, "user" | "me" | "relay")
-}
+pub(super) use scp_core::address::valid_handle as handle;
 pub(super) fn labels(value: Option<&Value>, grant: Option<&Grant>) -> Result<Value> {
     let mut v = match value {
         None | Some(Value::Null) => json!({}),
@@ -114,7 +112,7 @@ pub(super) fn labels(value: Option<&Value>, grant: Option<&Grant>) -> Result<Val
     }
     let keys: Vec<String> = map.keys().cloned().collect();
     for key in keys {
-        if !pattern!(r"^[a-z0-9][a-z0-9._-]{0,31}$", &key) {
+        if !scp_core::address::valid_label(&key) {
             return Err(invalid("invalid label name"));
         }
         v[&key] = text(v.get(&key), "label", 128)?
@@ -124,17 +122,7 @@ pub(super) fn labels(value: Option<&Value>, grant: Option<&Grant>) -> Result<Val
     Ok(v)
 }
 pub(super) fn server_fields(p: &Value) -> Result<()> {
-    for key in [
-        "from",
-        "id",
-        "seq",
-        "hop",
-        "created_at",
-        "auth",
-        "expires_at",
-        "relation",
-        "link",
-    ] {
+    for key in scp_core::protocol::SERVER_FIELDS {
         if p.get(key).is_some() {
             return Err(invalid(&format!("{key} is set by the relay")));
         }
