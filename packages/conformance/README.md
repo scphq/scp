@@ -112,6 +112,10 @@ same broker under Node when `SCP_BROKER_NODE` names a Node binary. `rust` runs t
 `SCP_BROKER_BIN` and is explicitly skipped without it. `SCP_BROKER_TARGETS` is a
 comma-separated target filter.
 
+The native engine in `crates/scp-broker` (`cargo build -p scp-broker`, binary `scp-broker`) is
+the `rust` engine. Suites it does not implement yet are listed in `rustPending` in
+`src/broker/suite.ts` and show as todo on the `rust` target; identity and framing run in full.
+
 The launcher contract is a harness requirement separate from SPEC conformance.
 An engine is started as `<engine> daemon --idle <seconds> --policy <file>` in the
 foreground, with the relay directory in `SCP_DIR`, and serves the socket of Appendix E.1

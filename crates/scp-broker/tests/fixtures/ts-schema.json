@@ -1,0 +1,356 @@
+[
+  {
+    "type": "index",
+    "name": "audit_at",
+    "tbl_name": "audit",
+    "sql": "CREATE INDEX audit_at ON audit (at)"
+  },
+  {
+    "type": "index",
+    "name": "audit_event",
+    "tbl_name": "audit",
+    "sql": "CREATE INDEX audit_event ON audit (event, endpoint, id)"
+  },
+  {
+    "type": "index",
+    "name": "audit_ref",
+    "tbl_name": "audit",
+    "sql": "CREATE INDEX audit_ref ON audit (event, ref)"
+  },
+  {
+    "type": "index",
+    "name": "deliveries_expires",
+    "tbl_name": "deliveries",
+    "sql": "CREATE INDEX deliveries_expires ON deliveries (expires_at)"
+  },
+  {
+    "type": "index",
+    "name": "deliveries_inbox",
+    "tbl_name": "deliveries",
+    "sql": "CREATE INDEX deliveries_inbox ON deliveries (endpoint, acked_at, seq)"
+  },
+  {
+    "type": "index",
+    "name": "deliveries_message",
+    "tbl_name": "deliveries",
+    "sql": "CREATE INDEX deliveries_message ON deliveries (message_id)"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_hooked",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_hooked ON endpoints (process) WHERE hook_seen IS NOT NULL AND process IS NOT NULL"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_parent",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_parent ON endpoints (parent_ep)"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_process",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_process ON endpoints (process)"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_revive",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_revive ON endpoints (wake_tried) WHERE hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_seen",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_seen ON endpoints (COALESCE(last_seen, created_at))"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_session",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_session ON endpoints (session)"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_status",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_status ON endpoints (status_state) WHERE status_state IS NOT NULL"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_token",
+    "tbl_name": "endpoints",
+    "sql": "CREATE UNIQUE INDEX endpoints_token ON endpoints (token_hash)"
+  },
+  {
+    "type": "index",
+    "name": "endpoints_wake",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_wake ON endpoints (waker_left) WHERE wake IS NOT NULL"
+  },
+  {
+    "type": "index",
+    "name": "grants_bound",
+    "tbl_name": "grants",
+    "sql": "CREATE INDEX grants_bound ON grants (bound_process)"
+  },
+  {
+    "type": "index",
+    "name": "grants_issuer",
+    "tbl_name": "grants",
+    "sql": "CREATE INDEX grants_issuer ON grants (issuer)"
+  },
+  {
+    "type": "index",
+    "name": "grants_used",
+    "tbl_name": "grants",
+    "sql": "CREATE INDEX grants_used ON grants (used_by)"
+  },
+  {
+    "type": "index",
+    "name": "group_members_endpoint",
+    "tbl_name": "group_members",
+    "sql": "CREATE INDEX group_members_endpoint ON group_members (endpoint)"
+  },
+  {
+    "type": "index",
+    "name": "messages_created",
+    "tbl_name": "messages",
+    "sql": "CREATE INDEX messages_created ON messages (created_at)"
+  },
+  {
+    "type": "index",
+    "name": "messages_reply_to",
+    "tbl_name": "messages",
+    "sql": "CREATE INDEX messages_reply_to ON messages (reply_to)"
+  },
+  {
+    "type": "index",
+    "name": "messages_thread",
+    "tbl_name": "messages",
+    "sql": "CREATE INDEX messages_thread ON messages (thread)"
+  },
+  {
+    "type": "index",
+    "name": "pair_events_pair",
+    "tbl_name": "pair_events",
+    "sql": "CREATE INDEX pair_events_pair ON pair_events (from_ep, to_ep, at)"
+  },
+  {
+    "type": "index",
+    "name": "peek_turns_endpoint",
+    "tbl_name": "peek_turns",
+    "sql": "CREATE INDEX peek_turns_endpoint ON peek_turns (endpoint, id)"
+  },
+  {
+    "type": "index",
+    "name": "spawn_via_address",
+    "tbl_name": "spawn_via",
+    "sql": "CREATE INDEX spawn_via_address ON spawn_via(address)"
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_blocks_1",
+    "tbl_name": "blocks",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_endpoints_1",
+    "tbl_name": "endpoints",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_endpoints_2",
+    "tbl_name": "endpoints",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_grants_1",
+    "tbl_name": "grants",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_group_members_1",
+    "tbl_name": "group_members",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_groups_1",
+    "tbl_name": "groups",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_idempotency_1",
+    "tbl_name": "idempotency",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_messages_1",
+    "tbl_name": "messages",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_policy_binds_1",
+    "tbl_name": "policy_binds",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_policy_loads_1",
+    "tbl_name": "policy_loads",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_relay_migrations_1",
+    "tbl_name": "relay_migrations",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "sqlite_autoindex_spawn_via_1",
+    "tbl_name": "spawn_via",
+    "sql": null
+  },
+  {
+    "type": "index",
+    "name": "tree_events_tree",
+    "tbl_name": "tree_events",
+    "sql": "CREATE INDEX tree_events_tree ON tree_events (tree, at)"
+  },
+  {
+    "type": "table",
+    "name": "activity",
+    "tbl_name": "activity",
+    "sql": "CREATE TABLE activity (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    at INTEGER NOT NULL,\n    endpoint TEXT NOT NULL,\n    kind TEXT NOT NULL,\n    tool TEXT,\n    summary TEXT,\n    agent TEXT\n  )"
+  },
+  {
+    "type": "table",
+    "name": "admins",
+    "tbl_name": "admins",
+    "sql": "CREATE TABLE admins (subject TEXT NOT NULL, scope_kind TEXT NOT NULL, scope TEXT NOT NULL, scope_id TEXT, granted_at INTEGER NOT NULL, revoked_at INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "audit",
+    "tbl_name": "audit",
+    "sql": "CREATE TABLE audit (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    at INTEGER NOT NULL,\n    event TEXT NOT NULL,\n    endpoint TEXT,\n    ref TEXT,\n    detail TEXT NOT NULL DEFAULT '{}'\n  )"
+  },
+  {
+    "type": "table",
+    "name": "blocks",
+    "tbl_name": "blocks",
+    "sql": "CREATE TABLE blocks (pair TEXT PRIMARY KEY, until INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "deliveries",
+    "tbl_name": "deliveries",
+    "sql": "CREATE TABLE deliveries (\n    seq INTEGER PRIMARY KEY AUTOINCREMENT,\n    message_id TEXT NOT NULL,\n    endpoint TEXT NOT NULL,\n    acked_at INTEGER,\n    expires_at INTEGER NOT NULL,\n    offered_until INTEGER,\n    offered_hold TEXT,\n    injected_at INTEGER,\n    nudged_at INTEGER,\n    deferred_at INTEGER,\n    deferred_ack INTEGER\n  , restated_at INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "endpoints",
+    "tbl_name": "endpoints",
+    "sql": "CREATE TABLE endpoints (\n    id TEXT PRIMARY KEY,\n    handle TEXT NOT NULL UNIQUE,\n    kind TEXT NOT NULL,\n    harness TEXT,\n    model TEXT,\n    cwd TEXT,\n    parent TEXT,\n    labels TEXT NOT NULL DEFAULT '{}',\n    status_state TEXT,\n    status_note TEXT,\n    token_hash TEXT,\n    connections INTEGER NOT NULL DEFAULT 0,\n    last_seen INTEGER,\n    last_received_at INTEGER,\n    last_received_hop INTEGER,\n    created_at INTEGER NOT NULL,\n    session TEXT,\n    hook_seen INTEGER,\n    hook_ended INTEGER,\n    process TEXT,\n    stop_blocks INTEGER\n  , tree TEXT, parent_ep TEXT, parent_addr TEXT, depth INTEGER, rules TEXT, caps TEXT, title TEXT, reset_at INTEGER, spawned_at INTEGER, peek TEXT, pushes INTEGER, prompts INTEGER, briefed INTEGER, introduced INTEGER, directive_holds INTEGER, harness_session TEXT, harness_origin TEXT, harness_transcript TEXT, title_auto TEXT, title_turn INTEGER, tldr_turn INTEGER, named INTEGER, linked INTEGER, wake TEXT, wakers INTEGER NOT NULL DEFAULT 0, waker_left INTEGER, hibernate TEXT, wake_ref TEXT, hibernated_at INTEGER, wake_tried INTEGER, wake_fails INTEGER NOT NULL DEFAULT 0, wake_note TEXT, wake_eta INTEGER, wake_declined TEXT, declined_message TEXT, declined_from TEXT, hold_ref TEXT, wake_ticket TEXT, wake_tickets TEXT, mail_at INTEGER, revive TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "grants",
+    "tbl_name": "grants",
+    "sql": "CREATE TABLE grants (\n    token_hash TEXT PRIMARY KEY,\n    issuer TEXT NOT NULL,\n    under TEXT NOT NULL,\n    name TEXT,\n    labels TEXT,\n    caps TEXT,\n    groups TEXT,\n    used_by TEXT,\n    created_at INTEGER NOT NULL,\n    expires_at INTEGER NOT NULL,\n    revoked_at INTEGER,\n    spent_cwd TEXT,\n    title TEXT,\n    bound_process TEXT\n  , peek TEXT, prompt TEXT, spawn INTEGER, no_push INTEGER, handback TEXT, pushed_at INTEGER, steer TEXT, run INTEGER, ended_at INTEGER)"
+  },
+  {
+    "type": "table",
+    "name": "group_members",
+    "tbl_name": "group_members",
+    "sql": "CREATE TABLE group_members (name TEXT NOT NULL, endpoint TEXT NOT NULL, added_by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (name, endpoint))"
+  },
+  {
+    "type": "table",
+    "name": "groups",
+    "tbl_name": "groups",
+    "sql": "CREATE TABLE groups (name TEXT PRIMARY KEY, owner TEXT NOT NULL, tree TEXT, rules TEXT, pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, id TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "idempotency",
+    "tbl_name": "idempotency",
+    "sql": "CREATE TABLE idempotency (\n    from_ep TEXT NOT NULL,\n    client_id TEXT NOT NULL,\n    payload_hash TEXT NOT NULL,\n    result TEXT NOT NULL,\n    created_at INTEGER NOT NULL,\n    PRIMARY KEY (from_ep, client_id)\n  )"
+  },
+  {
+    "type": "table",
+    "name": "messages",
+    "tbl_name": "messages",
+    "sql": "CREATE TABLE messages (\n    id TEXT PRIMARY KEY,\n    thread TEXT NOT NULL,\n    reply_to TEXT,\n    kind TEXT NOT NULL,\n    from_ep TEXT NOT NULL,\n    to_addr TEXT NOT NULL,\n    body TEXT NOT NULL,\n    mime TEXT NOT NULL,\n    data_class TEXT NOT NULL,\n    attachments TEXT NOT NULL,\n    hop INTEGER NOT NULL,\n    created_at INTEGER NOT NULL,\n    expires_at INTEGER NOT NULL,\n    sender_tty INTEGER,\n    require_reply INTEGER\n  , link_parent TEXT)"
+  },
+  {
+    "type": "table",
+    "name": "pair_events",
+    "tbl_name": "pair_events",
+    "sql": "CREATE TABLE pair_events (from_ep TEXT NOT NULL, to_ep TEXT NOT NULL, at INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "peek_turns",
+    "tbl_name": "peek_turns",
+    "sql": "CREATE TABLE peek_turns (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL, at INTEGER NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "policy_binds",
+    "tbl_name": "policy_binds",
+    "sql": "CREATE TABLE policy_binds (policy TEXT NOT NULL, name TEXT NOT NULL, grp TEXT NOT NULL, PRIMARY KEY (policy, name))"
+  },
+  {
+    "type": "table",
+    "name": "policy_loads",
+    "tbl_name": "policy_loads",
+    "sql": "CREATE TABLE policy_loads (policy TEXT PRIMARY KEY, at INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "relay_migrations",
+    "tbl_name": "relay_migrations",
+    "sql": "CREATE TABLE relay_migrations (name TEXT PRIMARY KEY, at INTEGER NOT NULL)"
+  },
+  {
+    "type": "table",
+    "name": "spawn_via",
+    "tbl_name": "spawn_via",
+    "sql": "CREATE TABLE spawn_via (\n    spawner TEXT NOT NULL, name TEXT NOT NULL, runner TEXT NOT NULL, address TEXT, machine TEXT, ref TEXT, attach TEXT,\n    created_at INTEGER NOT NULL, ended_at INTEGER, PRIMARY KEY (spawner, name)\n  )"
+  },
+  {
+    "type": "table",
+    "name": "sqlite_sequence",
+    "tbl_name": "sqlite_sequence",
+    "sql": "CREATE TABLE sqlite_sequence(name,seq)"
+  },
+  {
+    "type": "table",
+    "name": "tree_events",
+    "tbl_name": "tree_events",
+    "sql": "CREATE TABLE tree_events (tree TEXT NOT NULL, at INTEGER NOT NULL)"
+  },
+  {
+    "type": "trigger",
+    "name": "audit_no_delete",
+    "tbl_name": "audit",
+    "sql": "CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit\n    WHEN OLD.at > CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 2592000000 AND NOT (OLD.event IN ('scope_refused') AND OLD.at <= CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 86400000)\n    BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END"
+  },
+  {
+    "type": "trigger",
+    "name": "audit_no_update",
+    "tbl_name": "audit",
+    "sql": "CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END"
+  }
+]

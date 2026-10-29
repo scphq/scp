@@ -1,0 +1,1279 @@
+use crate::core::{Core, integer, now_ms, text};
+use crate::proto::{ErrorCode, RpcError};
+use crate::state::{ConnectionId, Mode};
+use crate::store::{Row, SqlValue};
+use crate::views::{address, opt, presence};
+use rand::RngCore;
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+
+pub fn valid_handle(value: &str) -> bool {
+    !matches!(value, "user" | "me" | "relay") && valid_name(value, 63, b"._-")
+}
+pub fn valid_harness(value: &str) -> bool {
+    valid_name(value, 32, b"-")
+}
+pub fn valid_label(value: &str) -> bool {
+    valid_name(value, 32, b"._-")
+}
+fn valid_name(value: &str, max: usize, punct: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value.as_bytes()[0]
+            .is_ascii_lowercase()
+            .then_some(())
+            .or_else(|| value.as_bytes()[0].is_ascii_digit().then_some(()))
+            .is_some()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || punct.contains(&b))
+}
+pub fn generic(harness: Option<&str>) -> bool {
+    harness.is_none_or(|v| matches!(v, "cli" | "hook" | "mcp" | "shell"))
+}
+pub fn harness_fits(held: Option<&str>, claimed: &str) -> bool {
+    held == Some(claimed) || generic(held)
+}
+pub fn same_provider(held: Option<&str>, claimed: &str) -> bool {
+    held.is_some_and(|v| v.split('-').next() == claimed.split('-').next())
+}
+pub fn process_key(value: &str, full: bool) -> bool {
+    let Some(raw) = value.strip_prefix("pid:") else {
+        return false;
+    };
+    let (pid, start) = raw
+        .split_once(':')
+        .map_or((raw, None), |(p, s)| (p, Some(s)));
+    !pid.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && match start {
+            None => !full,
+            Some(v) => {
+                !v.is_empty()
+                    && v.len() <= 64
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'-')
+            }
+        }
+}
+pub fn same_harness(a: &str, b: &str) -> bool {
+    a == b
+        || (process_key(a, false) && !process_key(a, true) && b.starts_with(&format!("{a}:")))
+        || (process_key(b, false) && !process_key(b, true) && a.starts_with(&format!("{b}:")))
+}
+pub fn harness_session(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+pub fn hash(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+pub fn token(prefix: &str) -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    format!("{prefix}_{}", hex::encode(bytes))
+}
+pub fn valid_token(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|v| {
+        v.len() == 64
+            && v.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+pub fn clean_text(
+    value: Option<&Value>,
+    field: &str,
+    max: usize,
+) -> Result<Option<String>, RpcError> {
+    crate::session::clean_text(value, field, max as u64)
+}
+pub fn clean_labels(value: Option<&Value>) -> Result<Value, RpcError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(json!({}));
+    };
+    let labels = value
+        .as_object()
+        .ok_or_else(|| RpcError::invalid_params("labels must be an object of strings"))?;
+    if labels.len() > 16 {
+        return Err(RpcError::new(ErrorCode::TooLarge, "at most 16 labels"));
+    }
+    let mut out = Map::new();
+    for (key, value) in labels {
+        if !valid_label(key) {
+            return Err(RpcError::invalid_params("label is not a valid name"));
+        }
+        out.insert(
+            key.clone(),
+            json!(clean_text(Some(value), key, 128)?.unwrap_or_default()),
+        );
+    }
+    Ok(Value::Object(out))
+}
+pub fn lineage_keys(value: Option<&Value>) -> Result<Vec<String>, RpcError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| RpcError::invalid_params("lineage is a list of process keys"))?;
+    if values
+        .iter()
+        .any(|v| v.as_str().is_none_or(|s| s.len() > 128))
+    {
+        return Err(RpcError::invalid_params(
+            "lineage is a list of process keys",
+        ));
+    }
+    Ok(values
+        .iter()
+        .take(16)
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect())
+}
+
+#[derive(Clone)]
+struct Fields {
+    model: Option<String>,
+    cwd: Option<String>,
+    parent: Option<String>,
+    labels: Value,
+    session: Option<String>,
+    process: Option<String>,
+    harness_session: Option<String>,
+    harness_origin: Option<String>,
+}
+#[derive(Clone)]
+struct Scope {
+    handle: String,
+    lineage: Vec<String>,
+    grant: Option<String>,
+    nearest: Option<String>,
+    rules: Value,
+    exact: bool,
+}
+struct Placement {
+    parent: Option<Row>,
+    grant: Option<Row>,
+}
+
+impl Core {
+    pub async fn lineage_rows(
+        &self,
+        keys: &[String],
+        exclude: &[&str],
+    ) -> Result<Vec<Row>, RpcError> {
+        if self
+            .policy
+            .as_ref()
+            .and_then(|v| v.pointer("/defaults/verifyLineage"))
+            == Some(&Value::Bool(true))
+        {
+            return Ok(Vec::new());
+        }
+        for key in keys.iter().filter(|v| process_key(v, true)) {
+            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
+            let mut out = Vec::new();
+            for row in rows {
+                if exclude.contains(&text(&row, "id").unwrap_or("")) {
+                    continue;
+                }
+                if self
+                    .ancestors(&row)
+                    .await?
+                    .iter()
+                    .any(|id| exclude.contains(&id.as_str()))
+                {
+                    continue;
+                }
+                out.push(row);
+            }
+            if !out.is_empty() {
+                return Ok(out);
+            }
+        }
+        Ok(Vec::new())
+    }
+    pub async fn place_lineage(
+        &self,
+        value: Option<&Value>,
+        handle: Option<&str>,
+        session: Option<&str>,
+    ) -> Result<Option<String>, RpcError> {
+        let rows = self.lineage_rows(&lineage_keys(value)?, &[]).await?;
+        let found = if let Some(handle) = handle {
+            rows.iter().find(|r| text(r, "handle") == Some(handle))
+        } else if let Some(session) = session {
+            rows.iter()
+                .find(|r| text(r, "harness_session") == Some(session))
+                .or_else(|| rows.iter().find(|r| text(r, "harness_session").is_none()))
+        } else {
+            rows.first()
+        };
+        Ok(found.and_then(|r| text(r, "id")).map(str::to_owned))
+    }
+    pub async fn grant_binds(&self, value: &Value, id: Option<&str>) -> Result<bool, RpcError> {
+        let raw = value
+            .as_str()
+            .filter(|s| valid_token(s, "krt_"))
+            .ok_or_else(|| RpcError::invalid_params("grant is a krt_ token"))?;
+        let grant=self.store.all("SELECT * FROM grants WHERE token_hash = ? AND used_by IS NOT NULL AND revoked_at IS NULL", &[opt(Some(&hash(raw)))]).await?.into_iter().next();
+        let Some(spender) = grant.as_ref().and_then(|r| text(r, "used_by")) else {
+            return Ok(false);
+        };
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        if id == spender {
+            return Ok(true);
+        }
+        Ok(self
+            .ancestors(&self.must_endpoint(id).await?)
+            .await?
+            .iter()
+            .any(|v| v == spender))
+    }
+    pub async fn end_exited(&self) -> Result<(), RpcError> {
+        let rows=self.store.all("SELECT id,process FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL",&[]).await?;
+        for row in rows {
+            if let Some(key) = text(&row, "process")
+                && let Some(pid) = key
+                    .strip_prefix("pid:")
+                    .and_then(|key| key.split(':').next())
+                    .filter(|pid| {
+                        !pid.is_empty()
+                            && pid.bytes().all(|byte| byte.is_ascii_digit())
+                            && *pid != "0"
+                    })
+                && !self.procs.alive(&format!("pid:{pid}")).await
+            {
+                self.store.all("UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL WHERE id = ? AND connections = 0", &[SqlValue::Int(now_ms()),opt(text(&row,"id"))]).await?;
+            }
+        }
+        Ok(())
+    }
+    pub async fn released(&self, row: &Row) -> bool {
+        text(row, "kind") == Some("agent")
+            && integer(row, "connections").unwrap_or(0) == 0
+            && (presence(row, now_ms()) == "offline"
+                || match text(row, "process") {
+                    Some(key) => !self.procs.alive(key).await,
+                    None => false,
+                })
+    }
+    async fn placement(&self, scope: &Scope, exclude: &[&str]) -> Result<Placement, RpcError> {
+        let lineage = self
+            .lineage_rows(&scope.lineage, exclude)
+            .await?
+            .into_iter()
+            .next();
+        let Some(grant_hash) = &scope.grant else {
+            return Ok(Placement {
+                parent: lineage,
+                grant: None,
+            });
+        };
+        let grant = self
+            .store
+            .all(
+                "SELECT * FROM grants WHERE token_hash = ?",
+                &[opt(Some(grant_hash))],
+            )
+            .await?
+            .into_iter()
+            .next();
+        if let Some(grant) = &grant
+            && let Some(spender) = text(grant, "used_by")
+            && let Some(parent) = &lineage
+            && (text(parent, "id") == Some(spender)
+                || self.ancestors(parent).await?.iter().any(|id| id == spender))
+        {
+            return Ok(Placement {
+                parent: lineage,
+                grant: None,
+            });
+        }
+        let valid = grant.as_ref().is_some_and(|g| {
+            integer(g, "expires_at").unwrap_or(0) > now_ms() && integer(g, "revoked_at").is_none()
+        });
+        let reason = if !valid {
+            Some("grant invalid")
+        } else if grant.as_ref().and_then(|g| text(g, "used_by")).is_some() {
+            Some("grant used")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            if lineage.is_some() {
+                return Ok(Placement {
+                    parent: lineage,
+                    grant: None,
+                });
+            }
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                format!("grant refused: {reason}"),
+            ));
+        }
+        let grant = grant.ok_or_else(RpcError::internal)?;
+        if text(&grant, "name").is_some_and(|name| name != scope.handle) {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "grant for another name",
+            ));
+        }
+        let under = self
+            .must_endpoint(text(&grant, "under").unwrap_or(""))
+            .await?;
+        if exclude.contains(&text(&under, "id").unwrap_or(""))
+            || self
+                .ancestors(&under)
+                .await?
+                .iter()
+                .any(|id| exclude.contains(&id.as_str()))
+        {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "grant under the claimed endpoint",
+            ));
+        }
+        if let Some(lineage) = &lineage
+            && text(&under, "id") != text(lineage, "id")
+            && !self
+                .ancestors(&under)
+                .await?
+                .iter()
+                .any(|id| Some(id.as_str()) == text(lineage, "id"))
+        {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "grant above lineage",
+            ));
+        }
+        Ok(Placement {
+            parent: Some(under),
+            grant: Some(grant),
+        })
+    }
+    fn restarts(&self, row: &Row, parent: Option<&Row>, process: Option<&str>) -> bool {
+        if parent.and_then(|r| text(r, "id")) == text(row, "id") {
+            return process
+                .zip(text(row, "process"))
+                .is_some_and(|(a, b)| same_harness(a, b));
+        }
+        parent.and_then(|r| text(r, "id")) == text(row, "parent_ep")
+            || (parent.is_none() && integer(row, "linked").is_some())
+    }
+    async fn returns(
+        &self,
+        row: &Row,
+        parent: Option<&Row>,
+        scope: &Scope,
+        fields: &Fields,
+        harness: &str,
+    ) -> Result<bool, RpcError> {
+        if self.restarts(row, parent, fields.process.as_deref()) {
+            return Ok(true);
+        }
+        if let Some(grant_hash) = &scope.grant {
+            let grant=self.store.all("SELECT * FROM grants WHERE token_hash = ? AND used_by = ? AND revoked_at IS NULL",&[opt(Some(grant_hash)),opt(text(row,"id"))]).await?.into_iter().next();
+            if let Some(grant) = grant {
+                let lineage = self
+                    .lineage_rows(&scope.lineage, &[])
+                    .await?
+                    .into_iter()
+                    .next();
+                if let Some(lineage) = lineage {
+                    if self.restarts(row, Some(&lineage), fields.process.as_deref())
+                        || self
+                            .ancestors(row)
+                            .await?
+                            .iter()
+                            .any(|id| Some(id.as_str()) == text(&lineage, "id"))
+                    {
+                        return Ok(true);
+                    }
+                } else if harness_fits(text(row, "harness"), harness)
+                    && text(&grant, "spent_cwd").is_some()
+                    && text(&grant, "spent_cwd") == fields.cwd.as_deref()
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(parent.is_none()
+            && scope.grant.is_none()
+            && fields.harness_session.is_some()
+            && text(row, "harness_session") == fields.harness_session.as_deref())
+    }
+    async fn resumable(
+        &self,
+        harness: &str,
+        session: &str,
+        scope: &Scope,
+        fields: &Fields,
+        instead: Option<&Row>,
+    ) -> Result<Option<Row>, RpcError> {
+        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' ORDER BY named IS NULL,COALESCE(last_seen,created_at) DESC",&[opt(Some(session))]).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let parent = if let Some(row) = instead {
+            match text(row, "parent_ep") {
+                Some(id) => self.by_id(id).await?,
+                None => None,
+            }
+        } else {
+            self.placement(scope, &[]).await?.parent
+        };
+        let spender = if let Some(grant) = &scope.grant {
+            Some(
+                self.store
+                    .all(
+                        "SELECT used_by FROM grants WHERE token_hash = ? AND used_by IS NOT NULL AND revoked_at IS NULL",
+                        &[opt(Some(grant))],
+                    )
+                    .await?
+                    .first()
+                    .and_then(|row| text(row, "used_by"))
+                    .unwrap_or("")
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        for row in rows {
+            if spender
+                .as_deref()
+                .is_some_and(|id| Some(id) != text(&row, "id"))
+            {
+                continue;
+            }
+            if instead.is_some_and(|r| text(r, "id") == text(&row, "id")) {
+                continue;
+            }
+            if !harness_fits(text(&row, "harness"), harness)
+                && !same_provider(text(&row, "harness"), harness)
+            {
+                continue;
+            }
+            if self.released(&row).await
+                && self
+                    .returns(
+                        &row,
+                        parent.as_ref(),
+                        scope,
+                        &Fields {
+                            harness_session: Some(session.into()),
+                            ..fields.clone()
+                        },
+                        harness,
+                    )
+                    .await?
+            {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+    async fn place_claim(&self, row: &Row, scope: &Scope, fields: &Fields) -> Result<(), RpcError> {
+        let id = text(row, "id").ok_or_else(RpcError::internal)?;
+        let place = self.placement(scope, &[id]).await?;
+        let depth = place
+            .parent
+            .as_ref()
+            .and_then(|r| integer(r, "depth"))
+            .unwrap_or(-1)
+            + 1;
+        if depth > 32 {
+            return Err(RpcError::new(
+                ErrorCode::ScopeRefused,
+                "claim is deeper than depthMax",
+            ));
+        }
+        let mut caps = json!({"caps":[],"allow":{}});
+        if let Some(grant) = &place.grant {
+            self.spend_claim(grant, id, fields).await?;
+            let entries: Vec<Value> = text(grant, "caps")
+                .and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut v| {
+                    v["id"] = json!(token("cap"));
+                    v["by"] = json!(text(grant, "issuer"));
+                    v
+                })
+                .collect();
+            caps["caps"] = json!(entries);
+        }
+        self.store.all("UPDATE endpoints SET tree = ?,parent_ep = ?,parent_addr = NULL,depth = ?,rules = ?,caps = ? WHERE id = ?",&[opt(place.parent.as_ref().and_then(|r|text(r,"tree").or_else(||text(r,"id")))),opt(place.parent.as_ref().and_then(|r|text(r,"id"))),SqlValue::Int(depth),if scope.rules == json!({}) { SqlValue::Null } else { opt(Some(&scope.rules.to_string())) },if caps["caps"]==json!([]){SqlValue::Null}else{opt(Some(&caps.to_string()))},opt(Some(id))]).await?;
+        if let Some(parent) = place.parent {
+            self.audit("scope_place",Some(id),None,json!({"by":match place.grant.as_ref().and_then(|r|text(r,"issuer")){Some(id)=>self.address_of(id).await?,None=>address(row)},"target":address(row),"parent":address(&parent)})).await?;
+        }
+        Ok(())
+    }
+    async fn spend_claim(&self, grant: &Row, id: &str, fields: &Fields) -> Result<(), RpcError> {
+        self.store.all("UPDATE grants SET used_by = ?,spent_cwd = ?,prompt = NULL WHERE token_hash = ? AND used_by IS NULL",&[opt(Some(id)),opt(fields.cwd.as_deref()),opt(text(grant,"token_hash"))]).await?;
+        let mut labels = text(grant, "labels")
+            .and_then(|v| serde_json::from_str::<Value>(v).ok())
+            .unwrap_or(json!({}));
+        if let (Some(dst), Some(src)) = (labels.as_object_mut(), fields.labels.as_object()) {
+            dst.extend(src.clone());
+        }
+        self.store.all("UPDATE endpoints SET labels = ?,title = CASE WHEN title IS NULL OR title IS title_auto THEN COALESCE(?,title) ELSE title END WHERE id = ?",&[opt(Some(&labels.to_string())),opt(text(grant,"title")),opt(Some(id))]).await?;
+        Ok(())
+    }
+    async fn claim_row(
+        &mut self,
+        harness: &str,
+        fields: &Fields,
+        scope: &Scope,
+        transient: bool,
+    ) -> Result<(Row, Option<String>), RpcError> {
+        self.end_exited().await?;
+        let mut row = if let Some(session) = &fields.session {
+            self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
+        } else {
+            None
+        };
+        let open = row
+            .as_ref()
+            .is_none_or(|r| presence(r, now_ms()) == "offline");
+        let mut session = fields.session.clone();
+        if let Some(held) = &row {
+            if presence(held, now_ms()) == "offline" {
+                self.store
+                    .all(
+                        "UPDATE endpoints SET session = NULL WHERE id = ?",
+                        &[opt(text(held, "id"))],
+                    )
+                    .await?;
+                row = None;
+            } else if !transient {
+                let same = fields
+                    .process
+                    .as_deref()
+                    .zip(text(held, "process"))
+                    .is_some_and(|(a, b)| {
+                        (integer(held, "connections").unwrap_or(0) == 0
+                            && if text(held, "token_hash").is_none() {
+                                same_harness(a, b)
+                            } else {
+                                a == b && process_key(a, true)
+                            })
+                            || (text(held, "handle") == Some(scope.handle.as_str())
+                                && integer(held, "connections").unwrap_or(0) > 0
+                                && a == b
+                                && process_key(a, true))
+                    });
+                if !same {
+                    row = None;
+                    session = None;
+                }
+            } else {
+                session = text(held, "session").map(str::to_owned);
+            }
+        }
+        let mut moved_hooks = None;
+        if !transient
+            && let Some(hooks) = row.clone()
+            && text(&hooks, "token_hash").is_none()
+            && integer(&hooks, "named").is_none()
+            && text(&hooks, "handle") != Some(scope.handle.as_str())
+            && !text(&hooks, "handle").unwrap_or("").starts_with(&format!(
+                "{}-",
+                scope.handle.chars().take(58).collect::<String>()
+            ))
+        {
+            for n in 1..if scope.exact { 2 } else { 1000 } {
+                let handle = suffixed(&scope.handle, n);
+                let held = self.by_handle(&handle).await?;
+                if let Some(held) = held {
+                    if self.released(&held).await
+                        && harness_fits(text(&held, "harness"), harness)
+                        && self
+                            .returns(
+                                &held,
+                                self.placement(scope, &[text(&hooks, "id").unwrap_or("")])
+                                    .await?
+                                    .parent
+                                    .as_ref(),
+                                scope,
+                                fields,
+                                harness,
+                            )
+                            .await?
+                    {
+                        moved_hooks = Some(hooks.clone());
+                        row = Some(held);
+                        break;
+                    }
+                } else {
+                    self.store
+                        .all(
+                            "UPDATE endpoints SET handle = ? WHERE id = ?",
+                            &[opt(Some(&handle)), opt(text(&hooks, "id"))],
+                        )
+                        .await?;
+                    row = self.by_id(text(&hooks, "id").unwrap_or("")).await?;
+                    break;
+                }
+            }
+        }
+        let exact = scope.exact;
+        let mut resumed = false;
+        if row.is_none() && open && !exact {
+            for reported in [&fields.harness_session, &fields.harness_origin]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(found) = self
+                    .resumable(harness, reported, scope, fields, None)
+                    .await?
+                {
+                    row = Some(found);
+                    session = fields.session.clone();
+                    resumed = true;
+                    break;
+                }
+            }
+        }
+        let mut joined = row.is_some() && !resumed;
+        let mut created = false;
+        let mut live = false;
+        let mut own = false;
+        if row.is_none() {
+            for n in 1..if exact { 2 } else { 1000 } {
+                let handle = suffixed(&scope.handle, n);
+                let Some(held) = self.by_handle(&handle).await? else {
+                    let id = token("ep");
+                    self.store.all("INSERT INTO endpoints (id,handle,kind,harness,labels,created_at) VALUES (?,?,'agent',?,'{}',?)",&[opt(Some(&id)),opt(Some(&handle)),opt(Some(harness)),SqlValue::Int(now_ms())]).await?;
+                    row = self.by_id(&id).await?;
+                    created = true;
+                    break;
+                };
+                let other_session = text(&held, "harness_session").is_some()
+                    && fields.harness_session.is_some()
+                    && text(&held, "harness_session") != fields.harness_session.as_deref()
+                    && fields
+                        .process
+                        .as_deref()
+                        .zip(text(&held, "process"))
+                        .is_some_and(|(a, b)| same_harness(a, b));
+                let outlived = integer(&held, "connections").unwrap_or(0) > 0
+                    && match text(&held, "process") {
+                        Some(key) => {
+                            !self
+                                .procs
+                                .alive(
+                                    key.splitn(3, ':')
+                                        .take(2)
+                                        .collect::<Vec<_>>()
+                                        .join(":")
+                                        .as_str(),
+                                )
+                                .await
+                        }
+                        None => false,
+                    };
+                if text(&held, "kind") == Some("agent")
+                    && (self.released(&held).await || (!transient && outlived))
+                    && harness_fits(text(&held, "harness"), harness)
+                    && !other_session
+                {
+                    own = transient
+                        && fields
+                            .process
+                            .as_deref()
+                            .zip(text(&held, "process"))
+                            .is_some_and(|(a, b)| same_harness(a, b));
+                    let ended = integer(&held, "hook_ended").is_some()
+                        || integer(&held, "last_seen")
+                            .or_else(|| integer(&held, "created_at"))
+                            .unwrap_or(0)
+                            < now_ms() - 60_000
+                        || match text(&held, "process") {
+                            Some(key) => !self.procs.alive(key).await,
+                            None => false,
+                        };
+                    if (!transient || own || ended)
+                        && self
+                            .returns(
+                                &held,
+                                self.placement(scope, &[]).await?.parent.as_ref(),
+                                scope,
+                                fields,
+                                harness,
+                            )
+                            .await?
+                    {
+                        row = Some(held);
+                        break;
+                    }
+                } else if exact
+                    && text(&held, "kind") == Some("agent")
+                    && text(&held, "process").is_none()
+                    && text(&held, "session").is_none()
+                    && harness_fits(text(&held, "harness"), harness)
+                    && self.restarts(
+                        &held,
+                        self.placement(scope, &[]).await?.parent.as_ref(),
+                        None,
+                    )
+                {
+                    live = presence(&held, now_ms()) != "offline";
+                    row = Some(held);
+                    joined = true;
+                    break;
+                }
+            }
+        }
+        let row = row.ok_or_else(|| {
+            RpcError::new(
+                if exact {
+                    ErrorCode::Unauthorized
+                } else {
+                    ErrorCode::InvalidParams
+                },
+                format!("no available endpoint for {}", scope.handle),
+            )
+        })?;
+        let id = text(&row, "id").ok_or_else(RpcError::internal)?;
+        if let Some(hooks) = moved_hooks {
+            self.store
+                .all(
+                    "UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL",
+                    &[opt(Some(id)), opt(text(&hooks, "id"))],
+                )
+                .await?;
+            self.store
+                .all(
+                    "UPDATE endpoints SET session = NULL,hook_seen = NULL WHERE id = ?",
+                    &[opt(text(&hooks, "id"))],
+                )
+                .await?;
+        }
+        let by_session = joined && text(&row, "token_hash").is_none();
+        let fresh = if created || joined || resumed {
+            None
+        } else {
+            let spent = if let Some(grant) = &scope.grant {
+                self.store
+                    .all(
+                        "SELECT used_by FROM grants WHERE token_hash = ? AND revoked_at IS NULL",
+                        &[opt(Some(grant))],
+                    )
+                    .await?
+                    .into_iter()
+                    .next()
+            } else {
+                None
+            };
+            if spent.as_ref().and_then(|r| text(r, "used_by")) == Some(id)
+                || fields
+                    .process
+                    .as_deref()
+                    .zip(text(&row, "process"))
+                    .is_some_and(|(a, b)| same_harness(a, b))
+            {
+                None
+            } else if scope.grant.is_some() && self.placement(scope, &[id]).await?.grant.is_some() {
+                Some("grant")
+            } else {
+                let parent = if let Some(pid) = text(&row, "parent_ep") {
+                    self.by_id(pid).await?
+                } else {
+                    None
+                };
+                let nearest = if text(&row, "process").is_some() {
+                    text(&row, "process")
+                } else {
+                    parent.as_ref().and_then(|r| text(r, "process"))
+                };
+                if nearest.is_some() && nearest == scope.nearest.as_deref() {
+                    None
+                } else {
+                    Some("process")
+                }
+            }
+        };
+        let resume = if transient || live {
+            None
+        } else {
+            Some(token("kre"))
+        };
+        let keep = (transient && (joined || own)) || live;
+        let kept_harness = if generic(Some(harness)) && !generic(text(&row, "harness")) {
+            text(&row, "harness").unwrap_or(harness)
+        } else {
+            harness
+        };
+        let field = |column: &str| {
+            if transient {
+                format!("COALESCE(?,{column})")
+            } else {
+                "?".into()
+            }
+        };
+        if let Some(session) = &session {
+            self.store.all("UPDATE endpoints SET session = NULL WHERE session = ? AND harness = ? AND id != ?",&[opt(Some(session)),opt(Some(harness)),opt(Some(id))]).await?;
+        }
+        let labels = fields.labels.to_string();
+        let query = format!(
+            "UPDATE endpoints SET harness = ?,model = {},cwd = {},parent = {},labels = {},session = ?,harness_origin = {},process = {},token_hash = {},connections = connections + ?,last_seen = ?,hook_seen = CASE WHEN ? IS NOT NULL AND (hook_ended IS NULL OR hook_ended < ?) THEN ? ELSE hook_seen END WHERE id = ?",
+            field("model"),
+            field("cwd"),
+            field("parent"),
+            field("labels"),
+            field("harness_origin"),
+            if keep { "COALESCE(process, ?)" } else { "?" },
+            if keep { "token_hash" } else { "?" }
+        );
+        let mut args = vec![
+            opt(Some(kept_harness)),
+            opt(fields.model.as_deref()),
+            opt(fields.cwd.as_deref()),
+            opt(fields.parent.as_deref()),
+            if transient && labels == "{}" {
+                SqlValue::Null
+            } else {
+                opt(Some(&labels))
+            },
+            opt(session.as_deref()),
+            opt(fields.harness_origin.as_deref()),
+            opt(fields.process.as_deref()),
+        ];
+        if !keep {
+            args.push(opt(resume.as_ref().map(|s| hash(s)).as_deref()));
+        }
+        args.extend([
+            SqlValue::Int(if transient { 0 } else { 1 }),
+            SqlValue::Int(now_ms()),
+            if transient {
+                SqlValue::Int(now_ms())
+            } else {
+                SqlValue::Null
+            },
+            SqlValue::Int(now_ms() - 30_000),
+            SqlValue::Int(now_ms()),
+            opt(Some(id)),
+        ]);
+        self.store.all(&query, &args).await?;
+        if !transient && fields.cwd.is_some() {
+            self.store
+                .all(
+                    "UPDATE grants SET spent_cwd = ? WHERE used_by = ?",
+                    &[opt(fields.cwd.as_deref()), opt(Some(id))],
+                )
+                .await?;
+        }
+        if !(transient && joined) {
+            self.audit("claim",Some(id),None,json!({"handle":text(&row,"handle"),"harness":harness,"joined":joined,"resumed":resumed,"transient":transient})).await?;
+        }
+        if let Some(kind) = fresh {
+            self.reset_claim(&row, scope, kind).await?;
+        }
+        if created || fresh == Some("grant") {
+            self.place_claim(&self.must_endpoint(id).await?, scope, fields)
+                .await?;
+        } else if scope.grant.is_some() {
+            let spent = self
+                .store
+                .all(
+                    "SELECT used_by FROM grants WHERE token_hash = ? AND revoked_at IS NULL",
+                    &[opt(scope.grant.as_deref())],
+                )
+                .await?
+                .into_iter()
+                .next();
+            if spent.as_ref().and_then(|r| text(r, "used_by")) != Some(id) {
+                let placement = self.placement(scope, &[id]).await?;
+                if placement.grant.is_some() {
+                    if by_session
+                        && text(&row, "parent_ep").is_none()
+                        && integer(&row, "named").is_none()
+                    {
+                        self.place_claim(&self.must_endpoint(id).await?, scope, fields)
+                            .await?;
+                    } else if let Some(grant) = placement.grant {
+                        self.spend_claim(&grant, id, fields).await?;
+                    }
+                }
+            }
+        }
+        let mut result = self.must_endpoint(id).await?;
+        if transient
+            && !exact
+            && let Some(session) = &fields.harness_session
+            && text(&result, "harness_session") != Some(session)
+            && integer(&result, "named").is_none()
+            && fields
+                .process
+                .as_deref()
+                .zip(text(&result, "process"))
+                .is_some_and(|(a, b)| same_harness(a, b))
+        {
+            for reported in [&fields.harness_session, &fields.harness_origin]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(held) = self
+                    .resumable(harness, reported, scope, fields, Some(&result))
+                    .await?
+                {
+                    if text(&result, "parent_ep").is_none()
+                        || self.default_of("rename") == Some("self")
+                    {
+                        self.store.all("UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ?",&[opt(Some(session)),if text(&held,"harness_session")==Some(session){opt(text(&held,"harness_transcript"))}else{SqlValue::Null},opt(Some(id))]).await?;
+                        self.retake(&result, &held, false).await?;
+                        result = self.must_endpoint(id).await?;
+                    }
+                    break;
+                }
+            }
+        }
+        self.state.addresses.insert(id.into(), address(&result));
+        Ok((result, resume))
+    }
+    async fn reset_claim(&self, row: &Row, scope: &Scope, kind: &str) -> Result<(), RpcError> {
+        let id = text(row, "id").ok_or_else(RpcError::internal)?;
+        self.store
+            .all(
+                "DELETE FROM group_members WHERE endpoint = ?",
+                &[opt(Some(id))],
+            )
+            .await?;
+        self.store
+            .all(
+                "UPDATE admins SET revoked_at = ? WHERE subject = ? AND revoked_at IS NULL",
+                &[SqlValue::Int(now_ms()), opt(Some(id))],
+            )
+            .await?;
+        self.store.all("UPDATE grants SET revoked_at = COALESCE(revoked_at,?) WHERE used_by = ? AND token_hash IS NOT ?",&[SqlValue::Int(now_ms()),opt(Some(id)),opt(scope.grant.as_deref())]).await?;
+        self.store.all("UPDATE endpoints SET reset_at = ?,peek = NULL,wake = NULL,hold_ref = NULL WHERE id = ?",&[SqlValue::Int(now_ms()),opt(Some(id))]).await?;
+        if kind == "grant" {
+            self.store.all("UPDATE endpoints SET rules = NULL,caps = NULL,status_state = NULL,status_note = NULL,title = NULL,harness_session = NULL,spawned_at = ? WHERE id = ?",&[SqlValue::Int(now_ms()),opt(Some(id))]).await?;
+        }
+        self.audit("scope_reset",Some(id),None,json!({"by":address(row),"target":address(row),"reason":if kind=="grant"{"a new spawn took over the endpoint"}else{"another process took over the endpoint"},"groups":[]})).await
+    }
+    async fn claim_agent(
+        &mut self,
+        claim: &Map<String, Value>,
+        transient: bool,
+        self_keys: Option<&Value>,
+    ) -> Result<(Row, Option<String>), RpcError> {
+        let harness =
+            clean_text(claim.get("harness"), "harness", 32)?.unwrap_or_else(|| "cli".into());
+        if !valid_harness(&harness) {
+            return Err(RpcError::invalid_params("harness is not a valid name"));
+        }
+        let wanted =
+            clean_text(claim.get("handle"), "handle", 63)?.unwrap_or_else(|| harness.clone());
+        if !valid_handle(&wanted) {
+            return Err(RpcError::invalid_params(
+                "handle is not valid: lowercase letters, digits, . _ -",
+            ));
+        }
+        let fields = Fields {
+            model: clean_text(claim.get("model"), "model", 128)?,
+            cwd: clean_text(claim.get("cwd"), "cwd", 1024)?,
+            parent: clean_text(claim.get("parent"), "parent", 128)?,
+            labels: clean_labels(claim.get("labels"))?,
+            session: clean_text(claim.get("session"), "session", 128)?,
+            process: clean_text(claim.get("process"), "process", 128)?,
+            harness_session: clean_text(claim.get("harness_session"), "harness_session", 128)?,
+            harness_origin: clean_text(claim.get("harness_origin"), "harness_origin", 128)?,
+        };
+        if fields
+            .process
+            .as_ref()
+            .is_some_and(|v| !process_key(v, false))
+        {
+            return Err(RpcError::invalid_params(
+                "process is a key pid:<pid>[:<start time>]",
+            ));
+        }
+        if [&fields.harness_session, &fields.harness_origin]
+            .into_iter()
+            .flatten()
+            .any(|v| !harness_session(v))
+        {
+            return Err(RpcError::invalid_params(
+                "harness session is not a valid id",
+            ));
+        }
+        for value in [
+            Some(wanted.as_str()),
+            fields.model.as_deref(),
+            fields.cwd.as_deref(),
+            fields.parent.as_deref(),
+            fields.session.as_deref(),
+            fields.harness_session.as_deref(),
+            fields.harness_origin.as_deref(),
+            Some(fields.labels.to_string().as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if crate::scrub::find_secret(value).is_some() {
+                return Err(RpcError::new(
+                    ErrorCode::SecretRefused,
+                    "the claim carries a credential",
+                ));
+            }
+        }
+        let lineage = lineage_keys(claim.get("lineage"))?;
+        let keys = lineage_keys(self_keys)?;
+        let nearest = keys
+            .last()
+            .filter(|v| process_key(v, true) && lineage.starts_with(&keys))
+            .cloned();
+        let grant = match claim.get("grant") {
+            Some(v) => Some(hash(
+                v.as_str()
+                    .filter(|v| valid_token(v, "krt_"))
+                    .ok_or_else(|| RpcError::invalid_params("grant is a krt_ token"))?,
+            )),
+            None => None,
+        };
+        let mut rules = json!({});
+        for dir in ["in", "out"] {
+            if let Some(v) = claim.get(dir).or_else(|| claim.get("allow")) {
+                rules[dir] = v.clone();
+            }
+        }
+        let exact = claim.get("exact") == Some(&Value::Bool(true));
+        let mut scope = Scope {
+            handle: wanted,
+            lineage,
+            grant,
+            nearest,
+            rules,
+            exact,
+        };
+        if scope.grant.is_none()
+            && !exact
+            && let Some(process) = &fields.process
+        {
+            let bound=self.store.all("SELECT * FROM grants WHERE bound_process = ? AND used_by IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC",&[opt(Some(process)),SqlValue::Int(now_ms())]).await?.into_iter().next();
+            if let Some(bound) = bound {
+                scope.grant = text(&bound, "token_hash").map(str::to_owned);
+                if let Some(name) = text(&bound, "name") {
+                    scope.handle = name.into();
+                }
+            }
+        }
+        let (row, resume) = self.claim_row(&harness, &fields, &scope, transient).await?;
+        if let Some(under) = clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty())
+            && text(&row, "parent_ep").is_none()
+        {
+            match self.lookup(&under).await {
+                Ok(parent) => {
+                    self.link_endpoint(&row, &parent, "session").await?;
+                }
+                Err(error) => {
+                    self.audit("claim_under_refused",text(&row,"id"),None,json!({"target":address(&row),"under":under,"code":error.data.map(|v|v.code)})).await?;
+                }
+            }
+        }
+        Ok((
+            self.must_endpoint(text(&row, "id").unwrap_or("")).await?,
+            resume,
+        ))
+    }
+}
+fn suffixed(handle: &str, n: usize) -> String {
+    if n == 1 {
+        handle.into()
+    } else {
+        format!("{}-{n}", handle.chars().take(58).collect::<String>())
+    }
+}
+
+pub async fn hello_claim(
+    core: &mut Core,
+    conn: ConnectionId,
+    params: &Map<String, Value>,
+) -> Result<Value, RpcError> {
+    let transient = params.get("transient") == Some(&Value::Bool(true));
+    if transient
+        && (params.get("human") == Some(&Value::Bool(true))
+            || params.get("observe") == Some(&Value::Bool(true))
+            || params.contains_key("resume"))
+    {
+        return Err(RpcError::invalid_params(
+            "transient does not go with human, observe or resume",
+        ));
+    }
+    let session = params.get("harness_session").and_then(Value::as_str);
+    if !transient && params.get("observe") == Some(&Value::Bool(true)) {
+        let own = core
+            .place_lineage(params.get("self"), None, session)
+            .await?;
+        if let Some(grant) = params.get("grant")
+            && !core.grant_binds(grant, own.as_deref()).await?
+        {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "grant does not bind this endpoint",
+            ));
+        }
+        if let Some(id) = own {
+            bind_lineage(core, conn, &id, params, true)?;
+            let mut result =
+                core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None);
+            if params.contains_key("grant") {
+                result["grant_bound"] = json!(true);
+            }
+            return Ok(result);
+        }
+        let lineage = core
+            .place_lineage(params.get("lineage"), None, session)
+            .await?;
+        core.state.bind(conn, None, Mode::Observer);
+        if let Some(c) = core.state.connections.get_mut(&conn) {
+            c.lineage = lineage;
+            c.self_keys = lineage_keys(params.get("self"))?;
+            c.lineage_keys = lineage_keys(params.get("lineage"))?;
+            c.harness_session = session.map(str::to_owned);
+        }
+        return Ok(core.hello_result(Value::Null, None));
+    }
+    if !transient && !params.contains_key("resume") {
+        if params.get("human") == Some(&Value::Bool(true)) {
+            if let Some(id) = core
+                .place_lineage(params.get("lineage"), None, session)
+                .await?
+            {
+                bind_lineage(core, conn, &id, params, false)?;
+                return Ok(
+                    core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None)
+                );
+            }
+        } else if let Some(claim) = params.get("claim").and_then(Value::as_object)
+            && !claim.contains_key("process")
+            && let Some(handle) = claim.get("handle").and_then(Value::as_str)
+            && let Some(id) = core
+                .place_lineage(claim.get("lineage"), Some(handle), None)
+                .await?
+            && (claim.get("grant").is_none()
+                || core
+                    .grant_binds(claim.get("grant").unwrap_or(&Value::Null), Some(&id))
+                    .await?)
+        {
+            let own = core
+                .place_lineage(params.get("self"), Some(handle), None)
+                .await?
+                == Some(id.clone());
+            bind_lineage(core, conn, &id, params, own)?;
+            return Ok(core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None));
+        }
+    }
+    let (row, resume) = crate::store::transaction(
+        core.store.clone(),
+        hello_transaction(core, conn, params, transient),
+    )
+    .await?;
+    let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
+    let mode = if transient {
+        Mode::Transient
+    } else if text(&row, "kind") == Some("human") {
+        Mode::Human {
+            tty: params.get("tty") == Some(&Value::Bool(true)),
+        }
+    } else {
+        Mode::Agent
+    };
+    core.state.bind(conn, Some(id.clone()), mode);
+    core.state.addresses.insert(id, address(&row));
+    if let Some(c) = core.state.connections.get_mut(&conn) {
+        c.brief = params.get("brief") == Some(&Value::Bool(true));
+        c.cwd = params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .or_else(|| text(&row, "cwd"))
+            .map(str::to_owned);
+        c.process = params
+            .get("claim")
+            .and_then(|v| v.get("process"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    Ok(core.hello_result(core.view(&row).await?, resume))
+}
+
+fn bind_lineage(
+    core: &mut Core,
+    conn: ConnectionId,
+    id: &str,
+    params: &Map<String, Value>,
+    own: bool,
+) -> Result<(), RpcError> {
+    if let Some(c) = core.state.connections.get_mut(&conn) {
+        c.endpoint = Some(id.into());
+        c.lineage = Some(id.into());
+        c.mode = Mode::Agent;
+        c.own = own;
+        c.brief = true;
+        c.cwd = params.get("cwd").and_then(Value::as_str).map(str::to_owned);
+        c.terminal = params.get("tty") == Some(&Value::Bool(true));
+    }
+    Ok(())
+}
+async fn hello_transaction(
+    core: &mut Core,
+    _conn: ConnectionId,
+    params: &Map<String, Value>,
+    transient: bool,
+) -> Result<(Row, Option<String>), RpcError> {
+    if !transient {
+        if let Some(resume) = params.get("resume").and_then(Value::as_str) {
+            let row=core.store.all("SELECT * FROM endpoints WHERE token_hash = ? AND substr(handle,1,5) != 'gone:'",&[opt(Some(&hash(resume)))]).await?.into_iter().next().ok_or_else(||RpcError::new(ErrorCode::Unauthorized,"unknown resume token"))?;
+            let id = text(&row, "id").ok_or_else(RpcError::internal)?;
+            core.store
+                .all(
+                    "UPDATE endpoints SET connections = connections + 1,last_seen = ? WHERE id = ?",
+                    &[SqlValue::Int(now_ms()), opt(Some(id))],
+                )
+                .await?;
+            core.audit("resume", Some(id), None, json!({})).await?;
+            return Ok((core.must_endpoint(id).await?, None));
+        }
+        if params.get("human") == Some(&Value::Bool(true)) {
+            let row=core.store.all("UPDATE endpoints SET connections = connections + 1,last_seen = ? WHERE handle = '_human' RETURNING *",&[SqlValue::Int(now_ms())]).await?.into_iter().next().ok_or_else(RpcError::internal)?;
+            core.audit("claim",text(&row,"id"),None,json!({"handle":"","harness":"human","tty":params.get("tty")==Some(&Value::Bool(true))})).await?;
+            return Ok((row, None));
+        }
+    }
+    let empty = Map::new();
+    let claim = params
+        .get("claim")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if transient && let Some(join) = params.get("join") {
+        let join = join
+            .as_object()
+            .ok_or_else(|| RpcError::invalid_params("join is {handle?, under?}"))?;
+        let (row, _) = core.claim_agent(claim, true, None).await?;
+        if let Some(handle) = join
+            .get("handle")
+            .filter(|v| !v.is_null() && v.as_str() != Some(""))
+        {
+            core.rename_row(&row, handle, false, false).await?;
+        }
+        let row = core.must_endpoint(text(&row, "id").unwrap_or("")).await?;
+        if let Some(under) = join.get("under").and_then(Value::as_str) {
+            let parent = core.lookup(under).await?;
+            core.link_endpoint(&row, &parent, "session").await?;
+        }
+        return Ok((
+            core.must_endpoint(text(&row, "id").unwrap_or("")).await?,
+            None,
+        ));
+    }
+    core.claim_agent(claim, transient, params.get("self")).await
+}
