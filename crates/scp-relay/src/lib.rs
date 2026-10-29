@@ -28,14 +28,7 @@ pub fn random(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 /// Validate account handles and machine-shaped device labels.
-pub fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 32
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(i, c)| c.is_ascii_lowercase() || c.is_ascii_digit() || (i > 0 && c == b'-'))
-}
+pub use scp_core::address::valid_machine as valid_name;
 /// Normalize a human-entered device user code.
 pub fn normalize_code(raw: &str) -> String {
     raw.chars()

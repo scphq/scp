@@ -240,7 +240,7 @@ jobs:
             exit 0
           fi
           missing=()
-          for name in scp-relay-store scp-relay-server; do
+          for name in scp-dev-core scp-relay-store scp-relay-server; do
             status=$(curl --silent --show-error --retry 3 --user-agent 'scp-release (https://github.com/scphq/scp)' --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/$name/$VERSION")
             case "$status" in
               200) ;;
@@ -250,10 +250,10 @@ jobs:
           done
           if [ "${#missing[@]}" -eq 0 ]; then
             echo "Already published: $VERSION"
-          elif [ "${#missing[@]}" -eq 1 ]; then
-            cargo publish -p "${missing[0]}" --locked
-          else
+          elif [ "${#missing[@]}" -eq 3 ]; then
             cargo publish --workspace --locked
+          else
+            for name in "${missing[@]}"; do cargo publish -p "$name" --locked; done
           fi
 
   image:

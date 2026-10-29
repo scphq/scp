@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
+use scp_core::protocol::{LIMITS, LimitsError, RATE_DURATIONS, RATE_LIMITS, parse_limits};
 use scp_relay_store::*;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -21,8 +22,37 @@ use std::{collections::BTreeMap, sync::Arc};
 /// Runtime hub limits; None removes a cap. Operational durations remain finite.
 #[derive(Clone, Debug)]
 pub struct Limits(pub BTreeMap<String, Option<u64>>);
+const PROTOCOL_KEYS: [&str; 13] = [
+    "userPerDay",
+    "hopMax",
+    "threadMax",
+    "pingPongAlternations",
+    "pingPongWindowS",
+    "pingPongBlockS",
+    "pairBurst",
+    "pairPerMinute",
+    "pairPerHour",
+    "treePerMinute",
+    "treePerHour",
+    "treePauseS",
+    "historicAfterS",
+];
+const HUB_DURATIONS: [&str; 6] = [
+    "clientMachineIdleS",
+    "idlePurgeS",
+    "httpWaitS",
+    "mcpWaitS",
+    "revalidateMs",
+    "deniedS",
+];
 impl Default for Limits {
     fn default() -> Self {
+        let rates = PROTOCOL_KEYS.map(|key| {
+            let value = RATE_LIMITS
+                .get(key)
+                .unwrap_or_else(|| LIMITS.get(key).map(Some).expect("a protocol limit"));
+            (key, value)
+        });
         Self(
             [
                 ("machines", None),
@@ -34,22 +64,10 @@ impl Default for Limits {
                 ("accountCallsPerMinute", None),
                 ("acksPerMinute", None),
                 ("accountAcksPerMinute", None),
-                ("userPerDay", None),
-                ("hopMax", None),
-                ("threadMax", None),
-                ("pingPongAlternations", None),
-                ("pingPongWindowS", Some(600)),
-                ("pingPongBlockS", Some(600)),
-                ("pairBurst", None),
-                ("pairPerMinute", None),
-                ("pairPerHour", None),
-                ("treePerMinute", None),
-                ("treePerHour", None),
                 ("contactPerMinute", None),
                 ("contactPerHour", None),
                 ("contactPerDay", None),
                 ("contactPerDayMax", None),
-                ("treePauseS", Some(600)),
                 ("storedBytes", None),
                 ("refusalsPerMinute", None),
                 ("clientMachineIdleS", Some(14 * 86400)),
@@ -58,9 +76,9 @@ impl Default for Limits {
                 ("mcpWaitS", Some(50)),
                 ("revalidateMs", Some(300000)),
                 ("deniedS", Some(3600)),
-                ("historicAfterS", Some(3600)),
             ]
             .into_iter()
+            .chain(rates)
             .map(|(k, v)| (k.into(), v))
             .collect(),
         )
@@ -94,45 +112,31 @@ impl Limits {
         matches!(key, "pingPongWindowS" | "pingPongBlockS")
     }
     fn is_duration(key: &str) -> bool {
-        matches!(
-            key,
-            "clientMachineIdleS"
-                | "idlePurgeS"
-                | "httpWaitS"
-                | "mcpWaitS"
-                | "revalidateMs"
-                | "deniedS"
-                | "treePauseS"
-                | "pingPongWindowS"
-                | "pingPongBlockS"
-        )
+        HUB_DURATIONS.contains(&key) || RATE_DURATIONS.contains(&key)
     }
     /// Apply an SCP_LIMITS JSON object, rejecting unknown keys and invalid values.
     pub fn apply_json(&mut self, raw: &str) -> std::result::Result<(), String> {
         let value: Value = serde_json::from_str(raw).map_err(|e| format!("SCP_LIMITS: {e}"))?;
-        let object = value
-            .as_object()
-            .ok_or("SCP_LIMITS must be a JSON object")?;
-        let mut configured = self.clone();
-        for (key, value) in object {
-            if !configured.0.contains_key(key) {
-                return Err(format!("SCP_LIMITS: unknown limit: {key}"));
+        let keys: Vec<&str> = self.0.keys().map(String::as_str).collect();
+        let durations: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|key| Self::is_duration(key))
+            .collect();
+        let parsed = parse_limits(&value, &keys, &durations).map_err(|e| match e {
+            LimitsError::NotObject => "SCP_LIMITS must be a JSON object".to_owned(),
+            LimitsError::Unknown(key) => format!("SCP_LIMITS: unknown limit: {key}"),
+            LimitsError::Invalid(key) => {
+                format!("SCP_LIMITS: {key} must be a nonnegative integer or null")
             }
-            let cap = if value.is_null() {
-                None
-            } else {
-                let n = value.as_u64().ok_or_else(|| {
-                    format!("SCP_LIMITS: {key} must be a nonnegative integer or null")
-                })?;
-                (n > 0).then_some(n)
-            };
-            if Self::is_ping_pong_duration(key) {
-                configured.0.insert(key.clone(), Some(cap.unwrap_or(600)));
-            } else if !Self::is_duration(key) || cap.is_some() {
-                configured.0.insert(key.clone(), cap);
+        })?;
+        for key in value.as_object().into_iter().flat_map(|o| o.keys()) {
+            if let Some(cap) = parsed.get(key) {
+                self.0.insert(key.clone(), *cap);
+            } else if Self::is_ping_pong_duration(key) {
+                self.0.insert(key.clone(), RATE_LIMITS.get(key).flatten());
             }
         }
-        *self = configured;
         Ok(())
     }
     /// Read a finite configured duration in seconds or milliseconds.

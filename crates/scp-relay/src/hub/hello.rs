@@ -1,6 +1,6 @@
 use super::*;
 use scp_relay_store::Machine;
-use validation::{handle, labels, no_secret, pattern, server_fields};
+use validation::{handle, labels, no_secret, server_fields};
 
 impl AccountHub {
     pub(super) async fn hello(&mut self, id: &str, conn: &Connection, p: &Value) -> Result<Value> {
@@ -222,7 +222,7 @@ impl AccountHub {
                 .as_str()
                 .unwrap_or("cli")
                 .to_owned();
-            if !pattern!(r"^[a-z0-9][a-z0-9-]{0,31}$", &harness) {
+            if !scp_core::protocol::valid_harness(&harness) {
                 return Err(invalid("invalid harness"));
             }
             let wanted = if human {

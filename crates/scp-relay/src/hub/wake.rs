@@ -690,7 +690,7 @@ async fn post_wake(waker: &Value, event: Value, now: i64) -> Outcome {
             serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| {
                 v["declined"]
                     .as_str()
-                    .filter(|s| validation::pattern!(r"^[a-z][a-z0-9_-]{0,31}$", s))
+                    .filter(|s| scp_core::protocol::valid_wake_decline(s))
                     .map(str::to_owned)
             })
         } else {

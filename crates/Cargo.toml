@@ -1,5 +1,5 @@
 [workspace]
-members = ["scp-relay-store", "scp-relay", "scp-hook"]
+members = ["scp-core", "scp-relay-store", "scp-relay", "scp-hook"]
 resolver = "3"
 
 [workspace.package]
