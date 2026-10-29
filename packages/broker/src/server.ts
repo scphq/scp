@@ -689,6 +689,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     else bridge?.changed(view.id)
   }
 
+  /** a background session took over its origin's endpoint: the session marker follows the handle and the origin's old connections close */
+  function handOver(s: Conn<Connection>, view: EndpointView, handedOff: { from: string; retired: string }) {
+    membership(view, core.sessionOf(view.id), true, handedOff.from)
+    for (const c of connections) if (c.data.endpoint === handedOff.retired && c !== s) c.end()
+  }
+
   function notifyFleet(event: Record<string, unknown>) {
     const at = new Date((options.now ?? Date.now)()).toISOString()
     let line: Uint8Array | undefined
@@ -1052,14 +1058,18 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           throw new RelayError("invalid_params", "join is {handle?, under?}")
         const under = (join as { under?: unknown } | undefined)?.under
         const before = join === undefined ? core.claimViews(params.claim) : new Map(core.list({ all: true }).map((view) => [view.id, view]))
-        const { endpoint, subagent, created, rehomed } =
+        let joinedOff: { from: string; retired: string } | undefined
+        const { endpoint, subagent, created, rehomed, handedOff } =
           join === undefined
             ? core.claim((params.claim ?? {}) as Claim, { transient: true })
             : {
-                endpoint: core.joinSession((params.claim ?? {}) as Claim, (join as { handle?: unknown }).handle, under),
+                endpoint: core.joinSession((params.claim ?? {}) as Claim, (join as { handle?: unknown }).handle, under, (moved) => {
+                  joinedOff = moved
+                }),
                 subagent: undefined,
                 created: undefined,
                 rehomed: undefined,
+                handedOff: joinedOff,
               }
         s.data.endpoint = endpoint.id
         s.data.transient = true
@@ -1068,8 +1078,9 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const was = before.get(endpoint.id)?.address
         if (join !== undefined) membership(endpoint, core.sessionOf(endpoint.id), true, was?.slice(was.lastIndexOf("/") + 1))
         if (rehomed) membership(endpoint, core.sessionOf(endpoint.id), true, rehomed.from)
+        if (handedOff) handOver(s, endpoint, handedOff)
         const tookOver = join !== undefined && [...before.values()].some((view) => view.id !== endpoint.id && view.address === endpoint.address)
-        if (rehomed || tookOver || (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent)) bridge?.resync()
+        if (rehomed || handedOff || tookOver || (under !== undefined && before.get(endpoint.id)?.parent !== endpoint.parent)) bridge?.resync()
         else if ((before.get(endpoint.id)?.presence ?? known.get(endpoint.id) ?? "offline") !== endpoint.presence) presenceChanged(endpoint)
         return {
           endpoint,
@@ -1121,6 +1132,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       }
       let token: string | undefined
       let endpoint: EndpointView
+      let handedOff: { from: string; retired: string } | undefined
       const before =
         params.resume === undefined ? core.claimViews(params.human === true ? undefined : params.claim, params.human === true) : new Map<string, EndpointView>()
       if (typeof params.resume === "string") endpoint = core.resume(params.resume)
@@ -1133,8 +1145,13 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         s.data.holder = typeof claim.grant === "string" || typeof claim.ticket === "string"
         endpoint = claimed.endpoint
         token = claimed.token
+        handedOff = claimed.handedOff
       }
       s.data.endpoint = endpoint.id
+      if (handedOff) {
+        handOver(s, endpoint, handedOff)
+        bridge?.resync()
+      }
       s.data.human = endpoint.kind === "human"
       s.data.brief = params.brief === true
       s.data.cwd = typeof params.cwd === "string" ? params.cwd : (endpoint.cwd ?? undefined)
@@ -1273,8 +1290,11 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         return renamed.endpoint
       }
       case "relink": {
-        const relinked = core.relink(actorOf(s), params.dry_run !== undefined ? { dry_run: params.dry_run } : {})
-        for (const pair of relinked.relinked) if (pair.retired) membership(core.whoami(pair.endpoint), core.sessionOf(pair.endpoint), true, pair.from)
+        const relinked = core.relink(actorOf(s), {
+          ...(params.dry_run !== undefined ? { dry_run: params.dry_run } : {}),
+          ...(params.live !== undefined ? { live: params.live } : {}),
+        })
+        for (const pair of relinked.relinked) if (pair.retired) handOver(s, core.whoami(pair.endpoint), { from: pair.from, retired: pair.retired })
         if (relinked.relinked.some((pair) => pair.retired)) bridge?.resync()
         return relinked
       }

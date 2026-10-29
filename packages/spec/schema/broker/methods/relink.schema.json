@@ -8,6 +8,9 @@
       "properties": {
         "dry_run": {
           "type": "boolean"
+        },
+        "live": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -34,6 +37,9 @@
                   "session",
                   "origin"
                 ]
+              },
+              "live": {
+                "const": true
               },
               "retired": {
                 "type": "string"

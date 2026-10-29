@@ -299,6 +299,11 @@ export interface Claim {
   harness_session?: string
   /** the harness session this one continues, as a fork of it: a claim that resumes no endpoint by `harness_session` takes back this one's */
   harness_origin?: string
+  /**
+   * the harness moved session `harness_origin` to this background session, as a hand-off rather than a parallel fork: this session takes
+   * over the origin's endpoint, also while the origin's idle harness process still holds it
+   */
+  harness_handoff?: boolean
   /** process keys of the claimant's harness process and its ancestors, nearest first: the nearest endpoint holding one places the claim under it */
   lineage?: string[]
   /** a `krt_` grant from `spawn-env`: places the claim at or below its lineage placement, with the grant's caps and groups */

@@ -266,7 +266,14 @@ async fn serve_connection(
     core: SharedCore,
     mut stopping: watch::Receiver<bool>,
 ) {
-    let conn = core.lock().await.state.connect();
+    let (conn, closed) = {
+        let mut core = core.lock().await;
+        let conn = core.state.connect();
+        (conn, core.state.connections[&conn].closed.clone())
+    };
+    let closing = closed.notified();
+    tokio::pin!(closing);
+    closing.as_mut().enable();
     let (mut reader, mut writer) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let queued = Arc::new(AtomicUsize::new(0));
@@ -302,6 +309,7 @@ async fn serve_connection(
         }
         let deadline = partial_since.unwrap_or_else(Instant::now) + PARTIAL_LINE_TIMEOUT;
         tokio::select! {
+            _ = &mut closing => break,
             _ = stopping.changed() => break,
             _ = failed.notified() => break,
             _ = requests.join_next(), if !requests.is_empty() => {},
@@ -317,6 +325,7 @@ async fn serve_connection(
                 for line in batch {
                     while requests.len() >= MAX_PENDING {
                         tokio::select! {
+                            _ = &mut closing => break 'connection,
                             _ = stopping.changed() => break 'connection,
                             _ = failed.notified() => break 'connection,
                             _ = requests.join_next() => {},
@@ -327,6 +336,7 @@ async fn serve_connection(
                         Err(frame) => { output.send(frame); continue; }
                     };
                     let guard = tokio::select! {
+                        _ = &mut closing => break 'connection,
                         _ = stopping.changed() => break 'connection,
                         _ = failed.notified() => break 'connection,
                         guard = core.clone().lock_owned() => guard,

@@ -718,6 +718,14 @@ export function forkOrigin(args: string | undefined): string | undefined {
 }
 
 /**
+ * whether this Claude Code session is the background session its terminal session was moved to (the daemon-hosted fork a session's own
+ * `/bg` starts), a hand-off of that session's endpoint rather than a parallel fork
+ */
+export function backgroundHandoff(env: Env): boolean {
+  return env.CLAUDE_CODE_SESSION_KIND === "bg" && env.CLAUDE_BG_SOURCE === "slash"
+}
+
+/**
  * the claim a shim or hook makes for this harness session; a muse process a launcher left a session and launcher for claims as $SCP_SESSION
  * and $SCP_HARNESS_PID would. A codex thread an app server hosts beside others (the desktop app, an IDE's) claims by its thread, `codex:<id>`
  */
@@ -769,6 +777,6 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     ...(threaded ? { lineage: keys.filter((key) => key !== own && key !== `pid:${pid}`) } : keys.length ? { lineage: keys } : {}),
     ...(grant ? { grant } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),
-    ...(origin ? { harness_origin: origin } : {}),
+    ...(origin ? { harness_origin: origin, ...(backgroundHandoff(input.env) ? { harness_handoff: true } : {}) } : {}),
   }
 }

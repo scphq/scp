@@ -289,3 +289,56 @@ async fn idle_waits_until_connections_close() -> io::Result<()> {
     broker.stop().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn handoff_and_live_relink_close_all_retired_connections() {
+    for (handoff, transient) in [(true, true), (true, false), (false, true)] {
+        let broker = Broker::start("600").await;
+        let mut old = broker.wire().await;
+        let origin = old.call(json!(1), "hello", json!({"protocol":"scp/1","claim":{"handle":"app","harness":"agent-test","session":"origin-process"}})).await;
+        old.call(
+            json!(2),
+            "event",
+            json!({"kind":"tool","session_id":"origin"}),
+        )
+        .await;
+        old.call(json!(3), "rename", json!({"handle":"lead"})).await;
+        let mut other = broker.wire().await;
+        other
+            .call(
+                json!(1),
+                "hello",
+                json!({"protocol":"scp/1","resume":origin["result"]["token"]}),
+            )
+            .await;
+        let mut human = broker.wire().await;
+        human
+            .call(
+                json!(1),
+                "hello",
+                json!({"protocol":"scp/1","human":true,"tty":true}),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let mut fork = broker.wire().await;
+        let claimed = fork.call(json!(1), "hello", json!({"protocol":"scp/1","transient":transient,"claim":{"handle":"app","harness":"agent-test","session":"fork-process","harness_session":"fork","harness_origin":"origin","harness_handoff":handoff}})).await;
+        assert!(claimed.get("error").is_none(), "{claimed}");
+        if handoff {
+            assert_eq!(claimed["result"]["endpoint"]["address"], "me/lead");
+        } else {
+            let relinked = human.call(json!(2), "relink", json!({"live":true})).await;
+            assert_eq!(
+                relinked["result"]["relinked"][0]["retired"],
+                origin["result"]["endpoint"]["id"]
+            );
+        }
+        assert!(old.next().await.is_none());
+        assert!(other.next().await.is_none());
+        assert_eq!(
+            fork.call(json!(2), "whoami", json!({})).await["result"]["address"],
+            "me/lead"
+        );
+        drop((old, other, human, fork));
+        broker.stop().await;
+    }
+}

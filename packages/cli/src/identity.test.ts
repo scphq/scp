@@ -23,12 +23,12 @@ describe("forkOrigin", () => {
 })
 
 describe("relayIdentity", () => {
-  const claim = (args: string, harnessSession = NEW) =>
+  const claim = (args: string, harnessSession = NEW, env: Record<string, string> = {}) =>
     relayIdentity({
       harness: "claude-code",
       fallbackHarness: "hook",
       cwd: "/work",
-      env: {},
+      env,
       harnessSession,
       harnessPid: () => 40,
       startOf: () => START,
@@ -44,5 +44,19 @@ describe("relayIdentity", () => {
   test("a plain resume, or a fork of the session itself, claims no origin", () => {
     expect(claim(`claude --resume ${OLD}`).harness_origin).toBeUndefined()
     expect(claim(`claude --fork-session --resume ${NEW}`).harness_origin).toBeUndefined()
+  })
+
+  test("the background session a terminal session moved to claims a hand-off of its origin", () => {
+    const fork = `claude --session-id ${NEW} --fork-session --resume ${OLD}`
+    const moved = { CLAUDE_CODE_SESSION_KIND: "bg", CLAUDE_BG_SOURCE: "slash" }
+    expect(claim(fork, NEW, moved)).toMatchObject({ harness_session: NEW, harness_origin: OLD, harness_handoff: true })
+    expect(claim(`claude --resume ${OLD}`, NEW, moved).harness_handoff).toBeUndefined()
+  })
+
+  test("a fork run from a terminal, or started in the background by other means, is a parallel fork", () => {
+    const fork = `claude --fork-session --resume ${OLD}`
+    expect(claim(fork).harness_handoff).toBeUndefined()
+    expect(claim(fork, NEW, { CLAUDE_CODE_SESSION_KIND: "bg" }).harness_handoff).toBeUndefined()
+    expect(claim(fork, NEW, { CLAUDE_CODE_SESSION_KIND: "bg", CLAUDE_BG_SOURCE: "cli" }).harness_handoff).toBeUndefined()
   })
 })

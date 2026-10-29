@@ -90,6 +90,14 @@ impl State {
         }
     }
 
+    pub fn close_endpoint(&self, endpoint: &str, except: ConnectionId) {
+        for connection in self.connections.values() {
+            if connection.id != except && connection.endpoint.as_deref() == Some(endpoint) {
+                connection.closed.notify_waiters();
+            }
+        }
+    }
+
     pub fn disconnect(&mut self, id: ConnectionId) -> Option<Connection> {
         let connection = self.connections.remove(&id)?;
         connection.closed.notify_waiters();
