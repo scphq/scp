@@ -1,5 +1,6 @@
 use super::*;
 use async_trait::async_trait;
+use scp_core::address::{valid_account, valid_machine as machine};
 use scp_relay_store::{Contact, Message as StoredMessage, XAllow, XInbox, XLimits};
 use subtle::ConstantTimeEq;
 use validation::{handle, no_secret, pattern, server_fields};
@@ -138,9 +139,6 @@ fn missing() -> Error {
 fn remote(e: &Endpoint) -> String {
     format!("{}/{}", e.machine, e.handle)
 }
-fn machine(s: &str) -> bool {
-    pattern!(r"^[a-z0-9][a-z0-9-]{0,31}$", s)
-}
 fn mirrored(e: &Endpoint) -> bool {
     !e.machine.is_empty() && e.token_hash.is_none() && e.kind != "system"
 }
@@ -239,22 +237,15 @@ fn refusal(code: String, categories: Vec<String>, retry: Option<i64>, side: &str
 }
 impl AccountHub {
     fn foreign(&self, v: &Value) -> Option<Target> {
-        let parts: Vec<_> = v.as_str()?.trim().split('/').collect();
-        let [account, machine_name, h] = parts.as_slice() else {
-            return None;
+        let users = scp_core::address::Users {
+            user: &self.handle,
+            aliases: &[],
         };
-        if matches!(*account, "me" | "local")
-            || *account == self.handle
-            || !pattern!(r"^[a-z0-9][a-z0-9-]{0,63}$", account)
-            || !machine(machine_name)
-            || (!h.is_empty() && *h != "me" && !handle(h))
-        {
-            return None;
-        }
+        let f = scp_core::address::foreign_account(v.as_str()?, &users)?;
         Some(Target {
-            account: (*account).into(),
-            machine: (*machine_name).into(),
-            handle: if *h == "me" { "".into() } else { (*h).into() },
+            account: f.account.into(),
+            machine: f.machine.into(),
+            handle: f.handle.into(),
         })
     }
     pub(super) fn has_foreign(&self, to: &Value) -> bool {
@@ -1140,7 +1131,7 @@ fn validate_message(m: &XMessage) -> Result<()> {
     if !pattern!(r"^[a-z]{2,8}_[a-z0-9]{8,64}$", &m.id) || !text(&m.id, 128) {
         return Err(invalid("the cross-account message's id is not valid"));
     }
-    if !pattern!(r"^[a-z0-9][a-z0-9-]{0,63}$", &sender.account)
+    if !valid_account(&sender.account)
         || !text(&sender.address, 200)
         || sender.auth != "contact"
         || sender.machine.as_ref().is_some_and(|m| !text(m, 32))

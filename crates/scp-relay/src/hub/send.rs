@@ -1,4 +1,5 @@
 use super::*;
+use scp_core::protocol::LIMITS;
 use scp_relay_store::{Idempotency, Message as StoredMessage, NewDelivery, PairEvent};
 use validation::{cursor, no_secret, server_fields};
 
@@ -59,8 +60,11 @@ impl AccountHub {
         let body = p["body"]
             .as_str()
             .ok_or_else(|| invalid("body must be a string"))?;
-        if body.len() > 65536 {
-            return Err(Error::new("too_large", "body exceeds 65536 bytes"));
+        if body.len() as u64 > LIMITS.body_bytes {
+            return Err(Error::new(
+                "too_large",
+                &format!("body exceeds {} bytes", LIMITS.body_bytes),
+            ));
         }
         no_secret(body)?;
         let kind = match p.get("kind") {
@@ -102,8 +106,11 @@ impl AccountHub {
         let a = attachments
             .as_array()
             .ok_or_else(|| invalid("attachments must be a list"))?;
-        if a.len() > 16 {
-            return Err(invalid("at most 16 attachments"));
+        if a.len() as u64 > LIMITS.attachments {
+            return Err(invalid(&format!(
+                "at most {} attachments",
+                LIMITS.attachments
+            )));
         }
         for item in a {
             if item["kind"] != "path" || !string(item, "path").starts_with('/') {
@@ -144,8 +151,11 @@ impl AccountHub {
         } else {
             vec![p["to"].clone()]
         };
-        if targets.is_empty() || targets.len() > 16 {
-            return Err(invalid("to takes 1 to 16 addresses"));
+        if targets.is_empty() || targets.len() as u64 > LIMITS.recipients {
+            return Err(invalid(&format!(
+                "to takes 1 to {} addresses",
+                LIMITS.recipients
+            )));
         }
         let mut recipients = Vec::new();
         for target in &targets {
@@ -239,7 +249,7 @@ impl AccountHub {
                 .store
                 .idempotency(&self.account_id, from, &client_id)
                 .await?
-            && seen.created_at >= now - 86400000
+            && seen.created_at >= now - LIMITS.idempotency_s as i64 * 1000
         {
             if seen.payload_hash != payload {
                 return Err(invalid(

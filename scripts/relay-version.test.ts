@@ -23,6 +23,7 @@ test("relay versions follow the changesets anchor", () => {
     const lock = readFileSync(join(root, "crates/Cargo.lock"), "utf8");
     expect(lock).toContain('name = "scp-relay-server"\nversion = "0.2.3"');
     expect(lock).toContain('name = "scp-relay-store"\nversion = "0.2.3"');
+    expect(lock).toContain('name = "scp-dev-core"\nversion = "0.2.3"');
     expect(JSON.parse(readFileSync(join(root, "packages/dashboard/package.json"), "utf8")).version).toBe("0.2.3");
     edit("crates/Cargo.lock", (text) => text.replace('name = "scp-relay-store"\nversion = "0.2.3"', 'name = "scp-relay-store"\nversion = "0.0.1"'));
     expect(() => checkVersion(root)).toThrow("versions disagree");
@@ -32,6 +33,9 @@ test("relay versions follow the changesets anchor", () => {
     expect(() => checkVersion(root)).toThrow("optionalDependencies");
     syncVersion(root);
     edit("crates/scp-relay/Cargo.toml", (text) => text.replace('version = "=0.2.3"', 'version = "=0.0.1"'));
+    expect(() => checkVersion(root)).toThrow("versions disagree");
+    syncVersion(root);
+    edit("crates/scp-relay-store/Cargo.toml", (text) => text.replace('version = "=0.2.3"', 'version = "=0.0.1"'));
     expect(() => checkVersion(root)).toThrow("versions disagree");
     edit(relayAnchor, (text) => text.replace(/"version": "[^"]+"/, '"version": "bad"'));
     expect(() => syncVersion(root)).toThrow("X.Y.Z");
