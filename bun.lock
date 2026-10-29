@@ -13,7 +13,7 @@
     },
     "apps/relay": {
       "name": "@scp-dev/relay",
-      "version": "0.4.13",
+      "version": "0.4.14",
       "dependencies": {
         "@cloudflare/workers-oauth-provider": "1.2.3",
         "@scp-dev/core": "workspace:*",
@@ -49,11 +49,11 @@
     },
     "crates": {
       "name": "scp-relay",
-      "version": "0.4.1",
+      "version": "0.4.2",
     },
     "packages/broker": {
       "name": "@scp-dev/broker",
-      "version": "0.13.1",
+      "version": "0.13.2",
       "dependencies": {
         "@scp-dev/core": "workspace:*",
         "@scp-dev/hub": "workspace:*",
@@ -64,7 +64,7 @@
     },
     "packages/cli": {
       "name": "@scp-dev/cli",
-      "version": "0.18.4",
+      "version": "0.18.5",
       "bin": {
         "swarm": "./dist/cli.js",
       },
@@ -82,11 +82,11 @@
         "tsup": "^8.5.1",
       },
       "optionalDependencies": {
-        "@scp-dev/native-darwin-arm64": "0.18.4",
-        "@scp-dev/native-darwin-x64": "0.18.4",
-        "@scp-dev/native-linux-arm64-gnu": "0.18.4",
-        "@scp-dev/native-linux-x64-gnu": "0.18.4",
-        "@scp-dev/native-linux-x64-musl": "0.18.4",
+        "@scp-dev/native-darwin-arm64": "0.18.5",
+        "@scp-dev/native-darwin-x64": "0.18.5",
+        "@scp-dev/native-linux-arm64-gnu": "0.18.5",
+        "@scp-dev/native-linux-x64-gnu": "0.18.5",
+        "@scp-dev/native-linux-x64-musl": "0.18.5",
       },
     },
     "packages/conformance": {
@@ -100,14 +100,14 @@
     },
     "packages/core": {
       "name": "@scp-dev/core",
-      "version": "0.18.1",
+      "version": "0.18.2",
       "devDependencies": {
         "tsup": "^8.5.1",
       },
     },
     "packages/dashboard": {
       "name": "@scp-dev/dashboard",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "bin": {
         "scp-dashboard": "dist/server.js",
       },
@@ -119,7 +119,7 @@
     },
     "packages/hub": {
       "name": "@scp-dev/hub",
-      "version": "0.13.1",
+      "version": "0.13.2",
       "dependencies": {
         "@scp-dev/core": "workspace:*",
       },
@@ -129,7 +129,7 @@
     },
     "packages/mcp": {
       "name": "@scp-dev/mcp",
-      "version": "0.5.10",
+      "version": "0.5.11",
       "dependencies": {
         "@scp-dev/broker": "workspace:*",
         "@scp-dev/core": "workspace:*",
@@ -140,7 +140,7 @@
     },
     "packages/mesh": {
       "name": "@scp-dev/mesh",
-      "version": "0.1.20",
+      "version": "0.1.21",
       "dependencies": {
         "@scp-dev/broker": "workspace:*",
         "@scp-dev/core": "workspace:*",
@@ -164,7 +164,7 @@
     },
     "packages/spec": {
       "name": "@scp-dev/spec",
-      "version": "0.6.1",
+      "version": "0.6.2",
     },
   },
   "packages": {

@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "scp-dev-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-store"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "async-trait",
  "rand 0.8.5",

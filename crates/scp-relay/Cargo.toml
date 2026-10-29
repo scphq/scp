@@ -19,8 +19,8 @@ name = "scp-relay"
 path = "src/main.rs"
 
 [dependencies]
-scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.1" }
-scp-relay-store = { path = "../scp-relay-store", version = "=0.4.1" }
+scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.2" }
+scp-relay-store = { path = "../scp-relay-store", version = "=0.4.2" }
 tokio.workspace = true
 axum.workspace = true
 serde.workspace = true
