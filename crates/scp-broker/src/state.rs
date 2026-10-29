@@ -27,6 +27,9 @@ pub struct Connection {
     pub self_keys: Vec<String>,
     pub harness_session: Option<String>,
     pub brief: bool,
+    pub own: bool,
+    pub process: Option<String>,
+    pub terminal: bool,
     pub cwd: Option<String>,
     pub closed: Arc<Notify>,
 }
@@ -46,6 +49,7 @@ impl Connection {
 pub struct State {
     pub connections: HashMap<ConnectionId, Connection>,
     pub presence: HashMap<String, usize>,
+    pub addresses: HashMap<String, String>,
     pub waiters: HashMap<String, Arc<Notify>>,
     next_id: ConnectionId,
 }
