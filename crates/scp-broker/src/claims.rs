@@ -514,22 +514,17 @@ impl Core {
                 "claim is deeper than depthMax",
             ));
         }
-        let mut caps = json!({"caps":[],"allow":{}});
         if let Some(grant) = &place.grant {
             self.spend_claim(grant, id, fields).await?;
-            let entries: Vec<Value> = text(grant, "caps")
-                .and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|mut v| {
-                    v["id"] = json!(token("cap"));
-                    v["by"] = json!(text(grant, "issuer"));
-                    v
-                })
-                .collect();
-            caps["caps"] = json!(entries);
         }
-        self.store.all("UPDATE endpoints SET tree = ?,parent_ep = ?,parent_addr = NULL,depth = ?,rules = ?,caps = ? WHERE id = ?",&[opt(place.parent.as_ref().and_then(|r|text(r,"tree").or_else(||text(r,"id")))),opt(place.parent.as_ref().and_then(|r|text(r,"id"))),SqlValue::Int(depth),if scope.rules == json!({}) { SqlValue::Null } else { opt(Some(&scope.rules.to_string())) },if caps["caps"]==json!([]){SqlValue::Null}else{opt(Some(&caps.to_string()))},opt(Some(id))]).await?;
+        self.place_scope(
+            row,
+            place.parent.as_ref(),
+            place.grant.as_ref(),
+            depth,
+            &scope.rules,
+        )
+        .await?;
         if let Some(parent) = place.parent {
             self.audit("scope_place",Some(id),None,json!({"by":match place.grant.as_ref().and_then(|r|text(r,"issuer")){Some(id)=>self.address_of(id).await?,None=>address(row)},"target":address(row),"parent":address(&parent)})).await?;
         }
@@ -1175,10 +1170,11 @@ impl Core {
             )),
             None => None,
         };
+        let symmetric = crate::world::Defaults::of(self.policy.as_ref()).symmetric;
         let mut rules = json!({});
-        for dir in ["in", "out"] {
-            if let Some(v) = claim.get(dir).or_else(|| claim.get("allow")) {
-                rules[dir] = v.clone();
+        for (dir, list) in crate::rules::expand(&crate::rules::rule_params(claim)?, symmetric)? {
+            if let Some(list) = list {
+                rules[dir.as_str()] = json!(list);
             }
         }
         let exact = claim.get("exact") == Some(&Value::Bool(true));

@@ -665,38 +665,12 @@ impl Core {
                 "bind_process is a full process key",
             ));
         }
-        let mut caps = Vec::new();
-        let preset = params
-            .get("scope")
-            .and_then(Value::as_str)
-            .map(|v| {
-                crate::policy::preset(v)
-                    .ok_or_else(|| RpcError::invalid_params("scope is a preset"))
-            })
-            .transpose()?;
-        for dir in ["in", "out"] {
-            if let Some(sels) = params
-                .get(dir)
-                .or_else(|| params.get("allow"))
-                .or(preset.as_ref())
-                .filter(|v| !v.is_null())
-            {
-                let sels = sels
-                    .as_array()
-                    .ok_or_else(|| RpcError::invalid_params("rules are selector lists"))?;
-                if sels.iter().any(|v| {
-                    !v.as_str()
-                        .is_some_and(|v| crate::policy::valid_selector(v, false, false))
-                }) {
-                    return Err(RpcError::invalid_params("invalid selector"));
-                }
-                caps.push(json!({"dir":dir,"sels":sels.iter().map(|s|json!({"sel":s})).collect::<Vec<_>>()}));
-            }
-        }
+        let actor = self.actor_of(conn)?;
+        let (caps, groups) = self.grant_scope(&actor, &me, params).await?;
         let value = token("krt");
         let now = now_ms();
-        self.store.all("INSERT INTO grants (token_hash,issuer,under,name,labels,title,caps,groups,created_at,expires_at,bound_process) VALUES (?,?,?,?,?,?,?,'[]',?,?,?)",&[opt(Some(&hash(&value))),opt(text(&me,"id")),opt(text(&under,"id")),opt(name.as_deref()),opt(Some(&labels.to_string())),opt(title.as_deref()),opt(Some(&json!(caps).to_string())),SqlValue::Int(now),SqlValue::Int(now+ttl*1000),opt(bound.as_deref())]).await?;
-        self.audit("scope_grant",text(&under,"id"),None,json!({"by":address(&me),"target":address(&under),"name":name,"caps":caps,"groups":[],"expires_at":timestamp(now+ttl*1000)})).await?;
+        self.store.all("INSERT INTO grants (token_hash,issuer,under,name,labels,title,caps,groups,created_at,expires_at,bound_process) VALUES (?,?,?,?,?,?,?,?,?,?,?)",&[opt(Some(&hash(&value))),opt(text(&me,"id")),opt(text(&under,"id")),opt(name.as_deref()),opt(Some(&labels.to_string())),opt(title.as_deref()),opt(Some(&caps.to_string())),opt(Some(&groups.to_string())),SqlValue::Int(now),SqlValue::Int(now+ttl*1000),opt(bound.as_deref())]).await?;
+        self.audit("scope_grant",text(&under,"id"),None,json!({"by":address(&me),"target":address(&under),"name":name,"caps":caps.as_array().into_iter().flatten().map(|c|json!({"dir":c["dir"],"sels":c["sels"].as_array().into_iter().flatten().map(|e|e["sel"].clone()).collect::<Vec<_>>()})).collect::<Vec<_>>(),"groups":groups.as_array().into_iter().flatten().map(|g|g["name"].clone()).collect::<Vec<_>>(),"expires_at":timestamp(now+ttl*1000)})).await?;
         let mut env = json!({"SCP_GRANT":value});
         if let Some(name) = name {
             env["SCP_NAME"] = json!(name);

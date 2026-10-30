@@ -7,14 +7,35 @@ use serde_json::{Map, Value, json};
 use crate::authority::Actor;
 use crate::core::{Core, now_ms, text, timestamp};
 use crate::proto::{ErrorCode, RpcError};
-use crate::rules::{DIRS, Namer, optional, selector_list};
+use crate::rules::{
+    DIRS, Namer, cap_id, caps_json, optional, rule_get, rules_json, selector_list, set_rule,
+};
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
 use crate::views::{address, not_found};
 use crate::world::{Group, GroupRules, World, caps_of};
+use scp_core::protocol::{ScopeCap, ScopePreset};
+use scp_core::scope::{ScopeCaps, ScopeRules, preset_lists};
 
 pub const FAN_OUT_MAX: usize = 32;
 pub const FAN_OUT_TOTAL: usize = 64;
+
+fn grant_caps(grant: &Row) -> Vec<ScopeCap> {
+    let issuer = text(grant, "issuer").unwrap_or_default();
+    let caps: Vec<Value> = text(grant, "caps")
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default();
+    caps.into_iter()
+        .filter_map(|cap| {
+            Some(ScopeCap {
+                id: cap_id(),
+                dir: serde_json::from_value(cap.get("dir")?.clone()).ok()?,
+                by: issuer.to_owned(),
+                sels: serde_json::from_value(cap.get("sels")?.clone()).ok()?,
+            })
+        })
+        .collect()
+}
 
 fn row_id(row: &Row) -> &str {
     text(row, "id").unwrap_or_default()
@@ -913,6 +934,156 @@ impl Core {
             ));
         }
         Ok(reached)
+    }
+
+    /// A placed claim's own rules, bound to the groups named now, with its grant's caps and groups and the policy's child default.
+    pub async fn place_scope(
+        &self,
+        row: &Row,
+        parent: Option<&Row>,
+        grant: Option<&Row>,
+        depth: i64,
+        rules: &Value,
+    ) -> Result<(), RpcError> {
+        let world = self.world().await?;
+        let id = row_id(row).to_owned();
+        let mut caps = ScopeCaps::default();
+        if let Some(grant) = grant {
+            caps.caps.extend(grant_caps(grant));
+        }
+        let own: ScopeRules = serde_json::from_value(rules.clone()).unwrap_or_default();
+        let mut bound = ScopeRules::default();
+        for dir in DIRS {
+            if let Some(list) = rule_get(&own, dir) {
+                set_rule(&world, &mut bound, dir, Some(list.clone()));
+            }
+        }
+        let child = world.defaults.child_default.clone();
+        if parent.is_some()
+            && caps.caps.is_empty()
+            && let Ok(preset) = child.parse::<ScopePreset>()
+            && let Some(list) = preset_lists(preset)
+        {
+            for dir in world.defaults.preset_dirs() {
+                caps.caps.push(ScopeCap {
+                    id: cap_id(),
+                    dir: *dir,
+                    by: "policy".into(),
+                    sels: list.iter().map(|sel| world.entry(sel, None)).collect(),
+                });
+            }
+        }
+        caps.caps.extend(caps_of(row).caps);
+        let tree = parent.map(|p| text(p, "tree").unwrap_or(row_id(p)).to_owned());
+        self.store
+            .all(
+                "UPDATE endpoints SET tree = ?, parent_ep = ?, parent_addr = NULL, depth = ?, rules = ?, caps = ? WHERE id = ?",
+                &[crate::views::opt(tree.as_deref()), crate::views::opt(parent.map(row_id)), SqlValue::Int(depth), rules_json(&bound), caps_json(&mut caps), s(&id)],
+            )
+            .await?;
+        let world = self.world().await?;
+        let placed = world.row(&id).cloned().ok_or_else(RpcError::internal)?;
+        for dir in DIRS {
+            if let Some(list) = rule_get(&own, dir) {
+                self.need_groups(&world, &placed, list, false)?;
+            }
+        }
+        if let Some(grant) = grant {
+            self.join_grant(grant, &id).await?;
+        }
+        Ok(())
+    }
+
+    /// The grant's groups, each while it is still the group it was issued for, with the issuer's membership allowance when it could widen.
+    async fn join_grant(&self, grant: &Row, endpoint: &str) -> Result<(), RpcError> {
+        let entries: Vec<Value> = text(grant, "groups")
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or_default();
+        let issuer = text(grant, "issuer").unwrap_or_default().to_owned();
+        for entry in entries {
+            let world = self.world().await?;
+            let Some(group) = entry["name"].as_str().and_then(|n| world.group_by_name(n)) else {
+                continue;
+            };
+            if group.policy || Some(group.id.as_str()) != entry["id"].as_str() {
+                continue;
+            }
+            self.join(&group.name, endpoint, &issuer).await?;
+            let world = self.world().await?;
+            let (Some(by), Some(target)) =
+                (world.row(&issuer).cloned(), world.row(endpoint).cloned())
+            else {
+                continue;
+            };
+            if entry["allow"] == Value::Bool(true)
+                && !crate::world::is_gone(&by)
+                && world.authority(&issuer, endpoint)
+            {
+                let sel = vec![format!("group:{}", group.name)];
+                let lists = HashMap::from([
+                    (ScopeDirection::In, sel.clone()),
+                    (ScopeDirection::Out, sel),
+                ]);
+                let detail = json!({"by": address(&by), "auth": "grant", "via": address(&by), "target": address(&target), "group": group.name});
+                self.allow_into(&by, &target, &lists, detail, Some(&group.name))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A grant's caps by its issuer and its groups, each checked as the actor may name and add to it.
+    pub async fn grant_scope(
+        &self,
+        actor: &Actor,
+        me: &Row,
+        params: &Map<String, Value>,
+    ) -> Result<(Value, Value), RpcError> {
+        let world = self.world().await?;
+        let expanded = crate::rules::expand(
+            &crate::rules::rule_params(params)?,
+            world.defaults.symmetric,
+        )?;
+        let mut caps = Vec::new();
+        for dir in DIRS {
+            if let Some(Some(sels)) = expanded.get(&dir) {
+                self.need_groups(&world, me, sels, false)?;
+                caps.push(json!({"dir": dir, "sels": sels.iter().map(|sel| world.entry(sel, None)).collect::<Vec<_>>()}));
+            }
+        }
+        if actor.narrow_only()
+            && let Ok(preset) = world.defaults.child_default.parse::<ScopePreset>()
+            && let Some(list) = preset_lists(preset)
+        {
+            for dir in world.defaults.preset_dirs() {
+                caps.push(json!({"dir": dir, "sels": list.iter().map(|sel| json!({"sel": sel})).collect::<Vec<_>>()}));
+            }
+        }
+        let me_id = row_id(me);
+        let mut groups = Vec::new();
+        for name in group_names(params.get("groups"), "groups")? {
+            let group = world
+                .group_by_name(&name)
+                .filter(|g| !g.policy && world.sees_group(me_id, g))
+                .ok_or_else(|| RpcError::new(ErrorCode::NotFound, format!("no group {name}")))?;
+            if world.is_agent(me_id) && group.owner != me_id && !world.admin_of_group(me_id, &group)
+            {
+                return Err(self
+                    .refused(
+                        actor,
+                        me,
+                        json!({"target": format!("group:{name}"), "reason": "not the owner"}),
+                        &format!("only the owner adds to group {name}"),
+                    )
+                    .await);
+            }
+            let mut entry = json!({"name": group.name, "id": group.id});
+            if !actor.narrow_only() {
+                entry["allow"] = json!(true);
+            }
+            groups.push(entry);
+        }
+        Ok((json!(caps), json!(groups)))
     }
 
     /// The send guards that run before the write: the fan-out cap and the policy, each refusal audited.

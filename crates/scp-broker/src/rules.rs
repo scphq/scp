@@ -864,9 +864,9 @@ impl Core {
             let before = snapshot(&caps);
             let (mut added, mut cut) = (Vec::new(), Vec::new());
             for sel in sels {
-                if stored.is_empty() && keys.is_empty() {
-                    cut.push(sel.clone());
-                } else if via != "human" && clipped(&world, &via, sel, &node, dir, &candidates) {
+                if (stored.is_empty() && keys.is_empty())
+                    || (via != "human" && clipped(&world, &via, sel, &node, dir, &candidates))
+                {
                     cut.push(sel.clone());
                 } else {
                     let put = |list: &mut Vec<ScopeEntry>| match list
