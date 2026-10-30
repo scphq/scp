@@ -236,6 +236,7 @@ impl Core {
             "policy" => self.policy_view(conn).await,
             "policy_check" => self.policy_check(conn, params).await,
             "subagent_title" => self.subagent_title(conn, params).await,
+            "spawn_steers" => self.spawn_steers(conn, params).await,
             "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
             "machine_wake" => Err(RpcError::new(
                 ErrorCode::Unavailable,

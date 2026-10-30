@@ -642,3 +642,104 @@ impl Core {
             .any(|v| v == spender))
     }
 }
+
+impl Core {
+    /// the grant `token` and the endpoint that spent it, for its issuer or an ancestor of that endpoint
+    async fn spawn_grant(&self, me: &Row, token: &str) -> Result<(Row, Option<Row>), RpcError> {
+        let grant = self
+            .store
+            .all(
+                "SELECT * FROM grants WHERE token_hash = ?",
+                &[opt(Some(&hash(token)))],
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| RpcError::new(ErrorCode::NotFound, "no such grant"))?;
+        let spender = match text(&grant, "used_by") {
+            Some(id) => self.by_id(id).await?,
+            None => None,
+        };
+        let below = match &spender {
+            Some(row) => self
+                .ancestors(row)
+                .await?
+                .iter()
+                .any(|id| Some(id.as_str()) == text(me, "id")),
+            None => false,
+        };
+        if text(&grant, "issuer") != text(me, "id") && !below {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "only the grant's issuer ends its spawn",
+            ));
+        }
+        if spender.is_some() && integer(&grant, "revoked_at").is_some() {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "the grant was revoked: a new spawn holds its endpoint",
+            ));
+        }
+        Ok((grant, spender))
+    }
+
+    /// the spawned worker's harness session, transcript and the issuer's unread steers to it; `take` marks them read for a resume
+    pub async fn spawn_steers(
+        &self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let token = params
+            .get("grant")
+            .and_then(Value::as_str)
+            .filter(|v| valid_token(v, "krt_"))
+            .ok_or_else(|| RpcError::invalid_params("grant is a krt_ token"))?;
+        let take = params.get("take") == Some(&Value::Bool(true));
+        let me = self.actor_row(conn).await?;
+        crate::store::transaction(self.store.clone(), async {
+            let (grant, spender) = self.spawn_grant(&me, token).await?;
+            let Some(spender) = spender else {
+                return Ok(json!({"session": null, "steers": [], "transcript": null, "joined": false}));
+            };
+            let id = text(&spender, "id").ok_or_else(RpcError::internal)?;
+            let now = now_ms();
+            let page = self.limits.get("inboxPage").unwrap_or(100) as i64;
+            let rows = self.store.all("SELECT m.*, d.seq AS seq FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.endpoint = ? AND m.from_ep = ? AND d.expires_at > ? AND m.created_at >= ? AND d.acked_at IS NULL ORDER BY d.seq LIMIT ?",&[opt(Some(id)),opt(text(&grant,"issuer")),SqlValue::Int(now),SqlValue::Int(integer(&grant,"created_at").unwrap_or(0)),SqlValue::Int(page)]).await?;
+            let mut steers = Vec::new();
+            for row in &rows {
+                steers.push(self.message_envelope(row, id).await?);
+            }
+            let session = text(&spender, "harness_session");
+            if take && session.is_some() && !rows.is_empty() {
+                self.store
+                    .all(
+                        "UPDATE endpoints SET hook_seen = NULL WHERE id = ?",
+                        &[opt(Some(id))],
+                    )
+                    .await?;
+                for row in &rows {
+                    self.store
+                        .all(
+                            "UPDATE deliveries SET acked_at = ? WHERE seq = ? AND acked_at IS NULL",
+                            &[SqlValue::Int(now), SqlValue::Int(integer(row, "seq").unwrap_or(0))],
+                        )
+                        .await?;
+                }
+                self.audit(
+                    "ack",
+                    Some(id),
+                    None,
+                    json!({"count": rows.len(), "by": address(&me)}),
+                )
+                .await?;
+            }
+            Ok(json!({
+                "session": session,
+                "steers": steers,
+                "transcript": session.and(text(&spender, "harness_transcript")),
+                "joined": true,
+            }))
+        })
+        .await
+    }
+}
