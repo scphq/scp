@@ -1,17 +1,17 @@
 {
   "name": "@scp-dev/relay-server",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Self-hosted SCP relay server",
   "bin": {
     "scp-relay": "bin/scp-relay.js"
   },
   "optionalDependencies": {
-    "@scp-dev/relay-server-darwin-arm64": "0.4.2",
-    "@scp-dev/relay-server-darwin-x64": "0.4.2",
-    "@scp-dev/relay-server-linux-x64-gnu": "0.4.2",
-    "@scp-dev/relay-server-linux-arm64-gnu": "0.4.2",
-    "@scp-dev/relay-server-linux-x64-musl": "0.4.2",
-    "@scp-dev/relay-server-win32-x64": "0.4.2"
+    "@scp-dev/relay-server-darwin-arm64": "0.4.3",
+    "@scp-dev/relay-server-darwin-x64": "0.4.3",
+    "@scp-dev/relay-server-linux-x64-gnu": "0.4.3",
+    "@scp-dev/relay-server-linux-arm64-gnu": "0.4.3",
+    "@scp-dev/relay-server-linux-x64-musl": "0.4.3",
+    "@scp-dev/relay-server-win32-x64": "0.4.3"
   },
   "engines": {
     "node": ">=18"

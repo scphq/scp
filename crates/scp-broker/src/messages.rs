@@ -307,10 +307,31 @@ impl Core {
     }
 }
 
+/// envelope fields only the relay sets: a sender naming one, `from` above all, is refused
+const SERVER_FIELDS: [&str; 9] = [
+    "from",
+    "id",
+    "seq",
+    "hop",
+    "created_at",
+    "auth",
+    "expires_at",
+    "relation",
+    "link",
+];
+
 pub fn validate_send(
     params: &Map<String, Value>,
     _limits: &crate::proto::Limits,
 ) -> Result<(), RpcError> {
+    if let Some(field) = SERVER_FIELDS
+        .iter()
+        .find(|field| params.contains_key(**field))
+    {
+        return Err(RpcError::invalid_params(format!(
+            "{field} is set by the relay, not the sender"
+        )));
+    }
     if !params.get("body").is_some_and(Value::is_string) {
         return Err(RpcError::invalid_params("body must be a string"));
     }

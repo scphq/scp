@@ -164,6 +164,7 @@ struct Fields {
     harness_session: Option<String>,
     harness_origin: Option<String>,
     harness_handoff: bool,
+    under: Option<String>,
 }
 #[derive(Clone)]
 struct Scope {
@@ -1006,6 +1007,24 @@ impl Core {
         ) {
             return Ok(None);
         }
+        if let Some(under) = &fields.under
+            && let Ok(parent) = self.lookup(under).await
+            && (text(&parent, "id") == text(&held, "id")
+                || self
+                    .ancestors(&parent)
+                    .await?
+                    .iter()
+                    .any(|id| Some(id.as_str()) == text(&held, "id")))
+        {
+            self.audit(
+                "handoff_refused",
+                Some(id),
+                None,
+                json!({"from":text(row,"handle"),"to":text(&held,"handle"),"code":"scope_refused"}),
+            )
+            .await?;
+            return Ok(None);
+        }
         self.store.all("SAVEPOINT handoff", &[]).await?;
         let result = async {
             self.store
@@ -1096,6 +1115,7 @@ impl Core {
             harness_session: clean_text(claim.get("harness_session"), "harness_session", 128)?,
             harness_origin: clean_text(claim.get("harness_origin"), "harness_origin", 128)?,
             harness_handoff: claim.get("harness_handoff") == Some(&Value::Bool(true)),
+            under: clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty()),
         };
         if fields
             .process

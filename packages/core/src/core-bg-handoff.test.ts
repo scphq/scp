@@ -45,7 +45,9 @@ function live() {
   core.title(old.id, "the lead")
   const worker = core.claim({ handle: "w1", harness: "codex", process: key(20), session: key(20), lineage: [key(20), key(9)] }, { transient: true }).endpoint
   core.send(peer.id, { to: "lead", body: "while away" })
-  return { core, clock, hook, shim, tool, old, worker }
+  const audit = (event: string) =>
+    (db.query(`SELECT detail FROM audit WHERE event = ? ORDER BY id`).all(event) as { detail: string }[]).map((row) => JSON.parse(row.detail))
+  return { core, clock, hook, shim, tool, old, worker, audit }
 }
 
 const quiet = (clock: { now: number }) => {
@@ -132,6 +134,49 @@ describe("a background hand-off", () => {
     expect(hook(30, HANDOFF).handedOff).toBeUndefined()
     expect(core.whoami(fork.id).address).toBe("me/claude-app")
     expect(core.whoami(old.id).address).toBe("me/lead")
+  })
+
+  test("never hands the origin to a fork started inside the origin's own process tree, or one placed under it", () => {
+    const { core, clock, hook, old, worker, audit } = live()
+    clock.now += 5000
+    const inside = { ...HANDOFF, lineage: [key(30), key(29), key(9), key(1)] }
+    const fork = hook(30, inside).endpoint
+    expect(core.whoami(fork.id).parent).toBe("me/lead")
+    clock.now += 5000
+    expect(hook(30, inside).handedOff).toBeUndefined()
+    quiet(clock)
+    expect(hook(30, inside).handedOff).toBeUndefined()
+    expect(core.whoami(old.id).address).toBe("me/lead")
+    expect(core.whoami(fork.id).address).not.toBe("me/lead")
+    expect(core.whoami(worker.id).parent).toBe("me/lead")
+    expect(audit("handoff_refused").at(-1)).toMatchObject({ to: "lead", code: "scope_refused" })
+    const placed = core.claim({
+      handle: "kid",
+      harness: "claude-code",
+      process: key(40),
+      session: key(40),
+      lineage: [key(40), key(1)],
+      harness_session: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d",
+      under: "lead",
+    }).endpoint
+    expect(core.whoami(placed.id).parent).toBe("me/lead")
+    quiet(clock)
+    const below = { harness_session: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d", harness_origin: ORIGIN, harness_handoff: true }
+    expect(
+      core.claim({ handle: "kid", harness: "claude-code", process: key(40), session: key(40), lineage: [key(40), key(1)], ...below }, { transient: true })
+        .handedOff,
+    ).toBeUndefined()
+    expect(core.whoami(old.id).address).toBe("me/lead")
+  })
+
+  test("never hands the origin to a fork that asks to sit under it", () => {
+    const { core, clock, hook, old, audit } = live()
+    quiet(clock)
+    const fork = hook(30, { ...HANDOFF, under: "lead" })
+    expect(fork.handedOff).toBeUndefined()
+    expect(core.whoami(old.id).address).toBe("me/lead")
+    expect(core.whoami(fork.endpoint.id).address).not.toBe("me/lead")
+    expect(audit("handoff_refused").at(-1)).toMatchObject({ to: "lead", code: "scope_refused" })
   })
 
   test("a malformed flag is refused", () => {

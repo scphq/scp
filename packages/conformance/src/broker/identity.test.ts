@@ -156,6 +156,33 @@ brokerSuite("broker identity", (start) => {
     expect([await due(), await due(), await due()]).toEqual([false, false, true]);
     expect((await h.request("prompted", { tldr_every: 0 })).tldr).toBeUndefined();
   });
+
+  test("a worker's shell proves only its own identity: --as its parent, a sibling or a peer is unauthorized, a free name lands under it", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead", "claude-code", {}, { ...session(2), harness_session: "lead-a" });
+    const peer = await broker.agent("peer", "codex", {}, session(5));
+    const grant = async (name: string) => (await lead.request<{ token: string }>("grant", { name, scope: "parent" })).token;
+    const worker = (pid: number) => ({ process: key(pid), session: key(pid), lineage: [key(pid), key(3)] });
+    const w1 = await broker.agent("w1", "claude-code", {}, { ...worker(4), grant: await grant("w1") });
+    const w2 = await broker.agent("w2", "claude-code", {}, { ...worker(6), grant: await grant("w2") });
+    expect([w1.hello.endpoint?.parent, w2.hello.endpoint?.parent]).toEqual(["me/lead", "me/lead"]);
+    const shell = async (handle: string) =>
+      (await broker.wire()).hello({ claim: { handle, exact: true, harness: "cli", lineage: [key(50), key(4), key(3)] }, self: [key(50), key(4)], brief: true });
+    for (const handle of ["lead", "w2", "peer"]) expect(await refusal(shell(handle))).toBe("unauthorized");
+    expect(await refusal(w1.request("send", { to: "lead", body: "spoofed", from: "me/lead" }, { unchecked: true }))).toBe("invalid_params");
+    const fresh = (await shell("lead-placeholder")).endpoint;
+    expect(fresh).toMatchObject({ address: "me/lead-placeholder", parent: "me/w1" });
+    const human = await broker.human();
+    const views = (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints;
+    for (const [id, address] of [
+      [lead.id, "me/lead"],
+      [w2.id, "me/w2"],
+      [peer.id, "me/peer"],
+      [w1.id, "me/w1"],
+    ])
+      expect(views.find((e) => e.id === id)?.address).toBe(address);
+    expect(await lead.request("inbox")).toMatchObject({ messages: [] });
+  });
 });
 
 brokerSuite("broker identity state", (start) => {
@@ -363,6 +390,22 @@ brokerSuite("broker resumed sessions", (start) => {
     expect(await fresh.request("whoami")).toMatchObject({ address: "me/other" });
     expect(await human.request("relink", {})).toMatchObject({ relinked: [pair] });
     expect(await fresh.request("whoami")).toMatchObject({ address: "me/lead" });
+  });
+
+  test("a hand-off claim that asks to sit under its origin never takes the origin's name", async () => {
+    const broker = await start();
+    const origin = { ...session(process.pid), harness_session: "origin-a" };
+    const old = await broker.agent("app", "claude-code", {}, origin);
+    const hook = await broker.hook({ handle: "app", ...origin });
+    await hook.request("event", { kind: "tool", session_id: "origin-a" });
+    await hook.close();
+    await old.request("rename", { handle: "lead" });
+    const fork = { ...session(1), harness_session: "fork-a", harness_origin: "origin-a", harness_handoff: true, under: "lead" };
+    await broker.hook({ handle: "app", ...fork });
+    await Bun.sleep(5);
+    const again = await broker.hook({ handle: "app", ...fork });
+    expect(again.hello.endpoint?.address).not.toBe("me/lead");
+    expect(await old.request("whoami")).toMatchObject({ id: old.id, address: "me/lead" });
   });
 
   for (const via of ["claim", "join"] as const) {
