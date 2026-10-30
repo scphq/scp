@@ -1371,10 +1371,13 @@ impl Core {
         if let Some(under) = clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty())
             && text(row, "parent_ep").is_none()
         {
-            match self.lookup(&under).await {
-                Ok(parent) => {
-                    self.link_endpoint(row, &parent, "session").await?;
-                }
+            let linked = match self.lookup(&under).await {
+                Ok(parent) if !self.may_link_under(row, &parent).await? => Err(unreachable(&under)),
+                Ok(parent) => self.link_endpoint(row, &parent, "session").await,
+                Err(error) => Err(error),
+            };
+            match linked {
+                Ok(()) => {}
                 Err(error) => {
                     self.audit("claim_under_refused",text(row,"id"),None,json!({"target":address(row),"under":under,"code":error.data.map(|v|v.code)})).await?;
                 }
@@ -1465,6 +1468,17 @@ pub fn subagent_handle(root: &str, id: &str, kind: Option<&str>) -> String {
         .take(58usize.saturating_sub(tail.len()))
         .collect();
     format!("{}{tail}", head.trim_end_matches(['-', '.']))
+}
+
+pub fn unreachable(value: &str) -> RpcError {
+    RpcError::new(
+        ErrorCode::NotFound,
+        format!(
+            "no endpoint {} that you can reach ({} peers lists who you may message)",
+            value.trim(),
+            scp_core::protocol::CLI_NAME
+        ),
+    )
 }
 
 fn suffixed(handle: &str, n: usize) -> String {
@@ -1682,8 +1696,17 @@ async fn hello_transaction(
             core.rename_row(row, handle, false, false).await?;
         }
         let row = core.must_endpoint(text(row, "id").unwrap_or("")).await?;
-        if let Some(under) = join.get("under").and_then(Value::as_str) {
+        if let Some(under) = join
+            .get("under")
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
             let parent = core.lookup(under).await?;
+            if text(&parent, "id") != text(&row, "parent_ep")
+                && !core.may_link_under(&row, &parent).await?
+            {
+                return Err(unreachable(under));
+            }
             core.link_endpoint(&row, &parent, "session").await?;
         }
         return Ok(Claimed {

@@ -158,6 +158,8 @@ impl Core {
             "rename" => self.rename(conn, params).await,
             "leave" => self.leave(conn, params).await,
             "adopt" => self.adopt(conn, params).await,
+            "link_accept" => self.link_accept(conn, params).await,
+            "unlink" => self.unlink(conn, params).await,
             "relink" => self.relink(conn, params).await,
             "event" => self.event(conn, params).await,
             "grant" => self.grant(conn, params).await,
