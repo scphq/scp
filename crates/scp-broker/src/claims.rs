@@ -151,6 +151,8 @@ struct Claimed {
     row: Row,
     resume: Option<String>,
     retired: Option<String>,
+    created: bool,
+    subagent: bool,
 }
 
 #[derive(Clone)]
@@ -174,6 +176,12 @@ struct Scope {
     nearest: Option<String>,
     rules: Value,
     exact: bool,
+    subagent: Option<Subagent>,
+}
+#[derive(Clone)]
+struct Subagent {
+    kind: Option<String>,
+    root: String,
 }
 struct Placement {
     parent: Option<Row>,
@@ -285,6 +293,12 @@ impl Core {
                 })
     }
     async fn placement(&self, scope: &Scope, exclude: &[&str]) -> Result<Placement, RpcError> {
+        if let Some(sub) = &scope.subagent {
+            return Ok(Placement {
+                parent: self.by_id(&sub.root).await?,
+                grant: None,
+            });
+        }
         let lineage = self
             .lineage_rows(&scope.lineage, exclude)
             .await?
@@ -645,7 +659,7 @@ impl Core {
         }
         let exact = scope.exact;
         let mut resumed = false;
-        if row.is_none() && open && !exact {
+        if row.is_none() && open && !exact && scope.subagent.is_none() {
             for reported in [&fields.harness_session, &fields.harness_origin]
                 .into_iter()
                 .flatten()
@@ -699,10 +713,17 @@ impl Core {
                         }
                         None => false,
                     };
+                let foreign_sub = scope.subagent.as_ref().is_some_and(|sub| {
+                    text(&held, "id") == Some(sub.root.as_str())
+                        || text(&held, "session").is_some_and(|v| {
+                            v.starts_with("sub:") && Some(v) != fields.session.as_deref()
+                        })
+                });
                 if text(&held, "kind") == Some("agent")
                     && (self.released(&held).await || (!transient && outlived))
                     && harness_fits(text(&held, "harness"), harness)
                     && !other_session
+                    && !foreign_sub
                 {
                     own = transient
                         && fields
@@ -891,7 +912,12 @@ impl Core {
                 .await?;
         }
         if !(transient && joined) {
-            self.audit("claim",Some(id),None,json!({"handle":text(&row,"handle"),"harness":harness,"joined":joined,"resumed":resumed,"transient":transient})).await?;
+            let mut detail = json!({"handle":text(&row,"handle"),"harness":harness,"joined":joined,"resumed":resumed,"transient":transient});
+            if let Some(sub) = &scope.subagent {
+                detail["subagent"] = json!(sub.kind.as_deref().unwrap_or("agent"));
+                detail["parent"] = json!(self.address_of(&sub.root).await?);
+            }
+            self.audit("claim", Some(id), None, detail).await?;
         }
         if let Some(kind) = fresh {
             self.reset_claim(&row, scope, kind).await?;
@@ -970,6 +996,8 @@ impl Core {
             row: result,
             resume,
             retired,
+            created,
+            subagent: scope.subagent.is_some(),
         })
     }
     async fn hand_off(
@@ -1087,12 +1115,199 @@ impl Core {
         }
         self.audit("scope_reset",Some(id),None,json!({"by":address(row),"target":address(row),"reason":if kind=="grant"{"a new spawn took over the endpoint"}else{"another process took over the endpoint"},"groups":[]})).await
     }
+    async fn subagent_root(
+        &mut self,
+        scope: &Scope,
+        harness: &str,
+        fields: &Fields,
+        transient: bool,
+    ) -> Result<Row, RpcError> {
+        let held = match &fields.session {
+            Some(session) => self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness = ? AND session = ? AND substr(handle,1,5) != 'gone:'",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next(),
+            None => None,
+        };
+        let root = match held {
+            Some(row) => Some(row),
+            None => self
+                .lineage_rows(&scope.lineage, &[])
+                .await?
+                .into_iter()
+                .next(),
+        };
+        if let Some(root) = &root
+            && transient
+            && text(root, "harness") == Some(harness)
+            && fields
+                .process
+                .as_deref()
+                .zip(text(root, "process"))
+                .is_some_and(|(a, b)| same_harness(b, a))
+        {
+            return Ok(root.clone());
+        }
+        self.state.deferred = Some((
+            root.as_ref().and_then(|r| text(r, "id")).map(str::to_owned),
+            json!({"target":scope.handle,"reason":"subagent claim from another process"}),
+        ));
+        Err(RpcError::new(
+            ErrorCode::Unauthorized,
+            "a subagent claim comes only from a hook of the harness process that holds its lineage endpoint",
+        ))
+    }
+    async fn claim_subagent(
+        &mut self,
+        harness: &str,
+        mut fields: Fields,
+        mut scope: Scope,
+        transient: bool,
+        (id, kind, stop): (String, Option<String>, bool),
+    ) -> Result<Claimed, RpcError> {
+        let root = self
+            .subagent_root(&scope, harness, &fields, transient)
+            .await?;
+        let root_id = text(&root, "id").ok_or_else(RpcError::internal)?.to_owned();
+        scope.handle = subagent_handle(text(&root, "handle").unwrap_or(""), &id, kind.as_deref());
+        scope.grant = None;
+        let session = format!("sub:{id}:{}", fields.session.as_deref().unwrap_or(&root_id));
+        fields.session = Some(session.chars().take(128).collect());
+        fields.under = None;
+        fields.harness_handoff = false;
+        let had = self.store.all("SELECT id FROM endpoints WHERE kind = 'agent' AND harness = ? AND (session = ? OR (handle = ? AND parent_ep = ?)) LIMIT 1",&[opt(Some(harness)),opt(fields.session.as_deref()),opt(Some(&scope.handle)),opt(Some(&root_id))]).await?;
+        if stop && had.is_empty() {
+            return Err(RpcError::new(
+                ErrorCode::NotFound,
+                "that subagent has no endpoint: it never ran a tool",
+            ));
+        }
+        scope.subagent = Some(Subagent {
+            kind,
+            root: root_id.clone(),
+        });
+        let claimed = self.claim_row(harness, &fields, &scope, true).await?;
+        let endpoint = text(&claimed.row, "id")
+            .ok_or_else(RpcError::internal)?
+            .to_owned();
+        let titled = self.take_subagent_title(&root_id, &id, &endpoint).await?;
+        let resumed = !stop
+            && !self.store.all("UPDATE endpoints SET status_state = 'working' WHERE id = ? AND status_state = 'done' RETURNING id",&[opt(Some(&endpoint))]).await?.is_empty();
+        if !titled && !resumed {
+            return Ok(claimed);
+        }
+        Ok(Claimed {
+            row: self.must_endpoint(&endpoint).await?,
+            ..claimed
+        })
+    }
+    async fn take_subagent_title(
+        &mut self,
+        root: &str,
+        id: &str,
+        endpoint: &str,
+    ) -> Result<bool, RpcError> {
+        let key = format!("{root} {id}");
+        let Some(at) = self
+            .state
+            .subagent_titles
+            .iter()
+            .position(|(k, _)| *k == key)
+        else {
+            return Ok(false);
+        };
+        let (_, title) = self
+            .state
+            .subagent_titles
+            .remove(at)
+            .ok_or_else(RpcError::internal)?;
+        self.fill_title(endpoint, &title).await
+    }
+    pub async fn fill_title(&self, endpoint: &str, title: &str) -> Result<bool, RpcError> {
+        Ok(!self.store.all("UPDATE endpoints SET title = ?,title_auto = ?,title_turn = NULL WHERE id = ? AND (title IS NULL OR title = title_auto) AND title IS NOT ? RETURNING id",&[opt(Some(title)),opt(Some(title)),opt(Some(endpoint)),opt(Some(title))]).await?.is_empty())
+    }
+    /// whether a hook connection's process holds `row`; a dead holder's process passes to it
+    pub async fn holds(
+        &self,
+        row: &Row,
+        transient: bool,
+        process: Option<&str>,
+    ) -> Result<bool, RpcError> {
+        let Some(held) = text(row, "process").filter(|_| transient) else {
+            return Ok(true);
+        };
+        let Some(process) = process else {
+            return Ok(false);
+        };
+        if same_harness(held, process) {
+            return Ok(true);
+        }
+        let pid = held
+            .strip_prefix("pid:")
+            .and_then(|v| v.split(':').next())
+            .filter(|v| !v.is_empty() && v != &"0" && v.bytes().all(|b| b.is_ascii_digit()));
+        let Some(pid) = pid else {
+            return Ok(false);
+        };
+        if self.procs.alive(&format!("pid:{pid}")).await {
+            return Ok(false);
+        }
+        self.store
+            .all(
+                "UPDATE endpoints SET process = ? WHERE id = ? AND process = ?",
+                &[opt(Some(process)), opt(text(row, "id")), opt(Some(held))],
+            )
+            .await?;
+        Ok(true)
+    }
+    /// a title for the caller's in-process subagent `id`; the subagent's endpoint id when it changed one, else kept until its first claim
+    pub async fn subagent_title(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| subagent_of(Some(&json!({"id": id}))).is_ok())
+            .ok_or_else(|| RpcError::invalid_params("id is the subagent's id"))?;
+        let title = params
+            .get("title")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("title must be a string"))?;
+        let c = self.connection(conn)?;
+        let row = self.actor_row(conn).await?;
+        let title = crate::session::hook_title(title);
+        let Some(title) = title.filter(|_| text(&row, "kind") == Some("agent")) else {
+            return Ok(json!({"changed": false}));
+        };
+        if !self
+            .holds(&row, c.mode == Mode::Transient, c.process.as_deref())
+            .await?
+        {
+            return Ok(json!({"changed": false}));
+        }
+        let root = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
+        let prefix = format!("sub:{id}:");
+        let sub = self.store.all("SELECT id FROM endpoints WHERE kind = 'agent' AND parent_ep = ? AND substr(session,1,?) = ? ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(&root)),SqlValue::Int(prefix.len() as i64),opt(Some(&prefix))]).await?.into_iter().next();
+        if let Some(sub) = sub {
+            let changed = self
+                .fill_title(text(&sub, "id").unwrap_or(""), &title)
+                .await?;
+            return Ok(json!({"changed": changed}));
+        }
+        let key = format!("{root} {id}");
+        self.state.subagent_titles.retain(|(k, _)| *k != key);
+        self.state.subagent_titles.push_back((key, title));
+        while self.state.subagent_titles.len() > 256 {
+            self.state.subagent_titles.pop_front();
+        }
+        Ok(json!({"changed": false}))
+    }
     async fn claim_agent(
         &mut self,
         claim: &Map<String, Value>,
         transient: bool,
         self_keys: Option<&Value>,
     ) -> Result<Claimed, RpcError> {
+        let subagent = subagent_of(claim.get("subagent"))?;
         let harness =
             clean_text(claim.get("harness"), "harness", 32)?.unwrap_or_else(|| "cli".into());
         if !valid_harness(&harness) {
@@ -1181,7 +1396,7 @@ impl Core {
                 rules[dir] = v.clone();
             }
         }
-        let exact = claim.get("exact") == Some(&Value::Bool(true));
+        let exact = claim.get("exact") == Some(&Value::Bool(true)) && subagent.is_none();
         let mut scope = Scope {
             handle: wanted,
             lineage,
@@ -1189,7 +1404,13 @@ impl Core {
             nearest,
             rules,
             exact,
+            subagent: None,
         };
+        if let Some((id, kind, stop)) = subagent {
+            return self
+                .claim_subagent(&harness, fields, scope, transient, (id, kind, stop))
+                .await;
+        }
         if scope.grant.is_none()
             && !exact
             && let Some(process) = &fields.process
@@ -1222,6 +1443,87 @@ impl Core {
         })
     }
 }
+fn subagent_of(value: Option<&Value>) -> Result<Option<(String, Option<String>, bool)>, RpcError> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| {
+            (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                && id.bytes().any(|b| b.is_ascii_alphanumeric())
+        })
+        .ok_or_else(|| {
+            RpcError::invalid_params("subagent is {id, type}: id letters, digits, _ and -")
+        })?;
+    let kind = match value.get("type") {
+        None => None,
+        Some(Value::String(kind)) if kind.encode_utf16().count() <= 64 => {
+            Some(kind.clone()).filter(|v| !v.is_empty())
+        }
+        Some(_) => {
+            return Err(RpcError::invalid_params(
+                "subagent type is a name of at most 64 characters",
+            ));
+        }
+    };
+    let stop = match value.get("stop") {
+        None => false,
+        Some(Value::Bool(stop)) => *stop,
+        Some(_) => return Err(RpcError::invalid_params("subagent stop is true or false")),
+    };
+    Ok(Some((id.into(), kind, stop)))
+}
+
+fn subagent_kind(kind: Option<&str>) -> String {
+    let kind = kind.unwrap_or("");
+    if kind.eq_ignore_ascii_case("general-purpose") {
+        return "gp".into();
+    }
+    let mut word = String::new();
+    let mut prev: Option<char> = None;
+    for c in kind.chars() {
+        if !c.is_ascii_alphanumeric() {
+            if !word.is_empty() {
+                break;
+            }
+        } else if c.is_ascii_uppercase()
+            && prev.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit())
+            && !word.is_empty()
+        {
+            break;
+        } else {
+            word.push(c);
+        }
+        prev = Some(c);
+    }
+    if word.is_empty() {
+        "agent".into()
+    } else {
+        word.to_ascii_lowercase().chars().take(16).collect()
+    }
+}
+
+/// `<root handle>-<short type>-<first 4 alphanumerics of id>`, the root's part clipped to leave room for a `-<n>` suffix
+pub fn subagent_handle(root: &str, id: &str, kind: Option<&str>) -> String {
+    let short: String = id
+        .to_ascii_lowercase()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(4)
+        .collect();
+    let tail = format!("-{}-{short}", subagent_kind(kind));
+    let head: String = root
+        .chars()
+        .take(58usize.saturating_sub(tail.len()))
+        .collect();
+    format!("{}{tail}", head.trim_end_matches(['-', '.']))
+}
+
 fn suffixed(handle: &str, n: usize) -> String {
     if n == 1 {
         handle.into()
@@ -1309,11 +1611,22 @@ pub async fn hello_claim(
             return Ok(core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None));
         }
     }
-    let claimed = crate::store::transaction(
+    core.state.deferred = None;
+    let claimed = match crate::store::transaction(
         core.store.clone(),
         hello_transaction(core, conn, params, transient),
     )
-    .await?;
+    .await
+    {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            if let Some((endpoint, detail)) = core.state.deferred.take() {
+                core.audit("scope_refused", endpoint.as_deref(), None, detail)
+                    .await?;
+            }
+            return Err(error);
+        }
+    };
     let row = claimed.row;
     let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
     let mode = if transient {
@@ -1343,7 +1656,14 @@ pub async fn hello_claim(
             .and_then(Value::as_str)
             .map(str::to_owned);
     }
-    Ok(core.hello_result(core.view(&row).await?, claimed.resume))
+    let mut result = core.hello_result(core.view(&row).await?, claimed.resume);
+    if claimed.subagent {
+        result["subagent"] = json!(true);
+        if claimed.created {
+            result["created"] = json!(true);
+        }
+    }
+    Ok(result)
 }
 
 fn bind_lineage(
@@ -1385,6 +1705,8 @@ async fn hello_transaction(
                 row: core.must_endpoint(id).await?,
                 resume: None,
                 retired: None,
+                created: false,
+                subagent: false,
             });
         }
         if params.get("human") == Some(&Value::Bool(true)) {
@@ -1394,6 +1716,8 @@ async fn hello_transaction(
                 row,
                 resume: None,
                 retired: None,
+                created: false,
+                subagent: false,
             });
         }
     }
@@ -1423,6 +1747,8 @@ async fn hello_transaction(
             row: core.must_endpoint(text(&row, "id").unwrap_or("")).await?,
             resume: None,
             retired: claimed.retired,
+            created: claimed.created,
+            subagent: false,
         });
     }
     core.claim_agent(claim, transient, params.get("self")).await

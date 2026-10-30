@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use serde_json::Value;
 use tokio::sync::Notify;
 
 pub type ConnectionId = u64;
@@ -51,6 +52,8 @@ pub struct State {
     pub presence: HashMap<String, usize>,
     pub addresses: HashMap<String, String>,
     pub waiters: HashMap<String, Arc<Notify>>,
+    pub subagent_titles: VecDeque<(String, String)>,
+    pub deferred: Option<(Option<String>, Value)>,
     next_id: ConnectionId,
 }
 

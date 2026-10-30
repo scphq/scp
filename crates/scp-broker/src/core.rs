@@ -247,6 +247,7 @@ impl Core {
             "prompted" => self.prompted(&endpoint, params).await,
             "rules" => self.rules(&endpoint).await,
             "rules_set" => self.rules_set(&endpoint, params).await,
+            "subagent_title" => self.subagent_title(conn, params).await,
             "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
                 self.review_hold(conn, method, params).await
             }
