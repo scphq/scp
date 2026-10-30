@@ -215,6 +215,7 @@ impl Core {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
+                self.judge_foreign(&endpoint, &addresses, params).await?;
                 let mut recipients = Vec::new();
                 for value in addresses {
                     let row = self.lookup(value).await?;

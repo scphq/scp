@@ -24,7 +24,14 @@ fn string(s: impl Into<String>) -> SqlValue {
     SqlValue::Text(s.into())
 }
 fn new_id(prefix: &str) -> String {
-    format!("{prefix}_{:x}{:016x}", now_ms(), rand::random::<u64>())
+    let mut value = now_ms().max(0) as u64;
+    let mut encoded = Vec::new();
+    while value > 0 {
+        encoded.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(value % 36) as usize] as char);
+        value /= 36;
+    }
+    let encoded: String = encoded.into_iter().rev().collect();
+    format!("{prefix}_{encoded:0>9}{:016x}", rand::random::<u64>())
 }
 fn stored(row: &Row, key: &str) -> Result<Value, RpcError> {
     serde_json::from_str(text(row, key).unwrap_or("{}")).map_err(|_| RpcError::internal())
@@ -80,6 +87,34 @@ fn held_result(id: &str, params: &Map<String, Value>) -> Value {
 }
 
 impl Core {
+    /// a send to another account is judged by the hub; enforce mode audits that it skipped the local judge
+    pub async fn judge_foreign(
+        &self,
+        endpoint: &str,
+        addresses: &[&str],
+        params: &Map<String, Value>,
+    ) -> Result<(), RpcError> {
+        let foreign = |a: &&str| {
+            a.split_once('/')
+                .is_some_and(|(u, _)| !matches!(u, "me" | "local"))
+        };
+        let Some(body) = params.get("body").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if !addresses.iter().any(foreign)
+            || self
+                .judge
+                .policy
+                .as_ref()
+                .is_none_or(|p| p["mode"] != "enforce")
+            || find_secret(body).is_some()
+        {
+            return Ok(());
+        }
+        let detail = json!({"side":"local","boundary":"other account","prompt_version":PROMPT_VERSION,"categories":[],"sha256":hash(body),"verdict":"skipped","reason":"other_account_judged_by_hub","to":addresses});
+        self.audit("judge_skipped", Some(endpoint), None, detail)
+            .await
+    }
     pub async fn judged_send(
         &mut self,
         _conn: ConnectionId,
