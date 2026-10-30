@@ -51,6 +51,7 @@ pub struct State {
     pub presence: HashMap<String, usize>,
     pub addresses: HashMap<String, String>,
     pub waiters: HashMap<String, Arc<Notify>>,
+    pub subagent_titles: Vec<(String, String)>,
     next_id: ConnectionId,
 }
 

@@ -221,6 +221,7 @@ impl Core {
                 )
                 .await
             }
+            "inbox" if crate::session::flag(params, "offer") => self.offer(&endpoint, params).await,
             "inbox" => self.inbox(&endpoint, params).await,
             "ack" => {
                 self.ack(&endpoint, params.get("seqs").unwrap_or(&Value::Null))
@@ -231,8 +232,15 @@ impl Core {
                 self.title(&endpoint, params.get("text"), &connection.mode)
                     .await
             }
-            "title_infer" => self.title_infer(&endpoint, params).await,
-            "prompted" => self.prompted(&endpoint, params).await,
+            "title_infer" => self.title_infer_rpc(conn, params).await,
+            "prompted" => self.prompted_rpc(conn, params).await,
+            "inject" => self.inject(conn, params).await,
+            "injected" => self.injected_rpc(conn, params).await,
+            "stop_wait" => self.stop_wait(conn, params, false).await,
+            "subagent_title" => self.subagent_title(conn, params).await,
+            "spawn_exit" => self.spawn_exit(conn, params).await,
+            "spawn_steers" => self.spawn_steers(conn, params).await,
+            "spawn_end" => self.spawn_end(conn, params).await,
             "rules" => self.rules(&endpoint).await,
             "rules_set" => self.rules_set(&endpoint, params).await,
             "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
@@ -340,6 +348,9 @@ impl Core {
         method: String,
         params: Map<String, Value>,
     ) -> Result<Value, RpcError> {
+        if method == "stop_wait" && guard.connection(conn)?.bound() {
+            return Self::stop_wait_poll(shared, guard, conn, params).await;
+        }
         let mut result = guard.dispatch(conn, &method, &params).await?;
         let wait_s = params
             .get("wait_s")
@@ -347,13 +358,21 @@ impl Core {
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(0.0)
             .min(guard.limits.get("waitMaxS").unwrap_or(50) as f64);
-        if method != "inbox" || wait_s == 0.0 {
+        let (list, waits) = match method.as_str() {
+            "inbox" => ("messages", true),
+            "inject" => (
+                "offered",
+                !crate::session::flag(&params, "stop") && !crate::session::flag(&params, "count"),
+            ),
+            _ => ("", false),
+        };
+        if !waits || wait_s == 0.0 {
             return Ok(result);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(wait_s);
         loop {
             if !result
-                .get("messages")
+                .get(list)
                 .and_then(Value::as_array)
                 .is_some_and(Vec::is_empty)
             {

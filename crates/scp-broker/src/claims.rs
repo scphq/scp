@@ -776,6 +776,15 @@ impl Core {
                     &[opt(text(&hooks, "id"))],
                 )
                 .await?;
+            self.store
+                .all(
+                    "UPDATE endpoints SET stop_blocks = ? WHERE id = ?",
+                    &[
+                        SqlValue::Int(integer(&hooks, "stop_blocks").unwrap_or(0)),
+                        opt(Some(id)),
+                    ],
+                )
+                .await?;
         }
         let by_session = joined && text(&row, "token_hash").is_none();
         let fresh = if created || joined || resumed {
