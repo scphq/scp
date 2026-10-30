@@ -108,6 +108,17 @@ brokerSuite("broker lineage", (start) => {
     expect(await peer.request("inbox")).toMatchObject({ messages: [] });
   });
 
+  test("a shell bound to an agent gets no terminal exemption from tty", async () => {
+    const broker = await start();
+    const a = await broker.hook({ handle: "a", ...claim(5) });
+    await broker.agent("victim");
+    const h = await broker.human();
+    await h.request("rules_set", { endpoint: "a", in: [], out: [] });
+    const shell = await broker.observer({ self: [key(5)], lineage: [key(5)], tty: true });
+    expect(shell.hello.endpoint?.id).toBe(a.hello.endpoint!.id);
+    expect(await refusal(shell.request("adopt", { endpoint: "victim" }))).toBe("not_found");
+  });
+
   test("link acceptance rechecks cycles and lineage auth cannot accept", async () => {
     const broker = await start();
     const lead = await broker.agent("lead");

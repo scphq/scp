@@ -1545,6 +1545,9 @@ pub async fn hello_claim(
                 .await?
             {
                 bind_lineage(core, conn, &id, params, false)?;
+                if let Some(c) = core.state.connections.get_mut(&conn) {
+                    c.terminal = params.get("tty") == Some(&Value::Bool(true));
+                }
                 return Ok(
                     core.hello_result(core.view(&core.must_endpoint(&id).await?).await?, None)
                 );
@@ -1637,7 +1640,7 @@ fn bind_lineage(
         c.own = own;
         c.brief = true;
         c.cwd = params.get("cwd").and_then(Value::as_str).map(str::to_owned);
-        c.terminal = params.get("tty") == Some(&Value::Bool(true));
+        c.terminal = false;
     }
     Ok(())
 }
