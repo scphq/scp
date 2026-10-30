@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use scp_core::protocol::{BROKER_CAPABILITIES, ErrorCode, PROTOCOL};
 use serde_json::{Map, Value, json};
@@ -188,44 +188,20 @@ impl Core {
             "event" => self.event(conn, params).await,
             "grant" => self.grant(conn, params).await,
             "log" => self.audit_log(params).await,
-            "send" => {
-                crate::messages::validate_send(params, &self.limits)?;
-                let to = params
-                    .get("to")
-                    .ok_or_else(|| RpcError::invalid_params("to is an address or list"))?;
-                let addresses = if let Some(to) = to.as_str() {
-                    vec![to]
-                } else {
-                    to.as_array()
-                        .ok_or_else(|| RpcError::invalid_params("to is an address or list"))?
-                        .iter()
-                        .map(|v| {
-                            v.as_str()
-                                .ok_or_else(|| RpcError::invalid_params("to is an address or list"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                let mut recipients = Vec::new();
-                for value in addresses {
-                    let row = self.lookup(value).await?;
-                    let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
-                    if !recipients.contains(&id) {
-                        recipients.push(id);
-                    }
-                }
-                self.send(
-                    &endpoint,
-                    &recipients,
-                    params,
-                    matches!(connection.mode, Mode::Human { tty: true }),
-                )
-                .await
+            "send" | "ask" => self.send_rpc(conn, method, params).await,
+            "ask_wait" => self.ask_wait(&endpoint, params).await,
+            "inbox" if params.get("offer") == Some(&Value::Bool(true)) => {
+                self.offer(conn, &endpoint, params).await
             }
             "inbox" => self.inbox(&endpoint, params).await,
             "ack" => {
                 self.ack(&endpoint, params.get("seqs").unwrap_or(&Value::Null))
                     .await
             }
+            "message" => self.message_rpc(&endpoint, params).await,
+            "receipts" => self.receipts(&endpoint, params).await,
+            "watch" => self.watch(conn).await,
+            "policy" => self.policy_rpc(conn).await,
             "status" => self.status(&endpoint, params).await,
             "title" => {
                 self.title(&endpoint, params.get("text"), &connection.mode)
@@ -340,52 +316,10 @@ impl Core {
         method: String,
         params: Map<String, Value>,
     ) -> Result<Value, RpcError> {
-        let mut result = guard.dispatch(conn, &method, &params).await?;
-        let wait_s = params
-            .get("wait_s")
-            .and_then(Value::as_f64)
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(0.0)
-            .min(guard.limits.get("waitMaxS").unwrap_or(50) as f64);
-        if method != "inbox" || wait_s == 0.0 {
-            return Ok(result);
+        if matches!(method.as_str(), "inbox" | "ask" | "ask_wait") {
+            return Self::poll(shared, guard, conn, &method, &params).await;
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(wait_s);
-        loop {
-            if !result
-                .get("messages")
-                .and_then(Value::as_array)
-                .is_some_and(Vec::is_empty)
-            {
-                return Ok(result);
-            }
-            let connection =
-                guard.state.connections.get(&conn).ok_or_else(|| {
-                    RpcError::new(ErrorCode::Unauthorized, "connection is closed")
-                })?;
-            let endpoint = connection
-                .endpoint
-                .clone()
-                .ok_or_else(|| RpcError::new(ErrorCode::Unauthorized, "call hello first"))?;
-            let closed = connection.closed.clone();
-            let waiter = guard.state.waiter(&endpoint);
-            let notified = waiter.notified();
-            let disconnected = closed.notified();
-            tokio::pin!(notified, disconnected);
-            notified.as_mut().enable();
-            disconnected.as_mut().enable();
-            drop(guard);
-            tokio::select! {
-                _ = &mut notified => {},
-                _ = &mut disconnected => return Ok(result),
-                _ = tokio::time::sleep_until(deadline) => return Ok(result),
-            }
-            guard = shared.clone().lock_owned().await;
-            if !guard.state.connections.contains_key(&conn) {
-                return Ok(result);
-            }
-            result = guard.dispatch(conn, &method, &params).await?;
-        }
+        guard.dispatch(conn, &method, &params).await
     }
 }
 

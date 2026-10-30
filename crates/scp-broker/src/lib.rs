@@ -4,6 +4,7 @@ pub mod authority;
 pub mod claims;
 pub mod core;
 pub mod identity;
+pub mod limits;
 pub mod messages;
 pub mod paths;
 pub mod policy;

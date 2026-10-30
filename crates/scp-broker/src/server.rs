@@ -141,6 +141,11 @@ impl Broker {
                 }
             }
         };
+        {
+            let mut core = self.core.lock().await;
+            core.state.closing = true;
+            core.state.stopping.notify_waiters();
+        }
         let _ = stop.send(true);
         let drain = async { while connections.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_secs(2), drain)
@@ -266,10 +271,16 @@ async fn serve_connection(
     core: SharedCore,
     mut stopping: watch::Receiver<bool>,
 ) {
+    let (events, mut fleet) = mpsc::unbounded_channel::<Value>();
     let (conn, closed) = {
         let mut core = core.lock().await;
         let conn = core.state.connect();
-        (conn, core.state.connections[&conn].closed.clone())
+        let connection = core.state.connections.get_mut(&conn);
+        let closed = connection.map(|c| {
+            c.events = Some(events);
+            c.closed.clone()
+        });
+        (conn, closed.unwrap_or_default())
     };
     let closing = closed.notified();
     tokio::pin!(closing);
@@ -313,6 +324,7 @@ async fn serve_connection(
             _ = stopping.changed() => break,
             _ = failed.notified() => break,
             _ = requests.join_next(), if !requests.is_empty() => {},
+            Some(event) = fleet.recv() => output.send(event),
             _ = tokio::time::sleep_until(deadline), if partial_since.is_some() && !too_large => {
                 output.send(RpcError::invalid_request("the request line was not finished in time").frame(Value::Null));
                 break;

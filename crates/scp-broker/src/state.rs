@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::Notify;
+use serde_json::{Value, json};
+use tokio::sync::{Notify, mpsc};
 
 pub type ConnectionId = u64;
 
@@ -32,6 +33,8 @@ pub struct Connection {
     pub terminal: bool,
     pub cwd: Option<String>,
     pub closed: Arc<Notify>,
+    pub watching: bool,
+    pub events: Option<mpsc::UnboundedSender<Value>>,
 }
 
 impl Connection {
@@ -51,6 +54,8 @@ pub struct State {
     pub presence: HashMap<String, usize>,
     pub addresses: HashMap<String, String>,
     pub waiters: HashMap<String, Arc<Notify>>,
+    pub closing: bool,
+    pub stopping: Arc<Notify>,
     next_id: ConnectionId,
 }
 
@@ -66,6 +71,22 @@ impl State {
             },
         );
         id
+    }
+
+    /// a `fleet` notification to every watching connection
+    pub fn notify_watchers(&self, event: Value, at: Option<String>) {
+        let mut params = json!({"at": at});
+        if let (Some(target), Some(fields)) = (params.as_object_mut(), event.as_object()) {
+            target.extend(fields.clone());
+        }
+        let frame = json!({"jsonrpc": "2.0", "method": "fleet", "params": params});
+        for connection in self.connections.values() {
+            if connection.watching
+                && let Some(events) = &connection.events
+            {
+                let _ = events.send(frame.clone());
+            }
+        }
     }
 
     pub fn waiter(&mut self, endpoint: &str) -> Arc<Notify> {
