@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 export const relayRoot = resolve(import.meta.dir, "..");
 export const relayAnchor = "crates/package.json";
 export const relayCrates = ["scp-dev-core", "scp-relay-server", "scp-relay-store"] as const;
+const workspaceCrates = [...relayCrates, "scp-broker"] as const;
 const pins = [
   ["crates/scp-relay/Cargo.toml", "scp-relay-store"],
   ["crates/scp-relay/Cargo.toml", "scp-core"],
@@ -33,7 +34,7 @@ export function checkVersion(root = relayRoot): void {
   if (
     workspace !== version ||
     pins.some(([path, dep]) => read(root, path).match(pinEntry(dep))?.[2] !== `=${version}`) ||
-    relayCrates.some((name) => lock.match(lockEntry(name))?.[2] !== version) ||
+    workspaceCrates.some((name) => lock.match(lockEntry(name))?.[2] !== version) ||
     wrapper.version !== version ||
     dashboard.version !== version
   )
@@ -48,7 +49,7 @@ export function syncVersion(root = relayRoot): string {
   const cargo = read(root, "crates/Cargo.toml");
   write(root, "crates/Cargo.toml", cargo.replace(/(\[workspace\.package\][\s\S]*?^version = ")[^"]+/m, `$1${version}`));
   for (const [path, dep] of pins) write(root, path, read(root, path).replace(pinEntry(dep), `$1=${version}`));
-  const lock = relayCrates.reduce((text, name) => text.replace(lockEntry(name), `$1${version}`), read(root, "crates/Cargo.lock"));
+  const lock = workspaceCrates.reduce((text, name) => text.replace(lockEntry(name), `$1${version}`), read(root, "crates/Cargo.lock"));
   write(root, "crates/Cargo.lock", lock);
   const wrapper = json(root, "crates/npm/relay-server/package.json");
   wrapper.version = version;
