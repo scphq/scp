@@ -5,7 +5,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::core::Core;
 use crate::proto::RpcError;
+use crate::state::ConnectionId;
+use crate::store::SqlValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -217,8 +220,7 @@ impl Policy {
             parsed["defaults"] = value.clone();
         }
         if let Some(judge) = input.get("judge") {
-            object(judge, "judge: the judge section is an object")?;
-            parsed["judge"] = judge.clone();
+            parsed["judge"] = crate::judge::parse_policy(judge)?;
         }
         Ok(Self(parsed))
     }
@@ -236,6 +238,266 @@ impl Policy {
                 "unlink" => json!("human"),
                 _ => Value::Null,
             })
+    }
+}
+
+const POLICY_LOADS_KEPT: i64 = 8;
+
+/// The policy as text that ignores the order of rules, groups and selector lists.
+pub fn canonical(policy: &Value) -> String {
+    let sorted = |value: Option<&Value>| {
+        value.and_then(Value::as_array).map(|list| {
+            let mut list: Vec<String> = list
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            list.sort();
+            list
+        })
+    };
+    let mut rules: Vec<String> = policy
+        .get("rules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|rule| {
+            let mut rule = rule.clone();
+            for key in ["accept_from", "send_to", "scope"] {
+                if let Some(list) = sorted(rule.get(key)) {
+                    rule[key] = json!(list);
+                }
+            }
+            rule.to_string()
+        })
+        .collect();
+    rules.sort();
+    let mut groups: Vec<Value> = policy
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|group| {
+            let mut group = group.clone();
+            for key in ["members", "in", "out", "rules"] {
+                if let Some(list) = sorted(group.get(key)) {
+                    group[key] = json!(list);
+                }
+            }
+            group
+        })
+        .collect();
+    groups.sort_by_key(|g| {
+        g.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    });
+    let mut out = json!({"rules": rules, "groups": groups, "defaults": policy.get("defaults").cloned().unwrap_or_else(|| json!({}))});
+    if let Some(judge) = policy.get("judge") {
+        out["judge"] = judge.clone();
+    }
+    out.to_string()
+}
+
+fn group_selectors(policy: &Value) -> Vec<String> {
+    let mut sels = Vec::new();
+    let mut take = |value: Option<&Value>| {
+        if let Some(list) = value {
+            match list {
+                Value::String(sel) => sels.push(sel.clone()),
+                Value::Array(list) => {
+                    sels.extend(list.iter().filter_map(Value::as_str).map(str::to_owned))
+                }
+                _ => {}
+            }
+        }
+    };
+    for rule in policy
+        .get("rules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for key in ["match", "scope", "send_to", "accept_from"] {
+            take(rule.get(key));
+        }
+    }
+    for group in policy
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for key in ["members", "rules", "in", "out"] {
+            take(group.get(key));
+        }
+    }
+    sels
+}
+
+impl Core {
+    /// Reads the policy file when its text changed; an unreadable or invalid file refuses messages until it is fixed.
+    pub async fn load_policy(&mut self) -> Result<(), RpcError> {
+        self.read_policy().await?;
+        self.judge
+            .configure(self.policy.as_ref().and_then(|p| p.get("judge")));
+        Ok(())
+    }
+
+    async fn read_policy(&mut self) -> Result<(), RpcError> {
+        let file = self.policy_file.display().to_string();
+        let text = match tokio::fs::read_to_string(&self.policy_file).await {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if tokio::fs::symlink_metadata(&self.policy_file).await.is_ok() {
+                    self.policy_text = None;
+                    self.policy_error = Some(format!(
+                        "the relay policy at {file} is a link to a missing file; messages are refused until it is fixed"
+                    ));
+                    return Ok(());
+                }
+                None
+            }
+            Err(error) => {
+                self.policy_text = None;
+                self.policy_error = Some(format!(
+                    "the relay policy at {file} cannot be read ({error}); messages are refused until it is fixed"
+                ));
+                return Ok(());
+            }
+        };
+        if self.policy_text.as_ref() == Some(&text) {
+            return Ok(());
+        }
+        self.policy_text = Some(text.clone());
+        let Some(text) = text else {
+            self.set_policy(None).await?;
+            self.policy_error = None;
+            return Ok(());
+        };
+        match serde_json::from_str::<Value>(&text)
+            .map_err(|e| e.to_string())
+            .and_then(|v| Policy::parse(&v).map(|p| p.0).map_err(|e| e.message))
+        {
+            Ok(policy) => {
+                self.set_policy(Some(policy)).await?;
+                self.policy_error = None;
+            }
+            Err(error) => {
+                self.policy_error = Some(format!(
+                    "the relay policy at {file} is invalid ({error}); messages are refused until it is fixed"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Installs a policy and binds each `group:<name>` naming no policy group to the group of that name at load.
+    pub async fn set_policy(&mut self, policy: Option<Value>) -> Result<(), RpcError> {
+        self.policy = policy;
+        self.policy_binds.clear();
+        let Some(policy) = self.policy.clone() else {
+            return Ok(());
+        };
+        let key = crate::claims::hash(&canonical(&policy));
+        let fixed: Vec<String> = policy
+            .get("groups")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|g| g.get("name").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let text = |v: &str| SqlValue::Text(v.into());
+        let store = self.store.clone();
+        let binds = crate::store::transaction(store.clone(), async {
+            store.all("DELETE FROM policy_loads WHERE policy = ?", &[text(&key)]).await?;
+            store.all("INSERT INTO policy_loads (policy, at) VALUES (?, ?)", &[text(&key), SqlValue::Int(crate::core::now_ms())]).await?;
+            store.all(&format!("DELETE FROM policy_loads WHERE policy NOT IN (SELECT policy FROM policy_loads ORDER BY at DESC, rowid DESC LIMIT {POLICY_LOADS_KEPT})"), &[]).await?;
+            store.all("DELETE FROM policy_binds WHERE policy NOT IN (SELECT policy FROM policy_loads)", &[]).await?;
+            let mut binds = std::collections::HashMap::new();
+            for row in store.all("SELECT name, grp FROM policy_binds WHERE policy = ?", &[text(&key)]).await? {
+                if let (Some(name), Some(grp)) = (crate::core::text(&row, "name"), crate::core::text(&row, "grp")) {
+                    binds.insert(name.to_owned(), grp.to_owned());
+                }
+            }
+            for sel in group_selectors(&policy) {
+                let Some(name) = sel.strip_prefix("group:") else { continue };
+                if name == "self" || fixed.iter().any(|f| f == name) || binds.contains_key(name) {
+                    continue;
+                }
+                let group = if scp_core::scope::valid_group_name(name) {
+                    store.all("SELECT id FROM groups WHERE name = ?", &[text(name)]).await?.into_iter().next().and_then(|r| crate::core::text(&r, "id").map(str::to_owned))
+                } else {
+                    None
+                };
+                let group = group.unwrap_or_else(|| "none".into());
+                store.all("INSERT INTO policy_binds (policy, name, grp) VALUES (?, ?, ?)", &[text(&key), text(name), text(&group)]).await?;
+                binds.insert(name.to_owned(), group);
+            }
+            Ok::<_, RpcError>(binds)
+        })
+        .await?;
+        self.policy_binds = binds;
+        Ok(())
+    }
+
+    pub async fn policy_info(&mut self) -> Result<Value, RpcError> {
+        self.load_policy().await?;
+        Ok(self.broker_info()["policy"].clone())
+    }
+
+    /// The policy state; only the human reads its text.
+    pub async fn policy_view(&mut self, conn: ConnectionId) -> Result<Value, RpcError> {
+        let mut info = self.policy_info().await?;
+        let human = matches!(self.actor_of(conn)?, crate::authority::Actor::Human { .. });
+        info["policy"] = match &self.policy_text {
+            Some(Some(text)) if human && info["state"] == "loaded" => {
+                serde_json::from_str(text).unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        };
+        Ok(info)
+    }
+
+    pub async fn policy_check(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let from = params.get("from").map(param_text).unwrap_or_default();
+        let to = params.get("to").map(param_text).unwrap_or_default();
+        if self.viewer_of(conn).is_some() {
+            let actor = self.actor_of(conn)?;
+            self.why(&actor, &from, &to).await?;
+        }
+        let info = self.policy_info().await?;
+        let file = info["file"].clone();
+        if let Some(error) = info.get("error") {
+            return Ok(json!({"allowed": false, "reason": error, "file": file}));
+        }
+        let (a, b) = (self.lookup(&from).await?, self.lookup(&to).await?);
+        let reason = self.policy_refusal(&a, &b).await?;
+        Ok(json!({"allowed": reason.is_none(), "reason": reason, "file": file}))
+    }
+
+    /// Refuses a send while the policy file is unreadable or invalid.
+    pub async fn policy_gate(&mut self) -> Result<(), RpcError> {
+        self.load_policy().await?;
+        match &self.policy_error {
+            Some(error) => Err(RpcError::new(
+                crate::proto::ErrorCode::PolicyRefused,
+                error.clone(),
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
+fn param_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 

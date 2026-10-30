@@ -126,7 +126,12 @@ impl Broker {
             tokio::select! {
                 _ = &mut shutdown => break Ok(()),
                 _ = tokio::time::sleep_until(deadline), if connections.is_empty() && !self.idle.is_zero() => break Ok(()),
-                _ = ownership.tick() => if !self.owns_socket().await { break Ok(()); },
+                _ = ownership.tick() => {
+                    if !self.owns_socket().await { break Ok(()); }
+                    if let Err(error) = self.core.lock().await.judge_sweep().await {
+                        tracing::error!(%error, "judge sweep failed");
+                    }
+                },
                 joined = connections.join_next(), if !connections.is_empty() => {
                     if let Some(Err(error)) = joined { tracing::error!(%error, "connection task failed"); }
                     if connections.is_empty() { idle_since = Instant::now(); }

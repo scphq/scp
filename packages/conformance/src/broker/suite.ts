@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, setDefaultTimeout } from "bun:test";
+import { afterEach, beforeAll, test as bunTest, describe, expect, setDefaultTimeout } from "bun:test";
 import { ensureBuilt } from "../../../cli/src/testing/fixtures";
 import { brokerReferenceWakers } from "../environment";
 import { type BrokerFiles, BrokerTarget, brokerTargetEnabled, brokerTargetNames } from "./target";
@@ -54,21 +54,9 @@ export const rustPending = new Set([
   "broker delivery",
   "broker hook goldens",
   "broker injection",
-  "broker judge and hold review",
   "broker limits and hardening",
-  "broker lineage",
-  "broker exact lineage state",
-  "broker subagent handle bounds",
   "broker peek",
-  "broker policy",
-  "broker policy group bindings",
-  "broker policy group precedence",
   "broker push",
-  "broker scoped fleet",
-  "broker group authority and widening",
-  "broker group and scope privacy",
-  "broker scopes",
-  "broker scope bounds",
   "broker grant redemption and incarnation",
   "broker grant validation",
   "broker spawn",
@@ -77,6 +65,22 @@ export const rustPending = new Set([
   "broker wake and hibernation",
   "broker reference waker binding",
 ]);
+
+/** single tests the native engine does not implement yet, as `<suite title> > <test name>`; they are todo on the `rust` target */
+export const rustPendingTests = new Set([
+  "broker scopes > ancestor traffic passes caps and reply grants pass both directions repeatedly",
+  "broker scopes > watch events respect visibility",
+  "broker lineage > root shells bind subagents without tokens and messages stay in their own inboxes",
+  "broker judge and hold review > ask returns a hold at once instead of waiting for a reply",
+]);
+
+let registering: { title: string; name: string } | undefined;
+
+/** bun's `test`, registered as todo on the `rust` target when {@link rustPendingTests} lists it */
+export const test = Object.assign((name: string, fn: () => void | Promise<unknown>, timeout?: number) => {
+  if (registering?.name === "rust" && rustPendingTests.has(`${registering.title} > ${name}`)) return bunTest.todo(name);
+  return bunTest(name, fn, timeout);
+}, bunTest) as typeof bunTest;
 
 /**
  * registers `body` once per broker target; each test calls `start` for a fresh broker. A disabled target is skipped by name.
@@ -100,6 +104,7 @@ export function brokerSuite(title: string, body: (start: Start) => void, options
         }
         expect(violations.splice(0)).toEqual([]);
       });
+      registering = { title, name };
       body(async (files) => {
         const target = new BrokerTarget(name, files);
         const fixture = new BrokerFixture(target);
@@ -107,6 +112,7 @@ export function brokerSuite(title: string, body: (start: Start) => void, options
         await target.start();
         return fixture;
       });
+      registering = undefined;
     });
   }
 }

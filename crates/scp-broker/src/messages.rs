@@ -106,17 +106,8 @@ impl Core {
             .await
     }
 
-    pub(crate) async fn send_link_request(
-        &mut self,
-        from: &str,
-        to: &str,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        self.send_message(from, &[to.to_owned()], params, false, true)
-            .await
-    }
-
-    async fn send_message(
+    /// `link` marks a broker-issued link request the recipient may accept
+    pub(crate) async fn send_message(
         &mut self,
         from: &str,
         recipients: &[String],
@@ -157,6 +148,7 @@ impl Core {
             }
         }
         // Scope decisions and messaging guards run before the write transaction.
+        self.send_guards(&sender, &targets).await?;
         let now = now_ms();
         let id = new_id("msg", now);
         let kind = if link { "request" } else { "message" };
@@ -322,7 +314,7 @@ const SERVER_FIELDS: [&str; 9] = [
 
 pub fn validate_send(
     params: &Map<String, Value>,
-    _limits: &crate::proto::Limits,
+    limits: &crate::proto::Limits,
 ) -> Result<(), RpcError> {
     if let Some(field) = SERVER_FIELDS
         .iter()
@@ -332,8 +324,69 @@ pub fn validate_send(
             "{field} is set by the relay, not the sender"
         )));
     }
-    if !params.get("body").is_some_and(Value::is_string) {
+    let Some(body) = params.get("body").and_then(Value::as_str) else {
         return Err(RpcError::invalid_params("body must be a string"));
+    };
+    let cap = limits.0.get("bodyBytes").copied().unwrap_or(Some(65536));
+    if let Some(cap) = cap.filter(|cap| body.len() as u64 > *cap) {
+        return Err(RpcError::new(
+            ErrorCode::TooLarge,
+            format!("the body is {} bytes, more than {cap}", body.len()),
+        ));
+    }
+    let paths = params
+        .get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.get("path").and_then(Value::as_str));
+    if let Some(found) = std::iter::once(body)
+        .chain(paths)
+        .find_map(crate::scrub::find_secret)
+    {
+        return Err(RpcError::new(
+            ErrorCode::SecretRefused,
+            format!(
+                "the message looks like it carries a credential ({found}); send a reference instead"
+            ),
+        ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::Limits;
+
+    fn code(params: Value, limits: &Limits) -> Option<ErrorCode> {
+        validate_send(params.as_object().unwrap(), limits)
+            .err()
+            .and_then(|e| e.data.map(|d| d.code))
+    }
+
+    #[test]
+    fn send_validation_refuses_oversized_and_credential_bodies() {
+        let limits = Limits::default();
+        assert_eq!(code(json!({"body":"hi"}), &limits), None);
+        assert_eq!(
+            code(json!({"body":"x".repeat(65537)}), &limits),
+            Some(ErrorCode::TooLarge)
+        );
+        let secret = format!("sk-ant-{}", "x".repeat(30));
+        assert_eq!(
+            code(json!({"body":secret}), &limits),
+            Some(ErrorCode::SecretRefused)
+        );
+        assert_eq!(
+            code(
+                json!({"body":"ok","attachments":[{"kind":"path","path":format!("/tmp/{secret}")}]}),
+                &limits
+            ),
+            Some(ErrorCode::SecretRefused)
+        );
+        let mut open = Limits::default();
+        open.0.insert("bodyBytes".into(), None);
+        assert_eq!(code(json!({"body":"x".repeat(65537)}), &open), None);
+    }
 }
