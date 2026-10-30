@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use scp_core::protocol::{BROKER_CAPABILITIES, ErrorCode, PROTOCOL};
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -9,7 +10,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::paths::Paths;
 use crate::procs::Procs;
-use crate::proto::{CAPABILITIES, ErrorCode, Limits, PREAMBLE, PROTOCOL, RpcError};
+use crate::proto::{Limits, PREAMBLE, RpcError};
 use crate::state::{ConnectionId, Mode, State};
 use crate::store::{Row, SqlValue, Storage};
 
@@ -108,7 +109,7 @@ impl Core {
     }
 
     pub fn hello_result(&self, endpoint: Value, token: Option<String>) -> Value {
-        let mut result = json!({"endpoint": endpoint, "capabilities": CAPABILITIES, "server_time": timestamp(now_ms()), "limits": self.limits, "preamble": PREAMBLE, "broker": self.broker_info()});
+        let mut result = json!({"endpoint": endpoint, "capabilities": BROKER_CAPABILITIES, "server_time": timestamp(now_ms()), "limits": self.limits, "preamble": PREAMBLE, "broker": self.broker_info()});
         if let Some(token) = token {
             result["token"] = json!(token);
         }

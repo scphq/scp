@@ -1,7 +1,7 @@
 mod messages_support;
 
 use messages_support::{TestCore, params};
-use scp_broker::proto::ErrorCode;
+use scp_core::protocol::ErrorCode;
 use serde_json::json;
 
 #[tokio::test]

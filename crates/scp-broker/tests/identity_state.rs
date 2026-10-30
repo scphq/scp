@@ -149,7 +149,7 @@ async fn adopt_requests_consent_and_direct_links_refuse_existing_parents() {
         .expect_err("already linked");
     assert_eq!(
         error.data.expect("code").code,
-        scp_broker::proto::ErrorCode::ScopeRefused
+        scp_core::protocol::ErrorCode::ScopeRefused
     );
     assert!(error.message.contains("unlink it first"));
     let c = core.state.connections.get_mut(&second).expect("connection");
@@ -164,7 +164,7 @@ async fn adopt_requests_consent_and_direct_links_refuse_existing_parents() {
         .expect_err("lineage cannot ask");
     assert_eq!(
         error.data.expect("code").code,
-        scp_broker::proto::ErrorCode::ScopeRefused
+        scp_core::protocol::ErrorCode::ScopeRefused
     );
     assert!(error.message.contains("only the session itself"));
     assert_eq!(
@@ -181,7 +181,7 @@ async fn adopt_requests_consent_and_direct_links_refuse_existing_parents() {
         .expect_err("self adoption");
     assert_eq!(
         error.data.expect("code").code,
-        scp_broker::proto::ErrorCode::ScopeRefused
+        scp_core::protocol::ErrorCode::ScopeRefused
     );
     let error = core
         .dispatch(
@@ -193,7 +193,7 @@ async fn adopt_requests_consent_and_direct_links_refuse_existing_parents() {
         .expect_err("ancestor adoption");
     assert_eq!(
         error.data.expect("code").code,
-        scp_broker::proto::ErrorCode::ScopeRefused
+        scp_core::protocol::ErrorCode::ScopeRefused
     );
     drop(core);
     tokio::fs::remove_dir_all(dir).await.expect("cleanup");
@@ -210,7 +210,7 @@ async fn refused_join_rolls_back_claim_and_mail_survives_resume() {
         .expect_err("occupied join");
     assert_eq!(
         error.data.expect("error code").code,
-        scp_broker::proto::ErrorCode::InvalidParams
+        scp_core::protocol::ErrorCode::InvalidParams
     );
     assert!(core.by_handle("app").await.expect("lookup").is_none());
     let (_, resumed) = hello(&mut core, json!({"resume":peer["token"]})).await;
@@ -463,7 +463,7 @@ async fn handoff_and_relink_flags_require_booleans() {
                 .expect_err("invalid flag");
             assert_eq!(
                 error.data.unwrap().code,
-                scp_broker::proto::ErrorCode::InvalidParams
+                scp_core::protocol::ErrorCode::InvalidParams
             );
             assert_eq!(error.message, message);
         }

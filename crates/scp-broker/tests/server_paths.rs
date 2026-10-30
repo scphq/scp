@@ -131,7 +131,8 @@ fn paths_normalize_dot_segments_before_applying_socket_limit() {
 
 #[test]
 fn rates_are_strict_and_null_caps_are_uncapped() {
-    use scp_broker::proto::{ErrorCode, Limits, RpcError};
+    use scp_broker::proto::{Limits, RpcError};
+    use scp_core::protocol::ErrorCode;
     let mut limits = Limits::default();
     limits
         .apply_rates(

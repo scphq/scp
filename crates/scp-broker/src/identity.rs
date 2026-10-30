@@ -3,10 +3,11 @@ use crate::claims::{
     revivable, same_harness, same_provider, token, valid_handle,
 };
 use crate::core::{Core, integer, now_ms, text, timestamp};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
 use crate::views::{address, opt, presence};
+use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 

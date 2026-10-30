@@ -1,8 +1,9 @@
 use crate::core::{Core, text};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::state::{Connection, ConnectionId, Mode};
 use crate::store::Row;
 use crate::views::address;
+use scp_core::protocol::ErrorCode;
 use serde_json::{Value, json};
 
 impl Core {

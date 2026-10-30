@@ -1,7 +1,8 @@
+use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 
 use crate::core::{Core, integer, now_ms, text};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::scrub::{find_secret, redact_secrets, strip_control};
 use crate::state::Mode;
 use crate::store::SqlValue;

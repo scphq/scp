@@ -1,9 +1,10 @@
 use crate::core::{Core, integer, now_ms, text};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
 use crate::views::{address, opt, presence};
 use rand::RngCore;
+use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
