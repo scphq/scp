@@ -3,6 +3,7 @@
 pub mod authority;
 pub mod claims;
 pub mod core;
+pub mod grants;
 pub mod identity;
 pub mod judge;
 pub mod messages;

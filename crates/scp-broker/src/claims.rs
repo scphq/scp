@@ -156,36 +156,38 @@ struct Claimed {
 }
 
 #[derive(Clone)]
-struct Fields {
-    model: Option<String>,
-    cwd: Option<String>,
-    parent: Option<String>,
-    labels: Value,
-    session: Option<String>,
-    process: Option<String>,
-    harness_session: Option<String>,
-    harness_origin: Option<String>,
-    harness_handoff: bool,
-    under: Option<String>,
+pub(crate) struct Fields {
+    pub(crate) model: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) labels: Value,
+    pub(crate) session: Option<String>,
+    pub(crate) process: Option<String>,
+    pub(crate) harness_session: Option<String>,
+    pub(crate) harness_origin: Option<String>,
+    pub(crate) harness_handoff: bool,
+    pub(crate) under: Option<String>,
 }
 #[derive(Clone)]
-struct Scope {
-    handle: String,
-    lineage: Vec<String>,
-    grant: Option<String>,
-    nearest: Option<String>,
-    rules: Value,
-    exact: bool,
-    subagent: Option<Subagent>,
+pub(crate) struct Scope {
+    pub(crate) handle: String,
+    pub(crate) lineage: Vec<String>,
+    pub(crate) grant: Option<String>,
+    pub(crate) nearest: Option<String>,
+    pub(crate) rules: Value,
+    pub(crate) exact: bool,
+    pub(crate) subagent: Option<Subagent>,
 }
 #[derive(Clone)]
-struct Subagent {
-    kind: Option<String>,
-    root: String,
+pub(crate) struct Subagent {
+    pub(crate) kind: Option<String>,
+    pub(crate) root: String,
 }
-struct Placement {
-    parent: Option<Row>,
-    grant: Option<Row>,
+pub(crate) struct Placement {
+    pub parent: Option<Row>,
+    pub grant: Option<Row>,
+    pub refused: Option<&'static str>,
+    pub ignored: Option<&'static str>,
 }
 
 impl Core {
@@ -243,27 +245,6 @@ impl Core {
         };
         Ok(found.and_then(|r| text(r, "id")).map(str::to_owned))
     }
-    pub async fn grant_binds(&self, value: &Value, id: Option<&str>) -> Result<bool, RpcError> {
-        let raw = value
-            .as_str()
-            .filter(|s| valid_token(s, "krt_"))
-            .ok_or_else(|| RpcError::invalid_params("grant is a krt_ token"))?;
-        let grant=self.store.all("SELECT * FROM grants WHERE token_hash = ? AND used_by IS NOT NULL AND revoked_at IS NULL", &[opt(Some(&hash(raw)))]).await?.into_iter().next();
-        let Some(spender) = grant.as_ref().and_then(|r| text(r, "used_by")) else {
-            return Ok(false);
-        };
-        let Some(id) = id else {
-            return Ok(false);
-        };
-        if id == spender {
-            return Ok(true);
-        }
-        Ok(self
-            .ancestors(&self.must_endpoint(id).await?)
-            .await?
-            .iter()
-            .any(|v| v == spender))
-    }
     pub async fn end_exited(&self) -> Result<(), RpcError> {
         let rows=self.store.all("SELECT id,process FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL",&[]).await?;
         for row in rows {
@@ -292,23 +273,34 @@ impl Core {
                     None => false,
                 })
     }
-    async fn placement(&self, scope: &Scope, exclude: &[&str]) -> Result<Placement, RpcError> {
+    /// the claim's place: under the nearest lineage endpoint, or under a valid grant's endpoint at or below it; a stale grant refuses only a claim with no lineage
+    pub(crate) async fn placement(
+        &self,
+        scope: &Scope,
+        exclude: Option<&Row>,
+        hooks: Option<&Row>,
+    ) -> Result<Placement, RpcError> {
+        let plain = |parent: Option<Row>| Placement {
+            parent,
+            grant: None,
+            refused: None,
+            ignored: None,
+        };
         if let Some(sub) = &scope.subagent {
-            return Ok(Placement {
-                parent: self.by_id(&sub.root).await?,
-                grant: None,
-            });
+            return Ok(plain(self.by_id(&sub.root).await?));
         }
+        let out: Vec<&str> = exclude
+            .or(hooks)
+            .and_then(|r| text(r, "id"))
+            .into_iter()
+            .collect();
         let lineage = self
-            .lineage_rows(&scope.lineage, exclude)
+            .lineage_rows(&scope.lineage, &out)
             .await?
             .into_iter()
             .next();
         let Some(grant_hash) = &scope.grant else {
-            return Ok(Placement {
-                parent: lineage,
-                grant: None,
-            });
+            return Ok(plain(lineage));
         };
         let grant = self
             .store
@@ -319,80 +311,87 @@ impl Core {
             .await?
             .into_iter()
             .next();
-        if let Some(grant) = &grant
-            && let Some(spender) = text(grant, "used_by")
+        if let Some(spender) = self
+            .spent_grant(scope)
+            .await?
+            .as_ref()
+            .and_then(|g| text(g, "used_by"))
             && let Some(parent) = &lineage
             && (text(parent, "id") == Some(spender)
                 || self.ancestors(parent).await?.iter().any(|id| id == spender))
         {
-            return Ok(Placement {
-                parent: lineage,
+            return Ok(plain(lineage));
+        }
+        let stale = |reason: &'static str, lineage: Option<Row>| match lineage {
+            Some(parent) => Placement {
+                parent: Some(parent),
                 grant: None,
-            });
-        }
-        let valid = grant.as_ref().is_some_and(|g| {
-            integer(g, "expires_at").unwrap_or(0) > now_ms() && integer(g, "revoked_at").is_none()
-        });
-        let reason = if !valid {
-            Some("grant invalid")
-        } else if grant.as_ref().and_then(|g| text(g, "used_by")).is_some() {
-            Some("grant used")
-        } else {
-            None
+                refused: None,
+                ignored: Some(reason),
+            },
+            None => Placement {
+                parent: None,
+                grant: None,
+                refused: Some(reason),
+                ignored: None,
+            },
         };
-        if let Some(reason) = reason {
-            if lineage.is_some() {
-                return Ok(Placement {
-                    parent: lineage,
-                    grant: None,
-                });
-            }
-            return Err(RpcError::new(
-                ErrorCode::Unauthorized,
-                format!("grant refused: {reason}"),
-            ));
-        }
-        let grant = grant.ok_or_else(RpcError::internal)?;
-        if text(&grant, "name").is_some_and(|name| name != scope.handle) {
-            return Err(RpcError::new(
-                ErrorCode::Unauthorized,
-                "grant for another name",
-            ));
-        }
-        let under = self
-            .must_endpoint(text(&grant, "under").unwrap_or(""))
-            .await?;
-        if exclude.contains(&text(&under, "id").unwrap_or(""))
-            || self
-                .ancestors(&under)
-                .await?
-                .iter()
-                .any(|id| exclude.contains(&id.as_str()))
+        let refused = |reason: &'static str, lineage: Option<Row>| Placement {
+            parent: lineage,
+            grant: None,
+            refused: Some(reason),
+            ignored: None,
+        };
+        let Some(grant) = grant else {
+            return Ok(stale("grant invalid", lineage));
+        };
+        let live = |row: &Option<Row>| {
+            row.as_ref()
+                .is_some_and(|r| !text(r, "handle").unwrap_or("").starts_with("gone:"))
+        };
+        let issuer = self.by_id(text(&grant, "issuer").unwrap_or("")).await?;
+        let under = self.by_id(text(&grant, "under").unwrap_or("")).await?;
+        if integer(&grant, "expires_at").unwrap_or(0) <= now_ms()
+            || integer(&grant, "revoked_at").is_some()
+            || !live(&issuer)
+            || !live(&under)
+            || under.as_ref().and_then(|r| text(r, "kind")) != Some("agent")
         {
-            return Err(RpcError::new(
-                ErrorCode::Unauthorized,
-                "grant under the claimed endpoint",
-            ));
+            return Ok(stale("grant invalid", lineage));
         }
-        if let Some(lineage) = &lineage
-            && text(&under, "id") != text(lineage, "id")
-            && !self
-                .ancestors(&under)
-                .await?
-                .iter()
-                .any(|id| Some(id.as_str()) == text(lineage, "id"))
+        if text(&grant, "used_by").is_some() {
+            return Ok(stale("grant used", lineage));
+        }
+        let under = under.ok_or_else(RpcError::internal)?;
+        let handle = exclude
+            .and_then(|r| text(r, "handle"))
+            .unwrap_or(&scope.handle);
+        if text(&grant, "name").is_some_and(|name| name != handle) {
+            return Ok(refused("grant for another name", lineage));
+        }
+        let under_above = self.ancestors(&under).await?;
+        if let Some(row) = exclude
+            && let Some(id) = text(row, "id")
+            && (text(&under, "id") == Some(id) || under_above.iter().any(|v| v == id))
         {
-            return Err(RpcError::new(
-                ErrorCode::Unauthorized,
-                "grant above lineage",
-            ));
+            return Ok(refused("grant under the claimed endpoint", lineage));
+        }
+        if let Some(parent) = &lineage
+            && text(&under, "id") != text(parent, "id")
+            && !under_above
+                .iter()
+                .any(|id| Some(id.as_str()) == text(parent, "id"))
+        {
+            return Ok(refused("grant above lineage", lineage));
         }
         Ok(Placement {
             parent: Some(under),
             grant: Some(grant),
+            refused: None,
+            ignored: None,
         })
     }
-    fn restarts(&self, row: &Row, parent: Option<&Row>, process: Option<&str>) -> bool {
+    pub(crate) fn restarts(&self, row: &Row, parent: Option<&Row>, process: Option<&str>) -> bool {
         if parent.and_then(|r| text(r, "id")) == text(row, "id") {
             return process
                 .zip(text(row, "process"))
@@ -412,31 +411,8 @@ impl Core {
         if self.restarts(row, parent, fields.process.as_deref()) {
             return Ok(true);
         }
-        if let Some(grant_hash) = &scope.grant {
-            let grant=self.store.all("SELECT * FROM grants WHERE token_hash = ? AND used_by = ? AND revoked_at IS NULL",&[opt(Some(grant_hash)),opt(text(row,"id"))]).await?.into_iter().next();
-            if let Some(grant) = grant {
-                let lineage = self
-                    .lineage_rows(&scope.lineage, &[])
-                    .await?
-                    .into_iter()
-                    .next();
-                if let Some(lineage) = lineage {
-                    if self.restarts(row, Some(&lineage), fields.process.as_deref())
-                        || self
-                            .ancestors(row)
-                            .await?
-                            .iter()
-                            .any(|id| Some(id.as_str()) == text(&lineage, "id"))
-                    {
-                        return Ok(true);
-                    }
-                } else if harness_fits(text(row, "harness"), harness)
-                    && text(&grant, "spent_cwd").is_some()
-                    && text(&grant, "spent_cwd") == fields.cwd.as_deref()
-                {
-                    return Ok(true);
-                }
-            }
+        if self.redeems(row, scope, fields, harness, None).await? {
+            return Ok(true);
         }
         Ok(parent.is_none()
             && scope.grant.is_none()
@@ -461,7 +437,7 @@ impl Core {
                 None => None,
             }
         } else {
-            self.placement(scope, &[]).await?.parent
+            self.placement(scope, None, None).await?.parent
         };
         let spender = if let Some(grant) = &scope.grant {
             Some(
@@ -513,51 +489,91 @@ impl Core {
         }
         Ok(None)
     }
-    async fn place_claim(&self, row: &Row, scope: &Scope, fields: &Fields) -> Result<(), RpcError> {
+    /// a new row's tree, caps (besides those a reset kept), own rules and the grant's groups
+    pub(crate) async fn place(
+        &mut self,
+        row: &Row,
+        scope: &Scope,
+        fields: &Fields,
+    ) -> Result<(), RpcError> {
         let id = text(row, "id").ok_or_else(RpcError::internal)?;
-        let place = self.placement(scope, &[id]).await?;
+        let place = self.placement(scope, Some(row), None).await?;
+        if let Some(reason) = place.refused {
+            return Err(self.grant_refused(scope, reason));
+        }
+        if let Some(reason) = place.ignored {
+            self.audit(
+                "scope_grant_ignored",
+                Some(id),
+                None,
+                json!({"target": address(row), "reason": reason}),
+            )
+            .await?;
+        }
         let depth = place
             .parent
             .as_ref()
-            .and_then(|r| integer(r, "depth"))
-            .unwrap_or(-1)
-            + 1;
+            .map_or(0, |r| integer(r, "depth").unwrap_or(0) + 1);
         if depth > 32 {
             return Err(RpcError::new(
                 ErrorCode::ScopeRefused,
-                "claim is deeper than depthMax",
+                format!(
+                    "{} would sit deeper than 32 under {}",
+                    scope.handle,
+                    place.parent.as_ref().map(address).unwrap_or_default()
+                ),
             ));
         }
-        let mut caps = json!({"caps":[],"allow":{}});
+        let mut caps: Vec<Value> = Vec::new();
         if let Some(grant) = &place.grant {
-            self.spend_claim(grant, id, fields).await?;
-            let entries: Vec<Value> = text(grant, "caps")
-                .and_then(|v| serde_json::from_str::<Vec<Value>>(v).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|mut v| {
-                    v["id"] = json!(token("cap"));
-                    v["by"] = json!(text(grant, "issuer"));
-                    v
-                })
-                .collect();
-            caps["caps"] = json!(entries);
+            self.spend(grant, id, fields.cwd.as_deref()).await?;
+            caps.extend(crate::grants::grant_caps(grant));
+            let mut labels = crate::grants::json_column(grant, "labels", json!({}));
+            if let (Some(dst), Some(src)) = (
+                labels.as_object_mut(),
+                crate::grants::json_column(row, "labels", json!({})).as_object(),
+            ) {
+                dst.extend(src.clone());
+            }
+            self.store.all("UPDATE endpoints SET labels = ?,title = CASE WHEN title IS NULL OR title IS title_auto THEN COALESCE(?,title) ELSE title END,title_auto = CASE WHEN ? IS NOT NULL AND (title IS NULL OR title IS title_auto) THEN NULL ELSE title_auto END WHERE id = ?",&[opt(Some(&labels.to_string())),opt(text(grant,"title")),opt(text(grant,"title")),opt(Some(id))]).await?;
         }
-        self.store.all("UPDATE endpoints SET tree = ?,parent_ep = ?,parent_addr = NULL,depth = ?,rules = ?,caps = ? WHERE id = ?",&[opt(place.parent.as_ref().and_then(|r|text(r,"tree").or_else(||text(r,"id")))),opt(place.parent.as_ref().and_then(|r|text(r,"id"))),SqlValue::Int(depth),if scope.rules == json!({}) { SqlValue::Null } else { opt(Some(&scope.rules.to_string())) },if caps["caps"]==json!([]){SqlValue::Null}else{opt(Some(&caps.to_string()))},opt(Some(id))]).await?;
-        if let Some(parent) = place.parent {
-            self.audit("scope_place",Some(id),None,json!({"by":match place.grant.as_ref().and_then(|r|text(r,"issuer")){Some(id)=>self.address_of(id).await?,None=>address(row)},"target":address(row),"parent":address(&parent)})).await?;
+        if place.parent.is_some() && caps.is_empty() {
+            caps.extend(self.child_default_caps());
         }
-        Ok(())
-    }
-    async fn spend_claim(&self, grant: &Row, id: &str, fields: &Fields) -> Result<(), RpcError> {
-        self.store.all("UPDATE grants SET used_by = ?,spent_cwd = ?,prompt = NULL WHERE token_hash = ? AND used_by IS NULL",&[opt(Some(id)),opt(fields.cwd.as_deref()),opt(text(grant,"token_hash"))]).await?;
-        let mut labels = text(grant, "labels")
-            .and_then(|v| serde_json::from_str::<Value>(v).ok())
-            .unwrap_or(json!({}));
-        if let (Some(dst), Some(src)) = (labels.as_object_mut(), fields.labels.as_object()) {
-            dst.extend(src.clone());
+        if let Some(kept) = crate::grants::json_column(row, "caps", json!({}))["caps"].as_array() {
+            caps.extend(kept.iter().cloned());
         }
-        self.store.all("UPDATE endpoints SET labels = ?,title = CASE WHEN title IS NULL OR title IS title_auto THEN COALESCE(?,title) ELSE title END WHERE id = ?",&[opt(Some(&labels.to_string())),opt(text(grant,"title")),opt(Some(id))]).await?;
+        let stored = (!caps.is_empty()).then(|| json!({"caps": caps, "allow": {}}).to_string());
+        self.store.all("UPDATE endpoints SET tree = ?,parent_ep = ?,parent_addr = NULL,depth = ?,rules = ?,caps = ? WHERE id = ?",&[opt(place.parent.as_ref().and_then(|r|text(r,"tree").or_else(||text(r,"id")))),opt(place.parent.as_ref().and_then(|r|text(r,"id"))),SqlValue::Int(depth),if scope.rules == json!({}) { SqlValue::Null } else { opt(Some(&scope.rules.to_string())) },opt(stored.as_deref()),opt(Some(id))]).await?;
+        if let Some(grant) = &place.grant {
+            self.join_grant(grant, id).await?;
+            let issuer = self.address_of(text(grant, "issuer").unwrap_or("")).await?;
+            if text(grant, "peek") == Some("local")
+                && !self.store.all("UPDATE endpoints SET peek = 'local' WHERE id = ? AND peek IS NULL RETURNING id",&[opt(Some(id))]).await?.is_empty()
+            {
+                self.audit("peek_set",Some(id),None,json!({"by":issuer,"auth":"grant","target":address(row),"before":null,"after":"local"})).await?;
+            }
+            if let Some(prompt) = text(grant, "prompt")
+                && self
+                    .by_id(id)
+                    .await?
+                    .is_some_and(|r| text(&r, "peek").is_some())
+            {
+                self.store
+                    .all(
+                        "INSERT INTO peek_turns (endpoint,at,role,text) VALUES (?,?,'user',?)",
+                        &[opt(Some(id)), SqlValue::Int(now_ms()), opt(Some(prompt))],
+                    )
+                    .await?;
+            }
+        }
+        if let Some(parent) = &place.parent {
+            let mut detail = json!({"by":match place.grant.as_ref().and_then(|r|text(r,"issuer")){Some(id)=>self.address_of(id).await?,None=>address(row)},"target":address(row),"parent":address(parent)});
+            if place.grant.is_some() {
+                detail["grant"] = json!(true);
+            }
+            self.audit("scope_place", Some(id), None, detail).await?;
+        }
         Ok(())
     }
     async fn claim_row(
@@ -631,7 +647,7 @@ impl Core {
                         && self
                             .returns(
                                 &held,
-                                self.placement(scope, &[text(&hooks, "id").unwrap_or("")])
+                                self.placement(scope, None, Some(&hooks))
                                     .await?
                                     .parent
                                     .as_ref(),
@@ -744,7 +760,7 @@ impl Core {
                         && self
                             .returns(
                                 &held,
-                                self.placement(scope, &[]).await?.parent.as_ref(),
+                                self.placement(scope, None, None).await?.parent.as_ref(),
                                 scope,
                                 fields,
                                 harness,
@@ -761,7 +777,7 @@ impl Core {
                     && harness_fits(text(&held, "harness"), harness)
                     && self.restarts(
                         &held,
-                        self.placement(scope, &[]).await?.parent.as_ref(),
+                        self.placement(scope, None, None).await?.parent.as_ref(),
                         None,
                     )
                 {
@@ -783,7 +799,18 @@ impl Core {
             )
         })?;
         let id = text(&row, "id").ok_or_else(RpcError::internal)?;
+        let mut moved = Vec::new();
         if let Some(hooks) = moved_hooks {
+            moved = self
+                .store
+                .all(
+                    "SELECT seq FROM deliveries WHERE endpoint = ? AND acked_at IS NULL",
+                    &[opt(text(&hooks, "id"))],
+                )
+                .await?
+                .iter()
+                .filter_map(|r| integer(r, "seq"))
+                .collect();
             self.store
                 .all(
                     "UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL",
@@ -801,45 +828,8 @@ impl Core {
         let fresh = if created || joined || resumed {
             None
         } else {
-            let spent = if let Some(grant) = &scope.grant {
-                self.store
-                    .all(
-                        "SELECT used_by FROM grants WHERE token_hash = ? AND revoked_at IS NULL",
-                        &[opt(Some(grant))],
-                    )
-                    .await?
-                    .into_iter()
-                    .next()
-            } else {
-                None
-            };
-            if spent.as_ref().and_then(|r| text(r, "used_by")) == Some(id)
-                || fields
-                    .process
-                    .as_deref()
-                    .zip(text(&row, "process"))
-                    .is_some_and(|(a, b)| same_harness(a, b))
-            {
-                None
-            } else if scope.grant.is_some() && self.placement(scope, &[id]).await?.grant.is_some() {
-                Some("grant")
-            } else {
-                let parent = if let Some(pid) = text(&row, "parent_ep") {
-                    self.by_id(pid).await?
-                } else {
-                    None
-                };
-                let nearest = if text(&row, "process").is_some() {
-                    text(&row, "process")
-                } else {
-                    parent.as_ref().and_then(|r| text(r, "process"))
-                };
-                if nearest.is_some() && nearest == scope.nearest.as_deref() {
-                    None
-                } else {
-                    Some("process")
-                }
-            }
+            self.incarnates(&row, scope, fields.process.as_deref())
+                .await?
         };
         let resume = if transient || live {
             None
@@ -920,35 +910,14 @@ impl Core {
             self.audit("claim", Some(id), None, detail).await?;
         }
         if let Some(kind) = fresh {
-            self.reset_claim(&row, scope, kind).await?;
+            self.reset(&row, scope, kind, &moved).await?;
         }
         if created || fresh == Some("grant") {
-            self.place_claim(&self.must_endpoint(id).await?, scope, fields)
+            self.place(&self.must_endpoint(id).await?, scope, fields)
                 .await?;
         } else if scope.grant.is_some() {
-            let spent = self
-                .store
-                .all(
-                    "SELECT used_by FROM grants WHERE token_hash = ? AND revoked_at IS NULL",
-                    &[opt(scope.grant.as_deref())],
-                )
-                .await?
-                .into_iter()
-                .next();
-            if spent.as_ref().and_then(|r| text(r, "used_by")) != Some(id) {
-                let placement = self.placement(scope, &[id]).await?;
-                if placement.grant.is_some() {
-                    if by_session
-                        && text(&row, "parent_ep").is_none()
-                        && integer(&row, "named").is_none()
-                    {
-                        self.place_claim(&self.must_endpoint(id).await?, scope, fields)
-                            .await?;
-                    } else if let Some(grant) = placement.grant {
-                        self.spend_claim(&grant, id, fields).await?;
-                    }
-                }
-            }
+            self.redeem(&self.must_endpoint(id).await?, scope, fields, by_session)
+                .await?;
         }
         let mut result = self.must_endpoint(id).await?;
         let mut rehomed = false;
@@ -1093,27 +1062,6 @@ impl Core {
         )
         .await?;
         Ok(Some(retired))
-    }
-    async fn reset_claim(&self, row: &Row, scope: &Scope, kind: &str) -> Result<(), RpcError> {
-        let id = text(row, "id").ok_or_else(RpcError::internal)?;
-        self.store
-            .all(
-                "DELETE FROM group_members WHERE endpoint = ?",
-                &[opt(Some(id))],
-            )
-            .await?;
-        self.store
-            .all(
-                "UPDATE admins SET revoked_at = ? WHERE subject = ? AND revoked_at IS NULL",
-                &[SqlValue::Int(now_ms()), opt(Some(id))],
-            )
-            .await?;
-        self.store.all("UPDATE grants SET revoked_at = COALESCE(revoked_at,?) WHERE used_by = ? AND token_hash IS NOT ?",&[SqlValue::Int(now_ms()),opt(Some(id)),opt(scope.grant.as_deref())]).await?;
-        self.store.all("UPDATE endpoints SET reset_at = ?,peek = NULL,wake = NULL,hold_ref = NULL WHERE id = ?",&[SqlValue::Int(now_ms()),opt(Some(id))]).await?;
-        if kind == "grant" {
-            self.store.all("UPDATE endpoints SET rules = NULL,caps = NULL,status_state = NULL,status_note = NULL,title = NULL,harness_session = NULL,spawned_at = ? WHERE id = ?",&[SqlValue::Int(now_ms()),opt(Some(id))]).await?;
-        }
-        self.audit("scope_reset",Some(id),None,json!({"by":address(row),"target":address(row),"reason":if kind=="grant"{"a new spawn took over the endpoint"}else{"another process took over the endpoint"},"groups":[]})).await
     }
     async fn subagent_root(
         &mut self,
@@ -1413,14 +1361,11 @@ impl Core {
         }
         if scope.grant.is_none()
             && !exact
-            && let Some(process) = &fields.process
+            && let Some(bound) = self.bound_grant(&scope, fields.process.as_deref()).await?
         {
-            let bound=self.store.all("SELECT * FROM grants WHERE bound_process = ? AND used_by IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC",&[opt(Some(process)),SqlValue::Int(now_ms())]).await?.into_iter().next();
-            if let Some(bound) = bound {
-                scope.grant = text(&bound, "token_hash").map(str::to_owned);
-                if let Some(name) = text(&bound, "name") {
-                    scope.handle = name.into();
-                }
+            scope.grant = text(&bound, "token_hash").map(str::to_owned);
+            if let Some(name) = text(&bound, "name") {
+                scope.handle = name.into();
             }
         }
         let claimed = self.claim_row(&harness, &fields, &scope, transient).await?;

@@ -6,7 +6,7 @@ use crate::proto::RpcError;
 use crate::store::SqlValue;
 use crate::views::address;
 
-fn selectors(value: &Value, field: &str) -> Result<Value, RpcError> {
+pub(crate) fn selectors(value: &Value, field: &str) -> Result<Value, RpcError> {
     let values = value
         .as_array()
         .filter(|values| values.len() <= 64)

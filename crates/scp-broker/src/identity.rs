@@ -1,6 +1,6 @@
 use crate::claims::{
-    busy_since, clean_labels, clean_text, harness_fits, harness_session, hash, process_key,
-    revivable, same_harness, same_provider, token, valid_handle,
+    busy_since, clean_text, harness_fits, harness_session, revivable, same_harness, same_provider,
+    valid_handle,
 };
 use crate::core::{Core, integer, now_ms, text, timestamp};
 use crate::proto::{ErrorCode, RpcError};
@@ -609,99 +609,6 @@ impl Core {
             relinked.push(pair);
         }
         Ok(json!({"relinked":relinked}))
-    }
-    pub async fn grant(
-        &self,
-        conn: ConnectionId,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        self.need_terminal(conn).await?;
-        let me = self.actor_row(conn).await?;
-        let under = if let Some(value) = params.get("under").and_then(Value::as_str) {
-            self.lookup(value).await?
-        } else {
-            me.clone()
-        };
-        if text(&under, "kind") != Some("agent") {
-            return Err(RpcError::invalid_params(
-                "the human names the endpoint to grant under",
-            ));
-        }
-        if text(&me, "kind") != Some("human")
-            && text(&me, "id") != text(&under, "id")
-            && !self.authority(&me, &under).await?
-        {
-            return Err(RpcError::new(ErrorCode::NotFound, "no endpoint"));
-        }
-        let name = clean_text(params.get("name"), "name", 63)?;
-        if name.as_ref().is_some_and(|v| !valid_handle(v)) {
-            return Err(RpcError::invalid_params("name is not a valid handle"));
-        }
-        let labels = clean_labels(params.get("labels"))?;
-        let title =
-            crate::session::one_line(params.get("title"), "title", 64)?.filter(|v| !v.is_empty());
-        if crate::scrub::find_secret(&labels.to_string()).is_some()
-            || title
-                .as_ref()
-                .is_some_and(|v| crate::scrub::find_secret(v).is_some())
-        {
-            return Err(RpcError::new(
-                ErrorCode::SecretRefused,
-                "grant carries a credential",
-            ));
-        }
-        let ttl = params
-            .get("ttl_s")
-            .map(|v| {
-                v.as_i64()
-                    .filter(|v| *v >= 1 && *v <= 604800)
-                    .ok_or_else(|| RpcError::invalid_params("ttl_s must be 1 to 604800"))
-            })
-            .transpose()?
-            .unwrap_or(604800);
-        let bound = clean_text(params.get("bind_process"), "bind_process", 128)?;
-        if bound.as_ref().is_some_and(|v| !process_key(v, true)) {
-            return Err(RpcError::invalid_params(
-                "bind_process is a full process key",
-            ));
-        }
-        let mut caps = Vec::new();
-        let preset = params
-            .get("scope")
-            .and_then(Value::as_str)
-            .map(|v| {
-                crate::policy::preset(v)
-                    .ok_or_else(|| RpcError::invalid_params("scope is a preset"))
-            })
-            .transpose()?;
-        for dir in ["in", "out"] {
-            if let Some(sels) = params
-                .get(dir)
-                .or_else(|| params.get("allow"))
-                .or(preset.as_ref())
-                .filter(|v| !v.is_null())
-            {
-                let sels = sels
-                    .as_array()
-                    .ok_or_else(|| RpcError::invalid_params("rules are selector lists"))?;
-                if sels.iter().any(|v| {
-                    !v.as_str()
-                        .is_some_and(|v| crate::policy::valid_selector(v, false, false))
-                }) {
-                    return Err(RpcError::invalid_params("invalid selector"));
-                }
-                caps.push(json!({"dir":dir,"sels":sels.iter().map(|s|json!({"sel":s})).collect::<Vec<_>>()}));
-            }
-        }
-        let value = token("krt");
-        let now = now_ms();
-        self.store.all("INSERT INTO grants (token_hash,issuer,under,name,labels,title,caps,groups,created_at,expires_at,bound_process) VALUES (?,?,?,?,?,?,?,'[]',?,?,?)",&[opt(Some(&hash(&value))),opt(text(&me,"id")),opt(text(&under,"id")),opt(name.as_deref()),opt(Some(&labels.to_string())),opt(title.as_deref()),opt(Some(&json!(caps).to_string())),SqlValue::Int(now),SqlValue::Int(now+ttl*1000),opt(bound.as_deref())]).await?;
-        self.audit("scope_grant",text(&under,"id"),None,json!({"by":address(&me),"target":address(&under),"name":name,"caps":caps,"groups":[],"expires_at":timestamp(now+ttl*1000)})).await?;
-        let mut env = json!({"SCP_GRANT":value});
-        if let Some(name) = name {
-            env["SCP_NAME"] = json!(name);
-        }
-        Ok(json!({"token":value,"env":env}))
     }
     pub async fn event(
         &self,
