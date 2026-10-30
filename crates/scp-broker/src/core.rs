@@ -24,6 +24,7 @@ pub struct Core {
     pub paths: Paths,
     pub policy_file: PathBuf,
     pub policy_error: Option<String>,
+    pub judge: crate::judge::JudgeGate,
 }
 
 impl Core {
@@ -34,6 +35,12 @@ impl Core {
         policy_file: PathBuf,
     ) -> Result<Self, RpcError> {
         crate::store::schema::migrate(store.as_ref(), now_ms()).await?;
+        store
+            .all(
+                "UPDATE judge_holds SET state = 'held' WHERE state = 'releasing'",
+                &[],
+            )
+            .await?;
         store
             .all("UPDATE endpoints SET connections = 0, hook_seen = CASE WHEN kind = 'agent' AND hook_ended IS NULL THEN MAX(COALESCE(hook_seen,0), ?) ELSE hook_seen END WHERE connections > 0", &[SqlValue::Int(now_ms()-1_740_000)])
             .await?;
@@ -52,6 +59,7 @@ impl Core {
                     .insert(id.to_owned(), crate::views::address(&row));
             }
         }
+        let judge = crate::judge::JudgeGate::new(&limits);
         let mut core = Self {
             store,
             limits,
@@ -61,6 +69,7 @@ impl Core {
             paths,
             policy_file,
             policy_error: None,
+            judge,
         };
         core.load_policy().await;
         Ok(core)
@@ -97,6 +106,8 @@ impl Core {
                 self.policy_error = Some(format!("the relay policy cannot be read ({error})"));
             }
         }
+        self.judge
+            .configure(self.policy.as_ref().and_then(|p| p.get("judge")));
     }
 
     pub fn broker_info(&self) -> Value {
@@ -212,7 +223,8 @@ impl Core {
                         recipients.push(id);
                     }
                 }
-                self.send(
+                self.judged_send(
+                    conn,
                     &endpoint,
                     &recipients,
                     params,
@@ -234,6 +246,9 @@ impl Core {
             "prompted" => self.prompted(&endpoint, params).await,
             "rules" => self.rules(&endpoint).await,
             "rules_set" => self.rules_set(&endpoint, params).await,
+            "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
+                self.review_hold(conn, method, params).await
+            }
             "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
             "machine_wake" => Err(RpcError::new(
                 ErrorCode::Unavailable,

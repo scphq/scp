@@ -11,6 +11,31 @@ use support::{TempStore, json_rows};
 const NOW: i64 = 1_700_000_000_000;
 const MASTER: &str = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name";
 
+fn expected_schema() -> Value {
+    let mut rows: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/ts-schema.json")).expect("schema fixture");
+    for (name, sql) in [
+        (
+            "judge_holds",
+            "CREATE TABLE judge_holds (id TEXT PRIMARY KEY, from_ep TEXT NOT NULL, params TEXT NOT NULL, origin TEXT NOT NULL, verdict TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL, by TEXT, resolved_at INTEGER)",
+        ),
+        (
+            "judge_sent",
+            "CREATE TABLE judge_sent (from_ep TEXT NOT NULL, client_id TEXT NOT NULL, fingerprint TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (from_ep, client_id))",
+        ),
+    ] {
+        rows.push(json!({"type":"table","name":name,"tbl_name":name,"sql":sql}));
+        rows.push(json!({"type":"index","name":format!("sqlite_autoindex_{name}_1"),"tbl_name":name,"sql":null}));
+    }
+    rows.sort_by(|a, b| {
+        a["type"]
+            .as_str()
+            .cmp(&b["type"].as_str())
+            .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    json!(rows)
+}
+
 fn sql_value(value: &Value) -> SqlValue {
     match value {
         Value::Null => SqlValue::Null,
@@ -35,11 +60,10 @@ fn normalize(mut rows: Value) -> Value {
 }
 
 #[tokio::test]
-async fn fresh_schema_exactly_matches_reference_sqlite_master() {
+async fn fresh_schema_matches_reference_with_judge_tables() {
     let temp = TempStore::new().await;
     migrate(&temp.store, NOW).await.expect("migrate");
-    let expected: Value =
-        serde_json::from_str(include_str!("fixtures/ts-schema.json")).expect("schema fixture");
+    let expected = expected_schema();
     assert_eq!(
         json_rows(temp.store.read(MASTER, &[]).await.expect("schema")),
         expected
@@ -63,7 +87,7 @@ async fn fresh_schema_exactly_matches_reference_sqlite_master() {
 }
 
 #[tokio::test]
-async fn reference_database_is_unchanged_after_two_migrations() {
+async fn reference_database_adds_judge_tables_without_changing_rows() {
     let temp = TempStore::new().await;
     let schema: Vec<Value> =
         serde_json::from_str(include_str!("fixtures/ts-schema.json")).expect("schema fixture");
@@ -120,7 +144,8 @@ async fn reference_database_is_unchanged_after_two_migrations() {
         }
         Value::Object(result)
     };
-    let before = snapshot().await;
+    let mut before = snapshot().await;
+    before["schema"] = expected_schema();
     for now in [NOW + 1, NOW + 2] {
         migrate(&temp.store, now)
             .await

@@ -217,8 +217,7 @@ impl Policy {
             parsed["defaults"] = value.clone();
         }
         if let Some(judge) = input.get("judge") {
-            object(judge, "judge: the judge section is an object")?;
-            parsed["judge"] = judge.clone();
+            parsed["judge"] = crate::judge::parse_policy(judge)?;
         }
         Ok(Self(parsed))
     }

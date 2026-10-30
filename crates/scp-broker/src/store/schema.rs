@@ -79,6 +79,8 @@ const MIGRATION: &[&str] = &[
     PRIMARY KEY (from_ep, client_id)
   )"#,
     r#"CREATE TABLE IF NOT EXISTS pair_events (from_ep TEXT NOT NULL, to_ep TEXT NOT NULL, at INTEGER NOT NULL)"#,
+    r#"CREATE TABLE IF NOT EXISTS judge_holds (id TEXT PRIMARY KEY, from_ep TEXT NOT NULL, params TEXT NOT NULL, origin TEXT NOT NULL, verdict TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL, by TEXT, resolved_at INTEGER)"#,
+    r#"CREATE TABLE IF NOT EXISTS judge_sent (from_ep TEXT NOT NULL, client_id TEXT NOT NULL, fingerprint TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (from_ep, client_id))"#,
     r#"CREATE INDEX IF NOT EXISTS pair_events_pair ON pair_events (from_ep, to_ep, at)"#,
     r#"CREATE TABLE IF NOT EXISTS blocks (pair TEXT PRIMARY KEY, until INTEGER NOT NULL)"#,
     r#"CREATE TABLE IF NOT EXISTS audit (

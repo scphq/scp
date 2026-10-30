@@ -1656,6 +1656,8 @@ dependencies = [
  "libc",
  "rand 0.8.5",
  "regex",
+ "reqwest",
+ "scp-dev-core",
  "serde",
  "serde_json",
  "sha2",
