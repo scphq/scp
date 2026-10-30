@@ -49,6 +49,7 @@ import {
   readPsTable,
   relayIdentity,
   sessionKey,
+  unclaimedSpare,
 } from "./identity"
 import { safeCwd } from "./cwd"
 import { membership } from "./session"
@@ -711,6 +712,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
     if (!("value" in table)) table.value = readPsTable()
     return table.value
   }
+  if (hookFormat(harness, harness) === "claude-code" && unclaimedSpare(options.env, () => (options.psTable ?? psTable)()?.get(pid)?.args)) return
   const identify = (as: string | undefined) =>
     relayIdentity({
       ...(as ? { as } : {}),

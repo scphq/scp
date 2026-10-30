@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Envelope, PeekResult } from "./protocol"
-import { clock, presenceText, reachLines, receiptLines, shortId, steerNote, stripSteerNote, wakeText, wrapMessage, wrapPeek } from "./render"
+import { clock, depthText, presenceText, reachLines, receiptLines, shortId, steerNote, stripSteerNote, wakeText, wrapMessage, wrapPeek } from "./render"
 
 const base: Envelope = {
   seq: 7,
@@ -219,5 +219,14 @@ describe("receiptLines", () => {
       "me/bg: delivered at 14:30:00 (it reaches the model with its next request)",
       "me/new: unread",
     ])
+  })
+})
+
+describe("depthText", () => {
+  test("depth counts this machine's tree: a root under a parent on another machine says so", () => {
+    expect(depthText({ parent: null, depth: 0 })).toBe("0")
+    expect(depthText({ parent: "me/lead", depth: 1 })).toBe("1")
+    expect(depthText({ parent: "me/laptop/lead", depth: 0 })).toBe("0 on this machine (parent on another machine)")
+    expect(depthText({})).toBe("0")
   })
 })

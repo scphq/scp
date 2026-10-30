@@ -26,6 +26,7 @@ export {
   clock,
   collapseTools,
   deliveryText,
+  depthText,
   PREAMBLE,
   PREAMBLE_BRIEF,
   presenceText,

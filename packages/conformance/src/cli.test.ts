@@ -104,6 +104,7 @@ process.exit(await s.exited);`;
       await vm.linked();
       await waitFor(async () => (await local()).find((e) => e.address === "me/worker" && e.parent === "me/laptop/lead"), "vm worker linked", 30000);
       expect((await local()).map((e) => e.address)).toEqual(["me/worker"]);
+      expect((await local()).map((e) => [e.parent, e.depth])).toEqual([["me/laptop/lead", 0]]);
       await waitFor(async () => (await laptop.list()).find((e) => e.address === "me/vm/worker" && e.parent === "me/lead"), "laptop sees the child", 30000);
     } finally {
       if (session?.stdin && typeof session.stdin !== "number") session.stdin.end();

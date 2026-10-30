@@ -420,6 +420,7 @@ export interface EndpointView {
   last_seen: string | null
   /** the parent endpoint's address, null for a root */
   parent?: string | null
+  /** the depth in its own machine's tree, 0 for a root: a parent on another machine (section 6.12) does not count */
   depth?: number
   scope?: ScopePreset | "custom"
   /** set only in a viewer's list, when that viewer may peek this endpoint */
