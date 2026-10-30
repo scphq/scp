@@ -189,6 +189,26 @@
           "items": {
             "$ref": "../types.schema.json#/$defs/PeekSeen"
           }
+        },
+        "link_pending": {
+          "type": "object",
+          "properties": {
+            "under": {
+              "type": "string"
+            },
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "under",
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

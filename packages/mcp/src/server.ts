@@ -33,6 +33,7 @@ import {
   CLI_NAME,
   deliveryText,
   type EndpointView,
+  type LinkPending,
   type Envelope,
   LIMITS,
   type MessageReceipts,
@@ -373,7 +374,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   async function tool(name: string, args: Json): Promise<ToolResult> {
     switch (name) {
       case "relay_whoami": {
-        const view = await call<EndpointView & Partial<PeekState>>("whoami")
+        const view = await call<EndpointView & Partial<PeekState> & { link_pending?: LinkPending }>("whoami")
         const labels = Object.entries(view.labels).map(([k, v]) => `${k}=${v}`)
         const peek =
           view.peek === undefined
@@ -386,6 +387,11 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
             `title: ${view.title ? quote(view.title) : "none"}`,
             `labels: ${labels.length ? labels.join(",") : "none"}`,
             ...peek,
+            ...(view.link_pending
+              ? [
+                  `parent: none yet, not linked under ${view.link_pending.under} (${view.link_pending.code}: ${view.link_pending.message}); tried again as other machines' endpoints arrive`,
+                ]
+              : []),
           ].join("\n"),
         )
       }

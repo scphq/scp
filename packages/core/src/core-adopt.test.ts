@@ -116,6 +116,61 @@ describe("a claim under a parent", () => {
     expect(failure(() => core.claim({ ...claim("long", 40), under: "x".repeat(129) })).code).toBe("too_large")
     expect(failure(() => core.claim({ ...claim("odd", 41), under: 5 as unknown as string })).code).toBe("invalid_params")
   })
+
+  test("links under an agent outside its reach when it may message the root of that agent's tree", () => {
+    const { core, claim, lead } = setup()
+    const worker = core.claim({ handle: "worker", harness: "codex", grant: core.grant(self(lead.id), { name: "worker" }).token }).endpoint
+    expect(worker.parent).toBe("me/lead")
+    const app = core.claim({ ...claim("app", 20), under: "worker" }).endpoint
+    expect(app).toMatchObject({ parent: "me/worker", depth: 2 })
+    expect(core.linkPendingOf(app.id)).toEqual({})
+  })
+
+  test("stays refused when the agent's own inbound rules do not admit it", () => {
+    const { core, claim, lead } = setup()
+    core.claim({ handle: "worker", harness: "codex", grant: core.grant(self(lead.id), { name: "worker" }).token })
+    core.rulesSet(HUMAN, { endpoint: "worker", in: [] })
+    const app = core.claim({ ...claim("app", 20), under: "worker" }).endpoint
+    expect(app.parent ?? null).toBeNull()
+    expect(core.linkPendingOf(app.id).link_pending).toMatchObject({ under: "worker", code: "not_found" })
+  })
+
+  test("with rules of its own, a root links only under an agent it may message", () => {
+    const { core, claim, lead } = setup()
+    core.claim({ handle: "worker", harness: "codex", grant: core.grant(self(lead.id), { name: "worker" }).token })
+    core.claim(claim("app", 20))
+    core.rulesSet(HUMAN, { endpoint: "app", out: ["ep:lead"] })
+    const app = core.claim({ ...claim("app", 20), under: "worker" }).endpoint
+    expect(app.parent ?? null).toBeNull()
+    expect(core.linkPendingOf(app.id).link_pending).toMatchObject({ under: "worker", code: "not_found" })
+  })
+
+  test("a link made another way, then undone, drops the pending request", () => {
+    const { core, claim } = setup()
+    const app = core.claim({ ...claim("app", 20), under: "later" }).endpoint
+    core.adopt(HUMAN, { endpoint: "app", parent: "lead" })
+    core.unlink(HUMAN, { endpoint: "app" })
+    core.claim({ handle: "later", harness: "codex" })
+    expect(core.retryUnder()).toEqual({ linked: [], refused: [] })
+    expect(core.whoami(app.id).parent ?? null).toBeNull()
+  })
+
+  test("a refused link stays pending, audited once, links once the parent arrives, and a claim without under drops it", () => {
+    const { core, claim, hook } = setup()
+    const app = core.claim({ ...claim("app", 20), under: "later" }).endpoint
+    expect(core.linkPendingOf(app.id)).toEqual({ link_pending: { under: "later", code: "not_found", message: expect.any(String) } })
+    core.claim({ ...claim("app", 20), under: "later" })
+    expect(core.retryUnder()).toEqual({ linked: [], refused: [] })
+    expect(core.log({}).filter((row) => row.event === "claim_under_refused")).toHaveLength(1)
+    hook("later", 30)
+    expect(core.retryUnder()).toEqual({ linked: [{ address: "me/app", parent: "me/later" }], refused: [] })
+    expect(core.whoami(app.id).parent).toBe("me/later")
+    expect(core.linkPendingOf(app.id)).toEqual({})
+    const other = core.claim({ ...claim("other", 40), under: "missing" }).endpoint
+    core.claim(claim("other", 40))
+    expect(core.linkPendingOf(other.id)).toEqual({})
+    expect(core.retryUnder()).toEqual({ linked: [], refused: [] })
+  })
 })
 
 describe("adopt", () => {

@@ -190,7 +190,10 @@ export function startBridge(options: BridgeOptions): Bridge {
   let localTimer: ReturnType<typeof setTimeout> | undefined
 
   const setState = (up: boolean, error: string | null) => {
-    if (up !== connected || error !== lastError) since = new Date().toISOString()
+    if (up !== connected || error !== lastError) {
+      since = new Date().toISOString()
+      log(up ? `relay bridge: linked to ${options.url} as machine ${machine}` : `relay bridge: not linked to the hub: ${error ?? "stopped"}`)
+    }
     connected = up
     lastError = error
   }
@@ -301,6 +304,7 @@ export function startBridge(options: BridgeOptions): Bridge {
     ready = true
     known = new Set()
     applyRemote(hello.endpoints, true)
+    linkPending(false)
     await Promise.all(fullMirror().map((params) => request("mirror", params)))
     await request("watch")
     await request("subscribe", { after: cursor() })
@@ -331,6 +335,20 @@ export function startBridge(options: BridgeOptions): Bridge {
         log(`relay bridge: the endpoints of ${name} were not applied: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+  }
+
+  /** the claims' pending links under a parent on another machine, tried again once its endpoints arrived; with `sync`, a link goes out at once */
+  function linkPending(sync: boolean) {
+    let result: ReturnType<FederatedCore["retryUnder"]>
+    try {
+      result = core.retryUnder()
+    } catch (error) {
+      return log(`relay bridge: pending links were not tried: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    for (const { address, parent } of result.linked) log(`relay bridge: ${address} linked under ${parent}`)
+    for (const { address, pending } of result.refused)
+      log(`relay bridge: ${address} is still not linked under ${pending.under} (${pending.code}: ${pending.message})`)
+    if (sync && result.linked.length) resync()
   }
 
   function mirrored(view: EndpointView): boolean {
@@ -507,6 +525,7 @@ export function startBridge(options: BridgeOptions): Bridge {
         } catch (error) {
           log(`relay bridge: the endpoints of ${params.machine} were not applied: ${error instanceof Error ? error.message : String(error)}`)
         }
+        linkPending(true)
         return
       }
       case "fleet":

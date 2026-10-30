@@ -73,12 +73,16 @@ export async function attribute(
         }
         client = connected
         await client.hello({ observe: true })
-        const bridge = await client.request<{ enabled: boolean; machine?: string }>("cloud_status")
+        const bridge = await client.request<{ enabled: boolean; machine?: string; connected?: boolean; last_error?: string | null }>("cloud_status")
         if (!bridge.enabled || !bridge.machine)
           throw new RelayUsage(
             `--under ${parent} names an agent on machine ${remote[1]}, but this relay broker is not linked to a hub (${CLI_NAME} login, then ${CLI_NAME} cloud enable)`,
           )
         if (bridge.machine === remote[1]) parent = `me/${remote[2]}`
+        else if (bridge.connected === false)
+          warn(
+            `${CLI_NAME} ${launcher}: this relay broker is not linked to the hub yet (${bridge.last_error ?? "connecting"}); the session starts as a root and links under ${parent} once the link is up (${CLI_NAME} whoami shows why it is not)`,
+          )
       }
       try {
         await Promise.race([check(), deadline])

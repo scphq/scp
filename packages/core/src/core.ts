@@ -58,6 +58,7 @@ import {
 import { digestText, PEEK, peekLevel, readText } from "./peek"
 import { clock, shortId, stripControl, wrapMessage } from "./render"
 import {
+  admits,
   clipped,
   crossFleet,
   expandRules,
@@ -284,6 +285,8 @@ export interface EndpointRow {
   parent_ep: string | null
   /** a parent on another machine of the account, `<machine>/<handle>`: the row stays a root of its own tree */
   parent_addr: string | null
+  /** JSON {@link LinkPending}: the parent a claim asked for under that was refused, tried again until it links */
+  link_under: string | null
   depth: number | null
   /** JSON {@link ScopeRules} */
   rules: string | null
@@ -423,6 +426,25 @@ export interface MessageRow {
 
 /** the ids a viewer sees, as a set or decided per id */
 export type Shown = { has(id: string): boolean }
+
+/** a claim's link under a parent that was refused and is tried again: the address it asked for, and why it is refused */
+export interface LinkPending {
+  under: string
+  code: string
+  message: string
+}
+
+function linkPending(text: string | null): LinkPending | undefined {
+  if (text === null) return undefined
+  try {
+    const value = JSON.parse(text) as Partial<LinkPending>
+    return typeof value?.under === "string" && typeof value.code === "string" && typeof value.message === "string"
+      ? { under: value.under, code: value.code, message: value.message }
+      : undefined
+  } catch {
+    return undefined
+  }
+}
 
 interface PassMemo {
   listed?: EndpointRow[]
@@ -741,6 +763,7 @@ export class RelayCore {
       ["tree", "TEXT"],
       ["parent_ep", "TEXT"],
       ["parent_addr", "TEXT"],
+      ["link_under", "TEXT"],
       ["depth", "INTEGER"],
       ["rules", "TEXT"],
       ["caps", "TEXT"],
@@ -952,6 +975,7 @@ export class RelayCore {
     subagent?: true
     rehomed?: { from: string }
     handedOff?: { from: string; retired: string }
+    linkRefused?: LinkPending
   } {
     const subagent = subagentOf(claim.subagent)
     const harness = cleanText(claim.harness, "harness", 32) ?? "cli"
@@ -1028,7 +1052,10 @@ export class RelayCore {
         rehomed || handedOff
           ? { ...claimed, endpoint: this.view(this.byId(claimed.endpoint.id)!), ...(rehomed ? { rehomed } : {}), ...(handedOff ? { handedOff } : {}) }
           : claimed
-      return under === null ? placed : this.claimUnder(placed, under)
+      if (under !== null) return this.claimUnder(placed, under)
+      if (options.transient !== true && !scope.exact)
+        this.sql.all(`UPDATE endpoints SET link_under = NULL WHERE id = ? AND link_under IS NOT NULL`, placed.endpoint.id)
+      return placed
     })
   }
 
@@ -1139,20 +1166,84 @@ export class RelayCore {
     return retired
   }
 
-  /** links a claimed root under `under` as a join under does; a refusal keeps the claim and is audited `claim_under_refused` */
-  private claimUnder<T extends { endpoint: EndpointView }>(claimed: T, under: string): T {
+  /**
+   * links a claimed root under `under` as a join under does. A refusal keeps the claim as a root and the request pending on the row, audited
+   * `claim_under_refused` when it is new or its reason changed, and {@link retryUnder} tries it again
+   */
+  private claimUnder<T extends { endpoint: EndpointView }>(claimed: T, under: string): T & { linkRefused?: LinkPending } {
     const me = this.mustEndpoint(claimed.endpoint.id)
-    if (me.kind !== "agent" || !this.localRow(me) || me.parent_ep !== null || me.parent_addr !== null) return claimed
+    if (me.kind !== "agent" || !this.localRow(me)) return claimed
+    if (me.parent_ep !== null || me.parent_addr !== null) {
+      if (me.link_under !== null) this.sql.all(`UPDATE endpoints SET link_under = NULL WHERE id = ?`, me.id)
+      return claimed
+    }
+    const refused = this.tryUnder(me, under)
+    return { ...claimed, endpoint: this.view(this.byId(me.id)!), ...(refused ? { linkRefused: refused.pending } : {}) }
+  }
+
+  /** links `me`, a local root, under `under`; the pending request it keeps when refused, and whether its reason is new */
+  private tryUnder(me: EndpointRow, under: string): { pending: LinkPending; changed: boolean } | undefined {
     try {
       const parent = this.resolve(under)
-      if (parent.kind === "agent" && !this.mayMessage(me, parent)) throw unreachable(under)
+      if (!this.mayLinkUnder(me, parent)) throw unreachable(under)
       this.link(me, parent, { by: this.address(me), auth: "session" })
     } catch (error) {
       if (!(error instanceof RelayError)) throw error
-      this.audit("claim_under_refused", me.id, null, { target: this.address(me), under, code: error.code })
-      return claimed
+      const pending: LinkPending = { under, code: error.code, message: error.message }
+      const text = JSON.stringify(pending)
+      const changed = me.link_under !== text
+      if (changed) {
+        this.sql.all(`UPDATE endpoints SET link_under = ? WHERE id = ?`, text, me.id)
+        this.audit("claim_under_refused", me.id, null, { target: this.address(me), under, code: error.code })
+      }
+      return { pending, changed }
     }
-    return { ...claimed, endpoint: this.view(this.byId(me.id)!) }
+    if (me.link_under !== null) this.sql.all(`UPDATE endpoints SET link_under = NULL WHERE id = ?`, me.id)
+    return undefined
+  }
+
+  /**
+   * whether `me`, a root, may link under `parent`: it may message the agent, or, with no rules or caps of its own, only its default reach
+   * stops it while it may message the root of the agent's tree, the agent's inbound rules admit it and the policy does not refuse it
+   */
+  private mayLinkUnder(me: EndpointRow, parent: EndpointRow): boolean {
+    if (parent.kind !== "agent" || this.mayMessage(me, parent)) return true
+    if (hasScope(this.nodeOf(me))) return false
+    const top = this.ancestorsOf(parent).at(-1)
+    const root = top === undefined ? undefined : this.byId(top)
+    if (root?.kind !== "agent" || !this.mayMessage(me, root)) return false
+    if (policyRefusal(this.policy, this.subjectOf(me), this.subjectOf(parent), this.policyBound) !== null) return false
+    const world = this.scopeWorld()
+    return admits(world, world.node(parent.id) ?? this.nodeOf(parent), "in", world.node(me.id) ?? this.nodeOf(me)).ok
+  }
+
+  /**
+   * the claims' pending links under a parent tried again, as when the parents of other machines arrive: the endpoints linked now, and those
+   * still refused for a new reason. A row that got a parent another way, or is no local agent, drops its request
+   */
+  retryUnder(): { linked: { address: string; parent: string }[]; refused: { address: string; pending: LinkPending }[] } {
+    return this.scopeTx(() => {
+      const linked: { address: string; parent: string }[] = []
+      const refused: { address: string; pending: LinkPending }[] = []
+      for (const row of this.sql.all<EndpointRow>(`SELECT * FROM endpoints WHERE link_under IS NOT NULL`)) {
+        const pending = linkPending(row.link_under)
+        if (!pending || row.kind !== "agent" || !this.localRow(row) || row.parent_ep !== null || row.parent_addr !== null) {
+          this.sql.all(`UPDATE endpoints SET link_under = NULL WHERE id = ?`, row.id)
+          continue
+        }
+        const result = this.tryUnder(row, pending.under)
+        if (!result) linked.push({ address: this.address(row), parent: this.parentAddress(this.byId(row.id)!) })
+        else if (result.changed) refused.push({ address: this.address(row), pending: result.pending })
+      }
+      return { linked, refused }
+    })
+  }
+
+  /** the link under a parent the endpoint's claim asked for and is still refused, for whoami */
+  linkPendingOf(endpoint: string): { link_pending?: LinkPending } {
+    const row = this.byId(endpoint)
+    const pending = row && row.parent_ep === null && row.parent_addr === null ? linkPending(row.link_under) : undefined
+    return pending ? { link_pending: pending } : {}
   }
 
   /** a claim's own rules per direction, as its `scope`, `allow`, `in` and `out` expand */
@@ -2226,7 +2317,7 @@ export class RelayCore {
       if (under !== undefined && under !== null && under !== "") {
         const me = this.byId(row.id)!
         const parent = this.resolve(under)
-        if (parent.id !== me.parent_ep && parent.kind === "agent" && !this.mayMessage(me, parent)) throw unreachable(under)
+        if (parent.id !== me.parent_ep && !this.mayLinkUnder(me, parent)) throw unreachable(under)
         this.link(me, parent, { by: this.address(me), auth: "session" })
       }
       return this.whoami(row.id)
@@ -2325,7 +2416,7 @@ export class RelayCore {
         )
       if (target.parent_ep === null) {
         const from = this.linkedParent(target) ?? target.parent_addr!
-        this.sql.all(`UPDATE endpoints SET parent_addr = NULL, linked = NULL WHERE id = ?`, target.id)
+        this.sql.all(`UPDATE endpoints SET parent_addr = NULL, linked = NULL, link_under = NULL WHERE id = ?`, target.id)
         this.scopeMemo?.ancestors.clear()
         this.scopeMemo?.limited.clear()
         this.audit("unlink", target.id, null, { ...this.actorDetail(actor, me), target: this.address(target), parent: from })
@@ -2344,7 +2435,7 @@ export class RelayCore {
       const caps = this.capsOf(target)
       const kept = caps.caps.filter((cap) => cap.by !== "policy")
       this.sql.all(
-        `UPDATE endpoints SET tree = NULL, parent_ep = NULL, depth = 0, linked = NULL, caps = ? WHERE id = ?`,
+        `UPDATE endpoints SET tree = NULL, parent_ep = NULL, depth = 0, linked = NULL, caps = ?, link_under = NULL WHERE id = ?`,
         kept.length || Object.keys(caps.allow).length ? JSON.stringify({ ...caps, caps: kept }) : null,
         target.id,
       )
@@ -2364,7 +2455,7 @@ export class RelayCore {
       const key = this.linkAcross(row, parent)
       if (row.parent_addr === key) return
       if (row.parent_ep !== null || row.parent_addr !== null) throw this.alreadyLinked(row)
-      this.sql.all(`UPDATE endpoints SET parent_addr = ?, linked = ? WHERE id = ?`, key, this.now(), row.id)
+      this.sql.all(`UPDATE endpoints SET parent_addr = ?, linked = ?, link_under = NULL WHERE id = ?`, key, this.now(), row.id)
       this.scopeMemo?.ancestors.clear()
       this.scopeMemo?.limited.clear()
       this.audit("adopt", row.id, by.request ?? null, { ...by, target: this.address(row), parent: this.address(parent) })
@@ -2386,7 +2477,7 @@ export class RelayCore {
     if (childDefault !== "open" && childDefault !== "inherit" && !caps.caps.some((cap) => cap.by === "policy"))
       for (const dir of this.presetDirs()) caps.caps.push({ id: capId(), dir, by: "policy", sels: PRESET_LISTS[childDefault].map((sel) => ({ sel })) })
     this.sql.all(
-      `UPDATE endpoints SET tree = ?, parent_ep = ?, depth = ?, linked = ?, caps = ? WHERE id = ?`,
+      `UPDATE endpoints SET tree = ?, parent_ep = ?, depth = ?, linked = ?, caps = ?, link_under = NULL WHERE id = ?`,
       tree,
       parent.id,
       depth,

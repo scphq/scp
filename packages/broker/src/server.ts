@@ -1146,6 +1146,12 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         endpoint = claimed.endpoint
         token = claimed.token
         handedOff = claimed.handedOff
+        if (claimed.linkRefused) {
+          const { under, code, message } = claimed.linkRefused
+          log(
+            `relay broker: ${endpoint.address} is not linked under ${under} (${code}: ${message}); it stays a root${bridge ? " and is tried again as the hub's endpoints arrive" : ""}`,
+          )
+        }
       }
       s.data.endpoint = endpoint.id
       if (handedOff) {
@@ -1193,7 +1199,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     if (SCOPE_METHODS.has(method)) return scope(s, method, params)
     switch (method) {
       case "whoami":
-        return s.data.transient ? core.whoami(me) : { ...core.whoami(me), ...core.peekState(me) }
+        return s.data.transient ? core.whoami(me) : { ...core.whoami(me), ...core.peekState(me), ...core.linkPendingOf(me) }
       case "peek_turn":
         if (!s.data.transient || !core.hookOwns(me, s.data.process))
           throw new RelayError("unauthorized", "only a hook of the endpoint's own harness process posts digest turns")
