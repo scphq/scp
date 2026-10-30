@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EndpointView, Envelope, SendResult } from "@scp-dev/core";
-import { enabled, ProcessTarget, targetNames, waitFor } from "./targets";
-import { ensureBuilt, Machine } from "./machines";
+import { enabled, ProcessTarget, type Target, targetNames, waitFor } from "./targets";
+import { ensureBuilt, hubGate, Machine } from "./machines";
 import { Wire } from "./wire";
 
 describe.each(targetNames)("%s CLI conformance", (name) => {
@@ -17,10 +17,12 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
   let laptop: Machine;
   let desk: Machine;
   let direct: Machine;
+  let token: string;
   beforeAll(async () => {
     ensureBuilt();
     await target.start();
     const credential = await target.mint("acme", "ada", { device: true });
+    token = credential.token;
     for (const machine of ["laptop", "desk", "ci"]) machines.push(new Machine(machine, target, credential.token));
     [laptop, desk, direct] = machines as [Machine, Machine, Machine];
     for (const machine of machines) machine.assertIsolated();
@@ -35,6 +37,80 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
     const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
     if (errors.length) throw new AggregateError(errors, "fixture cleanup failed");
   });
+  test("a background session its harness daemon hosts, claimed before the hub link is up, links under a non-root agent on another machine as one endpoint", async () => {
+    const gate = hubGate(target.url);
+    const vm = new Machine("vm", { url: gate.url } as Target, token);
+    machines.push(vm);
+    let session: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      await vm.start({ linked: false });
+      const boss = await laptop.claim("boss");
+      await laptop.child(boss, "lead");
+      const bin = join(vm.root, "bin");
+      const work = join(vm.root, "work");
+      mkdirSync(bin);
+      mkdirSync(work);
+      writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${join(vm.root, "claude-args")}'\necho 'backgrounded · 1a2b3c4d (idle)'\n`, {
+        mode: 0o755,
+      });
+      await vm.run(["claude", "--bg", "--name", "worker", "--under", "me/laptop/lead", "--", "work"], { PATH: `${bin}:${process.env.PATH}` });
+      const args = readFileSync(join(vm.root, "claude-args"), "utf8").split("\n");
+      const config = JSON.parse(readFileSync(args[args.indexOf("--mcp-config") + 1]!, "utf8"));
+      const mount = config.mcpServers.scp as { command: string; args: string[]; env: Record<string, string> };
+      expect(mount.env).toMatchObject({ SCP_NAME: "worker", SCP_UNDER: "me/laptop/lead" });
+      const id = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+      const daemon = {
+        ...Object.fromEntries(Object.entries(vm.env).filter(([key]) => !key.startsWith("CLAUDE"))),
+        CLAUDECODE: "1",
+        CLAUDE_CODE_SESSION_ID: id,
+      };
+      const script = `const [hook, shim] = JSON.parse(process.env.FAKE_SESSION);
+const h = Bun.spawn(hook.argv, { env: { ...hook.env, CLAUDE_PID: String(process.pid) }, stdin: new Blob([hook.payload]), stdout: "ignore", stderr: "ignore" });
+if ((await h.exited) !== 0) process.exit(70);
+const s = Bun.spawn(shim.argv, { env: shim.env, stdio: ["inherit", "inherit", "ignore"] });
+process.exit(await s.exited);`;
+      const plan = [
+        {
+          argv: [...vm.program, "hook", "claude"],
+          env: daemon,
+          payload: JSON.stringify({ hook_event_name: "SessionStart", source: "startup", cwd: work, session_id: id }),
+        },
+        { argv: [mount.command, ...mount.args], env: { ...daemon, ...mount.env } },
+      ];
+      const started = Bun.spawn([process.execPath, "-e", script], {
+        env: { ...daemon, FAKE_SESSION: JSON.stringify(plan) },
+        cwd: work,
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      session = started;
+      started.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`);
+      started.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "relay_whoami", arguments: {} } })}\n`);
+      started.stdin.flush();
+      const reader = started.stdout.getReader();
+      let out = "";
+      while (!out.includes('"id":1')) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error(`the session ended: ${out}`);
+        out += new TextDecoder().decode(chunk.value);
+      }
+      reader.releaseLock();
+      expect(out).toContain("address: me/worker");
+      expect(out).toContain("not linked under me/laptop/lead (not_found");
+      const local = async () => (await vm.list()).filter((e) => e.kind === "agent" && e.address.split("/").length === 2);
+      expect((await local()).map((e) => [e.address, e.parent])).toEqual([["me/worker", null]]);
+      gate.open();
+      await vm.linked();
+      await waitFor(async () => (await local()).find((e) => e.address === "me/worker" && e.parent === "me/laptop/lead"), "vm worker linked", 30000);
+      expect((await local()).map((e) => e.address)).toEqual(["me/worker"]);
+      await waitFor(async () => (await laptop.list()).find((e) => e.address === "me/vm/worker" && e.parent === "me/lead"), "laptop sees the child", 30000);
+    } finally {
+      if (session?.stdin && typeof session.stdin !== "number") session.stdin.end();
+      await session?.exited;
+      gate.stop();
+    }
+  }, 90000);
   test("two bridged machines exchange a message and reply on the same thread", async () => {
     const sent = await laptop.send("ada", "desk/bob", "hello desk");
     expect(sent.deliveries).toHaveLength(1);

@@ -76,16 +76,16 @@ test("background mount retains explicit placement and its claim links across bro
     clients.push(client)
     return client
   }
-  const machine = async (name: string, linked = true) => {
+  const machine = async (name: string, linked = true, url = hub.url) => {
     const broker = await startBroker({
       dir: join(root, name),
       policyPath: join(root, `${name}.json`),
       idleMs: 0,
       log: () => {},
-      ...(linked ? { bridge: { url: hub.url, token, machine: name, backoff: { minMs: 20, maxMs: 100 }, localFlushMs: 20 } } : {}),
+      ...(linked ? { bridge: { url, token, machine: name, backoff: { minMs: 20, maxMs: 100 }, localFlushMs: 20 } } : {}),
     })
     brokers.push(broker)
-    if (linked) await until(async () => broker.bridge!.status().connected || undefined)
+    if (linked && url === hub.url) await until(async () => broker.bridge!.status().connected || undefined)
     return broker
   }
   try {
@@ -103,6 +103,15 @@ test("background mount retains explicit placement and its claim links across bro
     await expect(attribute("pi", { under: "me/laptop/lead" }, {}, root, () => {}, { connect: async () => RelayClient.connect(solo.socket) })).rejects.toThrow(
       "not linked to a hub",
     )
+    const down = await machine("down", true, "http://127.0.0.1:9")
+    const warned: string[] = []
+    expect(
+      await attribute("pi", { under: "me/laptop/lead" }, {}, root, (line) => warned.push(line), { connect: async () => RelayClient.connect(down.socket) }),
+    ).toEqual({
+      env: { SCP_UNDER: "me/laptop/lead" },
+      parent: "me/laptop/lead",
+    })
+    expect(warned.join("\n")).toContain("not linked to the hub yet")
 
     const bin = join(root, "bin")
     mkdirSync(bin)

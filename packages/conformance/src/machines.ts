@@ -58,7 +58,7 @@ export class Machine {
   async json<T>(args: string[], extra: Record<string, string> = {}): Promise<T> {
     return JSON.parse(await this.run([args[0]!, "--json", ...args.slice(1)], extra)) as T;
   }
-  async start() {
+  async start(options: { linked?: boolean } = {}) {
     await this.run(["cloud", "enable", "--machine", this.name]);
     const child = Bun.spawn([...this.program, "daemon", "--idle", "10m", "--policy", join(this.env.XDG_CONFIG_HOME!, "scp/policy.json")], {
       env: this.env,
@@ -74,7 +74,7 @@ export class Machine {
       if (child.exitCode !== null) throw new Error(`broker exited: ${this.errors}`);
       return existsSync(socketPath(this.env.SCP_DIR!));
     }, `${this.name} broker socket`);
-    await this.linked();
+    if (options.linked !== false) await this.linked();
   }
   async linked() {
     await waitFor(async () => (await this.json<{ broker: { connected: boolean } }>(["cloud", "status"])).broker.connected, `${this.name} bridge`);
@@ -114,4 +114,58 @@ export class Machine {
       rmSync(this.root, { recursive: true, force: true });
     }
   }
+}
+
+/** a TCP relay to `url` that turns every connection away until it is opened, as a hub a machine cannot reach yet */
+export function hubGate(url: string) {
+  const hub = new URL(url);
+  let open = false;
+  type Side = { peer?: { write(data: Uint8Array): number; end(): void }; queued: Uint8Array[]; closed?: boolean };
+  const server = Bun.listen<Side>({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(socket) {
+        socket.data = { queued: [] };
+        if (!open) return void socket.end();
+        void Bun.connect({
+          hostname: hub.hostname,
+          port: Number(hub.port),
+          socket: {
+            open(peer) {
+              if (socket.data.closed) return void peer.end();
+              socket.data.peer = peer;
+              for (const chunk of socket.data.queued.splice(0)) peer.write(chunk);
+            },
+            data(_peer, chunk) {
+              socket.write(chunk);
+            },
+            close() {
+              socket.end();
+            },
+            error() {
+              socket.end();
+            },
+          },
+        }).catch(() => socket.end());
+      },
+      data(socket, chunk) {
+        if (socket.data.peer) socket.data.peer.write(chunk);
+        else socket.data.queued.push(new Uint8Array(chunk));
+      },
+      close(socket) {
+        socket.data.closed = true;
+        socket.data.peer?.end();
+      },
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    open() {
+      open = true;
+    },
+    stop() {
+      server.stop(true);
+    },
+  };
 }

@@ -15,6 +15,7 @@ import {
   type JudgeHeld,
   type JudgeRedacted,
   LIMITS,
+  type LinkPending,
   type MessageReceipts,
   PREAMBLE,
   presenceText,
@@ -843,7 +844,11 @@ async function runVerb(
   switch (verb) {
     case "whoami": {
       if (!me) throw new RelayUsage(`${CLI_NAME} whoami needs an identity: --as HANDLE or --human`)
-      if (asJson) json({ ...me, bound })
+      const pending =
+        me.kind === "agent" && me.parent === null
+          ? (await client.request<{ link_pending?: LinkPending }>("whoami").catch(() => undefined))?.link_pending
+          : undefined
+      if (asJson) json({ ...me, ...(pending ? { link_pending: pending } : {}), bound })
       else {
         out(`${me.address} (${me.kind}${me.harness ? `, ${me.harness}` : ""})`)
         const how = bound === "as" ? "--as" : bound === "lineage" ? "this shell's harness process" : bound === "human" ? "human inbox" : "-"
@@ -858,7 +863,7 @@ async function runVerb(
               ] as [string, string][])),
           ["cwd", shortCwd(me.cwd) || "-"],
           ...(bound === "as" ? [] : ([["harness pid", harnessPid ? String(harnessPid) : "-"]] as [string, string][])),
-          ["parent", me.parent ?? "root"],
+          ["parent", me.parent ?? (pending ? `root: not linked under ${pending.under} yet (${pending.code}: ${pending.message})` : "root")],
           ["bound", how],
         ]
         for (const [label, value] of fields) out(`${label.padEnd(12)}${value}`)

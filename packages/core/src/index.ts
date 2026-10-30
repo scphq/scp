@@ -17,6 +17,7 @@ export {
   type EndpointRow,
   type LocalAgent,
   type MessageRow,
+  type LinkPending,
   type Relinked,
   type WakeJob,
 } from "./core"
