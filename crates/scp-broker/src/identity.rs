@@ -1,16 +1,14 @@
 use crate::authority::Actor;
-use crate::claims::{
-    busy_since, clean_text, harness_fits, harness_session, revivable, same_harness, same_provider,
-    valid_handle,
-};
-use crate::core::{Core, integer, now_ms, text, timestamp};
-use crate::proto::{ErrorCode, RpcError};
+use crate::claims::{busy_since, harness_fits, revivable, same_provider, valid_handle};
+use crate::core::{Core, integer, now_ms, text};
+use crate::proto::RpcError;
 use crate::rules::{cap_id, caps_json};
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
 use crate::views::{address, not_found, opt, presence};
 use crate::world::caps_of;
 use scp_core::protocol::CLI_NAME;
+use scp_core::protocol::ErrorCode;
 use scp_core::protocol::{ScopeCap, ScopeDirection, ScopePreset};
 use scp_core::scope::{admits, has_scope, preset_lists};
 use serde_json::{Map, Value, json};
@@ -523,21 +521,11 @@ impl Core {
             let under = self.parent_address(&target).await?;
             let parent = address(&parent);
             let params = json!({"to":address(&target),"kind":"request","ttl_s":86_400,"body":format!("{parent} asks you to link under it as its worker. You sit under {under} now: you can accept only once you are a root again. To accept, run {CLI_NAME} link accept <id> with this message's id, or {CLI_NAME} join --under {parent} (relay_link_accept {{id}} or relay_join {{under: \"{parent}\"}}).")});
-            let me_id = text(&me, "id").ok_or_else(RpcError::internal)?.to_owned();
-            let targets: Vec<String> = self
-                .send_targets_as(&me_id, named, false)
-                .await?
-                .iter()
-                .filter_map(|row| text(row, "id").map(str::to_owned))
-                .collect();
             let sent = self
-                .judged_send(
-                    conn,
-                    &me_id,
-                    &targets,
+                .send_link_request(
+                    text(&me, "id").ok_or_else(RpcError::internal)?,
+                    &target_id,
                     params.as_object().ok_or_else(RpcError::internal)?,
-                    false,
-                    true,
                 )
                 .await?;
             if let Some(held) = sent.get("held").filter(|v| !v.is_null()) {
@@ -895,77 +883,5 @@ impl Core {
             relinked.push(pair);
         }
         Ok(json!({"relinked":relinked}))
-    }
-    pub async fn event(
-        &self,
-        conn: ConnectionId,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        let kind = params
-            .get("kind")
-            .and_then(Value::as_str)
-            .filter(|v| ["session_start", "tool", "stop", "note", "session_end"].contains(v))
-            .ok_or_else(|| RpcError::invalid_params("kind is an activity kind"))?;
-        let c = self.connection(conn)?;
-        let id = c.endpoint.as_deref().ok_or_else(|| {
-            RpcError::new(ErrorCode::Unauthorized, "this connection has no endpoint")
-        })?;
-        let row = self.must_endpoint(id).await?;
-        let tool =
-            clean_text(params.get("tool"), "tool", 64)?.map(|v| crate::scrub::redact_secrets(&v));
-        let summary = clean_text(params.get("summary"), "summary", 4096)?.map(|v| {
-            crate::scrub::redact_secrets(&v)
-                .chars()
-                .take(200)
-                .collect::<String>()
-        });
-        let agent =
-            clean_text(params.get("agent"), "agent", 64)?.map(|v| crate::scrub::redact_secrets(&v));
-        let now = now_ms();
-        let activity=self.store.all("INSERT INTO activity (at,endpoint,kind,tool,summary,agent) VALUES (?,?,?,?,?,?) RETURNING id",&[SqlValue::Int(now),opt(Some(id)),opt(Some(kind)),opt(tool.as_deref()),opt(summary.as_deref()),opt(agent.as_deref())]).await?.into_iter().next().ok_or_else(RpcError::internal)?;
-        let activity_id = integer(&activity, "id").ok_or_else(RpcError::internal)?;
-        self.store
-            .all(
-                "DELETE FROM activity WHERE id <= ?",
-                &[SqlValue::Int(activity_id - 5000)],
-            )
-            .await?;
-        let own = c.mode != Mode::Transient
-            || c.process
-                .as_deref()
-                .zip(text(&row, "process"))
-                .is_some_and(|(a, b)| same_harness(a, b));
-        if own
-            && agent.is_none()
-            && let Some(session) = params
-                .get("session_id")
-                .and_then(Value::as_str)
-                .filter(|v| harness_session(v))
-        {
-            self.store
-                .all(
-                    "UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ?",
-                    &[
-                        opt(Some(session)),
-                        opt(params
-                            .get("transcript_path")
-                            .and_then(Value::as_str)
-                            .filter(|v| v.starts_with('/'))),
-                        opt(Some(id)),
-                    ],
-                )
-                .await?;
-        }
-        if kind == "session_end" && own {
-            self.store.all("UPDATE endpoints SET hook_seen = NULL,hook_ended = ?,session = CASE WHEN connections = 0 THEN NULL ELSE session END WHERE id = ?",&[SqlValue::Int(now),opt(Some(id))]).await?;
-        } else if kind == "session_start" {
-            self.store.all("UPDATE endpoints SET hook_seen = COALESCE(?,hook_seen),hook_ended = NULL,stop_blocks = CASE WHEN ? THEN 0 ELSE stop_blocks END,pushes = CASE WHEN ? THEN 0 ELSE pushes END WHERE id = ?",&[if c.mode==Mode::Transient{SqlValue::Int(now)}else{SqlValue::Null},SqlValue::Int(i64::from(own)),SqlValue::Int(i64::from(own)),opt(Some(id))]).await?;
-        } else if c.mode == Mode::Transient {
-            self.store.all("UPDATE endpoints SET hook_seen = ? WHERE id = ? AND (hook_ended IS NULL OR hook_ended < ?)",&[SqlValue::Int(now),opt(Some(id)),SqlValue::Int(now-30000)]).await?;
-        }
-        self.touch(id).await?;
-        Ok(
-            json!({"id":activity_id,"at":timestamp(now),"endpoint":address(&row),"kind":kind,"tool":tool,"summary":summary,"agent":agent}),
-        )
     }
 }

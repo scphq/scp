@@ -6,14 +6,15 @@ use serde_json::{Map, Value, json};
 
 use crate::authority::Actor;
 use crate::core::{Core, now_ms, text, timestamp};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::rules::{
     DIRS, Namer, cap_id, caps_json, optional, rule_get, rules_json, selector_list, set_rule,
 };
-use crate::state::{ConnectionId, Mode};
+use crate::state::ConnectionId;
 use crate::store::{Row, SqlValue};
-use crate::views::{address, not_found};
+use crate::views::address;
 use crate::world::{Group, GroupRules, World, caps_of};
+use scp_core::protocol::ErrorCode;
 use scp_core::protocol::{ScopeCap, ScopePreset};
 use scp_core::scope::{ScopeCaps, ScopeRules, preset_lists};
 
@@ -866,37 +867,13 @@ impl Core {
         Ok(json!(out))
     }
 
-    /// The endpoints one `to` address of a send reaches: a group's members or the sender's children within its scope, or one endpoint it may message.
-    pub async fn send_targets(
+    /// The members of `group:<name>` (the sender must be one) or the sender's `tree:children` in its scope, the sender excluded; a reply reaches the asker.
+    pub(crate) async fn expand(
         &self,
-        sender_id: &str,
+        sender: &Row,
         value: &str,
-        conn: ConnectionId,
+        reply_to: Option<&Row>,
     ) -> Result<Vec<Row>, RpcError> {
-        let tty = !matches!(self.connection(conn)?.mode, Mode::Human { tty: false });
-        self.send_targets_as(sender_id, value, tty).await
-    }
-
-    /// the recipients `value` names for `sender_id` under the current scope rules; `tty` is whether a human sender has a terminal
-    pub async fn send_targets_as(
-        &self,
-        sender_id: &str,
-        value: &str,
-        tty: bool,
-    ) -> Result<Vec<Row>, RpcError> {
-        let sender = self.must_endpoint(sender_id).await?;
-        let trimmed = value.trim();
-        if trimmed.starts_with("group:") || trimmed == "tree:children" {
-            return self.expand(&sender, trimmed).await;
-        }
-        let row = self.lookup(value).await?;
-        let unverified = text(&sender, "kind") == Some("human") && !tty;
-        self.check_scope(&sender, &row, trimmed, None, unverified)
-            .await?;
-        Ok(vec![row])
-    }
-
-    async fn expand(&self, sender: &Row, value: &str) -> Result<Vec<Row>, RpcError> {
         let world = self.world().await?;
         let sender_id = row_id(sender);
         let members: Vec<Row> = if value == "tree:children" {
@@ -919,20 +896,24 @@ impl Core {
                 {
                     world.group_members(&group).into_iter().cloned().collect()
                 }
-                _ => return Err(not_found(value)),
+                _ => return Err(crate::messages::unreachable(value)),
             }
         };
-        let reached: Vec<Row> = members
-            .into_iter()
-            .filter(|row| {
-                row_id(row) != sender_id
-                    && world
-                        .refusal(sender_id, row_id(row), false, false)
-                        .is_none()
-            })
-            .collect();
+        let mut reached = Vec::new();
+        for row in members {
+            if row_id(&row) == sender_id {
+                continue;
+            }
+            let solicited = self.solicited(sender, &row, reply_to).await?;
+            if world
+                .decide(sender_id, row_id(&row), solicited, false, false)
+                .allowed
+            {
+                reached.push(row);
+            }
+        }
         if reached.is_empty() {
-            return Err(not_found(value));
+            return Err(crate::messages::unreachable(value));
         }
         if reached.len() > FAN_OUT_MAX {
             return Err(RpcError::new(
@@ -1094,37 +1075,5 @@ impl Core {
             groups.push(entry);
         }
         Ok((json!(caps), json!(groups)))
-    }
-
-    /// The send guards that run before the write: the fan-out cap and the policy, each refusal audited.
-    pub async fn send_guards(&self, sender: &Row, targets: &[Row]) -> Result<(), RpcError> {
-        if targets.len() > FAN_OUT_TOTAL {
-            return Err(RpcError::new(
-                ErrorCode::TooLarge,
-                format!(
-                    "the send reaches {} endpoints, more than {FAN_OUT_TOTAL}",
-                    targets.len()
-                ),
-            ));
-        }
-        if self.policy.is_none() {
-            return Ok(());
-        }
-        let world = self.world().await?;
-        for target in targets {
-            if let Some(refusal) = world.policy_refusal(row_id(sender), row_id(target)) {
-                let to = address(target);
-                let message = format!("{refusal} ({to})");
-                self.audit(
-                    "refuse",
-                    Some(row_id(sender)),
-                    None,
-                    json!({"code": "policy_refused", "message": message, "to": [to]}),
-                )
-                .await?;
-                return Err(RpcError::new(ErrorCode::PolicyRefused, message));
-            }
-        }
-        Ok(())
     }
 }

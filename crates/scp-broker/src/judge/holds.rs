@@ -1,15 +1,16 @@
 use serde_json::{Map, Value, json};
 
 use crate::core::{Core, integer, now_ms, text, timestamp};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::scrub::strip_control;
 use crate::state::ConnectionId;
 use crate::store::{Row, SqlValue};
 use crate::views::address;
+use scp_core::protocol::ErrorCode;
 
 use super::runtime::hash;
 use super::verdict::apply_redactions;
-use super::{new_id, no_hold, recipients, required, stored, stored_detail, string, verdict};
+use super::{new_id, no_hold, required, stored, stored_detail, string, verdict};
 
 impl Core {
     pub async fn review_hold(
@@ -124,24 +125,18 @@ impl Core {
             sent.insert("body".into(), json!(applied.text));
             redactions = Some(json!({"n":applied.n,"kinds":applied.kinds}));
         }
-        let delivery = async {
-            let origin = stored(row, "origin")?;
-            let tty = origin["tty"] == true;
-            let mut targets = Vec::new();
-            for to in recipients(&sent) {
-                for target in self.send_targets_as(from, &to, tty).await? {
-                    let id = text(&target, "id")
-                        .ok_or_else(RpcError::internal)?
-                        .to_owned();
-                    if !targets.contains(&id) {
-                        targets.push(id);
-                    }
-                }
-            }
-            self.send_message(from, &targets, &sent, tty, origin["link"] == true)
-                .await
-        }
-        .await;
+        let origin = stored(row, "origin")?;
+        let delivery = self
+            .send_message(
+                from,
+                &sent,
+                crate::messages::Origin {
+                    tty: origin["tty"].as_bool(),
+                    unverified: origin["unverified"] == true,
+                    link: origin["link"].as_str().map(|_| "session"),
+                },
+            )
+            .await;
         let mut result = match delivery {
             Ok(result) => result,
             Err(error) => {

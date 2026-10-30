@@ -1,8 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use serde_json::Value;
-use tokio::sync::Notify;
+use serde_json::{Value, json};
+use tokio::sync::{Notify, mpsc};
 
 pub type ConnectionId = u64;
 
@@ -33,6 +33,8 @@ pub struct Connection {
     pub terminal: bool,
     pub cwd: Option<String>,
     pub closed: Arc<Notify>,
+    pub watching: bool,
+    pub events: Option<mpsc::UnboundedSender<Value>>,
 }
 
 impl Connection {
@@ -52,8 +54,12 @@ pub struct State {
     pub presence: HashMap<String, usize>,
     pub addresses: HashMap<String, String>,
     pub waiters: HashMap<String, Arc<Notify>>,
+    pub closing: bool,
+    pub stopping: Arc<Notify>,
     pub subagent_titles: VecDeque<(String, String)>,
     pub deferred: Option<(Option<String>, Value)>,
+    /// the presence and address last reported to watchers, by endpoint id
+    pub known: HashMap<String, (String, String)>,
     next_id: ConnectionId,
 }
 
@@ -69,6 +75,21 @@ impl State {
             },
         );
         id
+    }
+
+    /// a `fleet` notification to one watching connection
+    pub fn notify_watcher(&self, conn: ConnectionId, event: Value, at: Option<String>) {
+        let mut params = json!({"at": at});
+        if let (Some(target), Some(fields)) = (params.as_object_mut(), event.as_object()) {
+            target.extend(fields.clone());
+        }
+        let frame = json!({"jsonrpc": "2.0", "method": "fleet", "params": params});
+        if let Some(connection) = self.connections.get(&conn)
+            && connection.watching
+            && let Some(events) = &connection.events
+        {
+            let _ = events.send(frame);
+        }
     }
 
     pub fn waiter(&mut self, endpoint: &str) -> Arc<Notify> {

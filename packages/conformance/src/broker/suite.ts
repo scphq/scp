@@ -51,12 +51,7 @@ export type Start = (files?: BrokerFiles) => Promise<BrokerFixture>;
 
 /** suites the native engine does not implement yet; they are registered as pending on the `rust` target */
 export const rustPending = new Set([
-  "broker delivery",
-  "broker hook goldens",
-  "broker injection",
-  "broker limits and hardening",
   "broker peek",
-  "broker push",
   "broker grant redemption and incarnation",
   "broker grant validation",
   "broker spawn",
@@ -68,10 +63,8 @@ export const rustPending = new Set([
 
 /** single tests the native engine does not implement yet, as `<suite title> > <test name>`; they are todo on the `rust` target */
 export const rustPendingTests = new Set([
-  "broker scopes > ancestor traffic passes caps and reply grants pass both directions repeatedly",
-  "broker scopes > watch events respect visibility",
-  "broker lineage > root shells bind subagents without tokens and messages stay in their own inboxes",
-  "broker judge and hold review > ask returns a hold at once instead of waiting for a reply",
+  "broker push > a waker interrupts a waiting stop and future stops return promptly",
+  "broker push > gathering returns promptly when interrupted by wake",
 ]);
 
 let registering: { title: string; name: string } | undefined;

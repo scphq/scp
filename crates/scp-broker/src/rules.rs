@@ -10,11 +10,12 @@ use serde_json::{Map, Value, json};
 use crate::authority::Actor;
 use crate::core::{Core, integer, text};
 use crate::policy::{preset, valid_selector};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::state::ConnectionId;
 use crate::store::{Row, SqlValue};
 use crate::views::{address, not_found};
 use crate::world::{World, caps_of, rules_of};
+use scp_core::protocol::ErrorCode;
 
 const RESERVED_WORDS: [&str; 12] = [
     "open",

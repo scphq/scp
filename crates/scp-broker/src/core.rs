@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use scp_core::protocol::{BROKER_CAPABILITIES, ErrorCode, PROTOCOL};
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -9,7 +10,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::paths::Paths;
 use crate::procs::Procs;
-use crate::proto::{CAPABILITIES, ErrorCode, Limits, PREAMBLE, PROTOCOL, RpcError};
+use crate::proto::{Limits, PREAMBLE, RpcError};
 use crate::state::{ConnectionId, Mode, State};
 use crate::store::{Row, SqlValue, Storage};
 
@@ -90,7 +91,7 @@ impl Core {
     }
 
     pub fn hello_result(&self, endpoint: Value, token: Option<String>) -> Value {
-        let mut result = json!({"endpoint": endpoint, "capabilities": CAPABILITIES, "server_time": timestamp(now_ms()), "limits": self.limits, "preamble": PREAMBLE, "broker": self.broker_info()});
+        let mut result = json!({"endpoint": endpoint, "capabilities": BROKER_CAPABILITIES, "server_time": timestamp(now_ms()), "limits": self.limits, "preamble": PREAMBLE, "broker": self.broker_info()});
         if let Some(token) = token {
             result["token"] = json!(token);
         }
@@ -155,65 +156,54 @@ impl Core {
         match method {
             "whoami" => self.view(&self.must_endpoint(&endpoint).await?).await,
             "list" => self.list_for(conn, params).await,
-            "rename" => self.rename(conn, params).await,
+            "rename" => {
+                let view = self.rename(conn, params).await?;
+                if let Some(id) = view["id"].as_str() {
+                    self.state.known.remove(id);
+                    let id = id.to_owned();
+                    self.presence_moved(&id, true, true).await?;
+                }
+                Ok(view)
+            }
             "leave" => self.leave(conn, params).await,
             "adopt" => self.adopt(conn, params).await,
             "link_accept" => self.link_accept(conn, params).await,
             "unlink" => self.unlink(conn, params).await,
             "relink" => self.relink(conn, params).await,
-            "event" => self.event(conn, params).await,
+            "event" => {
+                let row = self.event(conn, params).await?;
+                if !endpoint.is_empty() {
+                    self.presence_moved(&endpoint, true, true).await?;
+                }
+                Ok(row)
+            }
             "grant" => self.grant(conn, params).await,
             "log" => self.log_for(conn, params).await,
-            "send" => {
-                self.policy_gate().await?;
-                crate::messages::validate_send(params, &self.limits)?;
-                let to = params
-                    .get("to")
-                    .ok_or_else(|| RpcError::invalid_params("to is an address or list"))?;
-                let addresses = if let Some(to) = to.as_str() {
-                    vec![to]
-                } else {
-                    to.as_array()
-                        .ok_or_else(|| RpcError::invalid_params("to is an address or list"))?
-                        .iter()
-                        .map(|v| {
-                            v.as_str()
-                                .ok_or_else(|| RpcError::invalid_params("to is an address or list"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                self.judge_foreign(&endpoint, &addresses, params).await?;
-                let mut recipients = Vec::new();
-                for value in addresses {
-                    for row in self.send_targets(&endpoint, value, conn).await? {
-                        let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
-                        if !recipients.contains(&id) {
-                            recipients.push(id);
-                        }
-                    }
-                }
-                self.judged_send(
-                    conn,
-                    &endpoint,
-                    &recipients,
-                    params,
-                    matches!(connection.mode, Mode::Human { tty: true }),
-                    false,
-                )
-                .await
-            }
+            "send" | "ask" => self.send_rpc(conn, method, params).await,
+            "ask_wait" => self.ask_wait(&endpoint, params).await,
+            "inbox" if crate::session::flag(params, "offer") => self.offer(&endpoint, params).await,
             "inbox" => self.inbox(&endpoint, params).await,
             "ack" => {
                 self.ack(&endpoint, params.get("seqs").unwrap_or(&Value::Null))
                     .await
             }
+            "message" => self.message_rpc(&endpoint, params).await,
+            "receipts" => self.receipts(&endpoint, params).await,
+            "watch" => self.watch(conn).await,
             "status" => self.status(&endpoint, params).await,
             "title" => {
                 self.title(&endpoint, params.get("text"), &connection.mode)
                     .await
             }
-            "title_infer" => self.title_infer(&endpoint, params).await,
-            "prompted" => self.prompted(&endpoint, params).await,
+            "title_infer" => self.title_infer_rpc(conn, params).await,
+            "prompted" => self.prompted_rpc(conn, params).await,
+            "inject" => self.inject(conn, params).await,
+            "injected" => self.injected_rpc(conn, params).await,
+            "stop_wait" => self.stop_wait(conn, params, false).await,
+            "subagent_title" => self.subagent_title(conn, params).await,
+            "spawn_exit" => self.spawn_exit(conn, params).await,
+            "spawn_steers" => self.spawn_steers(conn, params).await,
+            "spawn_end" => self.spawn_end(conn, params).await,
             "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
                 self.review_hold(conn, method, params).await
             }
@@ -238,8 +228,6 @@ impl Core {
             "snapshot" => self.snapshot_for(conn, params).await,
             "policy" => self.policy_view(conn).await,
             "policy_check" => self.policy_check(conn, params).await,
-            "subagent_title" => self.subagent_title(conn, params).await,
-            "spawn_steers" => self.spawn_steers(conn, params).await,
             "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
             "machine_wake" => Err(RpcError::new(
                 ErrorCode::Unavailable,
@@ -270,7 +258,47 @@ impl Core {
         if params.get("protocol").and_then(Value::as_str) != Some(PROTOCOL) {
             return Err(RpcError::invalid_params("this broker speaks scp/1"));
         }
-        crate::claims::hello_claim(self, conn, params).await
+        let result = crate::claims::hello_claim(self, conn, params).await?;
+        let brief = self.state.connections.get(&conn).is_some_and(|c| c.brief);
+        if let Some(id) = result["endpoint"]["id"].as_str() {
+            let id = id.to_owned();
+            self.presence_moved(&id, !brief, true).await?;
+        }
+        Ok(result)
+    }
+
+    /// records an endpoint's presence and address; when either moved since the last report and `notify`, watchers hear it
+    pub async fn presence_moved(
+        &mut self,
+        id: &str,
+        notify: bool,
+        full: bool,
+    ) -> Result<bool, RpcError> {
+        let Some(row) = self.by_id(id).await? else {
+            return Ok(false);
+        };
+        let view = self.endpoint_view(&row)?;
+        let now = (
+            view["presence"].as_str().unwrap_or("offline").to_owned(),
+            view["address"].as_str().unwrap_or("").to_owned(),
+        );
+        let moved = self
+            .state
+            .known
+            .get(id)
+            .map_or(now.0 != "offline", |was| *was != now);
+        self.state.known.insert(id.to_owned(), now);
+        if !moved || !notify {
+            return Ok(false);
+        }
+        let mut event =
+            json!({"type": "presence", "endpoint": view["address"], "presence": view["presence"]});
+        if full {
+            event["harness"] = view["harness"].clone();
+            event["labels"] = view["labels"].clone();
+        }
+        self.notify_watchers(event).await;
+        Ok(true)
     }
 
     pub fn endpoint_view(&self, row: &Row) -> Result<Value, RpcError> {
@@ -330,10 +358,25 @@ impl Core {
             if let Err(error) = result {
                 tracing::error!(%error, "disconnect failed");
             } else if !connection.brief {
-                let settled = self.store.all("UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ? AND connections = 0 AND (hook_seen IS NULL OR hook_seen < ?) AND status_state IN ('working','waiting')", &[SqlValue::Text(endpoint), SqlValue::Int(now_ms()-1_800_000)]).await;
-                if let Err(error) = settled {
-                    tracing::error!(%error, "disconnect settlement failed");
+                let settled = self.store.all("UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ? AND connections = 0 AND (hook_seen IS NULL OR hook_seen < ?) AND status_state IN ('working','waiting') RETURNING id", &[SqlValue::Text(endpoint.clone()), SqlValue::Int(now_ms()-1_800_000)]).await;
+                if let Err(error) = self.presence_moved(&endpoint, true, false).await {
+                    tracing::error!(%error, "disconnect presence failed");
                 }
+                match settled {
+                    Err(error) => tracing::error!(%error, "disconnect settlement failed"),
+                    Ok(rows) if !rows.is_empty() => {
+                        let address = self.state.addresses.get(&endpoint).cloned();
+                        if let Some(address) = address {
+                            self.notify_watchers(
+                                json!({"type": "status", "endpoint": address, "status": null}),
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(_) => {}
+                }
+            } else {
+                let _ = self.presence_moved(&endpoint, false, false).await;
             }
         }
     }
@@ -345,6 +388,12 @@ impl Core {
         method: String,
         params: Map<String, Value>,
     ) -> Result<Value, RpcError> {
+        if matches!(method.as_str(), "inbox" | "ask" | "ask_wait") {
+            return Self::poll(shared, guard, conn, &method, &params).await;
+        }
+        if method == "stop_wait" && guard.connection(conn)?.bound() {
+            return Self::stop_wait_poll(shared, guard, conn, params).await;
+        }
         let mut result = guard.dispatch(conn, &method, &params).await?;
         let wait_s = params
             .get("wait_s")
@@ -352,13 +401,17 @@ impl Core {
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(0.0)
             .min(guard.limits.get("waitMaxS").unwrap_or(50) as f64);
-        if method != "inbox" || wait_s == 0.0 {
+        let list = "offered";
+        let waits = method == "inject"
+            && !crate::session::flag(&params, "stop")
+            && !crate::session::flag(&params, "count");
+        if !waits || wait_s == 0.0 {
             return Ok(result);
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(wait_s);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs_f64(wait_s);
         loop {
             if !result
-                .get("messages")
+                .get(list)
                 .and_then(Value::as_array)
                 .is_some_and(Vec::is_empty)
             {

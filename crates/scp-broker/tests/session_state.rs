@@ -2,10 +2,10 @@
 mod support;
 
 use scp_broker::core::{integer, text};
-use scp_broker::proto::ErrorCode;
 use scp_broker::session::{hook_title, one_line};
 use scp_broker::state::Mode;
 use scp_broker::store::{SqlValue, Storage};
+use scp_core::protocol::ErrorCode;
 use serde_json::json;
 use support::{TestCore, params};
 

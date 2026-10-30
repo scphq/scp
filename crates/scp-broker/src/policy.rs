@@ -486,7 +486,7 @@ impl Core {
         self.load_policy().await?;
         match &self.policy_error {
             Some(error) => Err(RpcError::new(
-                crate::proto::ErrorCode::PolicyRefused,
+                scp_core::protocol::ErrorCode::PolicyRefused,
                 error.clone(),
             )),
             None => Ok(()),

@@ -14,6 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::core::{Core, SharedCore};
+use crate::hooks::{HookCalls, HookHandler};
 use crate::paths::{BrokerLock, Paths};
 use crate::proto::{Limits, RpcError};
 use crate::store::sqlite::SqliteStore;
@@ -37,9 +38,16 @@ pub struct Broker {
     lock: BrokerLock,
     socket_inode: u64,
     idle: Duration,
+    hook: Option<Arc<dyn HookHandler>>,
 }
 
 impl Broker {
+    /// Serves the `hook` RPC through `handler` and advertises the "hook" capability.
+    pub fn with_hook(mut self, handler: Arc<dyn HookHandler>) -> Self {
+        self.hook = Some(handler);
+        self
+    }
+
     pub async fn start(options: BrokerOptions) -> io::Result<Self> {
         options.paths.prepare().await?;
         let lock = BrokerLock::acquire(&options.paths.lock).await?;
@@ -52,6 +60,7 @@ impl Broker {
                 idle,
                 lock,
                 socket_inode,
+                hook: None,
             }),
             Err(error) => {
                 lock.release().await;
@@ -140,12 +149,18 @@ impl Broker {
                     Ok((stream, _)) => {
                         let core = self.core.clone();
                         let stopping = stopping.clone();
-                        connections.spawn(async move { serve_connection(stream, core, stopping).await; });
+                        let hook = self.hook.clone();
+                        connections.spawn(async move { serve_connection(stream, core, stopping, hook).await; });
                     }
                     Err(error) => break Err(error),
                 }
             }
         };
+        {
+            let mut core = self.core.lock().await;
+            core.state.closing = true;
+            core.state.stopping.notify_waiters();
+        }
         let _ = stop.send(true);
         let drain = async { while connections.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_secs(2), drain)
@@ -248,6 +263,29 @@ struct Output {
 }
 
 impl Output {
+    /// a fleet event for a watcher; one that would overrun the output cap gets a single `lagged` notice instead, and false
+    fn send_event(&self, frame: Value) -> bool {
+        let Ok(mut bytes) = serde_json::to_vec(&frame) else {
+            return true;
+        };
+        bytes.push(b'\n');
+        let queued = self.queued.load(Ordering::Relaxed);
+        if queued == 0 || queued.saturating_add(bytes.len()) <= OUTBOUND_CAP {
+            self.send(frame);
+            return true;
+        }
+        let lagged = json!({"jsonrpc": "2.0", "method": "fleet", "params": {"at": frame["params"]["at"], "type": "lagged", "queued_bytes": queued}});
+        if let Ok(mut bytes) = serde_json::to_vec(&lagged) {
+            bytes.push(b'\n');
+            self.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+            if let Err(error) = self.tx.send(bytes) {
+                self.queued.fetch_sub(error.0.len(), Ordering::Relaxed);
+                self.failed.notify_one();
+            }
+        }
+        false
+    }
+
     fn send(&self, frame: Value) {
         let Ok(mut bytes) = serde_json::to_vec(&frame) else {
             return;
@@ -266,15 +304,22 @@ impl Output {
     }
 }
 
-async fn serve_connection(
+pub(crate) async fn serve_connection(
     stream: UnixStream,
     core: SharedCore,
     mut stopping: watch::Receiver<bool>,
+    hook: Option<Arc<dyn HookHandler>>,
 ) {
+    let (events, mut fleet) = mpsc::unbounded_channel::<Value>();
     let (conn, closed) = {
         let mut core = core.lock().await;
         let conn = core.state.connect();
-        (conn, core.state.connections[&conn].closed.clone())
+        let connection = core.state.connections.get_mut(&conn);
+        let closed = connection.map(|c| {
+            c.events = Some(events);
+            c.closed.clone()
+        });
+        (conn, closed.unwrap_or_default())
     };
     let closing = closed.notified();
     tokio::pin!(closing);
@@ -304,6 +349,11 @@ async fn serve_connection(
     let mut chunk = [0u8; 64 * 1024];
     let mut partial_since: Option<Instant> = None;
     let mut too_large = false;
+    let hooks = hook.as_ref().map(|_| {
+        let output = output.clone();
+        HookCalls::new(core.clone(), conn, move |frame| output.send(frame))
+    });
+    let mut not_plain = false;
     'connection: loop {
         if *stopping.borrow() {
             break;
@@ -318,6 +368,15 @@ async fn serve_connection(
             _ = stopping.changed() => break,
             _ = failed.notified() => break,
             _ = requests.join_next(), if !requests.is_empty() => {},
+            Some(event) = fleet.recv() => {
+                if !output.send_event(event) {
+                    let mut core = core.lock().await;
+                    if let Some(connection) = core.state.connections.get_mut(&conn) {
+                        connection.watching = false;
+                    }
+                    while fleet.try_recv().is_ok() {}
+                }
+            }
             _ = tokio::time::sleep_until(deadline), if partial_since.is_some() && !too_large => {
                 output.send(RpcError::invalid_request("the request line was not finished in time").frame(Value::Null));
                 break;
@@ -340,6 +399,22 @@ async fn serve_connection(
                         Ok(request) => request,
                         Err(frame) => { output.send(frame); continue; }
                     };
+                    if request.method == "hello" { not_plain |= crate::hooks::not_plain(&request.params); }
+                    if let (Some(handler), Some(calls)) = (&hook, &hooks)
+                        && matches!(request.method.as_str(), "hook" | "hook_commit")
+                    {
+                        let (handler, calls, output, plain) = (handler.clone(), calls.clone(), output.clone(), !not_plain);
+                        requests.spawn(async move {
+                            let result = calls.dispatch(handler, plain, &request.method, &request.params).await;
+                            if let Some(id) = request.id {
+                                output.send(match result {
+                                    Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
+                                    Err(error) => error.frame(id),
+                                });
+                            }
+                        });
+                        continue;
+                    }
                     let guard = tokio::select! {
                         _ = &mut closing => break 'connection,
                         _ = stopping.changed() => break 'connection,
@@ -348,8 +423,10 @@ async fn serve_connection(
                     };
                     let core = core.clone();
                     let output = output.clone();
+                    let advertise = hook.is_some() && request.method == "hello";
                     requests.spawn(async move {
-                        let result = Core::execute(core, guard, conn, request.method, request.params).await;
+                        let mut result = Core::execute(core, guard, conn, request.method, request.params).await;
+                        if advertise && let Ok(result) = &mut result { crate::hooks::advertise(result); }
                         if let Some(id) = request.id {
                             output.send(match result {
                                 Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
@@ -361,6 +438,9 @@ async fn serve_connection(
                 too_large = over_cap;
             }
         }
+    }
+    if let Some(calls) = &hooks {
+        calls.close();
     }
     core.lock().await.disconnect(conn).await;
     while requests.join_next().await.is_some() {}
@@ -439,7 +519,12 @@ mod tests {
         let core = Arc::new(Mutex::new(core));
         let (_stop, stopping) = watch::channel(false);
         let (server, mut client) = UnixStream::pair().expect("socket pair");
-        let mut connection = tokio::spawn(serve_connection(server, core.clone(), stopping.clone()));
+        let mut connection = tokio::spawn(serve_connection(
+            server,
+            core.clone(),
+            stopping.clone(),
+            None,
+        ));
         client.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"first\"}}}\n").await.expect("hello");
         tokio::time::timeout(Duration::from_secs(2), paused.written.notified())
             .await
@@ -457,7 +542,7 @@ mod tests {
             .expect("connection task");
 
         let (server, mut client) = UnixStream::pair().expect("socket pair");
-        let connection = tokio::spawn(serve_connection(server, core.clone(), stopping));
+        let connection = tokio::spawn(serve_connection(server, core.clone(), stopping, None));
         client.write_all(b"{\"id\":2,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"second\"}}}\n").await.expect("next hello");
         let mut response = String::new();
         use tokio::io::AsyncBufReadExt;

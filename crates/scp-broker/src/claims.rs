@@ -1,9 +1,10 @@
 use crate::core::{Core, integer, now_ms, text};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
 use crate::views::{address, opt, presence};
 use rand::RngCore;
+use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -820,6 +821,15 @@ impl Core {
                     &[opt(text(&hooks, "id"))],
                 )
                 .await?;
+            self.store
+                .all(
+                    "UPDATE endpoints SET stop_blocks = ? WHERE id = ?",
+                    &[
+                        SqlValue::Int(integer(&hooks, "stop_blocks").unwrap_or(0)),
+                        opt(Some(id)),
+                    ],
+                )
+                .await?;
         }
         let by_session = joined && text(&row, "token_hash").is_none();
         let fresh = if created || joined || resumed {
@@ -1168,40 +1178,6 @@ impl Core {
     pub async fn fill_title(&self, endpoint: &str, title: &str) -> Result<bool, RpcError> {
         Ok(!self.store.all("UPDATE endpoints SET title = ?,title_auto = ?,title_turn = NULL WHERE id = ? AND (title IS NULL OR title = title_auto) AND title IS NOT ? RETURNING id",&[opt(Some(title)),opt(Some(title)),opt(Some(endpoint)),opt(Some(title))]).await?.is_empty())
     }
-    /// whether a hook connection's process holds `row`; a dead holder's process passes to it
-    pub async fn holds(
-        &self,
-        row: &Row,
-        transient: bool,
-        process: Option<&str>,
-    ) -> Result<bool, RpcError> {
-        let Some(held) = text(row, "process").filter(|_| transient) else {
-            return Ok(true);
-        };
-        let Some(process) = process else {
-            return Ok(false);
-        };
-        if same_harness(held, process) {
-            return Ok(true);
-        }
-        let pid = held
-            .strip_prefix("pid:")
-            .and_then(|v| v.split(':').next())
-            .filter(|v| !v.is_empty() && v != &"0" && v.bytes().all(|b| b.is_ascii_digit()));
-        let Some(pid) = pid else {
-            return Ok(false);
-        };
-        if self.procs.alive(&format!("pid:{pid}")).await {
-            return Ok(false);
-        }
-        self.store
-            .all(
-                "UPDATE endpoints SET process = ? WHERE id = ? AND process = ?",
-                &[opt(Some(process)), opt(text(row, "id")), opt(Some(held))],
-            )
-            .await?;
-        Ok(true)
-    }
     /// a title for the caller's in-process subagent `id`; the subagent's endpoint id when it changed one, else kept until its first claim
     pub async fn subagent_title(
         &mut self,
@@ -1224,7 +1200,13 @@ impl Core {
             return Ok(json!({"changed": false}));
         };
         if !self
-            .holds(&row, c.mode == Mode::Transient, c.process.as_deref())
+            .holds(
+                &row,
+                &crate::session::HookOf {
+                    transient: c.mode == Mode::Transient,
+                    process: c.process.clone(),
+                },
+            )
             .await?
         {
             return Ok(json!({"changed": false}));

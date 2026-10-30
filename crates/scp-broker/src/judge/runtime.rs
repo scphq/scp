@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use super::provider::{HttpJudgeClient, JudgeClient, ProviderError};
 use super::verdict::{PROMPT_VERSION, Verdict, parse_verdict, prefilter, prompt, sort_categories};
 use crate::core::now_ms;
-use crate::proto::{ErrorCode, Limits, RpcError};
+use crate::proto::{Limits, RpcError};
+use scp_core::protocol::ErrorCode;
 
 pub fn hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))

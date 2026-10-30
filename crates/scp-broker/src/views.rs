@@ -1,8 +1,9 @@
+use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 
 use crate::claims::valid_handle;
 use crate::core::{Core, integer, now_ms, text, timestamp};
-use crate::proto::{ErrorCode, RpcError};
+use crate::proto::RpcError;
 use std::collections::HashSet;
 
 use crate::authority::Actor;
@@ -133,6 +134,7 @@ impl Core {
         viewer: Option<&str>,
     ) -> Result<Value, RpcError> {
         self.end_exited().await?;
+        self.settle_offline().await?;
         let mut world = None;
         if let Some(viewer) = viewer {
             let w = self.world().await?;
@@ -546,10 +548,6 @@ impl Core {
         Ok(json!({"peers": peers}))
     }
 
-    async fn pair_state(&self, _a: &str, _b: &str, _now: i64) -> Result<Value, RpcError> {
-        Ok(json!({}))
-    }
-
     /// Whether `from` may message `to` and why; an agent asks only about pairs it holds or has authority over, each side one it sees.
     pub async fn why(&self, actor: &Actor, from: &str, to: &str) -> Result<Value, RpcError> {
         let me = self.actor_endpoint(actor).await?;
@@ -581,19 +579,10 @@ impl Core {
         let limits = self.pair_state(a_id, b_id, now_ms()).await?;
         let mut reasons = decision.reasons.clone();
         reasons.extend(policy.clone());
-        reasons.extend(
-            limits["lines"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned),
-        );
-        let held = limits["held"] == Value::Bool(true);
-        let mut result =
-            json!({"allowed": decision.allowed && policy.is_none() && !held, "reasons": reasons});
-        if let Some(pair) = limits.get("pair") {
-            result["pair"] = pair.clone();
+        reasons.extend(limits.lines);
+        let mut result = json!({"allowed": decision.allowed && policy.is_none() && !limits.held, "reasons": reasons});
+        if let Some(pair) = limits.pair {
+            result["pair"] = serde_json::to_value(pair).map_err(|_| RpcError::internal())?;
         }
         Ok(result)
     }
@@ -604,6 +593,24 @@ pub fn opt(value: Option<&str>) -> SqlValue {
 }
 pub fn not_found(value: &str) -> RpcError {
     RpcError::new(ErrorCode::NotFound, format!("no endpoint {value}"))
+}
+
+impl Core {
+    /// an agent endpoint left offline drops a working or waiting status, which no one is left to keep current
+    pub async fn settle_offline(&self) -> Result<(), RpcError> {
+        let now = now_ms();
+        for row in self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND status_state IN ('working', 'waiting')", &[]).await? {
+            if presence(&row, now) == "offline" {
+                self.store
+                    .all(
+                        "UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?",
+                        &[opt(text(&row, "id"))],
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

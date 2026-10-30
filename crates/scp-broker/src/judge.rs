@@ -12,12 +12,13 @@ pub use runtime::JudgeGate;
 use serde_json::{Map, Value, json};
 
 use crate::core::{Core, integer, now_ms, text};
-use crate::proto::{ErrorCode, RpcError};
+use crate::messages::Origin;
+use crate::proto::RpcError;
 use crate::scrub::find_secret;
-use crate::state::ConnectionId;
 use crate::store::{Row, SqlValue};
 use crate::views::address;
 use runtime::hash;
+use scp_core::protocol::ErrorCode;
 use verdict::{PROMPT_VERSION, Verdict, apply_redactions};
 
 fn string(s: impl Into<String>) -> SqlValue {
@@ -42,17 +43,6 @@ fn required<'a>(params: &'a Map<String, Value>, key: &str) -> Result<&'a str, Rp
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| RpcError::invalid_params(format!("{key} is required")))
-}
-fn recipients(params: &Map<String, Value>) -> Vec<String> {
-    match params.get("to") {
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        _ => vec![],
-    }
 }
 fn fingerprint(params: &Map<String, Value>, default_ttl: u64) -> String {
     let mut to = recipients(params);
@@ -82,75 +72,120 @@ fn fingerprint(params: &Map<String, Value>, default_ttl: u64) -> String {
         .to_string(),
     )
 }
+fn recipients(params: &Map<String, Value>) -> Vec<String> {
+    match params.get("to") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => vec![],
+    }
+}
 fn held_result(id: &str, params: &Map<String, Value>) -> Value {
     json!({"id":id,"thread":params.get("thread").unwrap_or(&json!("")),"hop":0,"deliveries":[],"held":{"hold_id":id,"side":"local"}})
 }
 
 impl Core {
     /// a send to another account is judged by the hub; enforce mode audits that it skipped the local judge
-    pub async fn judge_foreign(
+    async fn judge_foreign(
         &self,
         endpoint: &str,
         addresses: &[&str],
-        params: &Map<String, Value>,
-    ) -> Result<(), RpcError> {
+        body: &str,
+    ) -> Result<bool, RpcError> {
         let foreign = |a: &&str| {
             a.split_once('/')
                 .is_some_and(|(u, _)| !matches!(u, "me" | "local"))
         };
-        let Some(body) = params.get("body").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        if !addresses.iter().any(foreign)
-            || self
-                .judge
-                .policy
-                .as_ref()
-                .is_none_or(|p| p["mode"] != "enforce")
-            || find_secret(body).is_some()
-        {
-            return Ok(());
+        if !addresses.iter().any(foreign) {
+            return Ok(false);
         }
-        let detail = json!({"side":"local","boundary":"other account","prompt_version":PROMPT_VERSION,"categories":[],"sha256":hash(body),"verdict":"skipped","reason":"other_account_judged_by_hub","to":addresses});
-        self.audit("judge_skipped", Some(endpoint), None, detail)
-            .await
+        if self
+            .judge
+            .policy
+            .as_ref()
+            .is_some_and(|p| p["mode"] == "enforce")
+        {
+            let detail = json!({"side":"local","boundary":"other account","prompt_version":PROMPT_VERSION,"categories":[],"sha256":hash(body),"verdict":"skipped","reason":"other_account_judged_by_hub","to":addresses});
+            self.audit("judge_skipped", Some(endpoint), None, detail)
+                .await?;
+        }
+        Ok(true)
     }
+
+    /// the endpoints a send's `to` reaches, each in the sender's scope, a reply in its parent's
+    async fn judge_targets(
+        &self,
+        sender: &Row,
+        params: &Map<String, Value>,
+        addresses: &[&str],
+        unverified: bool,
+    ) -> Result<Vec<String>, RpcError> {
+        let parent = match params.get("reply_to") {
+            Some(id) if params.get("kind").and_then(Value::as_str) == Some("reply") => {
+                let from = text(sender, "id").ok_or_else(RpcError::internal)?;
+                Some(self.reply_parent(from, id).await?)
+            }
+            _ => None,
+        };
+        let mut targets = Vec::new();
+        for value in addresses {
+            let value = value.trim();
+            let rows = if value.starts_with("group:") || value == "tree:children" {
+                self.expand(sender, value, parent.as_ref()).await?
+            } else {
+                let row = self.lookup(value).await?;
+                self.check_scope(sender, &row, value, parent.as_ref(), unverified)
+                    .await?;
+                vec![row]
+            };
+            for row in rows {
+                let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
+                if !targets.contains(&id) {
+                    targets.push(id);
+                }
+            }
+        }
+        Ok(targets)
+    }
+
+    /// a send through the local judge: delivered, shadow-audited, refused, redacted or held for the human
     pub async fn judged_send(
         &mut self,
-        _conn: ConnectionId,
         endpoint: &str,
-        targets: &[String],
         params: &Map<String, Value>,
-        tty: bool,
-        link: bool,
+        origin: Origin<'_>,
     ) -> Result<Value, RpcError> {
-        self.load_policy().await?;
-        if let Some(error) = &self.policy_error {
-            return Err(RpcError::new(ErrorCode::PolicyRefused, error));
-        }
         let Some(policy) = self.judge.policy.clone().filter(|p| p["mode"] != "off") else {
-            return self
-                .send_message(endpoint, targets, params, tty, link)
-                .await;
+            return self.send_message(endpoint, params, origin).await;
         };
-        crate::messages::validate_send(params, &self.limits)?;
-        let Some(body) = params.get("body").and_then(Value::as_str) else {
-            return self
-                .send_message(endpoint, targets, params, tty, link)
-                .await;
+        let Some(body) = params.get("body").and_then(Value::as_str).filter(|s| {
+            crate::messages::body_cap(&self.limits).is_none_or(|cap| s.len() as u64 <= cap)
+                && find_secret(s).is_none()
+        }) else {
+            return self.send_message(endpoint, params, origin).await;
         };
+        let addresses: Vec<&str> = match params.get("to") {
+            Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
+            Some(Value::String(to)) => vec![to.as_str()],
+            _ => Vec::new(),
+        };
+        if self.judge_foreign(endpoint, &addresses, body).await? {
+            return self.send_message(endpoint, params, origin).await;
+        }
         self.judge_sweep().await?;
         let sender = self.must_endpoint(endpoint).await?;
-        let groups = self.judge_boundaries(&policy, &sender, targets).await?;
-        if groups.is_empty() {
-            return self
-                .send_message(endpoint, targets, params, tty, link)
-                .await;
-        }
         if policy["mode"] == "shadow" {
-            let result = self
-                .send_message(endpoint, targets, params, tty, link)
+            let result = self.send_message(endpoint, params, origin).await?;
+            let targets = self
+                .judge_targets(&sender, params, &addresses, origin.unverified)
                 .await?;
+            let groups = self.judge_boundaries(&policy, &sender, &targets).await?;
+            if groups.is_empty() {
+                return Ok(result);
+            }
             if result["duplicate"] != true {
                 let tree = text(&sender, "tree").unwrap_or(endpoint);
                 let detail = if self.judge.spend(endpoint, tree, now_ms()).is_ok() {
@@ -168,6 +203,13 @@ impl Core {
                 .await?;
             }
             return Ok(result);
+        }
+        let targets = self
+            .judge_targets(&sender, params, &addresses, origin.unverified)
+            .await?;
+        let groups = self.judge_boundaries(&policy, &sender, &targets).await?;
+        if groups.is_empty() {
+            return self.send_message(endpoint, params, origin).await;
         }
         let default_ttl = self.limits.get("ttlDefaultS").unwrap_or(604800);
         let ttl = match params.get("ttl_s") {
@@ -223,7 +265,7 @@ impl Core {
                     serde_json::to_value(&verdict).map_err(|_| RpcError::internal())?;
                 stored_verdict["boundary"] = detail["boundary"].clone();
                 stored_verdict["to"] = detail["to"].clone();
-                self.store.all("INSERT INTO judge_holds (id,from_ep,params,origin,verdict,created_at,expires_at,state) VALUES (?,?,?,?,?,?,?,'held')",&[string(&id),string(endpoint),string(Value::Object(stored_params).to_string()),string(json!({"tty":tty,"link":link}).to_string()),string(stored_verdict.to_string()),SqlValue::Int(now),SqlValue::Int(now+ttl as i64*1000)]).await?;
+                self.store.all("INSERT INTO judge_holds (id,from_ep,params,origin,verdict,created_at,expires_at,state) VALUES (?,?,?,?,?,?,?,'held')",&[string(&id),string(endpoint),string(Value::Object(stored_params).to_string()),string(json!({"tty":origin.tty,"unverified":origin.unverified,"link":origin.link}).to_string()),string(stored_verdict.to_string()),SqlValue::Int(now),SqlValue::Int(now+ttl as i64*1000)]).await?;
                 self.audit("judge_hold", Some(endpoint), Some(&id), detail)
                     .await?;
                 Ok(held_result(&id, params))
@@ -234,9 +276,7 @@ impl Core {
                 if verdict.verdict == "redact" {
                     sent.insert("body".into(), json!(applied.text));
                 }
-                let mut result = self
-                    .send_message(endpoint, targets, &sent, tty, link)
-                    .await?;
+                let mut result = self.send_message(endpoint, &sent, origin).await?;
                 if verdict.verdict == "redact" {
                     let redacted = json!({"n":applied.n,"kinds":applied.kinds});
                     detail["redacted"] = redacted.clone();

@@ -1,7 +1,7 @@
 mod messages_support;
 
 use messages_support::{TestCore, params};
-use scp_broker::proto::ErrorCode;
+use scp_core::protocol::ErrorCode;
 use serde_json::json;
 
 #[tokio::test]
@@ -9,11 +9,10 @@ async fn inbox_keeps_deliveries_unread_until_ack() {
     let mut test = TestCore::new().await;
     let sent = test
         .core
-        .send(
+        .send_message(
             "sender",
-            &["recipient".into()],
             &params(json!({"to":"me/recipient","body":"line\n\u{0} text"})),
-            false,
+            scp_broker::messages::Origin::default(),
         )
         .await
         .expect("send");
@@ -69,11 +68,10 @@ async fn thread_continuation_requires_membership_and_accepts_message_references(
     let mut test = TestCore::new().await;
     let sent = test
         .core
-        .send(
+        .send_message(
             "sender",
-            &["recipient".into()],
             &params(json!({"to":"recipient","body":"first","thread":"topic"})),
-            false,
+            scp_broker::messages::Origin::default(),
         )
         .await
         .expect("send");
@@ -81,11 +79,10 @@ async fn thread_continuation_requires_membership_and_accepts_message_references(
     for reference in ["topic", id, &id[id.len() - 6..]] {
         assert_eq!(
             test.core
-                .send(
+                .send_message(
                     "recipient",
-                    &["sender".into()],
                     &params(json!({"to":"sender","body":"continue","thread":reference})),
-                    false
+                    scp_broker::messages::Origin::default()
                 )
                 .await
                 .expect("continue")["thread"],
@@ -95,11 +92,10 @@ async fn thread_continuation_requires_membership_and_accepts_message_references(
     for reference in ["topic", "msg_missing"] {
         assert_eq!(
             test.core
-                .send(
+                .send_message(
                     "outsider",
-                    &["sender".into()],
                     &params(json!({"to":"sender","body":"hidden","thread":reference})),
-                    false
+                    scp_broker::messages::Origin::default()
                 )
                 .await
                 .expect_err("no access")
@@ -119,11 +115,10 @@ async fn inbox_pages_deduplicated_recipients() {
     for body in ["one", "two"] {
         let sent = test
             .core
-            .send(
+            .send_message(
                 "sender",
-                &["recipient".into(), "recipient".into()],
                 &params(json!({"to":["recipient","recipient"],"body":body})),
-                false,
+                scp_broker::messages::Origin::default(),
             )
             .await
             .expect("send");

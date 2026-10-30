@@ -30,11 +30,10 @@ async fn inbox_wait_releases_core_and_wakes_on_send() {
         .await
         .expect("mutex released");
     sender
-        .send(
+        .send_message(
             "sender",
-            &["recipient".into()],
             &params(json!({"to":"recipient","body":"ping"})),
-            false,
+            scp_broker::messages::Origin::default(),
         )
         .await
         .expect("send");
