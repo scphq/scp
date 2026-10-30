@@ -69,7 +69,11 @@ impl Core {
         if text(&under, "kind") != Some("agent")
             || (agent
                 && text(&me, "id") != text(&under, "id")
-                && !self.authority(&me, &under).await?)
+                && !self
+                    .ancestors(&under)
+                    .await?
+                    .iter()
+                    .any(|id| text(&me, "id") == Some(id.as_str())))
         {
             return Err(not_found(
                 named_under.and_then(Value::as_str).unwrap_or("endpoint"),

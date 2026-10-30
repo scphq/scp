@@ -125,18 +125,20 @@ impl Core {
             redactions = Some(json!({"n":applied.n,"kinds":applied.kinds}));
         }
         let delivery = async {
+            let origin = stored(row, "origin")?;
+            let tty = origin["tty"] == true;
             let mut targets = Vec::new();
             for to in recipients(&sent) {
-                let target = self.lookup(&to).await?;
-                let id = text(&target, "id")
-                    .ok_or_else(RpcError::internal)?
-                    .to_owned();
-                if !targets.contains(&id) {
-                    targets.push(id);
+                for target in self.send_targets_as(from, &to, tty).await? {
+                    let id = text(&target, "id")
+                        .ok_or_else(RpcError::internal)?
+                        .to_owned();
+                    if !targets.contains(&id) {
+                        targets.push(id);
+                    }
                 }
             }
-            let origin = stored(row, "origin")?;
-            self.send(from, &targets, &sent, origin["tty"] == true)
+            self.send_message(from, &targets, &sent, tty, origin["link"] == true)
                 .await
         }
         .await;

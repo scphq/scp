@@ -43,7 +43,7 @@ async fn hold(test: &mut TestCore, extra: Value) -> Value {
     let mut send = params(json!({"to":"recipient","body":SUSPECT}));
     send.extend(params(extra));
     test.core
-        .judged_send(0, "sender", &["recipient".into()], &send, false)
+        .judged_send(0, "sender", &["recipient".into()], &send, false, false)
         .await
         .expect("held send")
 }
@@ -67,6 +67,7 @@ async fn terminal_releases_as_sender_and_resolved_hold_purges_body() {
             "sender",
             &["recipient".into()],
             &params(json!({"to":"recipient","body":"different","client_id":"retry"})),
+            false,
             false,
         )
         .await
@@ -255,6 +256,7 @@ async fn judged_send_validates_ttl_and_skips_unmatched_boundaries() {
                 "sender",
                 &["recipient".into()],
                 &params(json!({"to":"recipient","body":SUSPECT,"ttl_s":ttl})),
+                false,
                 false,
             )
             .await

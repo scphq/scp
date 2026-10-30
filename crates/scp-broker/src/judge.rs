@@ -122,28 +122,35 @@ impl Core {
         targets: &[String],
         params: &Map<String, Value>,
         tty: bool,
+        link: bool,
     ) -> Result<Value, RpcError> {
         self.load_policy().await?;
         if let Some(error) = &self.policy_error {
             return Err(RpcError::new(ErrorCode::PolicyRefused, error));
         }
         let Some(policy) = self.judge.policy.clone().filter(|p| p["mode"] != "off") else {
-            return self.send(endpoint, targets, params, tty).await;
+            return self
+                .send_message(endpoint, targets, params, tty, link)
+                .await;
         };
-        let Some(body) = params.get("body").and_then(Value::as_str).filter(|s| {
-            s.len() <= self.limits.get("bodyBytes").unwrap_or(65536) as usize
-                && find_secret(s).is_none()
-        }) else {
-            return self.send(endpoint, targets, params, tty).await;
+        crate::messages::validate_send(params, &self.limits)?;
+        let Some(body) = params.get("body").and_then(Value::as_str) else {
+            return self
+                .send_message(endpoint, targets, params, tty, link)
+                .await;
         };
         self.judge_sweep().await?;
         let sender = self.must_endpoint(endpoint).await?;
         let groups = self.judge_boundaries(&policy, &sender, targets).await?;
         if groups.is_empty() {
-            return self.send(endpoint, targets, params, tty).await;
+            return self
+                .send_message(endpoint, targets, params, tty, link)
+                .await;
         }
         if policy["mode"] == "shadow" {
-            let result = self.send(endpoint, targets, params, tty).await?;
+            let result = self
+                .send_message(endpoint, targets, params, tty, link)
+                .await?;
             if result["duplicate"] != true {
                 let tree = text(&sender, "tree").unwrap_or(endpoint);
                 let detail = if self.judge.spend(endpoint, tree, now_ms()).is_ok() {
@@ -216,7 +223,7 @@ impl Core {
                     serde_json::to_value(&verdict).map_err(|_| RpcError::internal())?;
                 stored_verdict["boundary"] = detail["boundary"].clone();
                 stored_verdict["to"] = detail["to"].clone();
-                self.store.all("INSERT INTO judge_holds (id,from_ep,params,origin,verdict,created_at,expires_at,state) VALUES (?,?,?,?,?,?,?,'held')",&[string(&id),string(endpoint),string(Value::Object(stored_params).to_string()),string(json!({"tty":tty}).to_string()),string(stored_verdict.to_string()),SqlValue::Int(now),SqlValue::Int(now+ttl as i64*1000)]).await?;
+                self.store.all("INSERT INTO judge_holds (id,from_ep,params,origin,verdict,created_at,expires_at,state) VALUES (?,?,?,?,?,?,?,'held')",&[string(&id),string(endpoint),string(Value::Object(stored_params).to_string()),string(json!({"tty":tty,"link":link}).to_string()),string(stored_verdict.to_string()),SqlValue::Int(now),SqlValue::Int(now+ttl as i64*1000)]).await?;
                 self.audit("judge_hold", Some(endpoint), Some(&id), detail)
                     .await?;
                 Ok(held_result(&id, params))
@@ -227,7 +234,9 @@ impl Core {
                 if verdict.verdict == "redact" {
                     sent.insert("body".into(), json!(applied.text));
                 }
-                let mut result = self.send(endpoint, targets, &sent, tty).await?;
+                let mut result = self
+                    .send_message(endpoint, targets, &sent, tty, link)
+                    .await?;
                 if verdict.verdict == "redact" {
                     let redacted = json!({"n":applied.n,"kinds":applied.kinds});
                     detail["redacted"] = redacted.clone();

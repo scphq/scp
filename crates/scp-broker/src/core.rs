@@ -198,6 +198,7 @@ impl Core {
                     &recipients,
                     params,
                     matches!(connection.mode, Mode::Human { tty: true }),
+                    false,
                 )
                 .await
             }

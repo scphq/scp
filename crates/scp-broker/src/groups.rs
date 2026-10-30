@@ -873,14 +873,24 @@ impl Core {
         value: &str,
         conn: ConnectionId,
     ) -> Result<Vec<Row>, RpcError> {
+        let tty = !matches!(self.connection(conn)?.mode, Mode::Human { tty: false });
+        self.send_targets_as(sender_id, value, tty).await
+    }
+
+    /// the recipients `value` names for `sender_id` under the current scope rules; `tty` is whether a human sender has a terminal
+    pub async fn send_targets_as(
+        &self,
+        sender_id: &str,
+        value: &str,
+        tty: bool,
+    ) -> Result<Vec<Row>, RpcError> {
         let sender = self.must_endpoint(sender_id).await?;
         let trimmed = value.trim();
         if trimmed.starts_with("group:") || trimmed == "tree:children" {
             return self.expand(&sender, trimmed).await;
         }
         let row = self.lookup(value).await?;
-        let unverified = text(&sender, "kind") == Some("human")
-            && matches!(self.connection(conn)?.mode, Mode::Human { tty: false });
+        let unverified = text(&sender, "kind") == Some("human") && !tty;
         self.check_scope(&sender, &row, trimmed, None, unverified)
             .await?;
         Ok(vec![row])

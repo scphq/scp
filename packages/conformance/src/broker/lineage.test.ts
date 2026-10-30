@@ -95,6 +95,19 @@ brokerSuite("broker lineage", (start) => {
     expect(await peer.request("link_accept", { id: result.requested.slice(-6) })).toMatchObject({ parent: "me/lead", endpoint: { depth: 1 } });
   });
 
+  test("a hidden child of another parent is not_found like a missing endpoint and gets no link request", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead");
+    const peer = await broker.agent("peer");
+    await broker.agent("other");
+    const h = await broker.human();
+    await h.request("adopt", { endpoint: "peer", parent: "other" });
+    await h.request("rules_set", { endpoint: "peer", in: [] });
+    expect(await refusal(lead.request("adopt", { endpoint: "peer" }))).toBe("not_found");
+    expect(await refusal(lead.request("adopt", { endpoint: "ghost" }))).toBe("not_found");
+    expect(await peer.request("inbox")).toMatchObject({ messages: [] });
+  });
+
   test("link acceptance rechecks cycles and lineage auth cannot accept", async () => {
     const broker = await start();
     const lead = await broker.agent("lead");

@@ -297,10 +297,32 @@ impl Core {
                     continue;
                 }
             }
-            values.push(json!({"id":integer(&row,"id"),"at":integer(&row,"at").and_then(timestamp),"event":text(&row,"event"),"endpoint":match text(&row,"endpoint") {Some(id)=>Some(self.address_of(id).await?),None=>None},"ref":text(&row,"ref"),"detail":text(&row,"detail").and_then(|v|serde_json::from_str::<Value>(v).ok()).unwrap_or(json!({}))}));
+            let event = text(&row, "event");
+            let mut detail = text(&row, "detail")
+                .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                .unwrap_or(json!({}));
+            if seen.is_some() && event.is_some_and(|e| e.starts_with("judge_")) {
+                detail = judge_detail_for_agents(detail);
+            }
+            values.push(json!({"id":integer(&row,"id"),"at":integer(&row,"at").and_then(timestamp),"event":event,"endpoint":match text(&row,"endpoint") {Some(id)=>Some(self.address_of(id).await?),None=>None},"ref":text(&row,"ref"),"detail":detail}));
         }
         Ok(json!({"rows":values}))
     }
+}
+
+/// A judge row as anyone but the human at a terminal reads it: no free text, no redaction kinds.
+pub(crate) fn judge_detail_for_agents(detail: Value) -> Value {
+    let Value::Object(mut map) = detail else {
+        return detail;
+    };
+    map.remove("reason");
+    let n = map
+        .remove("redacted")
+        .and_then(|r| r.get("n").filter(|n| n.is_number()).cloned());
+    if let Some(n) = n {
+        map.insert("redacted".to_owned(), json!({ "n": n }));
+    }
+    Value::Object(map)
 }
 
 /// Whether a value names, as `me/<handle>`, an endpoint outside `shown`.
@@ -582,4 +604,22 @@ pub fn opt(value: Option<&str>) -> SqlValue {
 }
 pub fn not_found(value: &str) -> RpcError {
     RpcError::new(ErrorCode::NotFound, format!("no endpoint {value}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn judge_rows_for_agents_drop_the_reason_and_redaction_kinds() {
+        let detail = json!({"verdict":"redact","reason":"note","redacted":{"n":2,"kinds":["pii"]},"to":["me/b"]});
+        assert_eq!(
+            judge_detail_for_agents(detail),
+            json!({"verdict":"redact","redacted":{"n":2},"to":["me/b"]})
+        );
+        assert_eq!(
+            judge_detail_for_agents(json!({"reason":"x","redacted":{"kinds":[]}})),
+            json!({})
+        );
+    }
 }

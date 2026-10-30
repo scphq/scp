@@ -8,7 +8,7 @@ use crate::proto::{ErrorCode, RpcError};
 use crate::rules::{cap_id, caps_json};
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
-use crate::views::{address, opt, presence};
+use crate::views::{address, not_found, opt, presence};
 use crate::world::caps_of;
 use scp_core::protocol::CLI_NAME;
 use scp_core::protocol::{ScopeCap, ScopeDirection, ScopePreset};
@@ -481,6 +481,13 @@ impl Core {
             result["endpoint"] = self.view(&self.must_endpoint(&target_id).await?).await?;
             return Ok(result);
         }
+        if !self
+            .world()
+            .await?
+            .discovers(text(&me, "id").unwrap_or_default(), &target_id)
+        {
+            return Err(not_found(named));
+        }
         let reason = if text(&target, "id") == text(&me, "id") {
             Some("an agent cannot adopt itself".to_owned())
         } else if self.ancestors(&me).await?.contains(&target_id) {
@@ -516,11 +523,21 @@ impl Core {
             let under = self.parent_address(&target).await?;
             let parent = address(&parent);
             let params = json!({"to":address(&target),"kind":"request","ttl_s":86_400,"body":format!("{parent} asks you to link under it as its worker. You sit under {under} now: you can accept only once you are a root again. To accept, run {CLI_NAME} link accept <id> with this message's id, or {CLI_NAME} join --under {parent} (relay_link_accept {{id}} or relay_join {{under: \"{parent}\"}}).")});
+            let me_id = text(&me, "id").ok_or_else(RpcError::internal)?.to_owned();
+            let targets: Vec<String> = self
+                .send_targets_as(&me_id, named, false)
+                .await?
+                .iter()
+                .filter_map(|row| text(row, "id").map(str::to_owned))
+                .collect();
             let sent = self
-                .send_link_request(
-                    text(&me, "id").ok_or_else(RpcError::internal)?,
-                    &target_id,
+                .judged_send(
+                    conn,
+                    &me_id,
+                    &targets,
                     params.as_object().ok_or_else(RpcError::internal)?,
+                    false,
+                    true,
                 )
                 .await?;
             if let Some(held) = sent.get("held").filter(|v| !v.is_null()) {
