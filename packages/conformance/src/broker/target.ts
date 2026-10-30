@@ -57,7 +57,6 @@ export class BrokerTarget {
       CLAUDE_CONFIG_DIR: join(this.home, "claude"),
       GEMINI_CLI_HOME: this.home,
     });
-    if (name === "rust") this.env.SCP_BROKER_EXPERIMENTAL = "1";
     if (files.limits !== undefined) this.env.SCP_LIMITS = JSON.stringify(files.limits);
     if (files.policy !== undefined) this.write(this.policyPath, typeof files.policy === "string" ? files.policy : JSON.stringify(files.policy));
     for (const [path, text] of Object.entries(files.files ?? {})) this.write(join(this.home, path), text);

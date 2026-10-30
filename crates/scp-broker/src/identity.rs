@@ -1,13 +1,16 @@
-use crate::claims::{
-    busy_since, clean_labels, clean_text, harness_fits, hash, process_key, revivable,
-    same_provider, token, valid_handle,
-};
-use crate::core::{Core, integer, now_ms, text, timestamp};
+use crate::authority::Actor;
+use crate::claims::{busy_since, harness_fits, revivable, same_provider, valid_handle};
+use crate::core::{Core, integer, now_ms, text};
 use crate::proto::RpcError;
+use crate::rules::{cap_id, caps_json};
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
-use crate::views::{address, opt, presence};
+use crate::views::{address, not_found, opt, presence};
+use crate::world::caps_of;
+use scp_core::protocol::CLI_NAME;
 use scp_core::protocol::ErrorCode;
+use scp_core::protocol::{ScopeCap, ScopeDirection, ScopePreset};
+use scp_core::scope::{admits, has_scope, preset_lists};
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
@@ -161,6 +164,11 @@ impl Core {
             .await
     }
     pub async fn link_endpoint(&self, row: &Row, parent: &Row, auth: &str) -> Result<(), RpcError> {
+        self.link(row, parent, json!({"by": address(row), "auth": auth}))
+            .await
+    }
+    /// `row`, a root, and its subtree moved under `parent`, a local agent that is neither `row` nor below it; `by` is the actor detail
+    pub async fn link(&self, row: &Row, parent: &Row, by: Value) -> Result<(), RpcError> {
         let id = text(row, "id").ok_or_else(RpcError::internal)?;
         let parent_id = text(parent, "id").ok_or_else(RpcError::internal)?;
         if text(parent, "kind") != Some("agent") {
@@ -172,7 +180,11 @@ impl Core {
         if id == parent_id || self.ancestors(parent).await?.iter().any(|v| v == id) {
             return Err(RpcError::new(
                 ErrorCode::ScopeRefused,
-                "an endpoint cannot sit under its own descendant",
+                format!(
+                    "{} sits under {}: a session cannot go under its own descendant",
+                    address(parent),
+                    address(row)
+                ),
             ));
         }
         if text(row, "parent_ep").is_some() || text(row, "parent_addr").is_some() {
@@ -189,14 +201,58 @@ impl Core {
         let shift = depth - integer(row, "depth").unwrap_or(0);
         let tree = text(parent, "tree").unwrap_or(parent_id);
         self.shift_subtree(id, tree, shift).await?;
-        self.store.all("UPDATE endpoints SET parent_ep = ?,parent_addr = NULL,tree = ?,depth = ?,linked = ? WHERE id = ?",&[opt(Some(parent_id)),opt(Some(tree)),SqlValue::Int(depth),SqlValue::Int(now_ms()),opt(Some(id))]).await?;
-        self.audit(
-            "scope_link",
-            Some(id),
-            None,
-            json!({"by":address(row),"auth":auth,"target":address(row),"parent":address(parent)}),
-        )
-        .await
+        let world = self.world().await?;
+        let mut caps = caps_of(row);
+        if let Ok(preset) = world.defaults.child_default.parse::<ScopePreset>()
+            && let Some(list) = preset_lists(preset)
+            && !caps.caps.iter().any(|cap| cap.by == "policy")
+        {
+            for dir in world.defaults.preset_dirs() {
+                caps.caps.push(ScopeCap {
+                    id: cap_id(),
+                    dir: *dir,
+                    by: "policy".into(),
+                    sels: list.iter().map(|sel| world.entry(sel, None)).collect(),
+                });
+            }
+        }
+        self.store.all("UPDATE endpoints SET parent_ep = ?,parent_addr = NULL,tree = ?,depth = ?,linked = ?,caps = ? WHERE id = ?",&[opt(Some(parent_id)),opt(Some(tree)),SqlValue::Int(depth),SqlValue::Int(now_ms()),caps_json(&mut caps),opt(Some(id))]).await?;
+        let request = by.get("request").and_then(Value::as_str).map(str::to_owned);
+        let mut detail = by;
+        detail["target"] = json!(address(row));
+        detail["parent"] = json!(address(parent));
+        self.audit("adopt", Some(id), request.as_deref(), detail)
+            .await
+    }
+    /// whether `me`, a root, may link under `parent`: it may message it, or with no scope of its own it may message the tree's root and `parent` admits it
+    pub async fn may_link_under(&self, me: &Row, parent: &Row) -> Result<bool, RpcError> {
+        let world = self.world().await?;
+        let (me_id, parent_id) = (
+            text(me, "id").unwrap_or_default(),
+            text(parent, "id").unwrap_or_default(),
+        );
+        if !world.is_agent(parent_id) || world.may_message(me_id, parent_id, false, false) {
+            return Ok(true);
+        }
+        let Some(node) = world.node_of(me_id) else {
+            return Ok(false);
+        };
+        if has_scope(node) {
+            return Ok(false);
+        }
+        let Some(root) = world.ancestors_of(parent_id).last().cloned() else {
+            return Ok(false);
+        };
+        if !world.is_agent(&root) || !world.may_message(me_id, &root, false, false) {
+            return Ok(false);
+        }
+        if world.policy_refusal(me_id, parent_id).is_some() {
+            return Ok(false);
+        }
+        let Some(target) = world.node_of(parent_id) else {
+            return Ok(false);
+        };
+        Ok(admits(&world, target, ScopeDirection::In, node, None).ok)
     }
     async fn shift_subtree(&self, id: &str, tree: &str, shift: i64) -> Result<(), RpcError> {
         let below = "WITH RECURSIVE below(id) AS (SELECT id FROM endpoints WHERE parent_ep = ? UNION SELECT e.id FROM endpoints e JOIN below b ON e.parent_ep = b.id)";
@@ -288,7 +344,7 @@ impl Core {
             )
             .await?;
         self.store.all("UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ? AND harness_session IS NULL",&[opt(text(held,"harness_session")),opt(text(held,"harness_transcript")),opt(Some(id))]).await?;
-        self.store.all("UPDATE endpoints SET handle = ?,session = NULL,token_hash = NULL,peek = NULL WHERE id = ?",&[opt(Some(&format!("gone:{retired}"))),opt(Some(retired))]).await?;
+        self.store.all("UPDATE endpoints SET handle = ?,session = NULL,token_hash = NULL,peek = NULL WHERE id = ?",&[opt(Some(&format!("{}{retired}", crate::world::GONE))),opt(Some(retired))]).await?;
         self.audit("take_over",Some(id),None,json!({"from":text(row,"handle"),"to":text(held,"handle"),"retired":retired,"children":children,"by":by})).await?;
         Ok(retired.into())
     }
@@ -365,108 +421,325 @@ impl Core {
         )
         .await
     }
+    fn actor_detail(actor: &Actor, me: &Row) -> Value {
+        json!({"by": address(me), "auth": actor.auth()})
+    }
+    /// the human links a local root directly; an agent adopts a root it may message under itself, and asks a child of another parent to link
     pub async fn adopt(
         &mut self,
         conn: ConnectionId,
         params: &Map<String, Value>,
     ) -> Result<Value, RpcError> {
-        self.need_terminal(conn).await?;
-        let me = self.actor_row(conn).await?;
-        let target = self
-            .lookup(
-                params
-                    .get("endpoint")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| RpcError::invalid_params("endpoint is an address"))?,
-            )
-            .await?;
-        let parent = if let Some(value) = params.get("parent").and_then(Value::as_str) {
-            self.lookup(value).await?
-        } else if text(&me, "kind") == Some("agent") {
-            me.clone()
-        } else {
-            return Err(RpcError::invalid_params(
-                "the human names the parent to link under",
-            ));
-        };
-        if text(&me, "kind") != Some("human") && text(&me, "id") != text(&parent, "id") {
-            return Err(RpcError::new(
-                ErrorCode::ScopeRefused,
-                "an agent adopts only under itself",
-            ));
+        let actor = self.actor_of(conn)?;
+        let terminal = self.connection(conn)?.terminal;
+        let human = matches!(actor, Actor::Human { .. });
+        if !human && !terminal {
+            self.policy_gate().await?;
         }
+        let me = self.actor_endpoint(&actor).await?;
+        let named = params.get("endpoint").and_then(Value::as_str);
+        if human {
+            self.need_tty(&actor, &me, named.map(str::to_owned)).await?;
+        }
+        let named = named.ok_or_else(|| RpcError::invalid_params("endpoint is an address"))?;
+        let target = self.lookup(named).await?;
         if text(&target, "kind") != Some("agent") {
             return Err(RpcError::invalid_params(
                 "only a local agent endpoint can be linked",
             ));
         }
-        let c = self.connection(conn)?;
-        if text(&me, "kind") != Some("human") && !self.at_terminal(conn) {
-            let reason = if text(&target, "id") == text(&me, "id") {
-                Some("an agent cannot adopt itself".to_owned())
-            } else if self
-                .ancestors(&me)
-                .await?
-                .iter()
-                .any(|id| Some(id.as_str()) == text(&target, "id"))
-            {
-                Some(format!(
-                    "{} sits above you: an agent cannot adopt its own ancestor",
-                    address(&target)
-                ))
-            } else if text(&target, "session").is_some_and(|session| session.starts_with("sub:")) {
-                Some(format!(
-                    "{} is a subagent's endpoint: it stays under its root",
-                    address(&target)
-                ))
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                return Err(self
-                    .scope_refused(
-                        conn,
-                        json!({"target":address(&target),"reason":"adopt"}),
-                        &reason,
-                    )
-                    .await?);
+        let parent = match params.get("parent").filter(|v| !v.is_null()) {
+            Some(value) => {
+                let value = value
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| RpcError::invalid_params("parent is an address"))?;
+                self.lookup(value).await?
             }
-            let mut result =
-                json!({"endpoint":self.view(&target).await?,"parent":address(&parent)});
-            if text(&target, "parent_ep") == text(&me, "id") {
-                return Ok(result);
+            None if !human => me.clone(),
+            None => {
+                return Err(RpcError::invalid_params(
+                    "the human names the parent to link under",
+                ));
             }
-            if text(&target, "parent_ep").is_some() || text(&target, "parent_addr").is_some() {
-                if c.lineage.is_some() && !c.own {
-                    return Err(self.scope_refused(conn, json!({"target":address(&target),"reason":"adopt"}), "only the session itself may ask a child that sits under another parent to link").await?);
-                }
-                let under = self.parent_address(&target).await?;
-                let parent = address(&parent);
-                let params = json!({"to":address(&target),"body":format!("{parent} asks you to link under it as its worker. You sit under {under} now: you can accept only once you are a root again. To accept, run swarm link accept <id> with this message's id, or swarm join --under {parent} (relay_link_accept {{id}} or relay_join {{under: \"{parent}\"}}).")});
-                let sent = self
-                    .send_link_request(
-                        text(&me, "id").ok_or_else(RpcError::internal)?,
-                        text(&target, "id").ok_or_else(RpcError::internal)?,
-                        params.as_object().ok_or_else(RpcError::internal)?,
-                    )
-                    .await?;
-                result["requested"] = sent["id"].clone();
-                return Ok(result);
-            }
+        };
+        let detail = json!({"target": address(&target), "reason": "adopt"});
+        if !human && text(&parent, "id") != text(&me, "id") {
+            return Err(self
+                .refused(&actor, &me, detail, "an agent adopts only under itself")
+                .await);
         }
-        self.link_endpoint(
-            &target,
-            &parent,
-            if self.at_terminal(conn) {
-                "tty"
+        let mut result = json!({"endpoint": self.view(&target).await?, "parent": address(&parent)});
+        let target_id = text(&target, "id")
+            .ok_or_else(RpcError::internal)?
+            .to_owned();
+        if human || terminal {
+            self.link(&target, &parent, Self::actor_detail(&actor, &me))
+                .await?;
+            result["endpoint"] = self.view(&self.must_endpoint(&target_id).await?).await?;
+            return Ok(result);
+        }
+        if !self
+            .world()
+            .await?
+            .discovers(text(&me, "id").unwrap_or_default(), &target_id)
+        {
+            return Err(not_found(named));
+        }
+        let reason = if text(&target, "id") == text(&me, "id") {
+            Some("an agent cannot adopt itself".to_owned())
+        } else if self.ancestors(&me).await?.contains(&target_id) {
+            Some(format!(
+                "{} sits above you: an agent cannot adopt its own ancestor",
+                address(&target)
+            ))
+        } else if text(&target, "session").is_some_and(|v| v.starts_with("sub:")) {
+            Some(format!(
+                "{} is a subagent's endpoint: it stays under its root",
+                address(&target)
+            ))
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(self.refused(&actor, &me, detail, &reason).await);
+        }
+        if text(&target, "parent_ep") == text(&me, "id") {
+            return Ok(result);
+        }
+        if text(&target, "parent_ep").is_some() || text(&target, "parent_addr").is_some() {
+            if actor.auth() == "lineage" {
+                return Err(self
+                    .refused(
+                        &actor,
+                        &me,
+                        detail,
+                        "only the session itself may ask a child that sits under another parent to link",
+                    )
+                    .await);
+            }
+            let under = self.parent_address(&target).await?;
+            let parent = address(&parent);
+            let params = json!({"to":address(&target),"kind":"request","ttl_s":86_400,"body":format!("{parent} asks you to link under it as its worker. You sit under {under} now: you can accept only once you are a root again. To accept, run {CLI_NAME} link accept <id> with this message's id, or {CLI_NAME} join --under {parent} (relay_link_accept {{id}} or relay_join {{under: \"{parent}\"}}).")});
+            let sent = self
+                .send_link_request(
+                    text(&me, "id").ok_or_else(RpcError::internal)?,
+                    &target_id,
+                    params.as_object().ok_or_else(RpcError::internal)?,
+                )
+                .await?;
+            if let Some(held) = sent.get("held").filter(|v| !v.is_null()) {
+                result["held"] = held.clone();
             } else {
-                "session"
-            },
-        )
-        .await?;
+                result["requested"] = sent["id"].clone();
+            }
+            return Ok(result);
+        }
+        self.check_scope(&me, &target, named, None, false).await?;
+        if let Some(policy) = self.policy_refusal(&me, &target).await? {
+            return Err(RpcError::new(
+                ErrorCode::PolicyRefused,
+                format!("{policy} ({})", address(&target)),
+            ));
+        }
+        self.link(&target, &me, Self::actor_detail(&actor, &me))
+            .await?;
+        result["endpoint"] = self.view(&self.must_endpoint(&target_id).await?).await?;
+        Ok(result)
+    }
+    /// a link request delivered to `endpoint`: by its id, a delivery seq, or a unique id suffix
+    async fn delivered_request(&self, endpoint: &str, id: &str) -> Result<Option<Row>, RpcError> {
+        let query = "SELECT m.*, d.seq AS seq FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.endpoint = ? AND d.expires_at > ?";
+        let now = SqlValue::Int(now_ms());
+        if let Some(row) = self
+            .store
+            .all(
+                &format!("{query} AND m.id = ? ORDER BY d.seq LIMIT 1"),
+                &[opt(Some(endpoint)), now.clone(), opt(Some(id))],
+            )
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Ok(Some(row));
+        }
+        if !id.is_empty()
+            && id.len() <= 15
+            && id.bytes().all(|b| b.is_ascii_digit())
+            && let Some(row) = self
+                .store
+                .all(
+                    &format!("{query} AND d.seq = ?"),
+                    &[
+                        opt(Some(endpoint)),
+                        now.clone(),
+                        SqlValue::Int(id.parse().unwrap_or(0)),
+                    ],
+                )
+                .await?
+                .into_iter()
+                .next()
+        {
+            return Ok(Some(row));
+        }
+        if id.len() < 4
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+        {
+            return Ok(None);
+        }
+        let rows = self
+            .store
+            .all(
+                &format!("{query} AND substr(m.id, -?) = ? ORDER BY d.seq DESC LIMIT 50"),
+                &[
+                    opt(Some(endpoint)),
+                    now,
+                    SqlValue::Int(id.len() as i64),
+                    opt(Some(id)),
+                ],
+            )
+            .await?;
+        let ids: HashSet<&str> = rows.iter().filter_map(|r| text(r, "id")).collect();
+        if ids.len() > 1 {
+            return Err(RpcError::invalid_params(format!(
+                "{id} matches more than one message delivered to you; give more of the id"
+            )));
+        }
+        Ok(rows.into_iter().next())
+    }
+    /// accepts a broker-issued link request delivered to the caller's own session
+    pub async fn link_accept(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let actor = self.actor_of(conn)?;
+        if matches!(actor, Actor::Human { .. }) || actor.auth() == "lineage" {
+            return Err(RpcError::new(
+                ErrorCode::ScopeRefused,
+                "only the session itself accepts a link request",
+            ));
+        }
+        let me = self.actor_endpoint(&actor).await?;
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::invalid_params("id is a message id"))?;
+        let request = self
+            .delivered_request(text(&me, "id").unwrap_or_default(), id)
+            .await?
+            .filter(|r| text(r, "link_parent").is_some() && text(r, "kind") == Some("request"))
+            .ok_or_else(|| {
+                RpcError::new(
+                    ErrorCode::NotFound,
+                    "no link request delivered to this endpoint",
+                )
+            })?;
+        let parent = self
+            .must_endpoint(text(&request, "from_ep").unwrap_or_default())
+            .await?;
+        if text(&parent, "kind") != Some("agent") {
+            return Err(RpcError::invalid_params(
+                "the requesting parent is no longer an agent",
+            ));
+        }
+        let mut by = Self::actor_detail(&actor, &me);
+        by["request"] = json!(text(&request, "id"));
+        crate::store::transaction(self.store.clone(), self.link(&me, &parent, by)).await?;
         Ok(
-            json!({"endpoint":self.view(&self.must_endpoint(text(&target,"id").unwrap_or("")).await?).await?,"parent":address(&parent)}),
+            json!({"endpoint": self.view(&self.must_endpoint(text(&me, "id").unwrap_or_default()).await?).await?, "parent": address(&parent)}),
         )
+    }
+    /// a linked agent back to a root with its subtree; the human at a terminal unlinks any, an agent itself only when the policy lets it
+    pub async fn unlink(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let actor = self.actor_of(conn)?;
+        let me = self.actor_endpoint(&actor).await?;
+        let named = params.get("endpoint").filter(|v| !v.is_null());
+        let human = matches!(actor, Actor::Human { .. });
+        if human {
+            self.need_tty(
+                &actor,
+                &me,
+                named.and_then(Value::as_str).map(str::to_owned),
+            )
+            .await?;
+        } else if actor.auth() == "lineage" {
+            return Err(RpcError::new(
+                ErrorCode::ScopeRefused,
+                "only the session itself unlinks it: run this from the session's own shell",
+            ));
+        }
+        let target = match named {
+            Some(value) => {
+                self.lookup(
+                    value
+                        .as_str()
+                        .ok_or_else(|| RpcError::invalid_params("endpoint is an address"))?,
+                )
+                .await?
+            }
+            None => me.clone(),
+        };
+        if !human && text(&target, "id") != text(&me, "id") {
+            return Err(RpcError::new(
+                ErrorCode::ScopeRefused,
+                "an agent unlinks only itself",
+            ));
+        }
+        if text(&target, "kind") != Some("agent") {
+            return Err(RpcError::invalid_params(
+                "only a local agent endpoint can be unlinked",
+            ));
+        }
+        if text(&target, "parent_ep").is_none() && text(&target, "parent_addr").is_none() {
+            return Err(RpcError::invalid_params(format!(
+                "{} is a root: it has no parent",
+                address(&target)
+            )));
+        }
+        if !human && self.default_of("unlink") != Some("self") {
+            return Err(self
+                .refused(
+                    &actor,
+                    &me,
+                    json!({"target": address(&target), "reason": "unlink"}),
+                    "unlinking widens a worker's scope: only the human at a terminal unlinks it (policy defaults.unlink: self lets it)",
+                )
+                .await);
+        }
+        let id = text(&target, "id")
+            .ok_or_else(RpcError::internal)?
+            .to_owned();
+        let from = self.parent_address(&target).await?;
+        let mut detail = Self::actor_detail(&actor, &me);
+        detail["target"] = json!(address(&target));
+        detail["parent"] = json!(from);
+        if text(&target, "parent_ep").is_none() {
+            self.store
+                .all(
+                    "UPDATE endpoints SET parent_addr = NULL,linked = NULL WHERE id = ?",
+                    &[opt(Some(&id))],
+                )
+                .await?;
+        } else {
+            let shift = integer(&target, "depth").unwrap_or(0);
+            let mut caps = caps_of(&target);
+            caps.caps.retain(|cap| cap.by != "policy");
+            crate::store::transaction(self.store.clone(), async {
+                self.store.all("WITH RECURSIVE below(id) AS (SELECT id FROM endpoints WHERE parent_ep = ? UNION SELECT e.id FROM endpoints e JOIN below b ON e.parent_ep = b.id) UPDATE endpoints SET tree = ?, depth = depth - ? WHERE id IN (SELECT id FROM below)",&[opt(Some(&id)),opt(Some(&id)),SqlValue::Int(shift)]).await?;
+                self.store.all("UPDATE endpoints SET tree = NULL,parent_ep = NULL,depth = 0,linked = NULL,caps = ? WHERE id = ?",&[caps_json(&mut caps),opt(Some(&id))]).await?;
+                Ok::<_, RpcError>(())
+            })
+            .await?;
+        }
+        self.audit("unlink", Some(&id), None, detail).await?;
+        Ok(json!({"endpoint": self.view(&self.must_endpoint(&id).await?).await?, "parent": from}))
     }
     async fn parent_address(&self, row: &Row) -> Result<String, RpcError> {
         if let Some(parent) = text(row, "parent_ep")
@@ -610,98 +883,5 @@ impl Core {
             relinked.push(pair);
         }
         Ok(json!({"relinked":relinked}))
-    }
-    pub async fn grant(
-        &self,
-        conn: ConnectionId,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        self.need_terminal(conn).await?;
-        let me = self.actor_row(conn).await?;
-        let under = if let Some(value) = params.get("under").and_then(Value::as_str) {
-            self.lookup(value).await?
-        } else {
-            me.clone()
-        };
-        if text(&under, "kind") != Some("agent") {
-            return Err(RpcError::invalid_params(
-                "the human names the endpoint to grant under",
-            ));
-        }
-        if text(&me, "kind") != Some("human")
-            && text(&me, "id") != text(&under, "id")
-            && !self.authority(&me, &under).await?
-        {
-            return Err(RpcError::new(ErrorCode::NotFound, "no endpoint"));
-        }
-        let name = clean_text(params.get("name"), "name", 63)?;
-        if name.as_ref().is_some_and(|v| !valid_handle(v)) {
-            return Err(RpcError::invalid_params("name is not a valid handle"));
-        }
-        let labels = clean_labels(params.get("labels"))?;
-        let title =
-            crate::session::one_line(params.get("title"), "title", 64)?.filter(|v| !v.is_empty());
-        if crate::scrub::find_secret(&labels.to_string()).is_some()
-            || title
-                .as_ref()
-                .is_some_and(|v| crate::scrub::find_secret(v).is_some())
-        {
-            return Err(RpcError::new(
-                ErrorCode::SecretRefused,
-                "grant carries a credential",
-            ));
-        }
-        let ttl = params
-            .get("ttl_s")
-            .map(|v| {
-                v.as_i64()
-                    .filter(|v| *v >= 1 && *v <= 604800)
-                    .ok_or_else(|| RpcError::invalid_params("ttl_s must be 1 to 604800"))
-            })
-            .transpose()?
-            .unwrap_or(604800);
-        let bound = clean_text(params.get("bind_process"), "bind_process", 128)?;
-        if bound.as_ref().is_some_and(|v| !process_key(v, true)) {
-            return Err(RpcError::invalid_params(
-                "bind_process is a full process key",
-            ));
-        }
-        let mut caps = Vec::new();
-        let preset = params
-            .get("scope")
-            .and_then(Value::as_str)
-            .map(|v| {
-                crate::policy::preset(v)
-                    .ok_or_else(|| RpcError::invalid_params("scope is a preset"))
-            })
-            .transpose()?;
-        for dir in ["in", "out"] {
-            if let Some(sels) = params
-                .get(dir)
-                .or_else(|| params.get("allow"))
-                .or(preset.as_ref())
-                .filter(|v| !v.is_null())
-            {
-                let sels = sels
-                    .as_array()
-                    .ok_or_else(|| RpcError::invalid_params("rules are selector lists"))?;
-                if sels.iter().any(|v| {
-                    !v.as_str()
-                        .is_some_and(|v| crate::policy::valid_selector(v, false, false))
-                }) {
-                    return Err(RpcError::invalid_params("invalid selector"));
-                }
-                caps.push(json!({"dir":dir,"sels":sels.iter().map(|s|json!({"sel":s})).collect::<Vec<_>>()}));
-            }
-        }
-        let value = token("krt");
-        let now = now_ms();
-        self.store.all("INSERT INTO grants (token_hash,issuer,under,name,labels,title,caps,groups,created_at,expires_at,bound_process) VALUES (?,?,?,?,?,?,?,'[]',?,?,?)",&[opt(Some(&hash(&value))),opt(text(&me,"id")),opt(text(&under,"id")),opt(name.as_deref()),opt(Some(&labels.to_string())),opt(title.as_deref()),opt(Some(&json!(caps).to_string())),SqlValue::Int(now),SqlValue::Int(now+ttl*1000),opt(bound.as_deref())]).await?;
-        self.audit("scope_grant",text(&under,"id"),None,json!({"by":address(&me),"target":address(&under),"name":name,"caps":caps,"groups":[],"expires_at":timestamp(now+ttl*1000)})).await?;
-        let mut env = json!({"SCP_GRANT":value});
-        if let Some(name) = name {
-            env["SCP_NAME"] = json!(name);
-        }
-        Ok(json!({"token":value,"env":env}))
     }
 }

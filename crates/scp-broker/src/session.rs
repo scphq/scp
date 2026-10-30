@@ -315,7 +315,6 @@ mod push;
 pub use push::{LiveWorkers, wakes};
 
 const GONE_PREFIX: &str = "_gone_";
-const SUBAGENT_TITLES_KEPT: usize = 256;
 
 /// who calls for an endpoint: a hook connection names the harness process it runs in
 #[derive(Clone, Debug, Default)]
@@ -358,14 +357,6 @@ pub fn seq_list(value: Option<&Value>, page: i64) -> Result<Vec<i64>, RpcError> 
         .filter(|n| n.abs() < 9.0e15)
         .map(|n| n as i64)
         .collect())
-}
-
-fn subagent_id(value: &str) -> bool {
-    (1..=64).contains(&value.len())
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        && value.bytes().any(|b| b.is_ascii_alphanumeric())
 }
 
 fn attr(value: &str) -> String {
@@ -715,27 +706,6 @@ impl Core {
         Ok(out)
     }
 
-    /// a delivered message's envelope with the broker's relation to the recipient
-    pub async fn relay_envelope(&self, row: &Row, endpoint: &str) -> Result<Value, RpcError> {
-        let mut envelope = self.message_envelope(row, endpoint).await?;
-        let sender = match text(row, "from_ep") {
-            Some(id) => self.by_id(id).await?,
-            None => None,
-        };
-        let recipient = self.by_id(endpoint).await?;
-        let kin = self
-            .kinship(
-                sender.as_ref(),
-                recipient.as_ref(),
-                integer(row, "created_at").unwrap_or(0),
-            )
-            .await?;
-        if let Some(object) = envelope.as_object_mut() {
-            object.extend(kin);
-        }
-        Ok(envelope)
-    }
-
     /// up to injectMessages rows, oldest first, whose wrapped text fits in `bytes`; `offered` adds each one too big, except a pushable one
     pub(crate) async fn budget(
         &self,
@@ -753,7 +723,7 @@ impl Core {
         let push_bytes = self.cap("pushBytes", 20480);
         for row in rows {
             let seq = integer(row, "seq").unwrap_or(0);
-            let envelope = self.relay_envelope(row, endpoint).await?;
+            let envelope = self.message_envelope(row, endpoint).await?;
             let size = wrap_message(&envelope).len() as i64;
             if size > bytes {
                 if let Some((me, now)) = pushable
@@ -1019,7 +989,7 @@ impl Core {
         self.received(endpoint, &rows, now).await?;
         let mut messages = Vec::new();
         for row in &rows {
-            messages.push(self.relay_envelope(row, endpoint).await?);
+            messages.push(self.message_envelope(row, endpoint).await?);
         }
         let after = params
             .get("after")
@@ -1336,70 +1306,6 @@ impl Core {
         self.notify_watchers(event).await;
         Ok(result)
     }
-
-    /// a title for the caller's in-process subagent from its parent's description; fills only a title nobody set
-    pub async fn subagent_title(
-        &mut self,
-        conn: ConnectionId,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        let id = params
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|v| subagent_id(v))
-            .ok_or_else(|| RpcError::invalid_params("id is the subagent's id"))?;
-        let value = params
-            .get("title")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RpcError::invalid_params("title must be a string"))?;
-        let (endpoint, hook) = self.hook_of(conn)?;
-        let row = self.must_endpoint(&endpoint).await?;
-        let title = hook_title(value);
-        let Some(title) = title.filter(|_| text(&row, "kind") == Some("agent")) else {
-            return Ok(json!({"changed":false}));
-        };
-        if !self.holds(&row, &hook).await? {
-            return Ok(json!({"changed":false}));
-        }
-        let prefix = format!("sub:{id}:");
-        if let Some(sub) = self.store.all("SELECT id FROM endpoints WHERE kind = 'agent' AND parent_ep = ? AND substr(session, 1, ?) = ? ORDER BY COALESCE(last_seen, created_at) DESC LIMIT 1", &[sv(&endpoint), SqlValue::Int(prefix.len() as i64), sv(&prefix)]).await?.first() {
-            let sub = text(sub, "id").unwrap_or("").to_owned();
-            return Ok(json!({"changed": self.fill_title(&sub, &title).await?}));
-        }
-        let key = format!("{endpoint} {id}");
-        let titles = &mut self.state.subagent_titles;
-        titles.retain(|(k, _)| *k != key);
-        titles.push((key, title));
-        if titles.len() > SUBAGENT_TITLES_KEPT {
-            let excess = titles.len() - SUBAGENT_TITLES_KEPT;
-            titles.drain(..excess);
-        }
-        Ok(json!({"changed":false}))
-    }
-
-    /// the title a root named subagent `id` with before it had an endpoint, given to `endpoint`; whether it changed its title
-    pub async fn take_subagent_title(
-        &mut self,
-        root: &str,
-        id: &str,
-        endpoint: &str,
-    ) -> Result<bool, RpcError> {
-        let key = format!("{root} {id}");
-        let Some(at) = self
-            .state
-            .subagent_titles
-            .iter()
-            .position(|(k, _)| *k == key)
-        else {
-            return Ok(false);
-        };
-        let (_, title) = self.state.subagent_titles.remove(at);
-        self.fill_title(endpoint, &title).await
-    }
-
-    async fn fill_title(&self, endpoint: &str, title: &str) -> Result<bool, RpcError> {
-        Ok(!self.store.all("UPDATE endpoints SET title = ?, title_auto = ?, title_turn = NULL WHERE id = ? AND (title IS NULL OR title = title_auto) AND title IS NOT ? RETURNING id", &[sv(title), sv(title), sv(endpoint), sv(title)]).await?.is_empty())
-    }
 }
 
 #[cfg(test)]
@@ -1430,6 +1336,5 @@ mod tests {
         assert!(seq_list(Some(&json!([1.5])), 100).is_err());
         assert!(seq_list(None, 100).is_err());
         assert!(seq_list(Some(&json!([1, 2, 3])), 2).is_err());
-        assert!(subagent_id("abc-12_") && !subagent_id("---") && !subagent_id("../bad"));
     }
 }

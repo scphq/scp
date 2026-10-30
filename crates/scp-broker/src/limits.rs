@@ -233,7 +233,7 @@ impl Core {
                         .await?);
                 }
             }
-            if let Some(refusal) = self.policy_refusal(guard.sender, recipient) {
+            if let Some(refusal) = self.policy_refusal(guard.sender, recipient).await? {
                 return Err(self
                     .refuse(
                         from,

@@ -1,6 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { waitFor } from "../targets";
-import { brokerSuite, type BrokerFixture } from "./suite";
+import { type BrokerFixture, brokerSuite, test } from "./suite";
 import { type BrokerWire, refusal, type View } from "./wire";
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`;
@@ -298,6 +298,17 @@ brokerSuite("broker scopes", (start) => {
     expect(await adm.request("admin", { action: "ls" })).toMatchObject([{ subject: "me/adm", tree: "me/main" }]);
     expect(await adm.request("rules_widen", { endpoint: "w", out: ["ep:orch"] })).toMatchObject({ added: ["ep:orch"] });
     await human.request("admin", { action: "revoke", subject: "adm", tree: "main" });
+  });
+
+  test("only the endpoint itself or an ancestor grants under it; admin authority does not", async () => {
+    const broker = await start();
+    const { main, orch } = await fleet(broker);
+    const adm = await broker.agent("adm");
+    await orch.request("rules_set", { endpoint: "w", in: [], out: [] });
+    await (await broker.human()).request("admin", { action: "grant", subject: "adm", tree: "w" });
+    expect(await adm.request("rules_widen", { endpoint: "w", out: ["ep:orch"] })).toMatchObject({ added: ["ep:orch"] });
+    expect(await refusal(adm.request("grant", { under: "w", name: "k" }))).toBe("not_found");
+    expect(await main.request<{ token: string }>("grant", { under: "w", name: "k" })).toMatchObject({ token: expect.any(String) });
   });
 
   test("unnameable groups refuse selectors at set and claim time without revealing their existence", async () => {

@@ -54,7 +54,6 @@ impl Broker {
             .args(["daemon", "--idle", idle, "--policy"])
             .arg(home.join("policy.json"))
             .env_clear()
-            .env("SCP_BROKER_EXPERIMENTAL", "1")
             .env("HOME", home)
             .env("SCP_DIR", dir)
             .kill_on_drop(true)

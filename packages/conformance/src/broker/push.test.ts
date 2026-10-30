@@ -1,6 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { waitFor } from "../targets";
-import { brokerSuite, type Start } from "./suite";
+import { brokerSuite, type Start, test } from "./suite";
 
 const key = (pid: number) => `pid:${pid}:conformance`;
 type Offer = { messages: { body: { text: string }; relation?: string }[]; offered: number[]; hold: string; prompts: number; pushes_left: number };

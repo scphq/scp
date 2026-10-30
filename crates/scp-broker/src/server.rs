@@ -135,7 +135,12 @@ impl Broker {
             tokio::select! {
                 _ = &mut shutdown => break Ok(()),
                 _ = tokio::time::sleep_until(deadline), if connections.is_empty() && !self.idle.is_zero() => break Ok(()),
-                _ = ownership.tick() => if !self.owns_socket().await { break Ok(()); },
+                _ = ownership.tick() => {
+                    if !self.owns_socket().await { break Ok(()); }
+                    if let Err(error) = self.core.lock().await.judge_sweep().await {
+                        tracing::error!(%error, "judge sweep failed");
+                    }
+                },
                 joined = connections.join_next(), if !connections.is_empty() => {
                     if let Some(Err(error)) = joined { tracing::error!(%error, "connection task failed"); }
                     if connections.is_empty() { idle_since = Instant::now(); }
@@ -258,6 +263,29 @@ struct Output {
 }
 
 impl Output {
+    /// a fleet event for a watcher; one that would overrun the output cap gets a single `lagged` notice instead, and false
+    fn send_event(&self, frame: Value) -> bool {
+        let Ok(mut bytes) = serde_json::to_vec(&frame) else {
+            return true;
+        };
+        bytes.push(b'\n');
+        let queued = self.queued.load(Ordering::Relaxed);
+        if queued == 0 || queued.saturating_add(bytes.len()) <= OUTBOUND_CAP {
+            self.send(frame);
+            return true;
+        }
+        let lagged = json!({"jsonrpc": "2.0", "method": "fleet", "params": {"at": frame["params"]["at"], "type": "lagged", "queued_bytes": queued}});
+        if let Ok(mut bytes) = serde_json::to_vec(&lagged) {
+            bytes.push(b'\n');
+            self.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+            if let Err(error) = self.tx.send(bytes) {
+                self.queued.fetch_sub(error.0.len(), Ordering::Relaxed);
+                self.failed.notify_one();
+            }
+        }
+        false
+    }
+
     fn send(&self, frame: Value) {
         let Ok(mut bytes) = serde_json::to_vec(&frame) else {
             return;
@@ -340,7 +368,15 @@ pub(crate) async fn serve_connection(
             _ = stopping.changed() => break,
             _ = failed.notified() => break,
             _ = requests.join_next(), if !requests.is_empty() => {},
-            Some(event) = fleet.recv() => output.send(event),
+            Some(event) = fleet.recv() => {
+                if !output.send_event(event) {
+                    let mut core = core.lock().await;
+                    if let Some(connection) = core.state.connections.get_mut(&conn) {
+                        connection.watching = false;
+                    }
+                    while fleet.try_recv().is_ok() {}
+                }
+            }
             _ = tokio::time::sleep_until(deadline), if partial_since.is_some() && !too_large => {
                 output.send(RpcError::invalid_request("the request line was not finished in time").frame(Value::Null));
                 break;

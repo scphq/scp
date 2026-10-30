@@ -25,6 +25,10 @@ pub struct Core {
     pub paths: Paths,
     pub policy_file: PathBuf,
     pub policy_error: Option<String>,
+    pub judge: crate::judge::JudgeGate,
+    pub policy_text: Option<Option<String>>,
+    pub policy_binds: std::collections::HashMap<String, String>,
+    pub noise: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
 impl Core {
@@ -35,6 +39,12 @@ impl Core {
         policy_file: PathBuf,
     ) -> Result<Self, RpcError> {
         crate::store::schema::migrate(store.as_ref(), now_ms()).await?;
+        store
+            .all(
+                "UPDATE judge_holds SET state = 'held' WHERE state = 'releasing'",
+                &[],
+            )
+            .await?;
         store
             .all("UPDATE endpoints SET connections = 0, hook_seen = CASE WHEN kind = 'agent' AND hook_ended IS NULL THEN MAX(COALESCE(hook_seen,0), ?) ELSE hook_seen END WHERE connections > 0", &[SqlValue::Int(now_ms()-1_740_000)])
             .await?;
@@ -53,6 +63,7 @@ impl Core {
                     .insert(id.to_owned(), crate::views::address(&row));
             }
         }
+        let judge = crate::judge::JudgeGate::new(&limits);
         let mut core = Self {
             store,
             limits,
@@ -62,42 +73,13 @@ impl Core {
             paths,
             policy_file,
             policy_error: None,
+            judge,
+            policy_text: None,
+            policy_binds: Default::default(),
+            noise: Default::default(),
         };
-        core.load_policy().await;
+        core.load_policy().await?;
         Ok(core)
-    }
-
-    pub async fn load_policy(&mut self) {
-        match tokio::fs::read_to_string(&self.policy_file).await {
-            Ok(text) => match serde_json::from_str::<Value>(&text)
-                .map_err(|e| e.to_string())
-                .and_then(|v| {
-                    crate::policy::Policy::parse(&v)
-                        .map(|p| p.0)
-                        .map_err(|e| e.message)
-                }) {
-                Ok(policy) => {
-                    self.policy = Some(policy);
-                    self.policy_error = None;
-                }
-                Err(error) => {
-                    self.policy = None;
-                    self.policy_error = Some(format!("the relay policy is invalid ({error})"));
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if tokio::fs::symlink_metadata(&self.policy_file).await.is_ok() {
-                    self.policy_error = Some("the relay policy is a link to a missing file".into());
-                } else {
-                    self.policy = None;
-                    self.policy_error = None;
-                }
-            }
-            Err(error) => {
-                self.policy = None;
-                self.policy_error = Some(format!("the relay policy cannot be read ({error})"));
-            }
-        }
     }
 
     pub fn broker_info(&self) -> Value {
@@ -129,26 +111,19 @@ impl Core {
         if !connection.bound() {
             return Err(RpcError::new(ErrorCode::Unauthorized, "call hello first"));
         }
+        let observes = OBSERVER_METHODS.contains(&method);
+        let scoped = SCOPE_METHODS.contains(&method);
         if connection.mode == Mode::Observer
-            && !matches!(
-                method,
-                "list"
-                    | "snapshot"
-                    | "watch"
-                    | "log"
-                    | "policy"
-                    | "policy_check"
-                    | "cloud_status"
-                    | "bridge_relink"
-            )
+            && !observes
+            && !(scoped && (connection.lineage.is_some() || method == "why"))
         {
             return Err(RpcError::new(
                 ErrorCode::Unauthorized,
-                "this connection only observes",
+                "this connection only observes: say hello as an agent or the human",
             ));
         }
         if connection.mode == Mode::Transient {
-            if matches!(method, "rules" | "rules_set" | "grant" | "group" | "admin") {
+            if scoped {
                 return Err(RpcError::new(
                     ErrorCode::ScopeRefused,
                     "a hook connection cannot read or change scopes, groups or grants",
@@ -180,14 +155,30 @@ impl Core {
         }
         match method {
             "whoami" => self.view(&self.must_endpoint(&endpoint).await?).await,
-            "list" => self.list_endpoints(params).await,
-            "rename" => self.rename(conn, params).await,
+            "list" => self.list_for(conn, params).await,
+            "rename" => {
+                let view = self.rename(conn, params).await?;
+                if let Some(id) = view["id"].as_str() {
+                    self.state.known.remove(id);
+                    let id = id.to_owned();
+                    self.presence_moved(&id, true, true).await?;
+                }
+                Ok(view)
+            }
             "leave" => self.leave(conn, params).await,
             "adopt" => self.adopt(conn, params).await,
+            "link_accept" => self.link_accept(conn, params).await,
+            "unlink" => self.unlink(conn, params).await,
             "relink" => self.relink(conn, params).await,
-            "event" => self.event(conn, params).await,
+            "event" => {
+                let row = self.event(conn, params).await?;
+                if !endpoint.is_empty() {
+                    self.presence_moved(&endpoint, true, true).await?;
+                }
+                Ok(row)
+            }
             "grant" => self.grant(conn, params).await,
-            "log" => self.audit_log(params).await,
+            "log" => self.log_for(conn, params).await,
             "send" | "ask" => self.send_rpc(conn, method, params).await,
             "ask_wait" => self.ask_wait(&endpoint, params).await,
             "inbox" if crate::session::flag(params, "offer") => self.offer(&endpoint, params).await,
@@ -199,7 +190,6 @@ impl Core {
             "message" => self.message_rpc(&endpoint, params).await,
             "receipts" => self.receipts(&endpoint, params).await,
             "watch" => self.watch(conn).await,
-            "policy" => self.policy_rpc(conn).await,
             "status" => self.status(&endpoint, params).await,
             "title" => {
                 self.title(&endpoint, params.get("text"), &connection.mode)
@@ -214,8 +204,30 @@ impl Core {
             "spawn_exit" => self.spawn_exit(conn, params).await,
             "spawn_steers" => self.spawn_steers(conn, params).await,
             "spawn_end" => self.spawn_end(conn, params).await,
-            "rules" => self.rules(&endpoint).await,
-            "rules_set" => self.rules_set(&endpoint, params).await,
+            "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
+                self.review_hold(conn, method, params).await
+            }
+            "rules" => self.scope_view(conn, params).await,
+            "rules_set" => self.rules_set(conn, params).await,
+            "rules_widen" => self.rules_widen(conn, params).await,
+            "rules_lift" => self.rules_lift(conn, params).await,
+            "group" => self.group(conn, params).await,
+            "admin" => self.admin(conn, params).await,
+            "peers" => self.peers(conn, params).await,
+            "why" => {
+                let actor = self.actor_of(conn)?;
+                let field = |key: &str| {
+                    params
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| RpcError::invalid_params(format!("{key} is required")))
+                };
+                self.why(&actor, &field("from")?, &field("to")?).await
+            }
+            "snapshot" => self.snapshot_for(conn, params).await,
+            "policy" => self.policy_view(conn).await,
+            "policy_check" => self.policy_check(conn, params).await,
             "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
             "machine_wake" => Err(RpcError::new(
                 ErrorCode::Unavailable,
@@ -246,7 +258,47 @@ impl Core {
         if params.get("protocol").and_then(Value::as_str) != Some(PROTOCOL) {
             return Err(RpcError::invalid_params("this broker speaks scp/1"));
         }
-        crate::claims::hello_claim(self, conn, params).await
+        let result = crate::claims::hello_claim(self, conn, params).await?;
+        let brief = self.state.connections.get(&conn).is_some_and(|c| c.brief);
+        if let Some(id) = result["endpoint"]["id"].as_str() {
+            let id = id.to_owned();
+            self.presence_moved(&id, !brief, true).await?;
+        }
+        Ok(result)
+    }
+
+    /// records an endpoint's presence and address; when either moved since the last report and `notify`, watchers hear it
+    pub async fn presence_moved(
+        &mut self,
+        id: &str,
+        notify: bool,
+        full: bool,
+    ) -> Result<bool, RpcError> {
+        let Some(row) = self.by_id(id).await? else {
+            return Ok(false);
+        };
+        let view = self.endpoint_view(&row)?;
+        let now = (
+            view["presence"].as_str().unwrap_or("offline").to_owned(),
+            view["address"].as_str().unwrap_or("").to_owned(),
+        );
+        let moved = self
+            .state
+            .known
+            .get(id)
+            .map_or(now.0 != "offline", |was| *was != now);
+        self.state.known.insert(id.to_owned(), now);
+        if !moved || !notify {
+            return Ok(false);
+        }
+        let mut event =
+            json!({"type": "presence", "endpoint": view["address"], "presence": view["presence"]});
+        if full {
+            event["harness"] = view["harness"].clone();
+            event["labels"] = view["labels"].clone();
+        }
+        self.notify_watchers(event).await;
+        Ok(true)
     }
 
     pub fn endpoint_view(&self, row: &Row) -> Result<Value, RpcError> {
@@ -306,10 +358,25 @@ impl Core {
             if let Err(error) = result {
                 tracing::error!(%error, "disconnect failed");
             } else if !connection.brief {
-                let settled = self.store.all("UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ? AND connections = 0 AND (hook_seen IS NULL OR hook_seen < ?) AND status_state IN ('working','waiting')", &[SqlValue::Text(endpoint), SqlValue::Int(now_ms()-1_800_000)]).await;
-                if let Err(error) = settled {
-                    tracing::error!(%error, "disconnect settlement failed");
+                let settled = self.store.all("UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ? AND connections = 0 AND (hook_seen IS NULL OR hook_seen < ?) AND status_state IN ('working','waiting') RETURNING id", &[SqlValue::Text(endpoint.clone()), SqlValue::Int(now_ms()-1_800_000)]).await;
+                if let Err(error) = self.presence_moved(&endpoint, true, false).await {
+                    tracing::error!(%error, "disconnect presence failed");
                 }
+                match settled {
+                    Err(error) => tracing::error!(%error, "disconnect settlement failed"),
+                    Ok(rows) if !rows.is_empty() => {
+                        let address = self.state.addresses.get(&endpoint).cloned();
+                        if let Some(address) = address {
+                            self.notify_watchers(
+                                json!({"type": "status", "endpoint": address, "status": null}),
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(_) => {}
+                }
+            } else {
+                let _ = self.presence_moved(&endpoint, false, false).await;
             }
         }
     }
@@ -379,6 +446,35 @@ impl Core {
         }
     }
 }
+
+const OBSERVER_METHODS: [&str; 8] = [
+    "list",
+    "snapshot",
+    "watch",
+    "log",
+    "policy",
+    "policy_check",
+    "cloud_status",
+    "bridge_relink",
+];
+const SCOPE_METHODS: [&str; 16] = [
+    "rules",
+    "rules_set",
+    "rules_widen",
+    "rules_lift",
+    "grant",
+    "group",
+    "admin",
+    "peers",
+    "why",
+    "spawn_exit",
+    "spawn_steers",
+    "spawn_end",
+    "spawn_via",
+    "peek",
+    "peek_set",
+    "peek_who",
+];
 
 pub fn now_ms() -> i64 {
     SystemTime::now()

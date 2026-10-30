@@ -1,6 +1,7 @@
 #[path = "messages_support.rs"]
 mod support;
 
+use scp_broker::state::Mode;
 use scp_broker::store::{SqlValue, Storage};
 use serde_json::json;
 use support::{TestCore, params};
@@ -8,10 +9,14 @@ use support::{TestCore, params};
 #[tokio::test]
 async fn rule_storage_preserves_directions_and_expands_presets() {
     let mut test = TestCore::new().await;
+    let sender = test.core.state.connect();
+    test.core
+        .state
+        .bind(sender, Some("sender".into()), Mode::Agent);
     let view = test
         .core
         .rules_set(
-            "sender",
+            sender,
             &params(json!({"in":["ep:recipient","ep:recipient"]})),
         )
         .await
@@ -19,47 +24,47 @@ async fn rule_storage_preserves_directions_and_expands_presets() {
     assert_eq!(view["rules"], json!({"in":["ep:recipient"]}));
     assert_eq!(
         test.core
-            .rules_set("sender", &params(json!({"out":["outsider"]})))
+            .rules_set(sender, &params(json!({"out":["outsider"]})))
             .await
             .expect("out")["rules"],
         json!({"in":["ep:recipient"],"out":["ep:outsider"]})
     );
     assert_eq!(
         test.core
-            .rules_set("sender", &params(json!({"scope":"parent"})))
+            .rules_set(sender, &params(json!({"scope":"parent"})))
             .await
             .expect("preset")["preset"],
         "parent"
     );
     assert_eq!(
         test.core
-            .rules_set("sender", &params(json!({"scope":"open"})))
+            .rules_set(sender, &params(json!({"scope":"open"})))
             .await
             .expect("open")["rules"],
         json!({})
     );
     assert!(
         test.core
-            .rules_set("sender", &params(json!({})))
+            .rules_set(sender, &params(json!({})))
             .await
             .is_err()
     );
     assert!(
         test.core
-            .rules_set("sender", &params(json!({"in":["tree"]})))
+            .rules_set(sender, &params(json!({"in":["tree"]})))
             .await
             .is_err()
     );
     assert!(
         test.core
-            .rules_set("sender", &params(json!({"in":["tree:ancestors:17"]})))
+            .rules_set(sender, &params(json!({"in":["tree:ancestors:17"]})))
             .await
             .is_err()
     );
     assert!(
         test.core
             .rules_set(
-                "sender",
+                sender,
                 &params(json!({"scope":"open","allow":["ep:recipient"]}))
             )
             .await

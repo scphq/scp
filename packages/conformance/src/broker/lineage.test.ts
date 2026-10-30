@@ -1,6 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { waitFor } from "../targets";
-import { brokerSuite, type BrokerFixture } from "./suite";
+import { type BrokerFixture, brokerSuite, test } from "./suite";
 import { refusal, type View } from "./wire";
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`;
@@ -93,6 +93,30 @@ brokerSuite("broker lineage", (start) => {
     const ordinary = await lead.request<{ id: string }>("send", { to: "peer", kind: "request", body: "join me" });
     expect(await refusal(peer.request("link_accept", { id: ordinary.id }))).toBe("not_found");
     expect(await peer.request("link_accept", { id: result.requested.slice(-6) })).toMatchObject({ parent: "me/lead", endpoint: { depth: 1 } });
+  });
+
+  test("a hidden child of another parent is not_found like a missing endpoint and gets no link request", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead");
+    const peer = await broker.agent("peer");
+    await broker.agent("other");
+    const h = await broker.human();
+    await h.request("adopt", { endpoint: "peer", parent: "other" });
+    await h.request("rules_set", { endpoint: "peer", in: [] });
+    expect(await refusal(lead.request("adopt", { endpoint: "peer" }))).toBe("not_found");
+    expect(await refusal(lead.request("adopt", { endpoint: "ghost" }))).toBe("not_found");
+    expect(await peer.request("inbox")).toMatchObject({ messages: [] });
+  });
+
+  test("a shell bound to an agent gets no terminal exemption from tty", async () => {
+    const broker = await start();
+    const a = await broker.hook({ handle: "a", ...claim(5) });
+    await broker.agent("victim");
+    const h = await broker.human();
+    await h.request("rules_set", { endpoint: "a", in: [], out: [] });
+    const shell = await broker.observer({ self: [key(5)], lineage: [key(5)], tty: true });
+    expect(shell.hello.endpoint?.id).toBe(a.hello.endpoint!.id);
+    expect(await refusal(shell.request("adopt", { endpoint: "victim" }))).toBe("not_found");
   });
 
   test("link acceptance rechecks cycles and lineage auth cannot accept", async () => {

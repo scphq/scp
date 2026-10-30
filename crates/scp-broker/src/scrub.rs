@@ -60,15 +60,15 @@ impl SecretScanner {
             ),
             (
                 "bearer token",
-                r"(?i)(?-u:\b)bearer\s+[A-Za-z0-9._~+/=-]{16,}",
+                r"(?i)(?-u:\b)bearer[\s\x{FEFF}]+[A-Za-z0-9._~+/=-]{16,}",
             ),
             (
                 concat!("aw", "s secret"),
-                r#"(?i)aw[s][_-]?secret[_-]?(?:access[_-]?)?key["']?\s*[:=]\s*["']?[A-Za-z0-9+/]{40}"#,
+                r#"(?i)aw[s][_-]?secret[_-]?(?:access[_-]?)?key["']?[\s\x{FEFF}]*[:=][\s\x{FEFF}]*["']?[A-Za-z0-9+/]{40}"#,
             ),
             (
                 "assigned secret",
-                r#"(?i)(?:api[_-]?key|token|secret|password|passwd|credentials?)["']?\s*[:=]\s*["']?([A-Za-z0-9][A-Za-z0-9+/._~-]{19,})"#,
+                r#"(?i)(?:api[_-]?key|token|secret|password|passwd|credentials?)["']?[\s\x{FEFF}]*[:=][\s\x{FEFF}]*["']?([A-Za-z0-9][A-Za-z0-9+/._~-]{19,})"#,
             ),
         ] {
             patterns.push((name, pattern.to_owned()));
@@ -349,6 +349,8 @@ mod tests {
             "sk-abcdefghijklmnopqrstuvwxyz012345",
             "Bearer abcdefghijklmnop",
             "password=abcdefghij0123456789",
+            "Bearer\u{feff}abcdefghijklmnop",
+            "password=\u{feff}abcdefghij0123456789",
         ] {
             assert!(find_secret(text).is_some(), "{text}");
             assert!(redact_secrets(text).starts_with("[redacted "));

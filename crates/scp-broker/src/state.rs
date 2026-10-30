@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -56,7 +56,10 @@ pub struct State {
     pub waiters: HashMap<String, Arc<Notify>>,
     pub closing: bool,
     pub stopping: Arc<Notify>,
-    pub subagent_titles: Vec<(String, String)>,
+    pub subagent_titles: VecDeque<(String, String)>,
+    pub deferred: Option<(Option<String>, Value)>,
+    /// the presence and address last reported to watchers, by endpoint id
+    pub known: HashMap<String, (String, String)>,
     next_id: ConnectionId,
 }
 

@@ -124,6 +124,13 @@ async fn adopt_requests_consent_and_direct_links_refuse_existing_parents() {
             .get("requested")
             .is_none()
     );
+    call(
+        &mut core,
+        human,
+        "rules_set",
+        json!({"endpoint":"second","in":["*"],"out":["*"]}),
+    )
+    .await;
     let requested = call(&mut core, second, "adopt", json!({"endpoint":"child"})).await;
     assert_eq!(requested["endpoint"]["parent"], "me/first");
     assert!(requested["requested"].is_string());

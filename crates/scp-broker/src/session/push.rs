@@ -436,7 +436,7 @@ impl Core {
             if integer(&row, "seq").is_some_and(|seq| workers.contains(&seq)) {
                 continue;
             }
-            let envelope = self.relay_envelope(&row, id).await?;
+            let envelope = self.message_envelope(&row, id).await?;
             let size = wrap_message(&envelope).len() as i64;
             if size > left {
                 continue;
@@ -1285,7 +1285,7 @@ impl Core {
             let rows = self.steers_of(&grant, &spender, now, &[]).await?;
             let mut steers = Vec::new();
             for row in &rows {
-                steers.push(self.relay_envelope(row, id).await?);
+                steers.push(self.message_envelope(row, id).await?);
             }
             let session = text(&spender, "harness_session");
             if flag(params, "take") && session.is_some() && !rows.is_empty() {
@@ -1444,8 +1444,12 @@ mod tests {
         core.store.all("INSERT INTO grants (token_hash, issuer, under, name, labels, caps, groups, used_by, created_at, expires_at, spawn, no_push, steer) VALUES (?, ?, ?, 'w1', '{}', '[]', '[]', ?, ?, ?, 1, ?, 'key1')", &[SqlValue::Text(hash(&token)), SqlValue::Text(main_id.clone()), SqlValue::Text(main_id.clone()), SqlValue::Text(worker_id.clone()), SqlValue::Int(at), SqlValue::Int(at + 600_000), mark]).await.expect("grant");
         core.store
             .all(
-                "UPDATE endpoints SET parent_ep = ? WHERE id = ?",
-                &[SqlValue::Text(main_id), SqlValue::Text(worker_id.clone())],
+                "UPDATE endpoints SET parent_ep = ?, tree = ?, depth = 1 WHERE id = ?",
+                &[
+                    SqlValue::Text(main_id.clone()),
+                    SqlValue::Text(main_id),
+                    SqlValue::Text(worker_id.clone()),
+                ],
             )
             .await
             .expect("parent");

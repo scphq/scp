@@ -20,7 +20,6 @@ use crate::views::{address, presence};
 const ASK_ENDED_GRACE_MS: i64 = 10_000;
 const ASK_RECHECK: Duration = Duration::from_millis(1000);
 const MESSAGE_KINDS: [&str; 4] = ["message", "request", "reply", "status"];
-const GONE_PREFIX: &str = "_gone_";
 
 fn string(value: impl Into<String>) -> SqlValue {
     SqlValue::Text(value.into())
@@ -64,7 +63,7 @@ fn ambiguous(id: &str, ids: &[String], place: &str) -> RpcError {
     ))
 }
 
-fn unreachable(value: &str) -> RpcError {
+pub(crate) fn unreachable(value: &str) -> RpcError {
     RpcError::new(
         ErrorCode::NotFound,
         format!(
@@ -257,7 +256,7 @@ impl Core {
     }
 
     /// the message a reply names: one in a thread the sender is in
-    async fn reply_parent(&self, from: &str, id: &Value) -> Result<Row, RpcError> {
+    pub(crate) async fn reply_parent(&self, from: &str, id: &Value) -> Result<Row, RpcError> {
         let name = match id {
             Value::String(value) => value.clone(),
             other => other.to_string(),
@@ -281,45 +280,6 @@ impl Core {
                 format!("no message {name} to reply to"),
             )),
         }
-    }
-
-    /// the children a `tree:children` send reaches
-    async fn expand(
-        &self,
-        sender: &Row,
-        value: &str,
-        reply_to: Option<&Row>,
-    ) -> Result<Vec<Row>, RpcError> {
-        if value != "tree:children" {
-            return Err(unreachable(value));
-        }
-        let id = text(sender, "id").unwrap_or("");
-        let members = self.store.all("SELECT * FROM endpoints WHERE parent_ep = ? AND kind = 'agent' AND substr(handle, 1, 6) != '_gone_' ORDER BY handle", &[string(id)]).await?;
-        let mut reached = Vec::new();
-        for row in members {
-            if text(&row, "id") != Some(id)
-                && self
-                    .scope_refusal(sender, &row, reply_to, false, false)
-                    .await?
-                    .is_none()
-            {
-                reached.push(row);
-            }
-        }
-        if reached.is_empty() {
-            return Err(unreachable(value));
-        }
-        let max = LIMITS.fan_out_max as usize;
-        if reached.len() > max {
-            return Err(RpcError::new(
-                ErrorCode::TooLarge,
-                format!(
-                    "{value} reaches {} endpoints, more than {max}",
-                    reached.len()
-                ),
-            ));
-        }
-        Ok(reached)
     }
 
     /// inserts one delivery, marks the recipient's mail watermark and returns the seq
@@ -392,10 +352,7 @@ impl Core {
         params: &Map<String, Value>,
     ) -> Result<Value, RpcError> {
         validate_send(params, &self.limits)?;
-        self.load_policy().await;
-        if let Some(error) = &self.policy_error {
-            return Err(RpcError::new(ErrorCode::PolicyRefused, error.clone()));
-        }
+        self.policy_gate().await?;
         let connection = self.connection(conn)?;
         let endpoint = connection
             .endpoint
@@ -419,8 +376,8 @@ impl Core {
             },
             _ => Origin::default(),
         };
-        let sent = self.send_message(&endpoint, &send, origin).await?;
-        if method == "send" {
+        let sent = self.judged_send(&endpoint, &send, origin).await?;
+        if method == "send" || sent.get("held").is_some() {
             return Ok(sent);
         }
         let id = sent["id"].as_str().unwrap_or("").to_owned();
@@ -446,7 +403,7 @@ impl Core {
         let mut send = params.clone();
         send.insert("to".into(), json!(address(&target)));
         send.insert("kind".into(), json!("request"));
-        self.send_message(
+        self.judged_send(
             from,
             &send,
             Origin {
@@ -478,14 +435,10 @@ impl Core {
             .get("body")
             .and_then(Value::as_str)
             .ok_or_else(|| RpcError::invalid_params("body must be a string"))?;
-        if body.len() as u64 > LIMITS.body_bytes {
+        if let Some(cap) = body_cap(&self.limits).filter(|cap| body.len() as u64 > *cap) {
             return Err(RpcError::new(
                 ErrorCode::TooLarge,
-                format!(
-                    "the body is {} bytes, more than {}",
-                    body.len(),
-                    LIMITS.body_bytes
-                ),
+                format!("the body is {} bytes, more than {cap}", body.len()),
             ));
         }
         let kind = match params.get("kind") {
@@ -948,6 +901,18 @@ impl Core {
         {
             envelope["shown_at"] = json!(timestamp(at));
         }
+        if integer(row, "seq").is_some() {
+            let kin = self
+                .kinship(
+                    sender.as_ref(),
+                    recipient.as_ref(),
+                    integer(row, "created_at").unwrap_or(0),
+                )
+                .await?;
+            if let Some(object) = envelope.as_object_mut() {
+                object.extend(kin);
+            }
+        }
         Ok(envelope)
     }
 
@@ -1310,83 +1275,9 @@ impl Core {
         if let Some(connection) = self.state.connections.get_mut(&conn) {
             connection.watching = true;
         }
-        self.watch_snapshot(conn, 20).await
-    }
-
-    /// endpoints, recent activity and unread counts for a watcher
-    pub async fn watch_snapshot(
-        &mut self,
-        conn: ConnectionId,
-        activity: i64,
-    ) -> Result<Value, RpcError> {
-        self.connection(conn)?;
-        let seen = match self.viewer_of(conn) {
-            Some(viewer) => Some(self.visible_to(&viewer).await?),
-            None => None,
-        };
-        let mut endpoints = self.list_endpoints(&Map::new()).await?["endpoints"].take();
-        if let Some(seen) = &seen
-            && let Some(endpoints) = endpoints.as_array_mut()
-        {
-            endpoints.retain(|endpoint| {
-                endpoint["address"]
-                    .as_str()
-                    .is_some_and(|address| seen.contains(address))
-            });
-        }
-        let mut unread = Map::new();
-        for row in self.store.all("SELECT e.kind AS kind, e.handle AS handle, COUNT(*) AS n FROM deliveries d JOIN endpoints e ON e.id = d.endpoint WHERE d.acked_at IS NULL AND d.expires_at > ? GROUP BY d.endpoint", &[SqlValue::Int(now_ms())]).await? {
-            if text(&row, "kind") == Some("system") || text(&row, "handle").unwrap_or("").starts_with(GONE_PREFIX) {
-                continue;
-            }
-            let address = address(&row);
-            if seen.as_ref().is_none_or(|seen| seen.contains(&address)) {
-                unread.insert(address, json!(integer(&row, "n").unwrap_or(0)));
-            }
-        }
-        let mut params = Vec::new();
-        let filter = if seen.is_some() {
-            for endpoint in endpoints.as_array().into_iter().flatten() {
-                if let Some(id) = endpoint["id"].as_str() {
-                    params.push(string(id));
-                }
-            }
-            if params.is_empty() {
-                "WHERE 0".to_owned()
-            } else {
-                format!("WHERE e.id IN ({})", vec!["?"; params.len()].join(","))
-            }
-        } else {
-            String::new()
-        };
-        params.push(SqlValue::Int(activity));
-        let mut rows = self.store.all(&format!("SELECT a.*, e.kind AS ep_kind, e.handle AS ep_handle FROM activity a JOIN endpoints e ON e.id = a.endpoint {filter} ORDER BY a.id DESC LIMIT ?"), &params).await?;
-        rows.reverse();
-        let activity = rows
-            .iter()
-            .map(|row| {
-                let owner = Row::from_iter([
-                    ("kind".to_owned(), row.get("ep_kind").cloned().unwrap_or(SqlValue::Null)),
-                    ("handle".to_owned(), row.get("ep_handle").cloned().unwrap_or(SqlValue::Null)),
-                ]);
-                json!({"id": integer(row, "id"), "at": iso(integer(row, "at")), "endpoint": address(&owner), "kind": text(row, "kind"), "tool": text(row, "tool"), "summary": text(row, "summary"), "agent": text(row, "agent")})
-            })
-            .collect::<Vec<_>>();
-        Ok(
-            json!({"endpoints": endpoints, "activity": activity, "unread": unread, "broker": self.broker_info()}),
-        )
-    }
-
-    /// `policy`: the policy file's state, and its rules for the human
-    pub async fn policy_rpc(&mut self, conn: ConnectionId) -> Result<Value, RpcError> {
-        self.load_policy().await;
-        let mut info = self.broker_info()["policy"].take();
-        let human = matches!(self.connection(conn)?.mode, Mode::Human { .. });
-        info["policy"] = match &self.policy {
-            Some(policy) if human && self.policy_error.is_none() => policy.clone(),
-            _ => Value::Null,
-        };
-        Ok(info)
+        let mut params = Map::new();
+        params.insert("activity".into(), json!(20));
+        self.snapshot_for(conn, &params).await
     }
 
     /// long polls of inbox, ask and ask_wait: waits outside the core lock for a delivery, the deadline, a close or shutdown
@@ -1403,7 +1294,7 @@ impl Core {
             if method == "inbox" {
                 !result["messages"].as_array().is_some_and(Vec::is_empty)
             } else {
-                ["reply", "expired", "ended"]
+                ["reply", "expired", "ended", "held"]
                     .iter()
                     .any(|key| result.get(*key).is_some())
             }
@@ -1560,44 +1451,41 @@ pub fn validate_send(
     Ok(())
 }
 
-// slice 3 stubs
-impl Core {
-    pub fn viewer_of(&self, conn: ConnectionId) -> Option<String> {
-        let connection = self.state.connections.get(&conn)?;
-        if matches!(connection.mode, Mode::Human { .. } | Mode::Observer) {
-            None
-        } else {
-            connection.endpoint.clone()
-        }
+/// the body cap from the limits, `None` when disabled
+pub(crate) fn body_cap(limits: &crate::proto::Limits) -> Option<u64> {
+    limits
+        .0
+        .get("bodyBytes")
+        .copied()
+        .unwrap_or(Some(LIMITS.body_bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::Limits;
+
+    fn code(params: Value, limits: &Limits) -> Option<ErrorCode> {
+        validate_send(params.as_object().unwrap(), limits)
+            .err()
+            .and_then(|e| e.data.map(|d| d.code))
     }
 
-    pub async fn visible_to(&self, viewer: &str) -> Result<HashSet<String>, RpcError> {
-        Ok(HashSet::from([address(&self.must_endpoint(viewer).await?)]))
-    }
-
-    pub async fn check_scope(
-        &self,
-        _from: &Row,
-        _to: &Row,
-        _address: &str,
-        _reply_to: Option<&Row>,
-        _unverified: bool,
-    ) -> Result<(), RpcError> {
-        Ok(())
-    }
-
-    pub async fn scope_refusal(
-        &self,
-        _from: &Row,
-        _to: &Row,
-        _reply_to: Option<&Row>,
-        _unverified: bool,
-        _strict: bool,
-    ) -> Result<Option<String>, RpcError> {
-        Ok(None)
-    }
-
-    pub fn policy_refusal(&self, _from: &Row, _to: &Row) -> Option<String> {
-        None
+    #[test]
+    fn body_cap_defaults_and_can_be_lifted() {
+        let mut limits = Limits::default();
+        assert_eq!(body_cap(&limits), Some(LIMITS.body_bytes));
+        limits.0.insert("bodyBytes".into(), Some(10));
+        assert_eq!(body_cap(&limits), Some(10));
+        limits.0.insert("bodyBytes".into(), None);
+        assert_eq!(body_cap(&limits), None);
+        assert_eq!(
+            code(json!({"body":1}), &limits),
+            Some(ErrorCode::InvalidParams)
+        );
+        assert_eq!(
+            code(json!({"body":"hi","id":"x"}), &limits),
+            Some(ErrorCode::InvalidParams)
+        );
     }
 }

@@ -4,7 +4,12 @@ use serde_json::{Map, Value, json};
 use crate::claims::valid_handle;
 use crate::core::{Core, integer, now_ms, text, timestamp};
 use crate::proto::RpcError;
+use std::collections::HashSet;
+
+use crate::authority::Actor;
+use crate::state::ConnectionId;
 use crate::store::{Row, SqlValue};
+use crate::world::{HUMAN_HANDLE, World};
 
 pub fn address(row: &Row) -> String {
     match text(row, "kind") {
@@ -123,9 +128,20 @@ impl Core {
         }
         Ok(out)
     }
-    pub async fn list_endpoints(&mut self, params: &Map<String, Value>) -> Result<Value, RpcError> {
+    pub async fn list_endpoints(
+        &mut self,
+        params: &Map<String, Value>,
+        viewer: Option<&str>,
+    ) -> Result<Value, RpcError> {
         self.end_exited().await?;
-        let rows = self.store.all("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' ORDER BY created_at, id", &[]).await?;
+        self.settle_offline().await?;
+        let mut world = None;
+        if let Some(viewer) = viewer {
+            let w = self.world().await?;
+            let shown = w.row(viewer).map(|row| w.visible(row)).unwrap_or_default();
+            world = Some((w, shown));
+        }
+        let rows = self.store.all("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY created_at, id", &[]).await?;
         let mut endpoints = Vec::new();
         for row in rows {
             if ["harness", "kind"].iter().any(|k| {
@@ -168,7 +184,17 @@ impl Core {
             {
                 continue;
             }
-            endpoints.push(self.view(&row).await?);
+            let mut view = self.view(&row).await?;
+            if let (Some((w, shown)), Some(viewer)) = (&world, viewer) {
+                let id = text(&row, "id").unwrap_or_default();
+                if id != viewer && !w.may_message(viewer, id, w.is_human(viewer), false) {
+                    continue;
+                }
+                if text(&row, "parent_ep").is_some_and(|p| !shown.contains(p)) {
+                    view["parent"] = Value::Null;
+                }
+            }
+            endpoints.push(view);
         }
         Ok(json!({"endpoints":endpoints}))
     }
@@ -202,7 +228,22 @@ impl Core {
             .await?;
         Ok(())
     }
-    pub async fn audit_log(&self, params: &Map<String, Value>) -> Result<Value, RpcError> {
+    pub async fn audit_log(
+        &self,
+        params: &Map<String, Value>,
+        viewer: Option<&str>,
+    ) -> Result<Value, RpcError> {
+        let seen = match viewer {
+            Some(viewer) => {
+                let world = self.world().await?;
+                let shown = world
+                    .row(viewer)
+                    .map(|row| world.visible(row))
+                    .unwrap_or_default();
+                Some((world, shown))
+            }
+            None => None,
+        };
         let mut sql = "SELECT * FROM audit WHERE id > ?".to_owned();
         for (key, clause) in [
             ("scope", " AND substr(event,1,6) = 'scope_'"),
@@ -245,9 +286,305 @@ impl Core {
         }
         let mut values = Vec::new();
         for row in rows {
-            values.push(json!({"id":integer(&row,"id"),"at":integer(&row,"at").and_then(timestamp),"event":text(&row,"event"),"endpoint":match text(&row,"endpoint") {Some(id)=>Some(self.address_of(id).await?),None=>None},"ref":text(&row,"ref"),"detail":text(&row,"detail").and_then(|v|serde_json::from_str::<Value>(v).ok()).unwrap_or(json!({}))}));
+            if let Some((world, shown)) = &seen {
+                let listed = text(&row, "endpoint").is_some_and(|id| shown.contains(id));
+                let detail = text(&row, "detail")
+                    .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                    .unwrap_or(json!({}));
+                let reference = text(&row, "ref").map_or(Value::Null, |v| json!(v));
+                if !listed
+                    || mentions_hidden(world, shown, &reference)
+                    || mentions_hidden(world, shown, &detail)
+                {
+                    continue;
+                }
+            }
+            let event = text(&row, "event");
+            let mut detail = text(&row, "detail")
+                .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                .unwrap_or(json!({}));
+            if seen.is_some() && event.is_some_and(|e| e.starts_with("judge_")) {
+                detail = judge_detail_for_agents(detail);
+            }
+            values.push(json!({"id":integer(&row,"id"),"at":integer(&row,"at").and_then(timestamp),"event":event,"endpoint":match text(&row,"endpoint") {Some(id)=>Some(self.address_of(id).await?),None=>None},"ref":text(&row,"ref"),"detail":detail}));
         }
         Ok(json!({"rows":values}))
+    }
+}
+
+/// A judge row as anyone but the human at a terminal reads it: no free text, no redaction kinds.
+pub(crate) fn judge_detail_for_agents(detail: Value) -> Value {
+    let Value::Object(mut map) = detail else {
+        return detail;
+    };
+    map.remove("reason");
+    let n = map
+        .remove("redacted")
+        .and_then(|r| r.get("n").filter(|n| n.is_number()).cloned());
+    if let Some(n) = n {
+        map.insert("redacted".to_owned(), json!({ "n": n }));
+    }
+    Value::Object(map)
+}
+
+/// Whether a value names, as `me/<handle>`, an endpoint outside `shown`.
+fn mentions_hidden(world: &World, shown: &HashSet<String>, value: &Value) -> bool {
+    match value {
+        Value::String(text) => addresses_in(text).iter().any(|address| {
+            let handle = address.split_once('/').map_or("", |(_, h)| h);
+            let handle = if handle.is_empty() {
+                HUMAN_HANDLE
+            } else {
+                handle
+            };
+            !world
+                .by_handle(handle)
+                .and_then(|row| text_of(row, "id"))
+                .is_some_and(|id| shown.contains(id))
+        }),
+        Value::Array(values) => values.iter().any(|v| mentions_hidden(world, shown, v)),
+        Value::Object(map) => map.values().any(|v| mentions_hidden(world, shown, v)),
+        _ => false,
+    }
+}
+
+fn address_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._/-".contains(c)
+}
+
+fn addresses_in(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for user in ["me/", "local/"] {
+        for (at, _) in value.match_indices(user) {
+            if value[..at].chars().next_back().is_some_and(address_char) {
+                continue;
+            }
+            let end = value[at..]
+                .char_indices()
+                .find(|(_, c)| !address_char(*c))
+                .map_or(value.len(), |(i, _)| at + i);
+            out.push(&value[at..end]);
+        }
+    }
+    out
+}
+
+fn text_of<'a>(row: &'a Row, key: &str) -> Option<&'a str> {
+    text(row, key)
+}
+
+impl Core {
+    pub async fn list_for(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let viewer = self.viewer_of(conn);
+        self.list_endpoints(params, viewer.as_deref()).await
+    }
+
+    pub async fn log_for(
+        &self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let viewer = self.viewer_of(conn);
+        self.audit_log(params, viewer.as_deref()).await
+    }
+
+    /// The addresses `viewer` sees: those it may message or be messaged by, and itself.
+    pub async fn visible_to(&self, viewer: &str) -> Result<HashSet<String>, RpcError> {
+        let world = self.world().await?;
+        let Some(row) = world.row(viewer) else {
+            return Ok(HashSet::new());
+        };
+        Ok(world
+            .visible(row)
+            .iter()
+            .filter_map(|id| world.row(id).map(address))
+            .collect())
+    }
+
+    pub async fn snapshot_for(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let viewer = self.viewer_of(conn);
+        self.snapshot(params, viewer.as_deref()).await
+    }
+
+    /// The fleet now: the listed endpoints, the latest activity, and unread mail of each endpoint the viewer may message.
+    pub async fn snapshot(
+        &mut self,
+        params: &Map<String, Value>,
+        viewer: Option<&str>,
+    ) -> Result<Value, RpcError> {
+        let viewer = viewer.map(str::to_owned);
+        let mut filters = Map::new();
+        for key in ["all", "historic"] {
+            if params.get(key) == Some(&Value::Bool(true)) {
+                filters.insert(key.into(), Value::Bool(true));
+            }
+        }
+        let endpoints =
+            self.list_endpoints(&filters, viewer.as_deref()).await?["endpoints"].clone();
+        let world = self.world().await?;
+        let mut unread = Map::new();
+        for row in self.store.all("SELECT endpoint, COUNT(*) AS n FROM deliveries WHERE acked_at IS NULL AND expires_at > ? GROUP BY endpoint", &[SqlValue::Int(now_ms())]).await? {
+            let id = text(&row, "endpoint").unwrap_or_default();
+            let Some(target) = world.row(id) else { continue };
+            if text(target, "kind") == Some("system") || crate::world::is_gone(target) {
+                continue;
+            }
+            if let Some(viewer) = viewer.as_deref()
+                && id != viewer
+                && !world.may_message(viewer, id, world.is_human(viewer), false)
+            {
+                continue;
+            }
+            unread.insert(address(target), json!(integer(&row, "n").unwrap_or(0)));
+        }
+        let among: Vec<String> = endpoints
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v["id"].as_str().map(str::to_owned))
+            .collect();
+        let limit = params
+            .get("activity")
+            .and_then(Value::as_i64)
+            .unwrap_or(50)
+            .clamp(1, 1000);
+        let activity = self.activity_among(&world, &among, limit).await?;
+        Ok(
+            json!({"endpoints": endpoints, "activity": activity, "unread": unread, "broker": self.broker_info()}),
+        )
+    }
+
+    async fn activity_among(
+        &self,
+        world: &World,
+        among: &[String],
+        limit: i64,
+    ) -> Result<Vec<Value>, RpcError> {
+        if among.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; among.len()].join(", ");
+        let mut values: Vec<SqlValue> = among.iter().map(|id| SqlValue::Text(id.clone())).collect();
+        values.push(SqlValue::Int(limit));
+        let mut rows = self
+            .store
+            .all(
+                &format!(
+                    "SELECT * FROM activity WHERE endpoint IN ({marks}) ORDER BY id DESC LIMIT ?"
+                ),
+                &values,
+            )
+            .await?;
+        rows.reverse();
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let endpoint = text(row, "endpoint").unwrap_or_default();
+                json!({"id": integer(row, "id"), "at": integer(row, "at").and_then(timestamp), "endpoint": world.row(endpoint).map_or_else(|| endpoint.to_owned(), address), "kind": text(row, "kind"), "tool": text(row, "tool"), "summary": text(row, "summary"), "agent": text(row, "agent")})
+            })
+            .collect())
+    }
+
+    /// The endpoints the viewer may message under its scope and the policy, with the rule that admits each.
+    pub async fn peers(
+        &mut self,
+        conn: ConnectionId,
+        params: &Map<String, Value>,
+    ) -> Result<Value, RpcError> {
+        let viewer = match self.viewer_of(conn) {
+            Some(viewer) => viewer,
+            None => self
+                .connection(conn)?
+                .endpoint
+                .ok_or_else(RpcError::internal)?,
+        };
+        let me = self.must_endpoint(&viewer).await?;
+        let unverified = text(&me, "kind") == Some("human") && !self.at_terminal(conn);
+        let historic = params.get("all") == Some(&Value::Bool(true))
+            || params.get("historic") == Some(&Value::Bool(true));
+        let mut world = self.world().await?;
+        world.view_as(Some(&viewer), true);
+        let mut peers = Vec::new();
+        let rows: Vec<Row> = world.listed().cloned().collect();
+        for row in rows {
+            let id = text(&row, "id").unwrap_or_default();
+            if id == viewer || !world.may_message(&viewer, id, unverified, false) {
+                continue;
+            }
+            let view = self.view(&row).await?;
+            if !historic && view.get("historic") == Some(&Value::Bool(true)) {
+                continue;
+            }
+            let decision = world.decide(&viewer, id, false, unverified, false);
+            let reason = match &decision.admitted {
+                None => decision.reasons.join("; "),
+                Some(admitted) => {
+                    let (Some(peer), Some(mine)) = (world.subject(id), world.subject(&viewer))
+                    else {
+                        return Err(RpcError::internal());
+                    };
+                    let list = if admitted.is_empty() {
+                        "open".to_owned()
+                    } else {
+                        admitted.join(", ")
+                    };
+                    format!("{} ({list})", scp_core::scope::relation_text(peer, mine))
+                }
+            };
+            let mut peer = json!({"address": view["address"], "kind": view["kind"], "presence": view["presence"], "title": view["title"], "status": view["status"], "reason": reason});
+            if view.get("historic") == Some(&Value::Bool(true)) {
+                peer["historic"] = json!(true);
+            }
+            peers.push(peer);
+        }
+        Ok(json!({"peers": peers}))
+    }
+
+    /// Whether `from` may message `to` and why; an agent asks only about pairs it holds or has authority over, each side one it sees.
+    pub async fn why(&self, actor: &Actor, from: &str, to: &str) -> Result<Value, RpcError> {
+        let me = self.actor_endpoint(actor).await?;
+        let (a, b) = (self.lookup(from).await?, self.lookup(to).await?);
+        let me_id = text(&me, "id").unwrap_or_default().to_owned();
+        let (a_id, b_id) = (
+            text(&a, "id").unwrap_or_default(),
+            text(&b, "id").unwrap_or_default(),
+        );
+        let mut world = self.world().await?;
+        if text(&me, "kind") == Some("agent") {
+            let mine = |id: &str| id == me_id || world.authority(&me_id, id);
+            let hidden = [a_id, b_id]
+                .iter()
+                .position(|id| !mine(id) && !world.sees(&me_id, id));
+            if hidden.is_some() || !(mine(a_id) || mine(b_id)) {
+                return Err(not_found(if hidden == Some(1) { to } else { from }));
+            }
+            world.view_as(Some(&me_id), true);
+        } else if !actor.at_terminal()
+            && let Some(hidden) = [a_id, b_id]
+                .iter()
+                .position(|id| *id != me_id && !world.may_message(&me_id, id, true, false))
+        {
+            return Err(not_found(if hidden == 0 { from } else { to }));
+        }
+        let decision = world.decide(a_id, b_id, false, false, false);
+        let policy = world.policy_refusal(a_id, b_id);
+        let limits = self.pair_state(a_id, b_id, now_ms()).await?;
+        let mut reasons = decision.reasons.clone();
+        reasons.extend(policy.clone());
+        reasons.extend(limits.lines);
+        let mut result = json!({"allowed": decision.allowed && policy.is_none() && !limits.held, "reasons": reasons});
+        if let Some(pair) = limits.pair {
+            result["pair"] = serde_json::to_value(pair).map_err(|_| RpcError::internal())?;
+        }
+        Ok(result)
     }
 }
 
@@ -256,4 +593,40 @@ pub fn opt(value: Option<&str>) -> SqlValue {
 }
 pub fn not_found(value: &str) -> RpcError {
     RpcError::new(ErrorCode::NotFound, format!("no endpoint {value}"))
+}
+
+impl Core {
+    /// an agent endpoint left offline drops a working or waiting status, which no one is left to keep current
+    pub async fn settle_offline(&self) -> Result<(), RpcError> {
+        let now = now_ms();
+        for row in self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND status_state IN ('working', 'waiting')", &[]).await? {
+            if presence(&row, now) == "offline" {
+                self.store
+                    .all(
+                        "UPDATE endpoints SET status_state = NULL, status_note = NULL WHERE id = ?",
+                        &[opt(text(&row, "id"))],
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn judge_rows_for_agents_drop_the_reason_and_redaction_kinds() {
+        let detail = json!({"verdict":"redact","reason":"note","redacted":{"n":2,"kinds":["pii"]},"to":["me/b"]});
+        assert_eq!(
+            judge_detail_for_agents(detail),
+            json!({"verdict":"redact","redacted":{"n":2},"to":["me/b"]})
+        );
+        assert_eq!(
+            judge_detail_for_agents(json!({"reason":"x","redacted":{"kinds":[]}})),
+            json!({})
+        );
+    }
 }

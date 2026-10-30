@@ -24,9 +24,18 @@ fn watcher(
     (conn, receiver)
 }
 
+async fn isolate(core: &mut Core, endpoint: &str) {
+    let conn = core.state.connect();
+    core.state.bind(conn, Some(endpoint.into()), Mode::Agent);
+    core.rules_set(conn, &params(json!({"scope":"none"})))
+        .await
+        .expect("isolate");
+}
+
 #[tokio::test]
 async fn agent_watcher_hides_other_endpoints_messages_while_observer_sees_them() {
     let mut test = TestCore::new().await;
+    isolate(&mut test.core, "outsider").await;
     let (agent, mut scoped) = watcher(&mut test.core, Some("outsider"), Mode::Agent);
     let (observer, mut all) = watcher(&mut test.core, None, Mode::Observer);
     test.core.watch(agent).await.expect("agent watch");
@@ -59,6 +68,7 @@ async fn agent_watcher_hides_other_endpoints_messages_while_observer_sees_them()
 #[tokio::test]
 async fn scoped_events_require_visible_sender_and_recipient_and_trim_recipients() {
     let mut test = TestCore::new().await;
+    isolate(&mut test.core, "recipient").await;
     let (agent, mut scoped) = watcher(&mut test.core, Some("sender"), Mode::Agent);
     test.core.watch(agent).await.expect("watch");
     for event in [
@@ -124,22 +134,34 @@ async fn watch_snapshot_scopes_endpoints_activity_and_unread_before_limiting() {
         )
         .await
         .expect("send");
+    isolate(&mut test.core, "sender").await;
     let (agent, _) = watcher(&mut test.core, Some("sender"), Mode::Agent);
     let (observer, _) = watcher(&mut test.core, None, Mode::Observer);
+    let (terminal, _) = watcher(&mut test.core, None, Mode::Human { tty: true });
     assert_eq!(test.core.viewer_of(agent).as_deref(), Some("sender"));
-    assert_eq!(test.core.viewer_of(observer), None);
+    let human = test.core.human_id().await.expect("human");
+    assert!(human.is_some());
+    assert_eq!(test.core.viewer_of(observer), human);
+    assert_eq!(test.core.viewer_of(terminal), None);
     let snapshot = test.core.watch(agent).await.expect("watch");
-    assert_eq!(
-        snapshot["endpoints"].as_array().expect("endpoints").len(),
-        1
-    );
-    assert_eq!(snapshot["endpoints"][0]["address"], "me/renamed");
+    let agents: Vec<&Value> = snapshot["endpoints"]
+        .as_array()
+        .expect("endpoints")
+        .iter()
+        .filter(|e| e["kind"] == "agent")
+        .collect();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["address"], "me/renamed");
     assert_eq!(snapshot["unread"], json!({"me/renamed":1}));
-    let snapshot = test.core.watch_snapshot(agent, 1).await.expect("snapshot");
+    let snapshot = test
+        .core
+        .snapshot_for(agent, &params(json!({"activity": 1})))
+        .await
+        .expect("snapshot");
     assert_eq!(snapshot["activity"].as_array().expect("activity").len(), 1);
     assert_eq!(snapshot["activity"][0]["endpoint"], "me/renamed");
 
-    let snapshot = test.core.watch(observer).await.expect("observer snapshot");
+    let snapshot = test.core.watch(terminal).await.expect("terminal snapshot");
     assert!(snapshot["endpoints"].as_array().expect("endpoints").len() >= 3);
     assert_eq!(snapshot["activity"].as_array().expect("activity").len(), 2);
     assert_eq!(snapshot["unread"], json!({"me/renamed":1,"me/recipient":1}));
