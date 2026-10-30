@@ -890,13 +890,6 @@ impl Core {
     }
 
     /// reading messages counts as receiving them for the causal hop
-    async fn received(&self, endpoint: &str, rows: &[Row], now: i64) -> Result<(), RpcError> {
-        if let Some(hop) = rows.iter().filter_map(|row| integer(row, "hop")).max() {
-            self.store.all("UPDATE endpoints SET last_received_at = ?, last_received_hop = MAX(?, CASE WHEN last_received_at >= ? THEN COALESCE(last_received_hop, 0) ELSE 0 END) WHERE id = ?", &[SqlValue::Int(now),SqlValue::Int(hop),SqlValue::Int(now-self.limit("causalWindowS",120)*1000),string(endpoint)]).await?;
-        }
-        Ok(())
-    }
-
     pub async fn inbox(
         &mut self,
         endpoint: &str,
@@ -1606,19 +1599,5 @@ impl Core {
 
     pub fn policy_refusal(&self, _from: &Row, _to: &Row) -> Option<String> {
         None
-    }
-}
-
-// sibling stub
-impl Core {
-    pub(crate) async fn offer(
-        &mut self,
-        _conn: ConnectionId,
-        endpoint: &str,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        let mut page = self.inbox(endpoint, params).await?;
-        page["hold"] = Value::Null;
-        Ok(page)
     }
 }

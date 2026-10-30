@@ -3,6 +3,7 @@
 pub mod authority;
 pub mod claims;
 pub mod core;
+pub mod hooks;
 pub mod identity;
 pub mod limits;
 pub mod messages;

@@ -56,6 +56,7 @@ pub struct State {
     pub waiters: HashMap<String, Arc<Notify>>,
     pub closing: bool,
     pub stopping: Arc<Notify>,
+    pub subagent_titles: Vec<(String, String)>,
     next_id: ConnectionId,
 }
 

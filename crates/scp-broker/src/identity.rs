@@ -1,6 +1,6 @@
 use crate::claims::{
-    busy_since, clean_labels, clean_text, harness_fits, harness_session, hash, process_key,
-    revivable, same_harness, same_provider, token, valid_handle,
+    busy_since, clean_labels, clean_text, harness_fits, hash, process_key, revivable,
+    same_provider, token, valid_handle,
 };
 use crate::core::{Core, integer, now_ms, text, timestamp};
 use crate::proto::RpcError;
@@ -703,77 +703,5 @@ impl Core {
             env["SCP_NAME"] = json!(name);
         }
         Ok(json!({"token":value,"env":env}))
-    }
-    pub async fn event(
-        &self,
-        conn: ConnectionId,
-        params: &Map<String, Value>,
-    ) -> Result<Value, RpcError> {
-        let kind = params
-            .get("kind")
-            .and_then(Value::as_str)
-            .filter(|v| ["session_start", "tool", "stop", "note", "session_end"].contains(v))
-            .ok_or_else(|| RpcError::invalid_params("kind is an activity kind"))?;
-        let c = self.connection(conn)?;
-        let id = c.endpoint.as_deref().ok_or_else(|| {
-            RpcError::new(ErrorCode::Unauthorized, "this connection has no endpoint")
-        })?;
-        let row = self.must_endpoint(id).await?;
-        let tool =
-            clean_text(params.get("tool"), "tool", 64)?.map(|v| crate::scrub::redact_secrets(&v));
-        let summary = clean_text(params.get("summary"), "summary", 4096)?.map(|v| {
-            crate::scrub::redact_secrets(&v)
-                .chars()
-                .take(200)
-                .collect::<String>()
-        });
-        let agent =
-            clean_text(params.get("agent"), "agent", 64)?.map(|v| crate::scrub::redact_secrets(&v));
-        let now = now_ms();
-        let activity=self.store.all("INSERT INTO activity (at,endpoint,kind,tool,summary,agent) VALUES (?,?,?,?,?,?) RETURNING id",&[SqlValue::Int(now),opt(Some(id)),opt(Some(kind)),opt(tool.as_deref()),opt(summary.as_deref()),opt(agent.as_deref())]).await?.into_iter().next().ok_or_else(RpcError::internal)?;
-        let activity_id = integer(&activity, "id").ok_or_else(RpcError::internal)?;
-        self.store
-            .all(
-                "DELETE FROM activity WHERE id <= ?",
-                &[SqlValue::Int(activity_id - 5000)],
-            )
-            .await?;
-        let own = c.mode != Mode::Transient
-            || c.process
-                .as_deref()
-                .zip(text(&row, "process"))
-                .is_some_and(|(a, b)| same_harness(a, b));
-        if own
-            && agent.is_none()
-            && let Some(session) = params
-                .get("session_id")
-                .and_then(Value::as_str)
-                .filter(|v| harness_session(v))
-        {
-            self.store
-                .all(
-                    "UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ?",
-                    &[
-                        opt(Some(session)),
-                        opt(params
-                            .get("transcript_path")
-                            .and_then(Value::as_str)
-                            .filter(|v| v.starts_with('/'))),
-                        opt(Some(id)),
-                    ],
-                )
-                .await?;
-        }
-        if kind == "session_end" && own {
-            self.store.all("UPDATE endpoints SET hook_seen = NULL,hook_ended = ?,session = CASE WHEN connections = 0 THEN NULL ELSE session END WHERE id = ?",&[SqlValue::Int(now),opt(Some(id))]).await?;
-        } else if kind == "session_start" {
-            self.store.all("UPDATE endpoints SET hook_seen = COALESCE(?,hook_seen),hook_ended = NULL,stop_blocks = CASE WHEN ? THEN 0 ELSE stop_blocks END,pushes = CASE WHEN ? THEN 0 ELSE pushes END WHERE id = ?",&[if c.mode==Mode::Transient{SqlValue::Int(now)}else{SqlValue::Null},SqlValue::Int(i64::from(own)),SqlValue::Int(i64::from(own)),opt(Some(id))]).await?;
-        } else if c.mode == Mode::Transient {
-            self.store.all("UPDATE endpoints SET hook_seen = ? WHERE id = ? AND (hook_ended IS NULL OR hook_ended < ?)",&[SqlValue::Int(now),opt(Some(id)),SqlValue::Int(now-30000)]).await?;
-        }
-        self.touch(id).await?;
-        Ok(
-            json!({"id":activity_id,"at":timestamp(now),"endpoint":address(&row),"kind":kind,"tool":tool,"summary":summary,"agent":agent}),
-        )
     }
 }

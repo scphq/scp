@@ -54,7 +54,7 @@ impl Core {
             .map(|v| v.min(i64::MAX as u64 / 1000) as i64)
     }
 
-    async fn count(
+    async fn count_first(
         &self,
         statement: &str,
         params: &[SqlValue],
@@ -99,7 +99,7 @@ impl Core {
         b: &str,
         now: i64,
     ) -> Result<(i64, Option<i64>), RpcError> {
-        self.count(
+        self.count_first(
             "SELECT COUNT(*) AS n, MIN(at) AS first FROM pair_events WHERE ((from_ep = ? AND to_ep = ?) OR (from_ep = ? AND to_ep = ?)) AND at > ?",
             &[string(a), string(b), string(b), string(a), SqlValue::Int(now - LIMITS.pair_burst_window_s as i64 * 1000)],
         )
@@ -132,7 +132,7 @@ impl Core {
         }
         if let Some(thread_max) = self.rate("threadMax") {
             let (n, _) = self
-                .count(
+                .count_first(
                     "SELECT COUNT(*) AS n FROM messages WHERE thread = ?",
                     &[string(guard.thread)],
                 )
@@ -153,7 +153,7 @@ impl Core {
             let today = if guard.tty == Some(1) {
                 0
             } else {
-                self.count(
+                self.count_first(
                     "SELECT COUNT(*) AS n FROM messages WHERE created_at >= ? AND (from_ep IN (SELECT id FROM endpoints WHERE kind = 'agent') OR sender_tty = 0)",
                     &[SqlValue::Int(now - 86_400_000)],
                 )
@@ -215,7 +215,7 @@ impl Core {
                     continue;
                 };
                 let (n, first_at) = self
-                    .count(
+                    .count_first(
                         "SELECT COUNT(*) AS n, MIN(at) AS first FROM pair_events WHERE from_ep = ? AND to_ep = ? AND at > ?",
                         &[string(from), string(to), SqlValue::Int(now - window * 1000)],
                     )
@@ -261,7 +261,7 @@ impl Core {
         if let Some(per_minute) = self.rate("groupPerMinute") {
             for name in guard.fan_out {
                 let (n, first_at) = self
-                    .count(
+                    .count_first(
                         "SELECT COUNT(*) AS n, MIN(at) AS first FROM tree_events WHERE tree = ? AND at > ?",
                         &[string(format!("group:{name}")), SqlValue::Int(now - 60_000)],
                     )
@@ -330,7 +330,7 @@ impl Core {
         {
             if limit.is_some() {
                 counts[slot] = self
-                    .count(
+                    .count_first(
                         "SELECT COUNT(*) AS n FROM tree_events WHERE tree = ? AND at > ?",
                         &[tree_key.clone(), SqlValue::Int(now - window * 1000)],
                     )
