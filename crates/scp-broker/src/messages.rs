@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -82,6 +82,36 @@ fn iso(value: Option<i64>) -> Value {
     value.and_then(timestamp).map_or(Value::Null, Value::String)
 }
 
+fn filter_event(event: &Value, seen: &HashSet<String>) -> Option<Value> {
+    if event["type"] == "message" {
+        if !event["from"]
+            .as_str()
+            .is_some_and(|from| seen.contains(from))
+        {
+            return None;
+        }
+        let to = event["to"]
+            .as_array()?
+            .iter()
+            .filter(|to| to.as_str().is_some_and(|to| seen.contains(to)))
+            .cloned()
+            .collect::<Vec<_>>();
+        if to.is_empty() {
+            return None;
+        }
+        let mut shown = event.clone();
+        shown["to"] = json!(to);
+        Some(shown)
+    } else if event["endpoint"]
+        .as_str()
+        .is_none_or(|endpoint| seen.contains(endpoint))
+    {
+        Some(event.clone())
+    } else {
+        None
+    }
+}
+
 /// who sent: a human at a terminal or a script, and what the send stands for
 #[derive(Default, Clone, Copy)]
 pub struct Origin<'a> {
@@ -146,8 +176,26 @@ impl Core {
     }
 
     /// a watcher event, with its time, to every connection that called watch
-    pub fn notify_watchers(&self, event: Value) {
-        self.state.notify_watchers(event, timestamp(now_ms()));
+    pub async fn notify_watchers(&self, event: Value) {
+        let at = timestamp(now_ms());
+        let mut views = HashMap::new();
+        for connection in self.state.connections.values().filter(|c| c.watching) {
+            let shown = if let Some(viewer) = self.viewer_of(connection.id) {
+                if !views.contains_key(&viewer) {
+                    views.insert(viewer.clone(), self.visible_to(&viewer).await.ok());
+                }
+                let Some(Some(seen)) = views.get(&viewer) else {
+                    continue;
+                };
+                let Some(shown) = filter_event(&event, seen) else {
+                    continue;
+                };
+                shown
+            } else {
+                event.clone()
+            };
+            self.state.notify_watcher(connection.id, shown, at.clone());
+        }
     }
 
     async fn thread_member(&self, thread: &str, endpoint: &str) -> Result<bool, RpcError> {
@@ -837,7 +885,7 @@ impl Core {
                 self.state.wake(id);
             }
         }
-        self.notify_watchers(json!({"type": "message", "id": result["id"], "thread": result["thread"], "kind": kind, "from": address(&sender), "to": addressed, "hop": hop}));
+        self.notify_watchers(json!({"type": "message", "id": result["id"], "thread": result["thread"], "kind": kind, "from": address(&sender), "to": addressed, "hop": hop})).await;
         Ok(result)
     }
 
@@ -1269,20 +1317,57 @@ impl Core {
         if let Some(connection) = self.state.connections.get_mut(&conn) {
             connection.watching = true;
         }
-        self.watch_snapshot(20).await
+        self.watch_snapshot(conn, 20).await
     }
 
     /// endpoints, recent activity and unread counts for a watcher
-    pub async fn watch_snapshot(&mut self, activity: i64) -> Result<Value, RpcError> {
-        let endpoints = self.list_endpoints(&Map::new()).await?["endpoints"].take();
+    pub async fn watch_snapshot(
+        &mut self,
+        conn: ConnectionId,
+        activity: i64,
+    ) -> Result<Value, RpcError> {
+        self.connection(conn)?;
+        let seen = match self.viewer_of(conn) {
+            Some(viewer) => Some(self.visible_to(&viewer).await?),
+            None => None,
+        };
+        let mut endpoints = self.list_endpoints(&Map::new()).await?["endpoints"].take();
+        if let Some(seen) = &seen
+            && let Some(endpoints) = endpoints.as_array_mut()
+        {
+            endpoints.retain(|endpoint| {
+                endpoint["address"]
+                    .as_str()
+                    .is_some_and(|address| seen.contains(address))
+            });
+        }
         let mut unread = Map::new();
         for row in self.store.all("SELECT e.kind AS kind, e.handle AS handle, COUNT(*) AS n FROM deliveries d JOIN endpoints e ON e.id = d.endpoint WHERE d.acked_at IS NULL AND d.expires_at > ? GROUP BY d.endpoint", &[SqlValue::Int(now_ms())]).await? {
             if text(&row, "kind") == Some("system") || text(&row, "handle").unwrap_or("").starts_with(GONE_PREFIX) {
                 continue;
             }
-            unread.insert(address(&row), json!(integer(&row, "n").unwrap_or(0)));
+            let address = address(&row);
+            if seen.as_ref().is_none_or(|seen| seen.contains(&address)) {
+                unread.insert(address, json!(integer(&row, "n").unwrap_or(0)));
+            }
         }
-        let mut rows = self.store.all("SELECT a.*, e.kind AS ep_kind, e.handle AS ep_handle FROM activity a JOIN endpoints e ON e.id = a.endpoint ORDER BY a.id DESC LIMIT ?", &[SqlValue::Int(activity)]).await?;
+        let mut params = Vec::new();
+        let filter = if seen.is_some() {
+            for endpoint in endpoints.as_array().into_iter().flatten() {
+                if let Some(id) = endpoint["id"].as_str() {
+                    params.push(string(id));
+                }
+            }
+            if params.is_empty() {
+                "WHERE 0".to_owned()
+            } else {
+                format!("WHERE e.id IN ({})", vec!["?"; params.len()].join(","))
+            }
+        } else {
+            String::new()
+        };
+        params.push(SqlValue::Int(activity));
+        let mut rows = self.store.all(&format!("SELECT a.*, e.kind AS ep_kind, e.handle AS ep_handle FROM activity a JOIN endpoints e ON e.id = a.endpoint {filter} ORDER BY a.id DESC LIMIT ?"), &params).await?;
         rows.reverse();
         let activity = rows
             .iter()
@@ -1484,6 +1569,19 @@ pub fn validate_send(
 
 // slice 3 stubs
 impl Core {
+    pub fn viewer_of(&self, conn: ConnectionId) -> Option<String> {
+        let connection = self.state.connections.get(&conn)?;
+        if matches!(connection.mode, Mode::Human { .. } | Mode::Observer) {
+            None
+        } else {
+            connection.endpoint.clone()
+        }
+    }
+
+    pub async fn visible_to(&self, viewer: &str) -> Result<HashSet<String>, RpcError> {
+        Ok(HashSet::from([address(&self.must_endpoint(viewer).await?)]))
+    }
+
     pub async fn check_scope(
         &self,
         _from: &Row,

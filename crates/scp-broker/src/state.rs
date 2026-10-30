@@ -73,19 +73,18 @@ impl State {
         id
     }
 
-    /// a `fleet` notification to every watching connection
-    pub fn notify_watchers(&self, event: Value, at: Option<String>) {
+    /// a `fleet` notification to one watching connection
+    pub fn notify_watcher(&self, conn: ConnectionId, event: Value, at: Option<String>) {
         let mut params = json!({"at": at});
         if let (Some(target), Some(fields)) = (params.as_object_mut(), event.as_object()) {
             target.extend(fields.clone());
         }
         let frame = json!({"jsonrpc": "2.0", "method": "fleet", "params": params});
-        for connection in self.connections.values() {
-            if connection.watching
-                && let Some(events) = &connection.events
-            {
-                let _ = events.send(frame.clone());
-            }
+        if let Some(connection) = self.connections.get(&conn)
+            && connection.watching
+            && let Some(events) = &connection.events
+        {
+            let _ = events.send(frame);
         }
     }
 
