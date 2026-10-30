@@ -622,6 +622,7 @@ describe("swarm", () => {
       expect.stringMatching(/^now +on review$/),
       `cwd         ${realpathSync("/tmp")}`,
       expect.stringMatching(/^parent +root$/),
+      expect.stringMatching(/^depth +0$/),
       expect.stringMatching(/^bound +--as$/),
       "",
     ])

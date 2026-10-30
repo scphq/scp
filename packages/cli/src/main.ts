@@ -16,6 +16,7 @@ import {
   type JudgeRedacted,
   LIMITS,
   type LinkPending,
+  depthText,
   type MessageReceipts,
   PREAMBLE,
   presenceText,
@@ -864,6 +865,7 @@ async function runVerb(
           ["cwd", shortCwd(me.cwd) || "-"],
           ...(bound === "as" ? [] : ([["harness pid", harnessPid ? String(harnessPid) : "-"]] as [string, string][])),
           ["parent", me.parent ?? (pending ? `root: not linked under ${pending.under} yet (${pending.code}: ${pending.message})` : "root")],
+          ...(me.kind === "agent" ? ([["depth", depthText(me)]] as [string, string][]) : []),
           ["bound", how],
         ]
         for (const [label, value] of fields) out(`${label.padEnd(12)}${value}`)

@@ -157,6 +157,12 @@ export function presenceText(e: Pick<EndpointView, "kind" | "presence" | "wake">
   return e.kind === "agent" && e.presence === "idle" && (!e.wake || e.wake === "none") ? "idle (next turn)" : e.presence
 }
 
+/** an agent's depth as whoami shows it: depth counts its own machine's tree only, so under a parent on another machine it stays a root here */
+export function depthText(e: Pick<EndpointView, "parent" | "depth">): string {
+  const depth = e.depth ?? 0
+  return e.parent && e.parent.split("/").length > 2 ? `${depth} on this machine (parent on another machine)` : String(depth)
+}
+
 /** an agent's wake as a column shows it, `turn` when it reads at its next turn; `-` for any other endpoint */
 export function wakeText(e: Pick<EndpointView, "kind" | "wake">): string {
   if (e.kind !== "agent") return "-"

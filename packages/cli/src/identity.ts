@@ -725,6 +725,29 @@ export function backgroundHandoff(env: Env): boolean {
   return env.CLAUDE_CODE_SESSION_KIND === "bg" && env.CLAUDE_BG_SOURCE === "slash"
 }
 
+/** the claim socket a Claude Code background spare waits on, from its command line (`--bg-spare <socket>`) */
+export function spareSocket(args: string | undefined): string | undefined {
+  const words = args?.split(/\s+/) ?? []
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!
+    if (word.startsWith("--bg-spare=")) return word.slice("--bg-spare=".length) || undefined
+    if (word !== "--bg-spare") continue
+    const next = words[i + 1]
+    return next && !next.startsWith("-") ? next : undefined
+  }
+  return undefined
+}
+
+/**
+ * whether a Claude Code hook runs in a background spare no session has claimed yet. The daemon starts spares ahead of use, in its own
+ * cwd; a claimed spare keeps its command line, but its claim socket is gone. `args` is read only for a background session
+ */
+export function unclaimedSpare(env: Env, args: () => string | undefined, exists: (path: string) => boolean = existsSync): boolean {
+  if (env.CLAUDE_CODE_SESSION_KIND !== "bg") return false
+  const socket = spareSocket(args())
+  return socket !== undefined && exists(socket)
+}
+
 /**
  * the claim a shim or hook makes for this harness session; a muse process a launcher left a session and launcher for claims as $SCP_SESSION
  * and $SCP_HARNESS_PID would. A codex thread an app server hosts beside others (the desktop app, an IDE's) claims by its thread, `codex:<id>`
