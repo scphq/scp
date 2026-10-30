@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/dashboard",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Optional dashboard for the SCP relay",
   "type": "module",
