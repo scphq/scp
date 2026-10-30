@@ -1,7 +1,7 @@
 {
   "name": "@scp-dev/relay",
   "private": true,
-  "version": "0.4.14",
+  "version": "0.4.15",
   "type": "module",
   "scripts": {
     "dev": "wrangler d1 migrations apply scp-relay --local && wrangler dev --local",
