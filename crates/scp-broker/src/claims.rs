@@ -195,7 +195,7 @@ impl Core {
             return Ok(Vec::new());
         }
         for key in keys.iter().filter(|v| process_key(v, true)) {
-            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
+            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
             let mut out = Vec::new();
             for row in rows {
                 if exclude.contains(&text(&row, "id").unwrap_or("")) {
@@ -437,7 +437,7 @@ impl Core {
         fields: &Fields,
         instead: Option<&Row>,
     ) -> Result<Option<Row>, RpcError> {
-        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' ORDER BY named IS NULL,COALESCE(last_seen,created_at) DESC",&[opt(Some(session))]).await?;
+        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY named IS NULL,COALESCE(last_seen,created_at) DESC",&[opt(Some(session))]).await?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -555,7 +555,7 @@ impl Core {
     ) -> Result<Claimed, RpcError> {
         self.end_exited().await?;
         let mut row = if let Some(session) = &fields.session {
-            self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
+            self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
         } else {
             None
         };
@@ -1372,7 +1372,7 @@ async fn hello_transaction(
 ) -> Result<Claimed, RpcError> {
     if !transient {
         if let Some(resume) = params.get("resume").and_then(Value::as_str) {
-            let row=core.store.all("SELECT * FROM endpoints WHERE token_hash = ? AND substr(handle,1,5) != 'gone:'",&[opt(Some(&hash(resume)))]).await?.into_iter().next().ok_or_else(||RpcError::new(ErrorCode::Unauthorized,"unknown resume token"))?;
+            let row=core.store.all("SELECT * FROM endpoints WHERE token_hash = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_'",&[opt(Some(&hash(resume)))]).await?.into_iter().next().ok_or_else(||RpcError::new(ErrorCode::Unauthorized,"unknown resume token"))?;
             let id = text(&row, "id").ok_or_else(RpcError::internal)?;
             core.store
                 .all(

@@ -3,6 +3,7 @@
 pub mod authority;
 pub mod claims;
 pub mod core;
+pub mod groups;
 pub mod identity;
 pub mod messages;
 pub mod paths;
@@ -16,3 +17,4 @@ pub mod session;
 pub mod state;
 pub mod store;
 pub mod views;
+pub mod world;

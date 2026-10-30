@@ -17,6 +17,7 @@ clap.workspace = true
 hex.workspace = true
 libc = "=0.2.191"
 rand.workspace = true
+scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.3" }
 regex = "=1.13.1"
 serde.workspace = true
 serde_json.workspace = true

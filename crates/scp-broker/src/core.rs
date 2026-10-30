@@ -24,6 +24,9 @@ pub struct Core {
     pub paths: Paths,
     pub policy_file: PathBuf,
     pub policy_error: Option<String>,
+    pub policy_text: Option<Option<String>>,
+    pub policy_binds: std::collections::HashMap<String, String>,
+    pub noise: std::sync::Mutex<std::collections::HashMap<String, i64>>,
 }
 
 impl Core {
@@ -61,42 +64,12 @@ impl Core {
             paths,
             policy_file,
             policy_error: None,
+            policy_text: None,
+            policy_binds: Default::default(),
+            noise: Default::default(),
         };
-        core.load_policy().await;
+        core.load_policy().await?;
         Ok(core)
-    }
-
-    pub async fn load_policy(&mut self) {
-        match tokio::fs::read_to_string(&self.policy_file).await {
-            Ok(text) => match serde_json::from_str::<Value>(&text)
-                .map_err(|e| e.to_string())
-                .and_then(|v| {
-                    crate::policy::Policy::parse(&v)
-                        .map(|p| p.0)
-                        .map_err(|e| e.message)
-                }) {
-                Ok(policy) => {
-                    self.policy = Some(policy);
-                    self.policy_error = None;
-                }
-                Err(error) => {
-                    self.policy = None;
-                    self.policy_error = Some(format!("the relay policy is invalid ({error})"));
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if tokio::fs::symlink_metadata(&self.policy_file).await.is_ok() {
-                    self.policy_error = Some("the relay policy is a link to a missing file".into());
-                } else {
-                    self.policy = None;
-                    self.policy_error = None;
-                }
-            }
-            Err(error) => {
-                self.policy = None;
-                self.policy_error = Some(format!("the relay policy cannot be read ({error})"));
-            }
-        }
     }
 
     pub fn broker_info(&self) -> Value {
@@ -128,26 +101,19 @@ impl Core {
         if !connection.bound() {
             return Err(RpcError::new(ErrorCode::Unauthorized, "call hello first"));
         }
+        let observes = OBSERVER_METHODS.contains(&method);
+        let scoped = SCOPE_METHODS.contains(&method);
         if connection.mode == Mode::Observer
-            && !matches!(
-                method,
-                "list"
-                    | "snapshot"
-                    | "watch"
-                    | "log"
-                    | "policy"
-                    | "policy_check"
-                    | "cloud_status"
-                    | "bridge_relink"
-            )
+            && !observes
+            && !(scoped && (connection.lineage.is_some() || method == "why"))
         {
             return Err(RpcError::new(
                 ErrorCode::Unauthorized,
-                "this connection only observes",
+                "this connection only observes: say hello as an agent or the human",
             ));
         }
         if connection.mode == Mode::Transient {
-            if matches!(method, "rules" | "rules_set" | "grant" | "group" | "admin") {
+            if scoped {
                 return Err(RpcError::new(
                     ErrorCode::ScopeRefused,
                     "a hook connection cannot read or change scopes, groups or grants",
@@ -179,15 +145,16 @@ impl Core {
         }
         match method {
             "whoami" => self.view(&self.must_endpoint(&endpoint).await?).await,
-            "list" => self.list_endpoints(params).await,
+            "list" => self.list_for(conn, params).await,
             "rename" => self.rename(conn, params).await,
             "leave" => self.leave(conn, params).await,
             "adopt" => self.adopt(conn, params).await,
             "relink" => self.relink(conn, params).await,
             "event" => self.event(conn, params).await,
             "grant" => self.grant(conn, params).await,
-            "log" => self.audit_log(params).await,
+            "log" => self.log_for(conn, params).await,
             "send" => {
+                self.policy_gate().await?;
                 crate::messages::validate_send(params, &self.limits)?;
                 let to = params
                     .get("to")
@@ -206,10 +173,11 @@ impl Core {
                 };
                 let mut recipients = Vec::new();
                 for value in addresses {
-                    let row = self.lookup(value).await?;
-                    let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
-                    if !recipients.contains(&id) {
-                        recipients.push(id);
+                    for row in self.send_targets(&endpoint, value, conn).await? {
+                        let id = text(&row, "id").ok_or_else(RpcError::internal)?.to_owned();
+                        if !recipients.contains(&id) {
+                            recipients.push(id);
+                        }
                     }
                 }
                 self.send(
@@ -232,8 +200,27 @@ impl Core {
             }
             "title_infer" => self.title_infer(&endpoint, params).await,
             "prompted" => self.prompted(&endpoint, params).await,
-            "rules" => self.rules(&endpoint).await,
-            "rules_set" => self.rules_set(&endpoint, params).await,
+            "rules" => self.scope_view(conn, params).await,
+            "rules_set" => self.rules_set(conn, params).await,
+            "rules_widen" => self.rules_widen(conn, params).await,
+            "rules_lift" => self.rules_lift(conn, params).await,
+            "group" => self.group(conn, params).await,
+            "admin" => self.admin(conn, params).await,
+            "peers" => self.peers(conn, params).await,
+            "why" => {
+                let actor = self.actor_of(conn)?;
+                let field = |key: &str| {
+                    params
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| RpcError::invalid_params(format!("{key} is required")))
+                };
+                self.why(&actor, &field("from")?, &field("to")?).await
+            }
+            "snapshot" => self.snapshot_for(conn, params).await,
+            "policy" => self.policy_view(conn).await,
+            "policy_check" => self.policy_check(conn, params).await,
             "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
             "machine_wake" => Err(RpcError::new(
                 ErrorCode::Unavailable,
@@ -387,6 +374,35 @@ impl Core {
         }
     }
 }
+
+const OBSERVER_METHODS: [&str; 8] = [
+    "list",
+    "snapshot",
+    "watch",
+    "log",
+    "policy",
+    "policy_check",
+    "cloud_status",
+    "bridge_relink",
+];
+const SCOPE_METHODS: [&str; 16] = [
+    "rules",
+    "rules_set",
+    "rules_widen",
+    "rules_lift",
+    "grant",
+    "group",
+    "admin",
+    "peers",
+    "why",
+    "spawn_exit",
+    "spawn_steers",
+    "spawn_end",
+    "spawn_via",
+    "peek",
+    "peek_set",
+    "peek_who",
+];
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
