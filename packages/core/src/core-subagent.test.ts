@@ -266,6 +266,37 @@ describe("--as from inside the tree", () => {
     expect(resets()).toEqual([])
   })
 
+  test("a daemon-hosted worker's shell, whose walk never reaches the root, proves no other identity: --as parent, sibling or grandparent is unauthorized", () => {
+    const { core, clock, hook, resets } = setup()
+    const self = (id: string): ScopeActor => ({ kind: "endpoint", id, auth: "session" })
+    const shim = (handle: string, pid: number, extra: Record<string, unknown> = {}) =>
+      core.claim({ handle, harness: "claude-code", process: key(pid), session: key(pid), lineage: [key(pid), key(pid - 1)], ...extra })
+    const root = core.claim({ handle: "claude-app", harness: "claude-code", process: key(9), session: key(9), lineage: [key(9), key(1)] }).endpoint
+    hook(9)
+    const lead = shim("lead", 20, { grant: core.grant(self(root.id), { name: "lead" }).token }).endpoint
+    const sib = shim("sib", 30, { grant: core.grant(self(root.id), { name: "sib" }).token }).endpoint
+    const kid = shim("kid", 40, { grant: core.grant(self(lead.id), { name: "kid" }).token }).endpoint
+    expect([core.whoami(lead.id).parent, core.whoami(sib.id).parent, core.whoami(kid.id).parent]).toEqual(["me/claude-app", "me/claude-app", "me/lead"])
+    const tries = () =>
+      [
+        ["claude-app", [41, 40, 39]],
+        ["claude-app", [21, 20, 19]],
+        ["lead", [41, 40, 39]],
+        ["sib", [21, 20, 19]],
+        ["sib", [41, 40, 39]],
+      ].map(([handle, walk]) => failure(() => as(core, handle as string, walk as number[])).code)
+    expect(tries()).toEqual(Array(5).fill("unauthorized"))
+    for (const id of [root.id, lead.id, sib.id]) core.disconnect(id)
+    clock.now += (LIMITS.hookIdleS + 1) * 1000
+    expect(core.whoami(root.id).presence).toBe("offline")
+    expect(tries()).toEqual(Array(5).fill("unauthorized"))
+    expect(core.whoami(root.id).address).toBe("me/claude-app")
+    expect(core.whoami(sib.id).address).toBe("me/sib")
+    const fresh = as(core, "lead-placeholder", [41, 40, 39])
+    expect(fresh).toMatchObject({ parent: "me/kid", depth: 3 })
+    expect(resets()).toEqual([])
+  })
+
   test("a genuinely different process still resets: a root --as endpoint, and a worker process's endpoint taken from its parent's shell", () => {
     const { core, hook, resets } = setup()
     const solo = as(core, "solo", [50])
