@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/broker",
-  "version": "0.13.4",
+  "version": "0.13.5",
   "description": "Swarm Communication Protocol local broker: a unix socket JSON-RPC daemon over the relay core, its client and the bridge to an account hub.",
   "license": "Apache-2.0",
   "homepage": "https://scp.dev",
