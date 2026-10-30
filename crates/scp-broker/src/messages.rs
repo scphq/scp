@@ -157,6 +157,7 @@ impl Core {
             }
         }
         // Scope decisions and messaging guards run before the write transaction.
+        self.send_guards(&sender, &targets).await?;
         let now = now_ms();
         let id = new_id("msg", now);
         let kind = if link { "request" } else { "message" };

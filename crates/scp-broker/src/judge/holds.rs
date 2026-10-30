@@ -52,7 +52,7 @@ impl Core {
             }
             "hold_release" => {
                 let id = required(params, "id")?;
-                self.load_policy().await;
+                self.load_policy().await?;
                 if let Some(error) = &self.policy_error {
                     return Err(RpcError::new(ErrorCode::PolicyRefused, error));
                 }

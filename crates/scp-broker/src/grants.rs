@@ -4,28 +4,14 @@ use crate::claims::{
 };
 use crate::core::{Core, integer, now_ms, text, timestamp};
 use crate::proto::{ErrorCode, RpcError};
-use crate::state::{ConnectionId, Mode};
+use crate::state::ConnectionId;
 use crate::store::{Row, SqlValue};
 use crate::views::{address, not_found, opt};
 use rand::RngCore;
-use scp_core::protocol::{ScopeDirection, ScopePreset};
-use scp_core::scope::{ExpandRulesParams, expand_rules};
 use serde_json::{Map, Value, json};
-use std::str::FromStr;
 
 const STORE_CHARS: usize = 2000;
 const GRANT_TTL_S: i64 = 604_800;
-
-/// the caps a grant adds, each set by its issuer
-pub fn grant_caps(grant: &Row) -> Vec<Value> {
-    json_column(grant, "caps", json!([]))
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|cap| json!({"id": token("cap"), "dir": cap["dir"], "by": text(grant, "issuer"), "sels": cap["sels"]}))
-        .collect()
-}
 
 pub fn json_column(row: &Row, key: &str, fallback: Value) -> Value {
     text(row, key)
@@ -55,131 +41,7 @@ fn prompt_digest(raw: &str) -> Option<String> {
     (!kept.trim().is_empty()).then_some(kept)
 }
 
-type RuleList = (ScopeDirection, Option<Vec<String>>);
-
-/// the scope lists a grant or rules call names, expanded from its preset
-pub fn rule_lists(params: &Map<String, Value>, symmetric: bool) -> Result<Vec<RuleList>, RpcError> {
-    let scope = params
-        .get("scope")
-        .map(|v| {
-            v.as_str()
-                .and_then(|v| ScopePreset::from_str(v).ok())
-                .ok_or_else(|| RpcError::invalid_params("scope is one of open, tree, parent, none"))
-        })
-        .transpose()?;
-    let list = |key: &str| -> Result<Option<Vec<String>>, RpcError> {
-        params
-            .get(key)
-            .map(|v| {
-                Ok(crate::rules::selectors(v, key)?
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect())
-            })
-            .transpose()
-    };
-    let expanded = expand_rules(
-        &ExpandRulesParams {
-            scope,
-            allow: list("allow")?,
-            r#in: list("in")?,
-            out: list("out")?,
-        },
-        symmetric,
-    )
-    .map_err(|e| RpcError::invalid_params(e.message))?;
-    let mut lists: Vec<_> = expanded.into_iter().collect();
-    lists.sort_by_key(|(dir, _)| dir.as_str());
-    Ok(lists)
-}
-
 impl Core {
-    fn symmetric(&self) -> bool {
-        self.policy
-            .as_ref()
-            .and_then(|v| v.pointer("/defaults/symmetric_presets"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    }
-    /// the policy's child default preset as caps, when it is a preset
-    pub fn child_default_caps(&self) -> Vec<Value> {
-        let Some(sels) = self
-            .default_of("child_default")
-            .and_then(crate::policy::preset)
-            .and_then(|v| v.as_array().cloned())
-        else {
-            return Vec::new();
-        };
-        let dirs: &[&str] = if self.symmetric() {
-            &["in", "out"]
-        } else {
-            &["out"]
-        };
-        dirs.iter()
-            .map(|dir| json!({"id": token("cap"), "dir": dir, "by": "policy", "sels": sels.iter().map(|s| json!({"sel": s})).collect::<Vec<_>>()}))
-            .collect()
-    }
-    async fn group_named(&self, name: &str) -> Result<Option<(Row, bool)>, RpcError> {
-        if self
-            .policy
-            .as_ref()
-            .and_then(|v| v.get("groups"))
-            .and_then(Value::as_array)
-            .is_some_and(|groups| groups.iter().any(|g| g["name"] == json!(name)))
-        {
-            return Ok(Some((Row::new(), true)));
-        }
-        Ok(self
-            .store
-            .all("SELECT * FROM groups WHERE name = ?", &[opt(Some(name))])
-            .await?
-            .into_iter()
-            .next()
-            .map(|row| (row, false)))
-    }
-    async fn admin_of_group(&self, subject: &str, group: &Row) -> Result<bool, RpcError> {
-        let rows = self
-            .store
-            .all(
-                "SELECT scope_kind,scope,scope_id FROM admins WHERE subject = ? AND revoked_at IS NULL",
-                &[opt(Some(subject))],
-            )
-            .await?;
-        Ok(rows.iter().any(|row| {
-            if text(row, "scope_kind") == Some("tree") {
-                text(row, "scope") == Some(text(group, "tree").unwrap_or(""))
-            } else {
-                text(row, "scope") == text(group, "name")
-                    && text(row, "scope_id").is_some()
-                    && text(row, "scope_id") == text(group, "id")
-            }
-        }))
-    }
-    fn narrow_only(&self, conn: ConnectionId) -> Result<bool, RpcError> {
-        let c = self.connection(conn)?;
-        Ok(match c.mode {
-            Mode::Human { tty } => !tty,
-            _ => c.lineage.is_some() && !c.own,
-        })
-    }
-    fn auth_of(&self, conn: ConnectionId) -> Result<&'static str, RpcError> {
-        let c = self.connection(conn)?;
-        Ok(match c.mode {
-            Mode::Human { tty: true } => "tty",
-            Mode::Human { tty: false } => "no-tty",
-            _ if c.lineage.is_some() => {
-                if c.own {
-                    "self"
-                } else {
-                    "lineage"
-                }
-            }
-            _ => "session",
-        })
-    }
-
     /// a `krt_` grant placing a claim under the actor or its descendant with the actor's caps and groups; stored hashed
     pub async fn grant(
         &self,
@@ -275,62 +137,10 @@ impl Core {
             Some(_) => return Err(RpcError::invalid_params("prompt is a string")),
         };
         let prompt = prompt.filter(|_| peek.is_some()).and_then(prompt_digest);
-        let mut caps: Vec<Value> = rule_lists(params, self.symmetric())?
-            .into_iter()
-            .filter_map(|(dir, sels)| {
-                sels.map(|sels| json!({"dir": dir.as_str(), "sels": sels.iter().map(|s| json!({"sel": s})).collect::<Vec<_>>()}))
-            })
-            .collect();
-        let narrow = self.narrow_only(conn)?;
-        if narrow {
-            caps.extend(self.child_default_caps().into_iter().map(|mut cap| {
-                if let Some(cap) = cap.as_object_mut() {
-                    cap.remove("id");
-                    cap.remove("by");
-                }
-                cap
-            }));
-        }
-        let mut groups = Vec::new();
-        let names = match params.get("groups") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(values)) => values
-                .iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| RpcError::invalid_params("groups is a list of group names"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            Some(_) => return Err(RpcError::invalid_params("groups is a list of group names")),
-        };
-        for group in names {
-            let Some((row, false)) = self.group_named(&group).await? else {
-                return Err(RpcError::new(
-                    ErrorCode::NotFound,
-                    format!("no group {group}"),
-                ));
-            };
-            if agent
-                && text(&row, "owner") != text(&me, "id")
-                && !self
-                    .admin_of_group(text(&me, "id").unwrap_or(""), &row)
-                    .await?
-            {
-                return Err(self
-                    .scope_refused(
-                        conn,
-                        json!({"target": format!("group:{group}"), "reason": "not the owner"}),
-                        &format!("only the owner adds to group {group}"),
-                    )
-                    .await?);
-            }
-            let mut entry = json!({"name": group, "id": text(&row, "id").unwrap_or(&group)});
-            if !narrow {
-                entry["allow"] = json!(true);
-            }
-            groups.push(entry);
-        }
+        let actor = self.actor_of(conn)?;
+        let (caps, groups) = self.grant_scope(&actor, &me, params).await?;
+        let caps = caps.as_array().cloned().unwrap_or_default();
+        let groups = groups.as_array().cloned().unwrap_or_default();
         let value = token("krt");
         let steer = spawn.then(steer_key);
         let now = now_ms();
@@ -338,7 +148,7 @@ impl Core {
         self.store.all("INSERT INTO grants (token_hash,issuer,under,name,labels,title,caps,groups,created_at,expires_at,bound_process,peek,spawn,no_push,prompt,steer) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",&[opt(Some(&hash(&value))),opt(text(&me,"id")),opt(text(&under,"id")),opt(name.as_deref()),opt(Some(&labels.to_string())),opt(title.as_deref()),opt(Some(&json!(caps).to_string())),opt(Some(&json!(groups).to_string())),SqlValue::Int(now),SqlValue::Int(expires),opt(bound.as_deref()),opt(peek),if spawn {SqlValue::Int(1)} else {SqlValue::Null},if no_push {SqlValue::Int(1)} else {SqlValue::Null},opt(prompt.as_deref()),opt(steer.as_deref())]).await?;
         let mut detail = json!({
             "by": address(&me),
-            "auth": self.auth_of(conn)?,
+            "auth": actor.auth(),
             "target": address(&under),
             "caps": caps.iter().map(|c| json!({"dir": c["dir"], "sels": c["sels"].as_array().into_iter().flatten().map(|e| e["sel"].clone()).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "groups": groups.iter().map(|g| g["name"].clone()).collect::<Vec<_>>(),
@@ -577,8 +387,9 @@ impl Core {
             .flatten()
             .map(base)
             .collect();
-        let added: Vec<Value> = grant_caps(&grant)
+        let added: Vec<Value> = crate::groups::grant_caps(&grant)
             .into_iter()
+            .filter_map(|cap| serde_json::to_value(cap).ok())
             .filter(|cap| !had.contains(&base(cap)))
             .collect();
         if !added.is_empty() {
@@ -636,27 +447,6 @@ impl Core {
                 .is_empty())
     }
 
-    /// the grant's groups the endpoint joins, each while it is still the group the grant was issued for
-    pub(crate) async fn join_grant(&self, grant: &Row, endpoint: &str) -> Result<(), RpcError> {
-        for entry in json_column(grant, "groups", json!([]))
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-        {
-            let Some(name) = entry["name"].as_str() else {
-                continue;
-            };
-            let Some((group, false)) = self.group_named(name).await? else {
-                continue;
-            };
-            if Some(text(&group, "id").unwrap_or(name)) != entry["id"].as_str() {
-                continue;
-            }
-            self.store.all("INSERT OR IGNORE INTO group_members (name,endpoint,added_by,at) VALUES (?,?,?,?)",&[opt(Some(name)),opt(Some(endpoint)),opt(text(grant,"issuer")),SqlValue::Int(now_ms())]).await?;
-        }
-        Ok(())
-    }
-
     pub(crate) async fn spend(
         &self,
         grant: &Row,
@@ -687,12 +477,9 @@ impl Core {
             .iter()
             .filter_map(|r| text(r, "name").map(|v| json!(v)))
             .collect();
-        self.store
-            .all(
-                "DELETE FROM group_members WHERE endpoint = ?",
-                &[opt(Some(id))],
-            )
-            .await?;
+        for name in groups.iter().filter_map(Value::as_str) {
+            self.leave_group(name, id).await?;
+        }
         let admins = self
             .store
             .all(

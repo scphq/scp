@@ -287,7 +287,7 @@ impl Core {
             )
             .await?;
         self.store.all("UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ? AND harness_session IS NULL",&[opt(text(held,"harness_session")),opt(text(held,"harness_transcript")),opt(Some(id))]).await?;
-        self.store.all("UPDATE endpoints SET handle = ?,session = NULL,token_hash = NULL,peek = NULL WHERE id = ?",&[opt(Some(&format!("gone:{retired}"))),opt(Some(retired))]).await?;
+        self.store.all("UPDATE endpoints SET handle = ?,session = NULL,token_hash = NULL,peek = NULL WHERE id = ?",&[opt(Some(&format!("{}{retired}", crate::world::GONE))),opt(Some(retired))]).await?;
         self.audit("take_over",Some(id),None,json!({"from":text(row,"handle"),"to":text(held,"handle"),"retired":retired,"children":children,"by":by})).await?;
         Ok(retired.into())
     }

@@ -16,7 +16,7 @@ async fn enable(test: &mut TestCore) {
     )
     .await
     .expect("policy");
-    test.core.load_policy().await;
+    test.core.load_policy().await.expect("load policy");
 }
 
 async fn reviewer(test: &mut TestCore, tty: bool) -> u64 {
@@ -129,7 +129,7 @@ async fn terminal_releases_as_sender_and_resolved_hold_purges_body() {
     assert!(shown.get("body").is_none());
     let audit = test
         .core
-        .audit_log(&params(json!({"judge":true})))
+        .audit_log(&params(json!({"judge":true})), None)
         .await
         .expect("audit");
     assert_eq!(
@@ -272,7 +272,7 @@ async fn judged_send_validates_ttl_and_skips_unmatched_boundaries() {
     assert!(sent.get("held").is_none());
     let audit = test
         .core
-        .audit_log(&params(json!({"judge":true})))
+        .audit_log(&params(json!({"judge":true})), None)
         .await
         .expect("audit");
     assert_eq!(audit["rows"], json!([]));

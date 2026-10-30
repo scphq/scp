@@ -205,7 +205,7 @@ impl Core {
             return Ok(Vec::new());
         }
         for key in keys.iter().filter(|v| process_key(v, true)) {
-            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
+            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
             let mut out = Vec::new();
             for row in rows {
                 if exclude.contains(&text(&row, "id").unwrap_or("")) {
@@ -427,7 +427,7 @@ impl Core {
         fields: &Fields,
         instead: Option<&Row>,
     ) -> Result<Option<Row>, RpcError> {
-        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' ORDER BY named IS NULL,COALESCE(last_seen,created_at) DESC",&[opt(Some(session))]).await?;
+        let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY named IS NULL,COALESCE(last_seen,created_at) DESC",&[opt(Some(session))]).await?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -524,10 +524,8 @@ impl Core {
                 ),
             ));
         }
-        let mut caps: Vec<Value> = Vec::new();
         if let Some(grant) = &place.grant {
             self.spend(grant, id, fields.cwd.as_deref()).await?;
-            caps.extend(crate::grants::grant_caps(grant));
             let mut labels = crate::grants::json_column(grant, "labels", json!({}));
             if let (Some(dst), Some(src)) = (
                 labels.as_object_mut(),
@@ -537,16 +535,15 @@ impl Core {
             }
             self.store.all("UPDATE endpoints SET labels = ?,title = CASE WHEN title IS NULL OR title IS title_auto THEN COALESCE(?,title) ELSE title END,title_auto = CASE WHEN ? IS NOT NULL AND (title IS NULL OR title IS title_auto) THEN NULL ELSE title_auto END WHERE id = ?",&[opt(Some(&labels.to_string())),opt(text(grant,"title")),opt(text(grant,"title")),opt(Some(id))]).await?;
         }
-        if place.parent.is_some() && caps.is_empty() {
-            caps.extend(self.child_default_caps());
-        }
-        if let Some(kept) = crate::grants::json_column(row, "caps", json!({}))["caps"].as_array() {
-            caps.extend(kept.iter().cloned());
-        }
-        let stored = (!caps.is_empty()).then(|| json!({"caps": caps, "allow": {}}).to_string());
-        self.store.all("UPDATE endpoints SET tree = ?,parent_ep = ?,parent_addr = NULL,depth = ?,rules = ?,caps = ? WHERE id = ?",&[opt(place.parent.as_ref().and_then(|r|text(r,"tree").or_else(||text(r,"id")))),opt(place.parent.as_ref().and_then(|r|text(r,"id"))),SqlValue::Int(depth),if scope.rules == json!({}) { SqlValue::Null } else { opt(Some(&scope.rules.to_string())) },opt(stored.as_deref()),opt(Some(id))]).await?;
+        self.place_scope(
+            row,
+            place.parent.as_ref(),
+            place.grant.as_ref(),
+            depth,
+            &scope.rules,
+        )
+        .await?;
         if let Some(grant) = &place.grant {
-            self.join_grant(grant, id).await?;
             let issuer = self.address_of(text(grant, "issuer").unwrap_or("")).await?;
             if text(grant, "peek") == Some("local")
                 && !self.store.all("UPDATE endpoints SET peek = 'local' WHERE id = ? AND peek IS NULL RETURNING id",&[opt(Some(id))]).await?.is_empty()
@@ -585,7 +582,7 @@ impl Core {
     ) -> Result<Claimed, RpcError> {
         self.end_exited().await?;
         let mut row = if let Some(session) = &fields.session {
-            self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
+            self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
         } else {
             None
         };
@@ -1338,10 +1335,11 @@ impl Core {
             )),
             None => None,
         };
+        let symmetric = crate::world::Defaults::of(self.policy.as_ref()).symmetric;
         let mut rules = json!({});
-        for dir in ["in", "out"] {
-            if let Some(v) = claim.get(dir).or_else(|| claim.get("allow")) {
-                rules[dir] = v.clone();
+        for (dir, list) in crate::rules::expand(&crate::rules::rule_params(claim)?, symmetric)? {
+            if let Some(list) = list {
+                rules[dir.as_str()] = json!(list);
             }
         }
         let exact = claim.get("exact") == Some(&Value::Bool(true)) && subagent.is_none();
@@ -1637,7 +1635,7 @@ async fn hello_transaction(
 ) -> Result<Claimed, RpcError> {
     if !transient {
         if let Some(resume) = params.get("resume").and_then(Value::as_str) {
-            let row=core.store.all("SELECT * FROM endpoints WHERE token_hash = ? AND substr(handle,1,5) != 'gone:'",&[opt(Some(&hash(resume)))]).await?.into_iter().next().ok_or_else(||RpcError::new(ErrorCode::Unauthorized,"unknown resume token"))?;
+            let row=core.store.all("SELECT * FROM endpoints WHERE token_hash = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_'",&[opt(Some(&hash(resume)))]).await?.into_iter().next().ok_or_else(||RpcError::new(ErrorCode::Unauthorized,"unknown resume token"))?;
             let id = text(&row, "id").ok_or_else(RpcError::internal)?;
             core.store
                 .all(
