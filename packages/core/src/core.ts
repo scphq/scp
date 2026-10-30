@@ -1047,7 +1047,9 @@ export class RelayCore {
       const claimed = this.claimRow(scope.handle, harness, fields, options.transient === true, scope)
       const rehomed = options.transient === true && !scope.exact ? this.rehome(claimed.endpoint.id, harness, fields, scope) : undefined
       const handedOff =
-        claim.harness_handoff === true && !scope.exact && !rehomed ? this.handOff(claimed.endpoint.id, harness, fields, claimed.created === true) : undefined
+        claim.harness_handoff === true && !scope.exact && !rehomed
+          ? this.handOff(claimed.endpoint.id, harness, fields, claimed.created === true, under)
+          : undefined
       const placed =
         rehomed || handedOff
           ? { ...claimed, endpoint: this.view(this.byId(claimed.endpoint.id)!), ...(rehomed ? { rehomed } : {}), ...(handedOff ? { handedOff } : {}) }
@@ -1071,6 +1073,7 @@ export class RelayCore {
     harness: string,
     fields: { harness_session: string | null; harness_origin: string | null },
     created: boolean,
+    under: string | null = null,
   ): { from: string; retired: string } | undefined {
     const row = this.byId(id)
     const origin = fields.harness_origin
@@ -1088,6 +1091,10 @@ export class RelayCore {
       .find((held) => this.localRow(held) && !revivable(held) && (harnessFits(held.harness, harness) || sameProvider(held.harness, harness)))
     if (!held || busySince(held, row.created_at, created, now)) return undefined
     const from = row.handle
+    if (under !== null && this.namesOrBelow(under, held)) {
+      this.audit("handoff_refused", row.id, null, { from, to: held.handle, code: "scope_refused" })
+      return undefined
+    }
     try {
       this.tx(() => {
         this.sql.all(`UPDATE endpoints SET harness_session = ? WHERE id = ?`, fields.harness_session, row.id)
@@ -1100,6 +1107,17 @@ export class RelayCore {
     }
     this.audit("handoff", row.id, null, { from, to: held.handle, retired: held.id })
     return { from, retired: held.id }
+  }
+
+  /** whether the address `under` names `row` or an endpoint below it */
+  private namesOrBelow(under: string, row: EndpointRow): boolean {
+    try {
+      const parent = this.resolve(under)
+      return parent.id === row.id || this.ancestorsOf(parent).includes(row.id)
+    } catch (error) {
+      if (error instanceof RelayError) return false
+      throw error
+    }
   }
 
   /**
