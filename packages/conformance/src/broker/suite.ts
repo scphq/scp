@@ -70,6 +70,8 @@ export const rustPending = new Set([
 export const rustPendingTests = new Set([
   "broker scopes > ancestor traffic passes caps and reply grants pass both directions repeatedly",
   "broker scopes > watch events respect visibility",
+  "broker lineage > root shells bind subagents without tokens and messages stay in their own inboxes",
+  "broker judge and hold review > ask returns a hold at once instead of waiting for a reply",
 ]);
 
 let registering: { title: string; name: string } | undefined;
