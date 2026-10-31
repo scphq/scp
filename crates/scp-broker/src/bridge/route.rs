@@ -1,6 +1,9 @@
 //! Messages across machines: a send to other machines goes through the bridge, a hub delivery is admitted here.
 
-use scp_core::protocol::{CLI_NAME, ErrorCode, LIMITS};
+use std::collections::HashMap;
+
+use scp_core::protocol::{CLI_NAME, ErrorCode, LIMITS, ScopeDirection};
+use scp_core::scope::{Admission, PolicySubject, ScopeNode, ScopeWorld, admits};
 use serde_json::{Map, Value, json};
 
 use super::rows::parse_time;
@@ -13,6 +16,7 @@ use crate::scrub::find_secret;
 use crate::session::clean_text;
 use crate::store::{Row, SqlValue};
 use crate::views::address;
+use crate::world::World;
 
 const MESSAGE_KINDS: [&str; 4] = ["message", "request", "reply", "status"];
 const AUTHS: [&str; 4] = ["local-uid", "account", "account+bridge", "contact"];
@@ -33,6 +37,48 @@ fn targets_of(to: Option<&Value>) -> Vec<Value> {
 /// the code an error refuses with, or None for one worth trying again
 pub fn refusal_code(error: &RpcError) -> Option<ErrorCode> {
     error.data.as_ref().map(|d| d.code)
+}
+
+/// an endpoint of another account as the scope check sees it: it matches only `acct:` selectors
+pub fn foreign_node(account: &str, machine: &str, handle: &str) -> ScopeNode {
+    let address = format!(
+        "{account}/{machine}/{}",
+        if handle.is_empty() { "me" } else { handle }
+    );
+    ScopeNode {
+        id: format!("@{address}"),
+        address,
+        subject: PolicySubject {
+            handle: handle.to_owned(),
+            harness: None,
+            kind: if handle.is_empty() { "human" } else { "agent" }.to_owned(),
+            labels: HashMap::new(),
+            scope: None,
+            account: Some(account.to_owned()),
+        },
+        ..ScopeNode::default()
+    }
+}
+
+/// whether direction `dir` of `endpoint` admits an endpoint of another account: only an `acct:` selector in each list, or no list at all
+pub fn cross_admission(
+    world: &World,
+    endpoint: &str,
+    dir: ScopeDirection,
+    peer: &ScopeNode,
+) -> Admission {
+    match world.node(endpoint) {
+        Some(node) => admits(world, node, dir, peer, None),
+        None => gone(),
+    }
+}
+
+fn gone() -> Admission {
+    Admission {
+        ok: false,
+        why: "the endpoint is gone".into(),
+        by: None,
+    }
 }
 
 /// what an inbound delivery came to
@@ -99,8 +145,17 @@ impl Core {
                 .next(),
             None => None,
         };
+        let reply_to = params.get("reply_to").and_then(Value::as_str);
         for to in &texts {
-            if self.foreign_account(to).is_some() {
+            if let Some(foreign) = self.foreign_account(to) {
+                self.check_foreign_out(&sender, to.trim(), &foreign, reply_to)
+                    .await?;
+                if let Some(refusal) = self.foreign_policy_refusal(&sender, to, &foreign).await? {
+                    return Err(RpcError::new(
+                        ErrorCode::PolicyRefused,
+                        format!("{refusal} ({to})"),
+                    ));
+                }
                 continue;
             }
             let Some(row) = self.resolve_remote(to).await? else {
@@ -650,8 +705,7 @@ impl Core {
             )
             .await?
             .is_empty();
-        let foreign = text(&sender, "remote").is_some_and(is_foreign);
-        if !had && !foreign {
+        if !had {
             let parent = match (message["kind"].as_str(), message["reply_to"].as_str()) {
                 (Some("reply"), Some(reply_to)) => self
                     .store
@@ -661,16 +715,127 @@ impl Core {
                     .next(),
                 _ => None,
             };
-            self.check_scope(
-                &sender,
-                &recipient,
-                &address(&recipient),
-                parent.as_ref(),
-                false,
-            )
-            .await?;
+            if text(&sender, "remote").is_some_and(is_foreign) {
+                self.check_foreign_in(&sender, &recipient, parent.as_ref())
+                    .await?;
+            } else {
+                self.check_scope(
+                    &sender,
+                    &recipient,
+                    &address(&recipient),
+                    parent.as_ref(),
+                    false,
+                )
+                .await?;
+            }
         }
         self.policy_refusal(&sender, &recipient).await
+    }
+
+    /// refuses, as not_found, a message from another account the recipient's in lists do not admit by `acct:`, unless it replies to the recipient's own message to that sender
+    async fn check_foreign_in(
+        &self,
+        sender: &Row,
+        recipient: &Row,
+        parent: Option<&Row>,
+    ) -> Result<(), RpcError> {
+        let (from, to) = (address(sender), address(recipient));
+        let recipient_id = text(recipient, "id").unwrap_or_default();
+        if parent.is_some_and(|p| {
+            text(p, "from_ep") == Some(recipient_id)
+                && text(p, "to_addr").is_some_and(|t| t.split(',').any(|t| t.trim() == from))
+        }) {
+            return Ok(());
+        }
+        let world = self.world().await?;
+        let sender_id = text(sender, "id").unwrap_or_default();
+        let admission = match world.node_of(sender_id) {
+            Some(peer) => cross_admission(&world, recipient_id, ScopeDirection::In, peer),
+            None => gone(),
+        };
+        if admission.ok {
+            return Ok(());
+        }
+        self.audit(
+            "scope_refused",
+            Some(sender_id),
+            None,
+            json!({"from": from, "to": to, "dir": "in", "reason": admission.why}),
+        )
+        .await?;
+        Err(crate::views::not_found(&to))
+    }
+
+    /// refuses, as not_found, a message to another account the sender's out lists do not admit by `acct:`, unless it replies to a message it got from exactly that address
+    async fn check_foreign_out(
+        &self,
+        sender: &Row,
+        to: &str,
+        foreign: &(String, String, String),
+        reply_to: Option<&str>,
+    ) -> Result<(), RpcError> {
+        let sender_id = text(sender, "id").unwrap_or_default();
+        if let Some(reply_to) = reply_to {
+            let parent = self
+                .store
+                .all(
+                    "SELECT m.from_ep AS from_ep FROM messages m JOIN deliveries d ON d.message_id = m.id WHERE m.id = ? AND d.endpoint = ?",
+                    &[sv(reply_to), sv(sender_id)],
+                )
+                .await?
+                .into_iter()
+                .next();
+            if let Some(origin) = match parent.as_ref().and_then(|p| text(p, "from_ep")) {
+                Some(id) => self.by_id(id).await?,
+                None => None,
+            } && address(&origin) == to
+            {
+                return Ok(());
+            }
+        }
+        let world = self.world().await?;
+        let (account, machine, handle) = foreign;
+        let peer = foreign_node(account, machine, handle);
+        let admission = cross_admission(&world, sender_id, ScopeDirection::Out, &peer);
+        if admission.ok {
+            return Ok(());
+        }
+        self.audit(
+            "scope_refused",
+            Some(sender_id),
+            None,
+            json!({"from": address(sender), "to": to, "dir": "out", "reason": admission.why}),
+        )
+        .await?;
+        Err(crate::views::not_found(to))
+    }
+
+    /// why the policy refuses a message from the local `sender` to an address of another account, checked as that account's endpoint
+    async fn foreign_policy_refusal(
+        &self,
+        sender: &Row,
+        to: &str,
+        foreign: &(String, String, String),
+    ) -> Result<Option<String>, RpcError> {
+        if self.policy.is_none() {
+            return Ok(None);
+        }
+        let proxy = self.by_remote(&format!("@{}", to.trim())).await?;
+        let world = self.world().await?;
+        let Some(from) = world.subject(text(sender, "id").unwrap_or_default()) else {
+            return Ok(None);
+        };
+        let target = match proxy
+            .as_ref()
+            .and_then(|row| world.subject(text(row, "id")?))
+        {
+            Some(subject) => subject.clone(),
+            None => {
+                let (account, machine, handle) = foreign;
+                foreign_node(account, machine, handle).subject
+            }
+        };
+        Ok(world.policy_refusal_of(from, &target))
     }
 
     /// a hub delivery stored under the hub's id from its sender's row; idempotent, refused inbox_full past the inbox cap
@@ -820,10 +985,19 @@ impl Core {
         let store = self.store.clone();
         let decided = crate::store::transaction(store, async {
             self.load_policy().await?;
-            if self.policy_error.is_some()
-                || self.inbound_refusal(&endpoint, message).await?.is_some()
-            {
-                return Ok::<_, RpcError>(Some(Injected::Refused("policy_refused".into())));
+            let refused = || Ok::<_, RpcError>(Some(Injected::Refused("policy_refused".into())));
+            if self.policy_error.is_some() {
+                return refused();
+            }
+            match self.inbound_refusal(&endpoint, message).await {
+                Ok(Some(_)) => return refused(),
+                Ok(None) => {}
+                Err(error) => {
+                    return match refusal_code(&error) {
+                        Some(code) => Ok(Some(Injected::Refused(code.as_str().into()))),
+                        None => Err(error),
+                    };
+                }
             }
             Ok(self
                 .admit(&endpoint, message)
