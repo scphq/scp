@@ -35,6 +35,14 @@ pub struct Connection {
     pub closed: Arc<Notify>,
     pub watching: bool,
     pub events: Option<mpsc::UnboundedSender<Value>>,
+    /// the endpoint this connection counts as the waker of
+    pub waker: Option<String>,
+    /// claimed with a grant or a wake ticket: it may give a durable spawn ref
+    pub holder: bool,
+    /// the wake ticket a broker wake's run bound this connection with
+    pub ticket: Option<String>,
+    /// ended by the broker: the connection closes
+    pub ended: bool,
 }
 
 impl Connection {

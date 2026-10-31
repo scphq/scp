@@ -23,6 +23,11 @@ pub fn presence(row: &Row, now: i64) -> &'static str {
     if text(row, "hibernate").is_some() {
         return "hibernated";
     }
+    session_presence(row, now)
+}
+
+/// the presence of the endpoint's session, whatever its hibernation says
+pub fn session_presence(row: &Row, now: i64) -> &'static str {
     if integer(row, "connections").unwrap_or(0) > 0 {
         return if integer(row, "last_seen").unwrap_or(0) >= now - 60_000 {
             "online"
@@ -103,6 +108,15 @@ impl Core {
     }
     pub async fn view(&self, row: &Row) -> Result<Value, RpcError> {
         let mut view = self.endpoint_view(row)?;
+        if text(row, "hibernate").is_none()
+            && crate::wake::wake_of(row).is_none()
+            && let Some((_, wake)) = self.root_wake(row, now_ms()).await?
+        {
+            view["wake"] = json!(wake);
+            if view["presence"] == "offline" {
+                view["presence"] = json!("idle");
+            }
+        }
         if let Some(parent) = text(row, "parent_ep") {
             view["parent"] = self
                 .by_id(parent)

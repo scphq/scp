@@ -1284,6 +1284,16 @@ impl Core {
                 self.store.all("UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = CASE WHEN connections = 0 THEN NULL ELSE session END, wake = CASE WHEN wakers = 0 AND NOT COALESCE(wake IN ('codex-queue'), 0) THEN NULL ELSE wake END WHERE id = ?", &[SqlValue::Int(now), sv(id)]).await?;
             }
         } else if kind == "session_start" {
+            if self.awaits_ticket(&self.must_endpoint(id).await?) {
+                self.store
+                    .all(
+                        "UPDATE endpoints SET wake_tried = ? WHERE id = ?",
+                        &[SqlValue::Int(now), sv(id)],
+                    )
+                    .await?;
+            } else {
+                self.wake_done(id, "session_start").await?;
+            }
             if own {
                 self.turn_runs(id).await?;
             }

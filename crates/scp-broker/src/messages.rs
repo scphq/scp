@@ -797,7 +797,7 @@ impl Core {
                 if let Some(reach) = reach {
                     delivery["state"] = json!(reach);
                 }
-                if hibernated && integer(recipient, "wake_declined").is_some() {
+                if hibernated && text(recipient, "wake_declined").is_some() {
                     delivery["wake"] = json!("declined");
                 } else if let Some(wake) = view["wake"].as_str().filter(|w| *w != "none") {
                     delivery["wake"] = json!(wake);
@@ -835,7 +835,7 @@ impl Core {
         .await?;
         for recipient in &recipients {
             if let Some(id) = text(recipient, "id") {
-                self.state.wake(id);
+                self.delivered(id).await;
             }
         }
         self.notify_watchers(json!({"type": "message", "id": result["id"], "thread": result["thread"], "kind": kind, "from": address(&sender), "to": addressed, "hop": hop})).await;

@@ -1328,7 +1328,7 @@ impl Core {
             .and_then(Value::as_str)
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| RpcError::invalid_params("an address is user/handle, or a handle"))?;
-        crate::store::transaction(self.store.clone(), async {
+        let ended = crate::store::transaction(self.store.clone(), async {
             let target = self
                 .lookup(value)
                 .await
@@ -1343,6 +1343,9 @@ impl Core {
             let grant = self.store.all("SELECT * FROM grants WHERE used_by = ? AND spawn = 1 ORDER BY created_at DESC, rowid DESC LIMIT 1", &[sv(id)]).await?.into_iter().next();
             let issuer = grant.as_ref().and_then(|g| text(g, "issuer")) == Some(me_id);
             if !tty && !issuer && !self.ancestors(&target).await?.iter().any(|a| a == me_id) {
+                if text(&me, "kind") == Some("agent") && !self.world().await?.discovers(me_id, id) {
+                    return Err(crate::messages::unreachable(value));
+                }
                 return Err(RpcError::new(
                     ErrorCode::Unauthorized,
                     "only the worker's spawner, an ancestor or the human at a terminal ends it",
@@ -1377,7 +1380,18 @@ impl Core {
             let view = self.view(&self.must_endpoint(id).await?).await?;
             Ok::<_, RpcError>(json!({"endpoint":view,"held":held}))
         })
-        .await
+        .await?;
+        if let Some(id) = ended["endpoint"]["id"].as_str() {
+            for connection in self.state.connections.values() {
+                if connection.waker.as_deref() == Some(id) {
+                    connection.closed.notify_waiters();
+                }
+            }
+            if !self.presence_moved(id, true, false).await? {
+                self.bridge_changed(id);
+            }
+        }
+        Ok(ended)
     }
 }
 
