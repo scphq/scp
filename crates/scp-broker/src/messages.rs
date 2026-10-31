@@ -325,6 +325,69 @@ impl Core {
         Ok(())
     }
 
+    /// the newest spawn grant `sender` issued for `handle` that no harness joined yet, while it may still be: unspent, unrevoked, unexpired
+    /// and its spawn process not gone
+    pub(crate) async fn unjoined_spawn(
+        &self,
+        sender: &Row,
+        handle: &str,
+        now: i64,
+    ) -> Result<Option<Row>, RpcError> {
+        let grant = self.store.all("SELECT * FROM grants WHERE issuer = ? AND name = ? AND spawn = 1 AND used_by IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1", &[string(text(sender, "id").unwrap_or("")), string(handle), SqlValue::Int(now)]).await?.into_iter().next();
+        let Some(grant) = grant else {
+            return Ok(None);
+        };
+        if let Some(bound) = text(&grant, "bound_process")
+            && bound.starts_with("pid:")
+            && !self.procs.alive(bound).await
+        {
+            return Ok(None);
+        }
+        Ok(Some(grant))
+    }
+
+    /// the spawn grant behind a local address no endpoint holds yet, when `sender` issued it and its harness has not joined: a send waits
+    /// there until the claim that spends it takes it
+    async fn unjoined_target(
+        &self,
+        sender: &Row,
+        value: &str,
+        now: i64,
+    ) -> Result<Option<Row>, RpcError> {
+        let (user, handle) = match value.split_once('/') {
+            Some((user, handle)) => (Some(user), handle),
+            None => (None, value),
+        };
+        if user.is_some_and(|u| u != "me")
+            || !crate::claims::valid_handle(handle)
+            || self.by_handle(handle).await?.is_some()
+        {
+            return Ok(None);
+        }
+        self.unjoined_spawn(sender, handle, now).await
+    }
+
+    /// the messages a spawner sent its spawn before it joined pass to the endpoint that spent the grant
+    pub(crate) async fn take_pending(&self, endpoint: &str) -> Result<(), RpcError> {
+        for grant in self
+            .store
+            .all(
+                "SELECT token_hash FROM grants WHERE used_by = ? AND spawn = 1",
+                &[string(endpoint)],
+            )
+            .await?
+        {
+            let key = format!("spawn:{}", text(&grant, "token_hash").unwrap_or(""));
+            self.store
+                .all(
+                    "UPDATE deliveries SET endpoint = ? WHERE endpoint = ?",
+                    &[string(endpoint), string(key)],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     /// a local agent recipient's reach for a send
     fn reach(recipient: &Row, offline: bool) -> Option<&'static str> {
         if text(recipient, "kind") != Some("agent") {
@@ -546,6 +609,7 @@ impl Core {
         };
         let mut resolved = Vec::new();
         let mut fan_out = Vec::new();
+        let mut pending: Vec<(String, String)> = Vec::new();
         for target in &targets {
             let value = target
                 .as_str()
@@ -555,6 +619,13 @@ impl Core {
                 resolved.extend(self.expand(&sender, value, reply_scope).await?);
                 if let Some(name) = value.strip_prefix("group:") {
                     fan_out.push(name.to_owned());
+                }
+                continue;
+            }
+            if let Some(grant) = self.unjoined_target(&sender, value, now).await? {
+                let key = format!("spawn:{}", text(&grant, "token_hash").unwrap_or(""));
+                if !pending.iter().any(|(k, _)| *k == key) {
+                    pending.push((key, format!("me/{}", text(&grant, "name").unwrap_or(""))));
                 }
                 continue;
             }
@@ -610,19 +681,34 @@ impl Core {
             .map(|r| format!("queued: no live session holds {}", address(r)))
             .collect::<Vec<_>>();
         let total = LIMITS.fan_out_total as usize;
-        if recipients.len() > total {
+        if recipients.len() + pending.len() > total {
             return Err(RpcError::new(
                 ErrorCode::TooLarge,
                 format!(
                     "the send reaches {} endpoints, more than {total}",
-                    recipients.len()
+                    recipients.len() + pending.len()
                 ),
             ));
+        }
+        for (key, to) in &pending {
+            let waiting = self
+                .count(
+                    "SELECT COUNT(*) AS n FROM deliveries WHERE endpoint = ? AND expires_at > ?",
+                    &[string(key), SqlValue::Int(now)],
+                )
+                .await?;
+            if waiting >= LIMITS.inbox_max as i64 {
+                return Err(RpcError::new(
+                    ErrorCode::InboxFull,
+                    format!("{to} has {waiting} messages waiting for it to join"),
+                ));
+            }
         }
         if origin.link.is_some()
             && (text(&sender, "kind") != Some("agent")
                 || kind != "request"
                 || recipients.len() != 1
+                || !pending.is_empty()
                 || text(&recipients[0], "kind") != Some("agent"))
         {
             return Err(RpcError::invalid_params(
@@ -635,6 +721,7 @@ impl Core {
         let mut ids = recipients
             .iter()
             .filter_map(|r| text(r, "id"))
+            .chain(pending.iter().map(|(key, _)| key.as_str()))
             .collect::<Vec<_>>();
         ids.sort_unstable();
         let mut paths = attachments.iter().map(String::as_str).collect::<Vec<_>>();
@@ -671,7 +758,11 @@ impl Core {
                 return Ok(result);
             }
         }
-        let addressed = recipients.iter().map(address).collect::<Vec<_>>();
+        let addressed = recipients
+            .iter()
+            .map(address)
+            .chain(pending.iter().map(|(_, to)| to.clone()))
+            .collect::<Vec<_>>();
         let thread = parent
             .as_ref()
             .and_then(|p| text(p, "thread").map(str::to_owned))
@@ -812,6 +903,10 @@ impl Core {
                     }
                 }
                 deliveries.push(delivery);
+            }
+            for (key, to) in &pending {
+                let seq = self.insert_delivery(&id, key, expires).await?;
+                deliveries.push(json!({"endpoint": key, "address": to, "seq": seq, "offline": false, "queued": true, "last_seen": null, "state": "starting"}));
             }
             for name in &fan_out {
                 self.record_group(name, now).await?;

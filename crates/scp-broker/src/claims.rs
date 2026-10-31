@@ -587,7 +587,8 @@ impl Core {
             Some(ticket) if !transient => Some(self.ticketed(ticket, harness).await?),
             _ => None,
         };
-        let mut row = if let Some(session) = fields.session.as_ref().filter(|_| ticketed.is_none()) {
+        let mut row = if let Some(session) = fields.session.as_ref().filter(|_| ticketed.is_none())
+        {
             self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
         } else {
             None
@@ -934,6 +935,9 @@ impl Core {
         } else if scope.grant.is_some() {
             self.redeem(&self.must_endpoint(id).await?, scope, fields, by_session)
                 .await?;
+        }
+        if scope.grant.is_some() {
+            self.take_pending(id).await?;
         }
         if !transient {
             self.wake_done(id, "claim").await?;
@@ -1511,13 +1515,18 @@ pub async fn hello_claim(
     if !transient && params.get("observe") == Some(&Value::Bool(true)) {
         if let Some(ticket) = params.get("ticket") {
             let holder = core.wake_ticket_holder(ticket).await?.ok_or_else(|| {
-                RpcError::new(ErrorCode::Unauthorized, "the wake ticket is unknown or spent")
+                RpcError::new(
+                    ErrorCode::Unauthorized,
+                    "the wake ticket is unknown or spent",
+                )
             })?;
             bind_lineage(core, conn, &holder, params, true)?;
             if let Some(c) = core.state.connections.get_mut(&conn) {
                 c.ticket = ticket.as_str().map(str::to_owned);
             }
-            return Ok(core.hello_result(core.view(&core.must_endpoint(&holder).await?).await?, None));
+            return Ok(
+                core.hello_result(core.view(&core.must_endpoint(&holder).await?).await?, None)
+            );
         }
         let own = core
             .place_lineage(params.get("self"), None, session)
@@ -1628,9 +1637,10 @@ pub async fn hello_claim(
             .and_then(|v| v.get("process"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        c.holder = params
-            .get("claim")
-            .is_some_and(|v| v.get("grant").is_some_and(Value::is_string) || v.get("ticket").is_some_and(Value::is_string));
+        c.holder = params.get("claim").is_some_and(|v| {
+            v.get("grant").is_some_and(Value::is_string)
+                || v.get("ticket").is_some_and(Value::is_string)
+        });
     }
     let mut result = core.hello_result(core.view(&row).await?, claimed.resume);
     if claimed.subagent {
@@ -1715,7 +1725,8 @@ async fn hello_transaction(
             core.rename_row(row, handle, false, false).await?;
         }
         let row = core.must_endpoint(text(row, "id").unwrap_or("")).await?;
-        core.wake_done(text(&row, "id").unwrap_or(""), "join").await?;
+        core.wake_done(text(&row, "id").unwrap_or(""), "join")
+            .await?;
         if let Some(under) = join
             .get("under")
             .and_then(Value::as_str)

@@ -1103,31 +1103,56 @@ fn same_set(a: &Value, b: &Value) -> bool {
     }
 }
 
-pub fn scope_of(row: &crate::store::Row) -> &'static str {
+/// the preset a row's scope lists amount to: its own rules and stored caps of each direction (inherited caps only when it has nothing of
+/// its own), one list per direction matching a preset's selectors
+pub fn scope_of(row: &crate::store::Row, symmetric: bool) -> &'static str {
     let rules = text(row, "rules")
         .and_then(|value| serde_json::from_str::<Value>(value).ok())
         .unwrap_or_else(|| json!({}));
     let caps = text(row, "caps")
         .and_then(|value| serde_json::from_str::<Value>(value).ok())
         .unwrap_or_else(|| json!({}));
-    if caps
-        .get("caps")
-        .and_then(Value::as_array)
-        .is_some_and(|caps| !caps.is_empty())
-    {
-        return "custom";
-    }
-    if ["in", "out"].iter().all(|dir| rules.get(*dir).is_none()) {
+    let set = |dir: &str| -> Vec<Value> {
+        let mut lists: Vec<(bool, Value)> = Vec::new();
+        if let Some(own) = rules.get(dir).filter(|v| v.is_array()) {
+            lists.push((false, own.clone()));
+        }
+        for cap in caps["caps"].as_array().into_iter().flatten() {
+            if cap["dir"] == dir {
+                let sels: Vec<Value> = cap["sels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|entry| entry.get("sel").cloned().unwrap_or_else(|| entry.clone()))
+                    .collect();
+                lists.push((cap["by"] == "inherited", Value::Array(sels)));
+            }
+        }
+        let own: Vec<Value> = lists
+            .iter()
+            .filter(|(inherited, _)| !inherited)
+            .map(|(_, l)| l.clone())
+            .collect();
+        if own.is_empty() {
+            lists.into_iter().map(|(_, l)| l).collect()
+        } else {
+            own
+        }
+    };
+    let (ins, outs) = (set("in"), set("out"));
+    if ins.is_empty() && outs.is_empty() {
         return "open";
     }
     for name in ["tree", "parent", "none"] {
-        if let Some(expected) = preset(name)
-            && ["in", "out"].iter().all(|dir| {
-                rules
-                    .get(*dir)
-                    .is_some_and(|value| same_set(value, &expected))
-            })
-        {
+        let Some(expected) = preset(name) else {
+            continue;
+        };
+        let is = |lists: &[Value]| lists.len() == 1 && same_set(&lists[0], &expected);
+        if if symmetric {
+            is(&ins) && is(&outs)
+        } else {
+            is(&outs) && ins.is_empty()
+        } {
             return name;
         }
     }

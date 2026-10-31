@@ -256,10 +256,7 @@ fn child_env(dir: &str, job: &WakeJob) -> Vec<(String, String)> {
     }
     env.push(("SCP_WAKE_PROVIDER".into(), job.provider.clone()));
     env.push(("SCP_WAKE_MESSAGE_ID".into(), job.message_id.clone()));
-    env.push((
-        "SCP_WAKE_FROM".into(),
-        job.from.clone().unwrap_or_default(),
-    ));
+    env.push(("SCP_WAKE_FROM".into(), job.from.clone().unwrap_or_default()));
     for (key, field) in [("SCP_WAKE_KIND", "kind"), ("SCP_WAKE_THREAD", "thread")] {
         env.push((
             key.into(),
@@ -418,13 +415,19 @@ fn decline_of(code: Option<i32>, stdout: &str) -> Option<String> {
 
 /// starts the task that runs wake hooks for the endpoints kicked: at most one run per endpoint, one kicked while its run is on runs again
 /// once it ends. Each run locks the core only to read its job and to record its result
-pub fn start(core: SharedCore, kicks: mpsc::UnboundedReceiver<String>) -> tokio::task::JoinHandle<()> {
+pub fn start(
+    core: SharedCore,
+    kicks: mpsc::UnboundedReceiver<String>,
+) -> tokio::task::JoinHandle<()> {
     let machine = short_hostname();
     tokio::spawn(dispatch(core, kicks, machine))
 }
 
 async fn dispatch(core: SharedCore, mut kicks: mpsc::UnboundedReceiver<String>, machine: String) {
-    let busy = Arc::new(StdMutex::new((HashSet::<String>::new(), HashSet::<String>::new())));
+    let busy = Arc::new(StdMutex::new((
+        HashSet::<String>::new(),
+        HashSet::<String>::new(),
+    )));
     let mut runs = JoinSet::new();
     loop {
         tokio::select! {
@@ -490,7 +493,11 @@ async fn run(
                 WakeOutcome {
                     ok: result.ok,
                     code: result.code,
-                    error: if declined.is_some() { None } else { result.error },
+                    error: if declined.is_some() {
+                        None
+                    } else {
+                        result.error
+                    },
                     declined,
                     ..WakeOutcome::default()
                 }
@@ -686,7 +693,11 @@ impl Core {
     }
 
     /// counts `conn` as the waker of `endpoint`, or of none, and reports the presence that moves
-    pub async fn set_waker(&mut self, conn: ConnectionId, endpoint: Option<String>) -> Result<(), RpcError> {
+    pub async fn set_waker(
+        &mut self,
+        conn: ConnectionId,
+        endpoint: Option<String>,
+    ) -> Result<(), RpcError> {
         let Some(connection) = self.state.connections.get_mut(&conn) else {
             return Ok(());
         };
@@ -708,9 +719,15 @@ impl Core {
     }
 
     async fn unwaker(&mut self, was: &str, transient: bool) -> Result<(), RpcError> {
-        let before = self.by_id(was).await?.and_then(|r| wake_of(&r).map(str::to_owned));
+        let before = self
+            .by_id(was)
+            .await?
+            .and_then(|r| wake_of(&r).map(str::to_owned));
         self.waker(was, false, transient).await?;
-        let after = self.by_id(was).await?.and_then(|r| wake_of(&r).map(str::to_owned));
+        let after = self
+            .by_id(was)
+            .await?
+            .and_then(|r| wake_of(&r).map(str::to_owned));
         if !self.presence_moved(was, true, false).await? && before != after {
             self.bridge_changed(was);
         }
@@ -812,14 +829,19 @@ impl Core {
     /// the wake hook run a delivery to `endpoint` is due, recorded as tried: none while it is neither hibernated nor has a broker wake and a
     /// harness session, has no unread message (for any provider but spawn, none that arrived since it hibernated), ran within the debounce
     /// (doubling after failures up to the backoff cap), or its provider declined the newest unread message or another from its sender
-    pub async fn wake_due(&mut self, endpoint: &str, now: i64) -> Result<Option<WakeJob>, RpcError> {
+    pub async fn wake_due(
+        &mut self,
+        endpoint: &str,
+        now: i64,
+    ) -> Result<Option<WakeJob>, RpcError> {
         self.settle_revived(now, Some(endpoint)).await?;
         let Some(row) = self.by_id(endpoint).await? else {
             return Ok(None);
         };
         let hibernate = text(&row, "hibernate");
         if text(&row, "kind") != Some("agent")
-            || (hibernate.is_none() && !(broker_wake(&row) && text(&row, "harness_session").is_some()))
+            || (hibernate.is_none()
+                && !(broker_wake(&row) && text(&row, "harness_session").is_some()))
         {
             return Ok(None);
         }
@@ -838,7 +860,9 @@ impl Core {
             }
         }
         let since = match hibernate {
-            Some(provider) if provider != SPAWN_PROVIDER => integer(&row, "hibernated_at").unwrap_or(0),
+            Some(provider) if provider != SPAWN_PROVIDER => {
+                integer(&row, "hibernated_at").unwrap_or(0)
+            }
             _ => 0,
         };
         let Some(newest) = self.store.all("SELECT m.id, m.from_ep, m.kind, m.thread, m.created_at FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE d.endpoint = ? AND d.acked_at IS NULL AND d.expires_at > ? AND m.created_at >= ? ORDER BY d.seq DESC LIMIT 1", &[sv(endpoint), SqlValue::Int(now), SqlValue::Int(since)]).await?.into_iter().next() else {
@@ -903,14 +927,21 @@ impl Core {
 
     /// how a run ended, audited without the ref: a failure counts toward the backoff and shows `wake_failed`, a decline shows `wake_declined`
     /// and holds runs for that message and its sender, a success resets both. Whether the shown note changed
-    pub async fn wake_result(&mut self, endpoint: &str, result: &WakeOutcome) -> Result<bool, RpcError> {
+    pub async fn wake_result(
+        &mut self,
+        endpoint: &str,
+        result: &WakeOutcome,
+    ) -> Result<bool, RpcError> {
         let Some(row) = self.by_id(endpoint).await? else {
             return Ok(false);
         };
         let error = result.error.as_deref().map(|e| {
             let clean = strip_control(e);
             let spaced = clean.split_whitespace().collect::<Vec<_>>().join(" ");
-            redact_secrets(&spaced).chars().take(200).collect::<String>()
+            redact_secrets(&spaced)
+                .chars()
+                .take(200)
+                .collect::<String>()
         });
         let declined = if result.ok {
             None
@@ -949,7 +980,10 @@ impl Core {
             let from = match &result.message {
                 Some(id) => self
                     .store
-                    .all("SELECT from_ep FROM messages WHERE id = ?", &[sv(id.as_str())])
+                    .all(
+                        "SELECT from_ep FROM messages WHERE id = ?",
+                        &[sv(id.as_str())],
+                    )
                     .await?
                     .into_iter()
                     .next()
@@ -966,7 +1000,10 @@ impl Core {
                 .filter(|e| !e.is_empty())
                 .or_else(|| result.code.map(|c| format!("exit {c}")))
                 .unwrap_or_else(|| "failed".into());
-            format!("wake_failed: {}", reason.chars().take(120).collect::<String>())
+            format!(
+                "wake_failed: {}",
+                reason.chars().take(120).collect::<String>()
+            )
         });
         let fails = if result.ok { "0" } else { "wake_fails + 1" };
         self.store.all(&format!("UPDATE endpoints SET wake_fails = {fails}, wake_note = ?, wake_declined = NULL, declined_message = NULL, declined_from = NULL WHERE id = ?"), &[opt(note.as_deref()), sv(endpoint)]).await?;
@@ -1003,9 +1040,15 @@ mod tests {
 
     #[test]
     fn parses_wakers() {
-        let parsed = parse_wakers(&json!({"vm": {"command": ["sh", "-c", "x"], "timeout_s": 2, "other": 1}})).unwrap();
+        let parsed = parse_wakers(
+            &json!({"vm": {"command": ["sh", "-c", "x"], "timeout_s": 2, "other": 1}}),
+        )
+        .unwrap();
         assert_eq!(parsed["vm"], config("x", 2));
-        assert_eq!(parse_wakers(&json!({"vm": {"command": ["a"]}})).unwrap()["vm"].timeout_s, 60);
+        assert_eq!(
+            parse_wakers(&json!({"vm": {"command": ["a"]}})).unwrap()["vm"].timeout_s,
+            60
+        );
         for bad in [
             json!([]),
             json!({"Bad Name": {"command": ["a"]}}),
@@ -1021,7 +1064,10 @@ mod tests {
 
     #[test]
     fn declines_need_exit_77_and_a_reason() {
-        assert_eq!(decline_of(Some(77), r#"{"declined":"budget"}"#).as_deref(), Some("budget"));
+        assert_eq!(
+            decline_of(Some(77), r#"{"declined":"budget"}"#).as_deref(),
+            Some("budget")
+        );
         assert_eq!(decline_of(Some(1), r#"{"declined":"budget"}"#), None);
         assert_eq!(decline_of(Some(77), r#"{"declined":"Bad"}"#), None);
         assert_eq!(decline_of(Some(77), "nope"), None);
@@ -1030,7 +1076,11 @@ mod tests {
     #[test]
     fn child_env_drops_other_scp_variables() {
         let env = child_env("/relay", &job());
-        assert!(env.iter().all(|(k, _)| !k.starts_with("SCP_") || k == "SCP_DIR" || k.starts_with("SCP_WAKE_")));
+        assert!(
+            env.iter().all(|(k, _)| !k.starts_with("SCP_")
+                || k == "SCP_DIR"
+                || k.starts_with("SCP_WAKE_"))
+        );
         assert!(env.contains(&("SCP_WAKE_FROM".into(), "me/peer".into())));
         assert!(env.contains(&("SCP_DIR".into(), "/relay".into())));
     }
@@ -1040,11 +1090,19 @@ mod tests {
         let ok = exec(&config("cat", 5), "hello\n".into(), vec![]).await;
         assert!(ok.ok);
         assert_eq!(ok.stdout, "hello\n");
-        let failed = exec(&config("echo first >&2; echo last >&2; exit 3", 5), String::new(), vec![]).await;
+        let failed = exec(
+            &config("echo first >&2; echo last >&2; exit 3", 5),
+            String::new(),
+            vec![],
+        )
+        .await;
         assert_eq!((failed.ok, failed.code), (false, Some(3)));
         assert_eq!(failed.error.as_deref(), Some("exit 3: last"));
         let missing = exec(
-            &WakerConfig { command: vec!["/nonexistent/waker".into()], timeout_s: 1 },
+            &WakerConfig {
+                command: vec!["/nonexistent/waker".into()],
+                timeout_s: 1,
+            },
             String::new(),
             vec![],
         )
@@ -1058,14 +1116,22 @@ mod tests {
         let slow = exec(&config("sleep 5", 1), String::new(), vec![]).await;
         assert_eq!(slow.error.as_deref(), Some("timed out after 1 s"));
         assert!(started.elapsed() < Duration::from_secs(4));
-        let loud = exec(&config("head -c 20000 /dev/zero | tr '\\0' a", 5), String::new(), vec![]).await;
+        let loud = exec(
+            &config("head -c 20000 /dev/zero | tr '\\0' a", 5),
+            String::new(),
+            vec![],
+        )
+        .await;
         assert_eq!(loud.stdout.len(), STDOUT_KEEP);
     }
 
     #[tokio::test]
     async fn exec_never_interprets_arguments() {
         let echo = exec(
-            &WakerConfig { command: vec!["printf".into(), "%s".into(), "$HOME;`id`".into()], timeout_s: 5 },
+            &WakerConfig {
+                command: vec!["printf".into(), "%s".into(), "$HOME;`id`".into()],
+                timeout_s: 5,
+            },
             String::new(),
             vec![],
         )

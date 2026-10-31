@@ -408,7 +408,8 @@ impl Core {
             ));
         }
         self.store.all("UPDATE endpoints SET session = NULL,token_hash = NULL,hook_seen = NULL,hook_ended = ?,wake = NULL,hold_ref = NULL WHERE id = ?",&[SqlValue::Int(now_ms()),opt(text(&target,"id"))]).await?;
-        self.wake_done(text(&target, "id").unwrap_or(""), "leave").await?;
+        self.wake_done(text(&target, "id").unwrap_or(""), "leave")
+            .await?;
         self.audit(
             "leave",
             text(&target, "id"),

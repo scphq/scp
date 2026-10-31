@@ -109,7 +109,10 @@ impl Core {
         let max = self.cap("wakeRefChars", 512) as usize;
         let text = value
             .as_str()
-            .filter(|v| v.encode_utf16().count() <= max && !v.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}'))
+            .filter(|v| {
+                v.encode_utf16().count() <= max
+                    && !v.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}')
+            })
             .ok_or_else(|| {
                 RpcError::invalid_params(format!(
                     "ref is a string of at most {max} characters with no control characters"
@@ -210,7 +213,13 @@ impl Core {
             views
         } else {
             let set = self.hibernation(params)?;
-            if matches!(actor, Actor::Endpoint { auth: "lineage", .. }) {
+            if matches!(
+                actor,
+                Actor::Endpoint {
+                    auth: "lineage",
+                    ..
+                }
+            ) {
                 return Err(RpcError::new(
                     ErrorCode::ScopeRefused,
                     "only the session itself hibernates: run this from the session's own shell",
@@ -388,7 +397,11 @@ impl Core {
 
     /// revivable rows whose resumed session's hooks ran for the restart grace since its `session_start` with no ticketed claim: the session
     /// is back, so the hibernation clears
-    pub async fn settle_revived(&mut self, now: i64, endpoint: Option<&str>) -> Result<(), RpcError> {
+    pub async fn settle_revived(
+        &mut self,
+        now: i64,
+        endpoint: Option<&str>,
+    ) -> Result<(), RpcError> {
         let grace = self.cap("restartGraceS", 60) * 1000;
         let filter = endpoint.map_or(SqlValue::Null, sv);
         let rows = self.store.all("SELECT id FROM endpoints WHERE (? IS NULL OR id = ?) AND kind = 'agent' AND hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL AND hook_ended IS NULL AND hook_seen >= wake_tried AND wake_tried <= ?", &[filter.clone(), filter, SqlValue::Int(now - grace)]).await?;

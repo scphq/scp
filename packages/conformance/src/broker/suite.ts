@@ -56,6 +56,7 @@ export const rustPending = new Set([
 
 /** single tests the native engine does not implement yet, as `<suite title> > <test name>`; they are todo on the `rust` target */
 export const rustPendingTests = new Set([
+  "broker grant validation > grant prompts are scrubbed before becoming the worker's first peek turn",
 ]);
 
 let registering: { title: string; name: string } | undefined;

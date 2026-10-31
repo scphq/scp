@@ -66,9 +66,10 @@ impl Core {
         }
         let judge = crate::judge::JudgeGate::new(&limits);
         let wakers = crate::wake::Wakers::new(
-            policy_file
-                .parent()
-                .map_or_else(|| PathBuf::from("wakers.json"), |dir| dir.join("wakers.json")),
+            policy_file.parent().map_or_else(
+                || PathBuf::from("wakers.json"),
+                |dir| dir.join("wakers.json"),
+            ),
             crate::wake::Wakers::builtin(),
         );
         let mut core = Self {
@@ -221,6 +222,7 @@ impl Core {
             "spawn_exit" => self.spawn_exit(conn, params).await,
             "spawn_steers" => self.spawn_steers(conn, params).await,
             "spawn_end" => self.spawn_end(conn, params).await,
+            "spawn_via" => self.spawn_via(conn, params).await,
             "wake" => self.wake_rpc(conn, params).await,
             "hibernate" => self.hibernate_rpc(conn, params).await,
             "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
@@ -343,7 +345,10 @@ impl Core {
                     |v| json!(v),
                 );
             view["depth"] = json!(integer(row, "depth").unwrap_or(0));
-            view["scope"] = json!(crate::rules::scope_of(row));
+            view["scope"] = json!(crate::rules::scope_of(
+                row,
+                crate::world::Defaults::of(self.policy.as_ref()).symmetric,
+            ));
             view["wake"] = match text(row, "hibernate") {
                 Some(provider) => json!(format!("hook:{provider}")),
                 None => crate::wake::wake_of(row).map_or(Value::Null, |v| json!(v)),
@@ -385,7 +390,9 @@ impl Core {
     pub async fn disconnect(&mut self, conn: ConnectionId) {
         let connection = self.state.disconnect(conn);
         if let Some(waker) = connection.as_ref().and_then(|c| c.waker.clone()) {
-            let transient = connection.as_ref().is_some_and(|c| c.mode == Mode::Transient);
+            let transient = connection
+                .as_ref()
+                .is_some_and(|c| c.mode == Mode::Transient);
             if let Err(error) = self.waker_closed(&waker, transient).await {
                 tracing::error!(%error, "waker close failed");
             }
