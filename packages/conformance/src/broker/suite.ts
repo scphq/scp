@@ -51,7 +51,6 @@ export type Start = (files?: BrokerFiles) => Promise<BrokerFixture>;
 
 /** suites the native engine does not implement yet; they are registered as pending on the `rust` target */
 export const rustPending = new Set([
-  "broker peek",
   "broker grant redemption and incarnation",
   "broker grant validation",
   "broker spawn",

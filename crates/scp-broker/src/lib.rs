@@ -11,6 +11,7 @@ pub mod judge;
 pub mod limits;
 pub mod messages;
 pub mod paths;
+pub mod peek;
 pub mod policy;
 pub mod procs;
 pub mod proto;

@@ -154,7 +154,29 @@ impl Core {
             self.touch(&endpoint).await?;
         }
         match method {
-            "whoami" => self.view(&self.must_endpoint(&endpoint).await?).await,
+            "whoami" => {
+                let row = self.must_endpoint(&endpoint).await?;
+                let mut view = self.view(&row).await?;
+                if connection.mode != Mode::Transient {
+                    let state = self.peek_state(&endpoint).await?;
+                    if let (Some(dst), Some(src)) = (view.as_object_mut(), state.as_object()) {
+                        dst.extend(src.clone());
+                    }
+                    if let Some(pending) = self.link_pending_of(&endpoint).await? {
+                        view["link_pending"] = pending;
+                    }
+                }
+                Ok(view)
+            }
+            "peek_turn" => self.peek_turn(conn, params).await,
+            "peek" => {
+                if let Some(view) = self.via_peek(conn, params).await? {
+                    return Ok(view);
+                }
+                self.peek(conn, params).await
+            }
+            "peek_set" => self.peek_set(conn, params).await,
+            "peek_who" => self.peek_who(conn, params).await,
             "list" => self.list_for(conn, params).await,
             "rename" => {
                 let view = self.rename(conn, params).await?;
