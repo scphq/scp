@@ -144,6 +144,216 @@ pub fn redact_secrets(text: &str) -> String {
     scanner().redact_secrets(text)
 }
 
+pub const OMITTED: &str = "[relay message omitted]";
+
+fn relay_open() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)<relay-message\b").expect("constant pattern"))
+}
+
+fn relay_close() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)</relay-message\s*>").expect("constant pattern"))
+}
+
+fn channel_tag() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)<channel\b[^>]*>").expect("constant pattern"))
+}
+
+fn channel_close() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)</channel\s*>").expect("constant pattern"))
+}
+
+fn marker_spans() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\[redacted [a-z ]+\]|\[relay message omitted\]").expect("constant pattern")
+    })
+}
+
+fn channel_is_relay(tag: &str) -> bool {
+    let attr = |name: &str| {
+        Regex::new(&format!(r"(?i)\b{}\s*=", name))
+            .expect("constant pattern")
+            .is_match(tag)
+    };
+    let source_scp = Regex::new(r#"(?i)\bsource\s*=\s*["']?scp\b"#)
+        .expect("constant pattern")
+        .is_match(tag);
+    source_scp || (attr("from") && attr("thread"))
+}
+
+/// the text without any spawn steer note, whole or cut short
+pub fn strip_steer_note(text: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let pattern = RE.get_or_init(|| {
+        Regex::new(&format!(
+            r"\n\n\[{} spawn: [^\]]*(\]|$)",
+            scp_core::protocol::CLI_NAME
+        ))
+        .expect("constant pattern")
+    });
+    pattern.replace_all(text, "").into_owned()
+}
+
+/// the text with every relay span cut to the omitted marker
+pub fn strip_relay_spans(text: &str) -> String {
+    let preamble = crate::proto::PREAMBLE;
+    let mut rest = text.replace(preamble, OMITTED);
+    let mut out = String::new();
+    loop {
+        let open = relay_open()
+            .find(&rest)
+            .map(|m| (m.start(), m.end(), 0usize));
+        let close = relay_close()
+            .find(&rest)
+            .map(|m| (m.start(), m.end(), 1usize));
+        let channel = channel_tag()
+            .find_iter(&rest)
+            .find(|m| channel_is_relay(m.as_str()))
+            .map(|m| (m.start(), m.end(), 2usize));
+        let mut candidates = [open, close, channel]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return out + &rest;
+        }
+        candidates.sort_by_key(|c| c.0);
+        let (first, _, kind) = candidates[0];
+        if kind == 1 {
+            out.push_str(OMITTED);
+            let m = relay_close().find(&rest).expect("close present");
+            rest = rest[m.end()..].to_owned();
+            continue;
+        }
+        out.push_str(&rest[..first]);
+        out.push_str(OMITTED);
+        let after = &rest[first..];
+        let end = if kind == 2 {
+            channel_close().find(after)
+        } else {
+            relay_close().find(after)
+        };
+        let Some(end) = end else {
+            return out;
+        };
+        rest = after[end.end()..].to_owned();
+    }
+}
+
+fn chars_of(text: &str) -> Vec<char> {
+    text.chars().collect()
+}
+
+/// the text with every long run shared with a delivered body cut to the omitted marker
+pub fn drop_quoted(text: &str, bodies: &[String]) -> String {
+    const QUOTE_CHARS: usize = 40;
+    const QUOTE_HITS: usize = 8;
+    let block = QUOTE_CHARS / 2;
+    let text_chars = chars_of(text);
+    let body_chars: Vec<Vec<char>> = bodies.iter().map(|b| chars_of(b)).collect();
+    let mut index: std::collections::HashMap<String, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+    for (bi, body) in body_chars.iter().enumerate() {
+        let mut at = 0usize;
+        while at + block <= body.len() {
+            let key: String = body[at..at + block].iter().collect();
+            let hits = index.entry(key).or_default();
+            if hits.len() < QUOTE_HITS {
+                hits.push((bi, at));
+            }
+            at += block;
+        }
+    }
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i + block <= text_chars.len() {
+        if let Some(last) = cuts.last()
+            && i + block <= last.1
+        {
+            i += 1;
+            continue;
+        }
+        let key: String = text_chars[i..i + block].iter().collect();
+        if let Some(hits) = index.get(&key).cloned() {
+            for (bi, at) in hits {
+                let body = &body_chars[bi];
+                let mut start = 0usize;
+                while i > start && at > start && text_chars[i - start - 1] == body[at - start - 1] {
+                    start += 1;
+                }
+                let mut end = block;
+                while i + end < text_chars.len()
+                    && at + end < body.len()
+                    && text_chars[i + end] == body[at + end]
+                {
+                    end += 1;
+                }
+                if start + end < QUOTE_CHARS {
+                    continue;
+                }
+                if let Some(last) = cuts.last_mut()
+                    && i - start <= last.1
+                {
+                    last.1 = last.1.max(i + end);
+                } else {
+                    cuts.push((i - start, i + end));
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    let mut out = String::new();
+    let mut from = 0usize;
+    for (start, end) in cuts {
+        out.extend(text_chars[from..start].iter());
+        out.push_str(OMITTED);
+        from = end;
+    }
+    out.extend(text_chars[from..].iter());
+    out
+}
+
+/// at most `max` characters, cut at a word boundary and never inside a marker
+pub fn clip(text: &str, max: usize) -> (String, bool) {
+    let chars = chars_of(text);
+    if chars.len() <= max {
+        return (text.to_owned(), false);
+    }
+    let markers: Vec<(usize, usize)> = marker_spans()
+        .find_iter(text)
+        .map(|m| {
+            let start = text[..m.start()].chars().count();
+            (start, start + m.as_str().chars().count())
+        })
+        .collect();
+    let mut end = max.saturating_sub(3);
+    for (start, stop) in &markers {
+        if *start < end && *stop > end {
+            end = *start;
+        }
+    }
+    let boundary = chars[..end.min(chars.len())]
+        .iter()
+        .rposition(|c| *c == ' ' || *c == '\n');
+    if let Some(boundary) = boundary
+        && boundary > end / 2
+    {
+        end = boundary;
+        for (start, stop) in &markers {
+            if *start < end && *stop > end {
+                end = *stop;
+            }
+        }
+    }
+    let kept: String = chars[..end.min(chars.len())].iter().collect();
+    (format!("{}...", kept.trim_end()), true)
+}
+
 pub fn after_cut_key(text: &str) -> Option<&str> {
     static END: OnceLock<Regex> = OnceLock::new();
     let pattern = END.get_or_init(|| {
@@ -374,6 +584,44 @@ mod tests {
             Some("rest")
         );
         assert_eq!(strip_control("a\u{202e}b\n\tc"), "ab\n\tc");
+    }
+    #[test]
+    fn relay_spans_quotes_and_clip() {
+        assert_eq!(
+            strip_relay_spans("before <relay-message from=\"me/z\">private</relay-message> after"),
+            format!("before {OMITTED} after")
+        );
+        assert_eq!(
+            strip_relay_spans(
+                "keep <channel source=\"scp\" from=\"me/z\" thread=\"t\">priv</channel> end"
+            ),
+            format!("keep {OMITTED} end")
+        );
+        assert_eq!(
+            strip_relay_spans("orphan </relay-message> tail"),
+            format!("{OMITTED} tail")
+        );
+        assert_eq!(
+            strip_relay_spans("open <relay-message>never closed"),
+            format!("open {OMITTED}")
+        );
+        let body = "QUOTE-MARKER the staging database password moves to the vault next week";
+        assert_eq!(
+            drop_quoted(
+                &format!("noted: {}, will do", &body[..50]),
+                &[body.to_owned()]
+            ),
+            format!("noted: {OMITTED}, will do")
+        );
+        let secret = format!("ghp_{}", "A1b2C3d4".repeat(5));
+        let stored = redact_secrets(&format!("{} {}", "word ".repeat(398), secret));
+        let (clipped, _) = clip(&stored, 600);
+        assert!(clipped.chars().count() <= 600);
+        assert!(!clipped.contains("[redacted gh"));
+        assert_eq!(
+            strip_steer_note("task\n\n[swarm spawn: me/p, note]"),
+            "task"
+        );
     }
     #[test]
     fn framing_tags_are_neutralized() {

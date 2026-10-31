@@ -1332,7 +1332,7 @@ impl Bridge {
             let result = core.lock().await.inject_remote(target, message).await;
             match result {
                 Ok(Injected::Admitted(endpoint)) => {
-                    super::wake_delivered(core, &endpoint).await;
+                    crate::wake::wake_delivered(core, &endpoint).await;
                     break None;
                 }
                 Ok(Injected::Duplicate) => break None,

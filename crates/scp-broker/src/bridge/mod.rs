@@ -234,14 +234,8 @@ impl Core {
     }
 
     /// mirrors these endpoints now: true once the hub took the delta, false when it did not; None without a bridge
-    #[allow(dead_code)]
     pub(crate) async fn bridge_mirror(&self, ids: Vec<String>) -> Option<bool> {
         let bridge = self.federation.bridge.clone()?;
         Some(bridge.mirror_now(self, ids).await)
     }
-}
-
-/// releases the inbox waiters of an endpoint that got a message from the hub
-pub async fn wake_delivered(core: &Arc<tokio::sync::Mutex<Core>>, endpoint: &str) {
-    core.lock().await.state.wake(endpoint);
 }

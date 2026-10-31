@@ -263,6 +263,7 @@ jobs:
         env:
           SCP_BROKER_BIN: ${{ github.workspace }}/crates/target/debug/scp-broker
           SCP_BROKER_TARGETS: rust
+          SCP_BROKER_WAKERS: "1"
         run: bun test packages/conformance/src/broker
 
       # ts always runs; the two variables add rust-sqlite and rust-pg.

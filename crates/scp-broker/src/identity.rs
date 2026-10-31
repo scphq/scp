@@ -371,6 +371,7 @@ impl Core {
             .await?;
         self.store.all("UPDATE endpoints SET harness_session = ?,harness_transcript = ? WHERE id = ? AND harness_session IS NULL",&[opt(text(held,"harness_session")),opt(text(held,"harness_transcript")),opt(Some(id))]).await?;
         self.store.all("UPDATE endpoints SET handle = ?,session = NULL,token_hash = NULL,peek = NULL WHERE id = ?",&[opt(Some(&format!("{}{retired}", crate::world::GONE))),opt(Some(retired))]).await?;
+        self.wake_done(retired, "retired").await?;
         self.audit("take_over",Some(id),None,json!({"from":text(row,"handle"),"to":text(held,"handle"),"retired":retired,"children":children,"by":by})).await?;
         Ok(retired.into())
     }
@@ -433,6 +434,8 @@ impl Core {
             ));
         }
         self.store.all("UPDATE endpoints SET session = NULL,token_hash = NULL,hook_seen = NULL,hook_ended = ?,wake = NULL,hold_ref = NULL WHERE id = ?",&[SqlValue::Int(now_ms()),opt(text(&target,"id"))]).await?;
+        self.wake_done(text(&target, "id").unwrap_or(""), "leave")
+            .await?;
         self.audit(
             "leave",
             text(&target, "id"),

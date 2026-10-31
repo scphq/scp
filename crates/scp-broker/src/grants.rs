@@ -11,7 +11,6 @@ use rand::RngCore;
 use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 
-const STORE_CHARS: usize = 2000;
 const GRANT_TTL_S: i64 = 604_800;
 
 pub fn json_column(row: &Row, key: &str, fallback: Value) -> Value {
@@ -30,15 +29,7 @@ fn steer_key() -> String {
 }
 
 fn prompt_digest(raw: &str) -> Option<String> {
-    let cut: String = raw.chars().take(256 * 1024).collect();
-    let clean = crate::scrub::redact_secrets(&crate::scrub::strip_control(&cut));
-    let mut kept: String = clean.chars().take(STORE_CHARS).collect();
-    if kept.len() < clean.len() {
-        if let Some(space) = kept.rfind(char::is_whitespace) {
-            kept.truncate(space);
-        }
-        kept = format!("{}...", kept.trim_end());
-    }
+    let kept = crate::peek::digest_text(raw, &[]);
     (!kept.trim().is_empty()).then_some(kept)
 }
 
@@ -525,6 +516,7 @@ impl Core {
                 &[opt(Some(id))],
             )
             .await?;
+        self.wake_done(id, "reset").await?;
         let grant = match (kind, &scope.grant) {
             ("grant", Some(hash)) => self
                 .store
