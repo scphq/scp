@@ -96,8 +96,10 @@ impl Limits {
     }
 
     pub fn apply_rates(&mut self, raw: &Value, source: &str) -> Result<(), String> {
-        let parsed = parse_limits(raw, RateLimits::KEYS, &RATE_DURATIONS)
-            .map_err(|error| error.message(source))?;
+        let mut keys: Vec<&str> = RateLimits::KEYS.to_vec();
+        keys.extend(["endpointRetireS", "endpointRetireMax", "historicAfterS"]);
+        let parsed =
+            parse_limits(raw, &keys, &RATE_DURATIONS).map_err(|error| error.message(source))?;
         self.0.extend(parsed);
         Ok(())
     }
@@ -142,17 +144,29 @@ impl Limits {
                 "SCP_LIMITS",
             )?;
         }
-        if let Some(raw) = env.get("SCP_HISTORIC_AFTER_S") {
-            if raw.trim() == "Infinity" {
-                limits.0.insert("historicAfterS".into(), None);
-            } else if let Ok(seconds) = raw.trim().parse::<u64>()
-                && seconds > 0
-            {
-                limits.0.insert("historicAfterS".into(), Some(seconds));
-            }
+        if let Some(raw) = env.get("SCP_HISTORIC_AFTER_S")
+            && let Some(value) = historic_after(raw)
+        {
+            limits.0.insert("historicAfterS".into(), value);
         }
         Ok(limits)
     }
+}
+
+/// `SCP_HISTORIC_AFTER_S`: seconds, or `Infinity`; `None` keeps the default when unset or unreadable
+fn historic_after(raw: &str) -> Option<Option<u64>> {
+    if raw.trim() == "Infinity" {
+        return Some(None);
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: f64 = trimmed.parse().ok()?;
+    if !value.is_finite() || value <= 0.0 || value >= u64::MAX as f64 {
+        return None;
+    }
+    Some(Some(value as u64))
 }
 
 impl Default for Limits {

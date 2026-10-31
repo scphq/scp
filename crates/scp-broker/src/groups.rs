@@ -191,7 +191,7 @@ impl Core {
         Ok(())
     }
 
-    async fn drop_group(&self, name: &str) -> Result<(), RpcError> {
+    pub(crate) async fn drop_group(&self, name: &str) -> Result<(), RpcError> {
         for row in self
             .store
             .all(
