@@ -24,6 +24,8 @@ const MAX_PENDING: usize = 32;
 const OUTBOUND_CAP: usize = 4 * 1024 * 1024;
 const PARTIAL_LINE_TIMEOUT: Duration = Duration::from_secs(30);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
+/// how often the broker runs the wake hooks of hibernated endpoints and broker wakes that are due
+const PRESENCE_PASS: Duration = Duration::from_secs(60);
 
 pub struct BrokerOptions {
     pub paths: Paths,
@@ -130,6 +132,8 @@ impl Broker {
         let mut ownership = tokio::time::interval(Duration::from_secs(2));
         let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
         sweeper.tick().await;
+        let wakers = crate::wake::attach(&self.core).await;
+        let mut presence = tokio::time::interval(PRESENCE_PASS);
         let result = loop {
             let deadline = if connections.is_empty() && !self.idle.is_zero() {
                 idle_since + self.idle
@@ -139,6 +143,13 @@ impl Broker {
             tokio::select! {
                 _ = &mut shutdown => break Ok(()),
                 _ = tokio::time::sleep_until(deadline), if connections.is_empty() && !self.idle.is_zero() => break Ok(()),
+                _ = presence.tick() => {
+                    let core = self.core.lock().await;
+                    match core.wakeable().await {
+                        Ok(ids) => for id in ids { core.wakers.kick(&id); },
+                        Err(error) => tracing::error!(%error, "wake pass failed"),
+                    }
+                },
                 _ = ownership.tick() => {
                     if !self.owns_socket().await { break Ok(()); }
                     if let Err(error) = self.core.lock().await.judge_sweep().await {
@@ -172,6 +183,8 @@ impl Broker {
             core.state.stopping.notify_waiters();
         }
         let _ = stop.send(true);
+        wakers.abort();
+        let _ = wakers.await;
         let drain = async { while connections.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_secs(2), drain)
             .await

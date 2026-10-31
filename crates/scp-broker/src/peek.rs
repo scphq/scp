@@ -83,15 +83,6 @@ pub fn may_peek_world(world: &World, me: &Row, target: &Row, tty: bool) -> bool 
 }
 
 impl Core {
-    /// runner-backed spawns answer peek from their runner
-    pub async fn via_peek(
-        &self,
-        _conn: ConnectionId,
-        _params: &Map<String, Value>,
-    ) -> Result<Option<Value>, RpcError> {
-        Ok(None)
-    }
-
     async fn peek_target(&self, value: Option<&Value>) -> Result<Row, RpcError> {
         let raw = value
             .and_then(Value::as_str)

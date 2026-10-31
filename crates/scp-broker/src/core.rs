@@ -29,6 +29,7 @@ pub struct Core {
     pub policy_text: Option<Option<String>>,
     pub policy_binds: std::collections::HashMap<String, String>,
     pub noise: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    pub wakers: crate::wake::Wakers,
 }
 
 impl Core {
@@ -64,6 +65,13 @@ impl Core {
             }
         }
         let judge = crate::judge::JudgeGate::new(&limits);
+        let wakers = crate::wake::Wakers::new(
+            policy_file.parent().map_or_else(
+                || PathBuf::from("wakers.json"),
+                |dir| dir.join("wakers.json"),
+            ),
+            crate::wake::Wakers::builtin(),
+        );
         let mut core = Self {
             store,
             limits,
@@ -77,8 +85,10 @@ impl Core {
             policy_text: None,
             policy_binds: Default::default(),
             noise: Default::default(),
+            wakers,
         };
         core.load_policy().await?;
+        core.hibernate_held(None).await?;
         Ok(core)
     }
 
@@ -149,6 +159,14 @@ impl Core {
                 ));
             }
         }
+        if let Some(ticket) = &connection.ticket
+            && self.wake_ticket_holder(&json!(ticket)).await? != connection.endpoint
+        {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "the wake ticket is spent: its run ended",
+            ));
+        }
         let endpoint = connection.endpoint.clone().unwrap_or_default();
         if !endpoint.is_empty() {
             self.touch(&endpoint).await?;
@@ -170,7 +188,7 @@ impl Core {
             }
             "peek_turn" => self.peek_turn(conn, params).await,
             "peek" => {
-                if let Some(view) = self.via_peek(conn, params).await? {
+                if let Some(view) = self.via_peek_answer(conn, params).await? {
                     return Ok(view);
                 }
                 self.peek(conn, params).await
@@ -226,6 +244,9 @@ impl Core {
             "spawn_exit" => self.spawn_exit(conn, params).await,
             "spawn_steers" => self.spawn_steers(conn, params).await,
             "spawn_end" => self.spawn_end(conn, params).await,
+            "spawn_via" => self.spawn_via(conn, params).await,
+            "wake" => self.wake_rpc(conn, params).await,
+            "hibernate" => self.hibernate_rpc(conn, params).await,
             "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
                 self.review_hold(conn, method, params).await
             }
@@ -346,8 +367,14 @@ impl Core {
                     |v| json!(v),
                 );
             view["depth"] = json!(integer(row, "depth").unwrap_or(0));
-            view["scope"] = json!(crate::rules::scope_of(row));
-            view["wake"] = text(row, "wake").map_or(Value::Null, |v| json!(v));
+            view["scope"] = json!(crate::rules::scope_of(
+                row,
+                crate::world::Defaults::of(self.policy.as_ref()).symmetric,
+            ));
+            view["wake"] = match text(row, "hibernate") {
+                Some(provider) => json!(format!("hook:{provider}")),
+                None => crate::wake::wake_of(row).map_or(Value::Null, |v| json!(v)),
+            };
             let active = [
                 "created_at",
                 "last_seen",
@@ -368,11 +395,31 @@ impl Core {
                 view["historic"] = json!(true);
             }
         }
+        let shows_wake = text(row, "hibernate").is_some()
+            || text(row, "wake").is_some_and(|w| w == "codex-queue");
+        if shows_wake && let Some(note) = text(row, "wake_note") {
+            view["wake_failed"] = json!(note.strip_prefix("wake_failed: ").unwrap_or(note));
+        }
+        if shows_wake && let Some(declined) = text(row, "wake_declined") {
+            view["wake_declined"] = json!(declined);
+        }
+        if crate::claims::revivable(row) {
+            view["revivable"] = json!(true);
+        }
         Ok(view)
     }
 
     pub async fn disconnect(&mut self, conn: ConnectionId) {
-        if let Some(connection) = self.state.disconnect(conn)
+        let connection = self.state.disconnect(conn);
+        if let Some(waker) = connection.as_ref().and_then(|c| c.waker.clone()) {
+            let transient = connection
+                .as_ref()
+                .is_some_and(|c| c.mode == Mode::Transient);
+            if let Err(error) = self.waker_closed(&waker, transient).await {
+                tracing::error!(%error, "waker close failed");
+            }
+        }
+        if let Some(connection) = connection
             && connection.counts_presence()
             && let Some(endpoint) = connection.endpoint
         {

@@ -516,6 +516,7 @@ impl Core {
                 &[opt(Some(id))],
             )
             .await?;
+        self.wake_done(id, "reset").await?;
         let grant = match (kind, &scope.grant) {
             ("grant", Some(hash)) => self
                 .store

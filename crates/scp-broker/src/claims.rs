@@ -2,7 +2,7 @@ use crate::core::{Core, integer, now_ms, text};
 use crate::proto::RpcError;
 use crate::state::{ConnectionId, Mode};
 use crate::store::{Row, SqlValue};
-use crate::views::{address, opt, presence};
+use crate::views::{address, opt, session_presence as presence};
 use rand::RngCore;
 use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
@@ -178,6 +178,7 @@ pub(crate) struct Scope {
     pub(crate) rules: Value,
     pub(crate) exact: bool,
     pub(crate) subagent: Option<Subagent>,
+    pub(crate) ticket: Option<String>,
 }
 #[derive(Clone)]
 pub(crate) struct Subagent {
@@ -582,7 +583,12 @@ impl Core {
         transient: bool,
     ) -> Result<Claimed, RpcError> {
         self.end_exited().await?;
-        let mut row = if let Some(session) = &fields.session {
+        let ticketed = match &scope.ticket {
+            Some(ticket) if !transient => Some(self.ticketed(ticket, harness).await?),
+            _ => None,
+        };
+        let mut row = if let Some(session) = fields.session.as_ref().filter(|_| ticketed.is_none())
+        {
             self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
         } else {
             None
@@ -673,7 +679,11 @@ impl Core {
         }
         let exact = scope.exact;
         let mut resumed = false;
-        if row.is_none() && open && !exact && scope.subagent.is_none() {
+        if let Some(found) = ticketed.clone() {
+            row = Some(found);
+            session = fields.session.clone();
+            resumed = true;
+        } else if row.is_none() && open && !exact && scope.subagent.is_none() {
             for reported in [&fields.harness_session, &fields.harness_origin]
                 .into_iter()
                 .flatten()
@@ -850,7 +860,7 @@ impl Core {
             harness
         };
         let field = |column: &str| {
-            if transient {
+            if transient || ticketed.is_some() {
                 format!("COALESCE(?,{column})")
             } else {
                 "?".into()
@@ -875,7 +885,7 @@ impl Core {
             opt(fields.model.as_deref()),
             opt(fields.cwd.as_deref()),
             opt(fields.parent.as_deref()),
-            if transient && labels == "{}" {
+            if ticketed.is_some() || (transient && labels == "{}") {
                 SqlValue::Null
             } else {
                 opt(Some(&labels))
@@ -925,6 +935,12 @@ impl Core {
         } else if scope.grant.is_some() {
             self.redeem(&self.must_endpoint(id).await?, scope, fields, by_session)
                 .await?;
+        }
+        if scope.grant.is_some() {
+            self.take_pending(id).await?;
+        }
+        if !transient {
+            self.wake_done(id, "claim").await?;
         }
         let mut result = self.must_endpoint(id).await?;
         let mut rehomed = false;
@@ -1325,6 +1341,14 @@ impl Core {
             }
         }
         let exact = claim.get("exact") == Some(&Value::Bool(true)) && subagent.is_none();
+        let ticket = match claim.get("ticket") {
+            Some(v) => Some(
+                v.as_str()
+                    .filter(|v| valid_token(v, "kwt_"))
+                    .ok_or_else(|| RpcError::invalid_params("ticket is a kwt_ wake ticket"))?,
+            ),
+            None => None,
+        };
         let mut scope = Scope {
             handle: wanted,
             lineage,
@@ -1333,6 +1357,7 @@ impl Core {
             rules,
             exact,
             subagent: None,
+            ticket: ticket.filter(|_| subagent.is_none()).map(hash),
         };
         if let Some((id, kind, stop)) = subagent {
             return self
@@ -1488,6 +1513,21 @@ pub async fn hello_claim(
     }
     let session = params.get("harness_session").and_then(Value::as_str);
     if !transient && params.get("observe") == Some(&Value::Bool(true)) {
+        if let Some(ticket) = params.get("ticket") {
+            let holder = core.wake_ticket_holder(ticket).await?.ok_or_else(|| {
+                RpcError::new(
+                    ErrorCode::Unauthorized,
+                    "the wake ticket is unknown or spent",
+                )
+            })?;
+            bind_lineage(core, conn, &holder, params, true)?;
+            if let Some(c) = core.state.connections.get_mut(&conn) {
+                c.ticket = ticket.as_str().map(str::to_owned);
+            }
+            return Ok(
+                core.hello_result(core.view(&core.must_endpoint(&holder).await?).await?, None)
+            );
+        }
         let own = core
             .place_lineage(params.get("self"), None, session)
             .await?;
@@ -1597,6 +1637,10 @@ pub async fn hello_claim(
             .and_then(|v| v.get("process"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        c.holder = params.get("claim").is_some_and(|v| {
+            v.get("grant").is_some_and(Value::is_string)
+                || v.get("ticket").is_some_and(Value::is_string)
+        });
     }
     let mut result = core.hello_result(core.view(&row).await?, claimed.resume);
     if claimed.subagent {
@@ -1681,6 +1725,8 @@ async fn hello_transaction(
             core.rename_row(row, handle, false, false).await?;
         }
         let row = core.must_endpoint(text(row, "id").unwrap_or("")).await?;
+        core.wake_done(text(&row, "id").unwrap_or(""), "join")
+            .await?;
         if let Some(under) = join
             .get("under")
             .and_then(Value::as_str)
