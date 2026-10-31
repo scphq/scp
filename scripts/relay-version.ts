@@ -9,6 +9,7 @@ const pins = [
   ["crates/scp-relay/Cargo.toml", "scp-relay-store"],
   ["crates/scp-relay/Cargo.toml", "scp-core"],
   ["crates/scp-relay-store/Cargo.toml", "scp-core"],
+  ["crates/scp-broker/Cargo.toml", "scp-core"],
 ] as const;
 const pinEntry = (dep: string) => new RegExp(`^(${dep} = .*version = ")([^"]+)`, "m");
 export const platformKeys = ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu", "linux-x64-musl", "win32-x64"] as const;
