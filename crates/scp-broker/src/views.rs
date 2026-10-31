@@ -23,6 +23,11 @@ pub fn presence(row: &Row, now: i64) -> &'static str {
     if text(row, "hibernate").is_some() {
         return "hibernated";
     }
+    session_presence(row, now)
+}
+
+/// the presence of the endpoint's session, whatever its hibernation says
+pub fn session_presence(row: &Row, now: i64) -> &'static str {
     if integer(row, "connections").unwrap_or(0) > 0 {
         return if integer(row, "last_seen").unwrap_or(0) >= now - 60_000 {
             "online"
@@ -103,6 +108,15 @@ impl Core {
     }
     pub async fn view(&self, row: &Row) -> Result<Value, RpcError> {
         let mut view = self.endpoint_view(row)?;
+        if text(row, "hibernate").is_none()
+            && crate::wake::wake_of(row).is_none()
+            && let Some((_, wake)) = self.root_wake(row, now_ms()).await?
+        {
+            view["wake"] = json!(wake);
+            if view["presence"] == "offline" {
+                view["presence"] = json!("idle");
+            }
+        }
         if let Some(parent) = text(row, "parent_ep") {
             view["parent"] = self
                 .by_id(parent)
@@ -141,6 +155,14 @@ impl Core {
             let shown = w.row(viewer).map(|row| w.visible(row)).unwrap_or_default();
             world = Some((w, shown));
         }
+        let peek_world = self.world().await?;
+        let peeker = match viewer {
+            Some(id) => self.by_id(id).await?,
+            None => self.by_handle(HUMAN_HANDLE).await?,
+        };
+        let viewer_is_human = peeker
+            .as_ref()
+            .is_some_and(|row| viewer.is_some() && text(row, "kind") == Some("human"));
         let rows = self.store.all("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY created_at, id", &[]).await?;
         let mut endpoints = Vec::new();
         for row in rows {
@@ -193,6 +215,17 @@ impl Core {
                 if text(&row, "parent_ep").is_some_and(|p| !shown.contains(p)) {
                     view["parent"] = Value::Null;
                 }
+            }
+            if let Some(peeker) = &peeker
+                && let Some(level) = text(&row, "peek")
+                && crate::peek::may_peek_world(
+                    &peek_world,
+                    peeker,
+                    &row,
+                    text(peeker, "kind") == Some("human") && !viewer_is_human,
+                )
+            {
+                view["peekable"] = json!(level);
             }
             endpoints.push(view);
         }
@@ -540,6 +573,16 @@ impl Core {
                 }
             };
             let mut peer = json!({"address": view["address"], "kind": view["kind"], "presence": view["presence"], "title": view["title"], "status": view["status"], "reason": reason});
+            if let Some(level) = text(&row, "peek").filter(|_| {
+                crate::peek::may_peek_world(
+                    &world,
+                    &me,
+                    &row,
+                    text(&me, "kind") == Some("human") && !unverified,
+                )
+            }) {
+                peer["peekable"] = json!(level);
+            }
             if view.get("historic") == Some(&Value::Bool(true)) {
                 peer["historic"] = json!(true);
             }

@@ -1,6 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { waitFor } from "../targets";
-import { brokerSuite } from "./suite";
+import { brokerSuite, test } from "./suite";
 import { type BrokerWire, refusal, type View } from "./wire";
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`;
