@@ -31,6 +31,8 @@ pub struct Core {
     pub noise: std::sync::Mutex<std::collections::HashMap<String, i64>>,
     pub federation: crate::bridge::Federation,
     pub wakers: crate::wake::Wakers,
+    pub runners: Arc<crate::runners::Service>,
+    pub runner_job: Option<crate::runners::Job>,
 }
 
 impl Core {
@@ -73,6 +75,7 @@ impl Core {
             ),
             crate::wake::Wakers::builtin(),
         );
+        let runners = Arc::new(crate::runners::Service::from_env(&policy_file));
         let mut core = Self {
             store,
             limits,
@@ -88,6 +91,8 @@ impl Core {
             noise: Default::default(),
             federation: Default::default(),
             wakers,
+            runners,
+            runner_job: None,
         };
         core.load_policy().await?;
         core.hibernate_held(None).await?;
@@ -197,7 +202,11 @@ impl Core {
             }
             "peek_set" => self.peek_set(conn, params).await,
             "peek_who" => self.peek_who(conn, params).await,
-            "list" => self.list_for(conn, params).await,
+            "list" => {
+                let result = self.list_for(conn, params).await?;
+                self.runner_job = self.list_job(&result).await?;
+                Ok(result)
+            }
             "rename" => {
                 let was = self
                     .by_id(&endpoint)
@@ -256,7 +265,19 @@ impl Core {
             "subagent_title" => self.subagent_title(conn, params).await,
             "spawn_exit" => self.spawn_exit(conn, params).await,
             "spawn_steers" => self.spawn_steers(conn, params).await,
-            "spawn_end" => self.spawn_end(conn, params).await,
+            "spawn_end" => match self.end_via(conn, params).await? {
+                Some((record, endpoint)) => {
+                    let record = crate::runners::Record::from_row(&record);
+                    let input = self.runner_input(&record, "stop").await;
+                    self.runner_job = Some(crate::runners::Job::Stop { record, input });
+                    let mut ended = json!({"held": false});
+                    if let Some(endpoint) = endpoint {
+                        ended["endpoint"] = endpoint;
+                    }
+                    Ok(ended)
+                }
+                None => self.spawn_end(conn, params).await,
+            },
             "spawn_via" => self.spawn_via(conn, params).await,
             "wake" => self.wake_rpc(conn, params).await,
             "hibernate" => self.hibernate_rpc(conn, params).await,
@@ -505,7 +526,14 @@ impl Core {
         if method == "stop_wait" && guard.connection(conn)?.bound() {
             return Self::stop_wait_poll(shared, guard, conn, params).await;
         }
+        guard.runner_job = None;
         let mut result = guard.dispatch(conn, &method, &params).await?;
+        if let Some(job) = guard.runner_job.take() {
+            let runners = guard.runners.clone();
+            drop(guard);
+            job.finish(&shared, &runners, &mut result).await;
+            return Ok(result);
+        }
         let wait_s = params
             .get("wait_s")
             .and_then(Value::as_f64)
