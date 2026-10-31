@@ -25,7 +25,7 @@ fn string(value: impl Into<String>) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
-fn new_id(prefix: &str, now: i64) -> String {
+pub(crate) fn new_id(prefix: &str, now: i64) -> String {
     let mut value = now.max(0) as u64;
     let mut encoded = Vec::new();
     while value > 0 {
@@ -424,6 +424,9 @@ impl Core {
             return Err(RpcError::invalid_params(
                 "link is set by the relay, not the sender",
             ));
+        }
+        if self.remote_send(params.get("to")).await? {
+            return self.forward(from, params, origin).await;
         }
         let sender = self.must_endpoint(from).await?;
         let human = text(&sender, "kind") == Some("human");
@@ -839,6 +842,7 @@ impl Core {
             }
         }
         self.notify_watchers(json!({"type": "message", "id": result["id"], "thread": result["thread"], "kind": kind, "from": address(&sender), "to": addressed, "hop": hop})).await;
+        self.report_local(from, kind, &result);
         Ok(result)
     }
 
@@ -882,6 +886,23 @@ impl Core {
         let mut from = json!({"address":sender.as_ref().map(address).unwrap_or_else(||sender_id.into()),"endpoint":sender_id,"user":"me","auth":"local-uid","claims":{"harness":sender.as_ref().and_then(|row|text(row,"harness")),"model":sender.as_ref().and_then(|row|text(row,"model"))}});
         if let Some(tty) = integer(row, "sender_tty") {
             from["claims"]["tty"] = json!(tty == 1);
+        }
+        if let Some(remote) = sender.as_ref().and_then(|s| text(s, "remote")) {
+            from["auth"] = json!(
+                sender
+                    .as_ref()
+                    .and_then(|s| text(s, "auth"))
+                    .unwrap_or("local-uid")
+            );
+            let machine = crate::bridge::machine_part(remote);
+            if !crate::bridge::is_foreign(remote) && !self.is_local_user(machine) {
+                from["machine"] = json!(machine);
+                if sender.as_ref().and_then(|s| text(s, "kind")) == Some("human")
+                    && integer(row, "sender_tty") == Some(1)
+                {
+                    from["human"] = json!(true);
+                }
+            }
         }
         let to = text(row, "to_addr").unwrap_or("");
         let to = if to.contains(',') || to == "tree:children" || to.starts_with("group:") {

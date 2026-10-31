@@ -207,6 +207,13 @@ impl Core {
                 .await?,
             policy: self.policy.clone(),
             binds: self.policy_binds.clone(),
+            local_users: self
+                .federation
+                .aliases
+                .iter()
+                .cloned()
+                .chain(["me".to_owned(), "local".to_owned()])
+                .collect(),
         }))
     }
 

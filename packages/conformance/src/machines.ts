@@ -6,11 +6,21 @@ import { RelayClient, socketPath } from "@scp-dev/broker";
 import type { EndpointView, Envelope, SendResult } from "@scp-dev/core";
 import type { Subprocess } from "bun";
 import { ensureBuilt } from "../../cli/src/testing/fixtures";
+import { brokerBinary, machineBrokers } from "./environment";
 import { command, type Target, terminate, waitFor } from "./targets";
 
 export const cli = join(import.meta.dir, "../../cli/dist/cli.js");
 export { ensureBuilt };
+let machinesMade = 0;
+/** whether the next machine fixture runs the native broker, per SCP_MACHINE_BROKERS */
+function nativeNext(): boolean {
+  const index = machinesMade++;
+  if (!brokerBinary) return false;
+  return machineBrokers === "rust" || (machineBrokers === "mixed" && index % 2 === 0);
+}
+
 export class Machine {
+  readonly native = nativeNext();
   readonly root = mkdtempSync(join(tmpdir(), "scp-conformance-machine-"));
   readonly env: Record<string, string | undefined>;
   private daemon?: Subprocess;
@@ -60,7 +70,9 @@ export class Machine {
   }
   async start(options: { linked?: boolean } = {}) {
     await this.run(["cloud", "enable", "--machine", this.name]);
-    const child = Bun.spawn([...this.program, "daemon", "--idle", "10m", "--policy", join(this.env.XDG_CONFIG_HOME!, "scp/policy.json")], {
+    const policy = join(this.env.XDG_CONFIG_HOME!, "scp/policy.json");
+    const daemon = this.native ? [brokerBinary!, "daemon", "--idle", "600"] : [...this.program, "daemon", "--idle", "10m"];
+    const child = Bun.spawn([...daemon, "--policy", policy], {
       env: this.env,
       stdin: "ignore",
       stdout: "ignore",

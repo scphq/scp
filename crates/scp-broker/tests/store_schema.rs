@@ -10,6 +10,16 @@ use support::{TempStore, json_rows};
 
 const NOW: i64 = 1_700_000_000_000;
 const MASTER: &str = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name";
+const FEDERATED: [(&str, &str); 8] = [
+    ("remote", "TEXT"),
+    ("auth", "TEXT"),
+    ("incarnation", "TEXT"),
+    ("scope_epoch", "INTEGER"),
+    ("mirrored_caps", "TEXT"),
+    ("mirrored_presence", "TEXT"),
+    ("waking_until", "INTEGER"),
+    ("mirrored_active", "INTEGER"),
+];
 
 fn expected_schema() -> Value {
     let mut rows: Vec<Value> =
@@ -27,6 +37,17 @@ fn expected_schema() -> Value {
         rows.push(json!({"type":"table","name":name,"tbl_name":name,"sql":sql}));
         rows.push(json!({"type":"index","name":format!("sqlite_autoindex_{name}_1"),"tbl_name":name,"sql":null}));
     }
+    for row in &mut rows {
+        if row["type"] == "table" && row["name"] == "endpoints" {
+            let sql = row["sql"].as_str().expect("endpoints sql");
+            let added: String = FEDERATED
+                .iter()
+                .map(|(column, kind)| format!(", {column} {kind}"))
+                .collect();
+            row["sql"] = json!(format!("{}{added})", &sql[..sql.len() - 1]));
+        }
+    }
+    rows.push(json!({"type":"index","name":"endpoints_remote","tbl_name":"endpoints","sql":"CREATE UNIQUE INDEX endpoints_remote ON endpoints (remote) WHERE remote IS NOT NULL"}));
     rows.sort_by(|a, b| {
         a["type"]
             .as_str()
@@ -122,20 +143,24 @@ async fn reference_database_adds_judge_tables_without_changing_rows() {
                 .expect("fixture data");
         }
     }
-    let snapshot = || async {
+    let (store, schema) = (&temp.store, &schema);
+    let snapshot = |pass: i64| async move {
         let mut result = serde_json::Map::new();
         result.insert(
             "schema".into(),
-            json_rows(temp.store.all(MASTER, &[]).await.expect("schema")),
+            json_rows(store.all(MASTER, &[]).await.expect("schema")),
         );
-        for entry in &schema {
+        for entry in schema {
             if entry["type"] == "table" {
                 let table = entry["name"].as_str().expect("table name");
                 result.insert(
                     table.into(),
                     json_rows(
-                        temp.store
-                            .all(&format!("SELECT * FROM {table} ORDER BY rowid"), &[])
+                        store
+                            .all(
+                                &format!("SELECT * FROM {table} ORDER BY rowid -- pass {pass}"),
+                                &[],
+                            )
                             .await
                             .expect("table"),
                     ),
@@ -144,13 +169,18 @@ async fn reference_database_adds_judge_tables_without_changing_rows() {
         }
         Value::Object(result)
     };
-    let mut before = snapshot().await;
+    let mut before = snapshot(0).await;
     before["schema"] = expected_schema();
+    for row in before["endpoints"].as_array_mut().expect("endpoint rows") {
+        for (column, _) in FEDERATED {
+            row[column] = Value::Null;
+        }
+    }
     for now in [NOW + 1, NOW + 2] {
         migrate(&temp.store, now)
             .await
             .expect("idempotent migration");
-        assert_eq!(snapshot().await, before);
+        assert_eq!(snapshot(now).await, before);
     }
     temp.close().await;
 }

@@ -112,6 +112,7 @@ pub struct Tables {
     pub admins: Vec<Row>,
     pub policy: Option<Value>,
     pub binds: HashMap<String, String>,
+    pub local_users: HashSet<String>,
 }
 
 pub struct World {
@@ -127,6 +128,7 @@ pub struct World {
     nodes: HashMap<String, ScopeNode>,
     viewer: Option<String>,
     shown: Option<HashSet<String>>,
+    local_users: HashSet<String>,
 }
 
 pub fn json_of(row: &Row, key: &str) -> Value {
@@ -244,6 +246,7 @@ impl World {
             nodes: HashMap::new(),
             viewer: None,
             shown: None,
+            local_users: tables.local_users,
         };
         world.derive();
         world
@@ -367,7 +370,36 @@ impl World {
         }
     }
 
+    /// another machine's row sits in no local tree: a fleet of its own on its machine, with its mirrored ancestors
+    fn remote_subject(&self, row: &Row, remote: &str) -> PolicySubject {
+        let mut subject = Self::plain_subject(row);
+        subject.handle = String::new();
+        if crate::bridge::is_foreign(remote) {
+            subject.account = Some(crate::bridge::machine_part(&remote[1..]).to_owned());
+            return subject;
+        }
+        if text(row, "kind") == Some("system") {
+            return subject;
+        }
+        let id = text(row, "id").unwrap_or_default().to_owned();
+        subject.scope = Some(ScopeSubject {
+            tree: text(row, "tree").unwrap_or(&id).to_owned(),
+            ancestors: self.ancestors(row),
+            groups: Vec::new(),
+            root_handle: String::new(),
+            machine: Some(crate::bridge::machine_part(remote).to_owned()),
+            local: false,
+            root: (text(row, "kind") == Some("agent") && !crate::bridge::rows::placed_root(row))
+                .then_some(false),
+            id,
+        });
+        subject
+    }
+
     fn subject_now(&self, row: &Row) -> PolicySubject {
+        if let Some(remote) = text(row, "remote") {
+            return self.remote_subject(row, remote);
+        }
         let mut subject = Self::plain_subject(row);
         if text(row, "kind") != Some("agent") {
             return subject;
@@ -430,6 +462,31 @@ impl World {
     fn node_now(&self, row: &Row, limited: &mut HashMap<String, bool>) -> ScopeNode {
         let id = text(row, "id").unwrap_or_default().to_owned();
         let subject = self.subjects.get(&id).cloned().unwrap_or_default();
+        if let Some(remote) = text(row, "remote") {
+            let foreign = crate::bridge::is_foreign(remote);
+            let machine = crate::bridge::machine_part(remote);
+            let human = !foreign
+                && text(row, "kind") == Some("human")
+                && crate::bridge::handle_part(remote).is_empty()
+                && self.local_users.contains(machine);
+            return ScopeNode {
+                id,
+                address: address(row),
+                subject,
+                human: Some(human),
+                rules: if foreign {
+                    ScopeRules::default()
+                } else {
+                    rules_of(row)
+                },
+                caps: if foreign {
+                    ScopeCaps::default()
+                } else {
+                    caps_of(row)
+                },
+                ..ScopeNode::default()
+            };
+        }
         let human = text(row, "kind") == Some("human") && text(row, "handle") == Some(HUMAN_HANDLE);
         let mut node = ScopeNode {
             id: id.clone(),
@@ -1025,6 +1082,7 @@ mod tests {
             admins: vec![],
             policy,
             binds: HashMap::new(),
+            local_users: HashSet::new(),
         })
     }
 

@@ -273,3 +273,16 @@ jobs:
           SCP_RELAY_BIN: ${{ github.workspace }}/crates/target/debug/scp-relay
           SCP_CONFORMANCE_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: bun test packages/conformance/src/*.test.ts
+
+      # the machine fixtures again, with native brokers on every machine and then on every other one
+      - name: Multi-machine conformance with native brokers
+        env:
+          SCP_CONFORMANCE_COMPAT: "1"
+          SCP_COMPAT_DIR: ${{ runner.temp }}/scp-compat
+          SCP_RELAY_BIN: ${{ github.workspace }}/crates/target/debug/scp-relay
+          SCP_BROKER_BIN: ${{ github.workspace }}/crates/target/debug/scp-broker
+          SCP_CONFORMANCE_TARGETS: ts,rust-sqlite
+        run: |
+          files="packages/conformance/src/cli.test.ts packages/conformance/src/lifecycle.test.ts packages/conformance/src/wire-hub.test.ts packages/conformance/src/compat.test.ts"
+          SCP_MACHINE_BROKERS=rust bun test $files
+          SCP_MACHINE_BROKERS=mixed bun test $files

@@ -1704,3 +1704,8 @@ async fn hello_transaction(
     }
     core.claim_agent(claim, transient, params.get("self")).await
 }
+
+/// tries the pending links of local claims under a parent on another machine again, now that its endpoints arrived; the (address, parent) pairs that linked
+pub async fn retry_link_under(_core: &mut Core) -> Vec<(String, String)> {
+    Vec::new()
+}

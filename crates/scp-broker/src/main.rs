@@ -69,6 +69,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         limits,
         policy_file,
         idle: Duration::from_secs_f64(idle),
+        env: env.clone(),
     })
     .await?;
     broker
