@@ -188,6 +188,15 @@ const ENDPOINT_COLUMNS: &[(&str, &str)] = &[
     ("wake_tickets", "TEXT"),
     ("mail_at", "INTEGER"),
     ("revive", "TEXT"),
+    ("remote", "TEXT"),
+    ("auth", "TEXT"),
+    ("incarnation", "TEXT"),
+    ("scope_epoch", "INTEGER"),
+    ("mirrored_caps", "TEXT"),
+    ("mirrored_presence", "TEXT"),
+    ("waking_until", "INTEGER"),
+    ("mirrored_active", "INTEGER"),
+    ("link_under", "TEXT"),
 ];
 
 fn error(message: impl std::fmt::Display) -> StoreError {
@@ -373,6 +382,7 @@ pub async fn migrate(store: &dyn Storage, now_ms: i64) -> StoreResult<()> {
         "CREATE INDEX IF NOT EXISTS endpoints_parent ON endpoints (parent_ep)",
         "CREATE INDEX IF NOT EXISTS endpoints_session ON endpoints (session)",
         "CREATE INDEX IF NOT EXISTS endpoints_seen ON endpoints (COALESCE(last_seen, created_at))",
+        "CREATE UNIQUE INDEX IF NOT EXISTS endpoints_remote ON endpoints (remote) WHERE remote IS NOT NULL",
     ] {
         store.all(statement, &[]).await?;
     }

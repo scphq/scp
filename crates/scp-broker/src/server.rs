@@ -32,6 +32,7 @@ pub struct BrokerOptions {
     pub limits: Limits,
     pub policy_file: PathBuf,
     pub idle: Duration,
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 pub struct Broker {
@@ -84,6 +85,9 @@ impl Broker {
         )
         .await
         .map_err(io::Error::other)?;
+        let bridge = crate::bridge::daemon_bridge(&options.env, |line| eprintln!("{line}"))
+            .map(|config| crate::bridge::Bridge::attach(config, &mut core));
+        core.federation.env = options.env;
         core.sweep().await.map_err(io::Error::other)?;
         tokio::fs::set_permissions(
             &options.paths.database,
@@ -108,13 +112,11 @@ impl Broker {
         let inode = tokio::fs::symlink_metadata(&options.paths.socket)
             .await?
             .ino();
-        Ok((
-            listener,
-            Arc::new(Mutex::new(core)),
-            options.paths,
-            options.idle,
-            inode,
-        ))
+        let core = Arc::new(Mutex::new(core));
+        if let Some(bridge) = bridge {
+            bridge.spawn(core.clone());
+        }
+        Ok((listener, core, options.paths, options.idle, inode))
     }
 
     async fn owns_socket(&self) -> bool {
@@ -130,6 +132,7 @@ impl Broker {
         let mut connections = JoinSet::new();
         let mut idle_since = Instant::now();
         let mut ownership = tokio::time::interval(Duration::from_secs(2));
+        let restart = self.core.lock().await.federation.restart.clone();
         let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
         sweeper.tick().await;
         let wakers = crate::wake::attach(&self.core).await;
@@ -142,6 +145,7 @@ impl Broker {
             };
             tokio::select! {
                 _ = &mut shutdown => break Ok(()),
+                _ = restart.notified() => break Ok(()),
                 _ = tokio::time::sleep_until(deadline), if connections.is_empty() && !self.idle.is_zero() => break Ok(()),
                 _ = presence.tick() => {
                     let core = self.core.lock().await;
@@ -181,6 +185,9 @@ impl Broker {
             let mut core = self.core.lock().await;
             core.state.closing = true;
             core.state.stopping.notify_waiters();
+            if let Some(bridge) = core.bridge() {
+                bridge.stop();
+            }
         }
         let _ = stop.send(true);
         wakers.abort();

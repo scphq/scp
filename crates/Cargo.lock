@@ -1652,6 +1652,7 @@ version = "0.4.3"
 dependencies = [
  "async-trait",
  "clap",
+ "futures-util",
  "hex",
  "libc",
  "rand 0.8.5",
@@ -1665,6 +1666,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2283,8 +2285,12 @@ checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2422,6 +2428,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror",
  "utf-8",

@@ -96,14 +96,6 @@ fn sv(value: impl Into<String>) -> SqlValue {
 }
 
 impl Core {
-    // bridge seam
-    pub(crate) fn bridge_changed(&self, _endpoint: &str) {}
-
-    // bridge seam
-    pub(crate) async fn bridge_mirror(&self, _ids: Vec<String>) -> Option<bool> {
-        None
-    }
-
     /// a provider's opaque reference to a session: bounded, without control characters or a credential
     pub(crate) fn wake_ref(&self, value: &Value) -> Result<String, RpcError> {
         let max = self.cap("wakeRefChars", 512) as usize;

@@ -132,28 +132,8 @@ impl Core {
 
     /// the refused link a claim asked for, for whoami; empty when there is none
     pub async fn link_pending_of(&self, endpoint: &str) -> Result<Option<Value>, RpcError> {
-        let cols = self.store.all("PRAGMA table_info(endpoints)", &[]).await?;
-        if !cols.iter().any(|r| text(r, "name") == Some("link_under")) {
-            return Ok(None);
-        }
         let row = self.must_endpoint(endpoint).await?;
-        if text(&row, "parent_ep").is_some() || text(&row, "parent_addr").is_some() {
-            return Ok(None);
-        }
-        let Some(raw) = text(&row, "link_under") else {
-            return Ok(None);
-        };
-        let parsed: Value = serde_json::from_str(raw).map_err(|_| RpcError::internal())?;
-        let (Some(under), Some(code), Some(message)) = (
-            parsed.get("under").and_then(Value::as_str),
-            parsed.get("code").and_then(Value::as_str),
-            parsed.get("message").and_then(Value::as_str),
-        ) else {
-            return Ok(None);
-        };
-        Ok(Some(
-            json!({"under": under, "code": code, "message": message}),
-        ))
+        Ok(Self::link_pending_row(&row).map(|pending| json!(pending)))
     }
 
     /// a hook's digest turn for its own endpoint

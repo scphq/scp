@@ -12,6 +12,9 @@ use crate::store::{Row, SqlValue};
 use crate::world::{HUMAN_HANDLE, World};
 
 pub fn address(row: &Row) -> String {
+    if let Some(remote) = text(row, "remote") {
+        return crate::bridge::remote_address(remote);
+    }
     match text(row, "kind") {
         Some("human") => "me/".into(),
         Some("system") => "me/relay".into(),
@@ -83,10 +86,14 @@ impl Core {
                 "an address is user/handle, or a handle",
             ));
         }
+        if let Some(row) = self.resolve_remote(value).await? {
+            return Ok(row);
+        }
         let handle = if let Some((user, handle)) = value.split_once('/') {
-            if !matches!(user, "me" | "local") {
+            if !self.is_local_user(user) && Some(user) != self.federation.machine.as_deref() {
                 return Err(not_found(value));
             }
+            let handle = handle.rsplit('/').next().unwrap_or(handle);
             if handle.is_empty() { "_human" } else { handle }
         } else {
             value
@@ -124,6 +131,17 @@ impl Core {
                 .as_ref()
                 .map(address)
                 .map_or(Value::Null, Value::String);
+        } else if text(row, "kind") == Some("agent") && text(row, "parent_addr").is_some() {
+            view["parent"] = json!(self.linked_parent(row, None).await?);
+        }
+        if let Some(via) = self.via_for(row).await? {
+            let mut runner = json!({"name": text(&via, "runner")});
+            for key in ["ref", "attach"] {
+                if let Some(value) = text(&via, key) {
+                    runner[key] = json!(value);
+                }
+            }
+            view["runner"] = runner;
         }
         Ok(view)
     }
@@ -163,7 +181,7 @@ impl Core {
         let viewer_is_human = peeker
             .as_ref()
             .is_some_and(|row| viewer.is_some() && text(row, "kind") == Some("human"));
-        let rows = self.store.all("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY created_at, id", &[]).await?;
+        let rows = self.store.all("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (remote IS NULL OR substr(remote,1,1) != '@') ORDER BY created_at, id", &[]).await?;
         let mut endpoints = Vec::new();
         for row in rows {
             if ["harness", "kind"].iter().any(|k| {
@@ -185,6 +203,11 @@ impl Core {
             .filter_map(|k| integer(&row, k))
             .max()
             .unwrap_or(0);
+            let active = if text(&row, "remote").is_some() {
+                crate::bridge::rows::remote_active(&row, &self.federation.observed)
+            } else {
+                active
+            };
             if params.get("all") != Some(&Value::Bool(true)) && text(&row, "kind") == Some("agent")
             {
                 if active < now_ms() - 86_400_000 {
@@ -202,7 +225,13 @@ impl Core {
             if params
                 .get("presence")
                 .and_then(Value::as_str)
-                .is_some_and(|v| v != presence(&row, now_ms()))
+                .is_some_and(|v| {
+                    let base = presence(&row, now_ms());
+                    match text(&row, "remote") {
+                        Some(_) => v != crate::bridge::rows::remote_presence(&row, base),
+                        None => v != base,
+                    }
+                })
             {
                 continue;
             }
@@ -214,6 +243,8 @@ impl Core {
                 }
                 if text(&row, "parent_ep").is_some_and(|p| !shown.contains(p)) {
                     view["parent"] = Value::Null;
+                } else if text(&row, "parent_ep").is_none() && text(&row, "kind") == Some("agent") {
+                    view["parent"] = json!(self.linked_parent(&row, Some(shown)).await?);
                 }
             }
             if let Some(peeker) = &peeker
@@ -642,7 +673,7 @@ impl Core {
     /// an agent endpoint left offline drops a working or waiting status, which no one is left to keep current
     pub async fn settle_offline(&self) -> Result<(), RpcError> {
         let now = now_ms();
-        for row in self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND status_state IN ('working', 'waiting')", &[]).await? {
+        for row in self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND connections = 0 AND remote IS NULL AND status_state IN ('working', 'waiting')", &[]).await? {
             if presence(&row, now) == "offline" {
                 self.store
                     .all(

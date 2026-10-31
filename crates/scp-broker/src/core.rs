@@ -29,7 +29,10 @@ pub struct Core {
     pub policy_text: Option<Option<String>>,
     pub policy_binds: std::collections::HashMap<String, String>,
     pub noise: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    pub federation: crate::bridge::Federation,
     pub wakers: crate::wake::Wakers,
+    pub runners: Arc<crate::runners::Service>,
+    pub runner_job: Option<crate::runners::Job>,
 }
 
 impl Core {
@@ -47,7 +50,7 @@ impl Core {
             )
             .await?;
         store
-            .all("UPDATE endpoints SET connections = 0, hook_seen = CASE WHEN kind = 'agent' AND hook_ended IS NULL THEN MAX(COALESCE(hook_seen,0), ?) ELSE hook_seen END WHERE connections > 0", &[SqlValue::Int(now_ms()-1_740_000)])
+            .all("UPDATE endpoints SET connections = 0, hook_seen = CASE WHEN kind = 'agent' AND hook_ended IS NULL AND remote IS NULL THEN MAX(COALESCE(hook_seen,0), ?) ELSE hook_seen END WHERE connections > 0", &[SqlValue::Int(now_ms()-1_740_000)])
             .await?;
         store
             .all(
@@ -72,6 +75,7 @@ impl Core {
             ),
             crate::wake::Wakers::builtin(),
         );
+        let runners = Arc::new(crate::runners::Service::from_env(&policy_file));
         let mut core = Self {
             store,
             limits,
@@ -85,7 +89,10 @@ impl Core {
             policy_text: None,
             policy_binds: Default::default(),
             noise: Default::default(),
+            federation: Default::default(),
             wakers,
+            runners,
+            runner_job: None,
         };
         core.load_policy().await?;
         core.hibernate_held(None).await?;
@@ -195,9 +202,20 @@ impl Core {
             }
             "peek_set" => self.peek_set(conn, params).await,
             "peek_who" => self.peek_who(conn, params).await,
-            "list" => self.list_for(conn, params).await,
+            "list" => {
+                let result = self.list_for(conn, params).await?;
+                self.runner_job = self.list_job(&result).await?;
+                Ok(result)
+            }
             "rename" => {
+                let was = self
+                    .by_id(&endpoint)
+                    .await?
+                    .and_then(|r| text(&r, "handle").map(str::to_owned));
                 let view = self.rename(conn, params).await?;
+                if let (Some(id), Some(was)) = (view["id"].as_str(), was) {
+                    self.bridge_renamed(id, &was);
+                }
                 if let Some(id) = view["id"].as_str() {
                     self.state.known.remove(id);
                     let id = id.to_owned();
@@ -213,11 +231,11 @@ impl Core {
             "event" => {
                 let row = self.event(conn, params).await?;
                 if !endpoint.is_empty() {
+                    self.bridge_activity(&endpoint, &row);
                     self.presence_moved(&endpoint, true, true).await?;
                 }
                 Ok(row)
             }
-            "grant" => self.grant(conn, params).await,
             "log" => self.log_for(conn, params).await,
             "send" | "ask" => self.send_rpc(conn, method, params).await,
             "ask_wait" => self.ask_wait(&endpoint, params).await,
@@ -230,7 +248,11 @@ impl Core {
             "message" => self.message_rpc(&endpoint, params).await,
             "receipts" => self.receipts(&endpoint, params).await,
             "watch" => self.watch(conn).await,
-            "status" => self.status(&endpoint, params).await,
+            "status" => {
+                let result = self.status(&endpoint, params).await?;
+                self.bridge_changed(&endpoint);
+                Ok(result)
+            }
             "title" => {
                 self.title(&endpoint, params.get("text"), &connection.mode)
                     .await
@@ -243,7 +265,19 @@ impl Core {
             "subagent_title" => self.subagent_title(conn, params).await,
             "spawn_exit" => self.spawn_exit(conn, params).await,
             "spawn_steers" => self.spawn_steers(conn, params).await,
-            "spawn_end" => self.spawn_end(conn, params).await,
+            "spawn_end" => match self.end_via(conn, params).await? {
+                Some((record, endpoint)) => {
+                    let record = crate::runners::Record::from_row(&record);
+                    let input = self.runner_input(&record, "stop").await;
+                    self.runner_job = Some(crate::runners::Job::Stop { record, input });
+                    let mut ended = json!({"held": false});
+                    if let Some(endpoint) = endpoint {
+                        ended["endpoint"] = endpoint;
+                    }
+                    Ok(ended)
+                }
+                None => self.spawn_end(conn, params).await,
+            },
             "spawn_via" => self.spawn_via(conn, params).await,
             "wake" => self.wake_rpc(conn, params).await,
             "hibernate" => self.hibernate_rpc(conn, params).await,
@@ -251,11 +285,26 @@ impl Core {
                 self.review_hold(conn, method, params).await
             }
             "rules" => self.scope_view(conn, params).await,
-            "rules_set" => self.rules_set(conn, params).await,
-            "rules_widen" => self.rules_widen(conn, params).await,
-            "rules_lift" => self.rules_lift(conn, params).await,
-            "group" => self.group(conn, params).await,
-            "admin" => self.admin(conn, params).await,
+            "rules_set" | "rules_widen" | "rules_lift" | "group" | "admin" | "grant" => {
+                let result = match method {
+                    "rules_set" => self.rules_set(conn, params).await,
+                    "rules_widen" => self.rules_widen(conn, params).await,
+                    "rules_lift" => self.rules_lift(conn, params).await,
+                    "group" => self.group(conn, params).await,
+                    "admin" => self.admin(conn, params).await,
+                    _ => self.grant(conn, params).await,
+                }?;
+                if method != "admin"
+                    && method != "grant"
+                    && !matches!(
+                        params.get("action").and_then(Value::as_str),
+                        Some("ls" | "show")
+                    )
+                {
+                    self.bridge_resync();
+                }
+                Ok(result)
+            }
             "peers" => self.peers(conn, params).await,
             "why" => {
                 let actor = self.actor_of(conn)?;
@@ -271,11 +320,11 @@ impl Core {
             "snapshot" => self.snapshot_for(conn, params).await,
             "policy" => self.policy_view(conn).await,
             "policy_check" => self.policy_check(conn, params).await,
-            "cloud_status" | "bridge_relink" => Ok(json!({"enabled": false})),
-            "machine_wake" => Err(RpcError::new(
-                ErrorCode::Unavailable,
-                "this broker has no hub link: the machine waker lives on the hub",
-            )),
+            "cloud_status" => Ok(self
+                .bridge()
+                .map_or_else(|| json!({"enabled": false}), |bridge| bridge.status())),
+            "bridge_relink" => Ok(self.bridge_relink()),
+            "machine_wake" => self.machine_wake(conn, params).await,
             _ => Err(RpcError::new(
                 ErrorCode::MethodNotFound,
                 format!("no method {method}"),
@@ -331,6 +380,9 @@ impl Core {
             .get(id)
             .map_or(now.0 != "offline", |was| *was != now);
         self.state.known.insert(id.to_owned(), now);
+        if moved {
+            self.bridge_changed(id);
+        }
         if !moved || !notify {
             return Ok(false);
         }
@@ -353,10 +405,16 @@ impl Core {
             .unwrap_or_else(|| json!({}));
         let status = text(row, "status_state")
             .map(|state| json!({"state":state,"note":text(row,"status_note").unwrap_or("")}));
+        let remote = text(row, "remote");
+        let presence = crate::views::presence(row, now_ms());
+        let presence = match remote {
+            Some(_) => crate::bridge::rows::remote_presence(row, presence),
+            None => presence.to_owned(),
+        };
         let mut view = json!({
-            "id": text(row, "id"), "address": if handle == "_human" { "me/".to_owned() } else { format!("me/{handle}") },
+            "id": text(row, "id"), "address": if remote.is_some() { crate::views::address(row) } else if handle == "_human" { "me/".to_owned() } else { format!("me/{handle}") },
             "kind": text(row, "kind"), "harness": text(row, "harness"), "model": text(row, "model"), "cwd": text(row, "cwd"),
-            "labels": labels, "title": text(row, "title"), "presence": crate::views::presence(row, now_ms()),
+            "labels": labels, "title": text(row, "title"), "presence": presence,
             "status": status, "last_seen": integer(row, "last_seen").and_then(timestamp),
         });
         if text(row, "kind") == Some("agent") {
@@ -386,6 +444,11 @@ impl Core {
             .filter_map(|k| integer(row, k))
             .max()
             .unwrap_or(0);
+            let active = if remote.is_some() {
+                crate::bridge::rows::remote_active(row, &self.federation.observed)
+            } else {
+                active
+            };
             view["active_at"] = json!(timestamp(active));
             if self
                 .limits
@@ -463,7 +526,14 @@ impl Core {
         if method == "stop_wait" && guard.connection(conn)?.bound() {
             return Self::stop_wait_poll(shared, guard, conn, params).await;
         }
+        guard.runner_job = None;
         let mut result = guard.dispatch(conn, &method, &params).await?;
+        if let Some(job) = guard.runner_job.take() {
+            let runners = guard.runners.clone();
+            drop(guard);
+            job.finish(&shared, &runners, &mut result).await;
+            return Ok(result);
+        }
         let wait_s = params
             .get("wait_s")
             .and_then(Value::as_f64)

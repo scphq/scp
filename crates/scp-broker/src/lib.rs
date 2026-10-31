@@ -1,6 +1,7 @@
 //! Native SCP local broker: a wire-compatible engine for the local socket protocol.
 
 pub mod authority;
+pub mod bridge;
 pub mod claims;
 pub mod core;
 pub mod grants;
@@ -17,6 +18,7 @@ pub mod policy;
 pub mod procs;
 pub mod proto;
 pub mod rules;
+pub mod runners;
 pub mod scrub;
 pub mod server;
 pub mod session;
