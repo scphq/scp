@@ -1,5 +1,14 @@
 # scp-relay
 
+## 0.4.4
+
+### Patch Changes
+
+- fd9003e: Native broker: hub bridge (auth, endpoint mirroring, cross-machine sends, wakes and reconnect) and cross-machine links.
+- 14be1c9: Native broker: wake hooks, hibernation and revive tickets, spawn holds and durable spawns, peek, and the periodic retention sweep.
+- 10c5e99: The native broker delivers messages: send and ask with receipts, inbox, injection and stop push, spawn results, hook RPCs, per-viewer watch streams and rate limits, on the shared scp-core protocol types.
+- 56d8391: The native broker enforces scopes, groups, grants, policy and the judge gate, and filters list, log, peers and snapshots by visibility. It no longer needs an opt-in flag to start.
+
 ## 0.4.3
 
 ### Patch Changes
