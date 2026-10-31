@@ -113,6 +113,7 @@ pub struct Tables {
     pub policy: Option<Value>,
     pub binds: HashMap<String, String>,
     pub local_users: HashSet<String>,
+    pub machine: Option<String>,
 }
 
 pub struct World {
@@ -129,6 +130,7 @@ pub struct World {
     viewer: Option<String>,
     shown: Option<HashSet<String>>,
     local_users: HashSet<String>,
+    machine: Option<String>,
 }
 
 pub fn json_of(row: &Row, key: &str) -> Value {
@@ -247,6 +249,7 @@ impl World {
             viewer: None,
             shown: None,
             local_users: tables.local_users,
+            machine: tables.machine,
         };
         world.derive();
         world
@@ -779,6 +782,9 @@ impl World {
         strict: bool,
     ) -> ScopeDecision {
         let blank = ScopeNode::default();
+        let linked = a != b
+            && matches!((self.rows.get(a), self.rows.get(b)), (Some(x), Some(y))
+                if crate::bridge::across::linked_across(x, y, self.machine.as_deref()));
         scope_decision(
             self,
             self.nodes.get(a).unwrap_or(&blank),
@@ -786,7 +792,7 @@ impl World {
             ScopeDecisionOptions {
                 human_always: self.defaults.human_always,
                 solicited,
-                linked: false,
+                linked,
                 unverified,
                 strict,
             },
@@ -1083,6 +1089,7 @@ mod tests {
             policy,
             binds: HashMap::new(),
             local_users: HashSet::new(),
+            machine: None,
         })
     }
 

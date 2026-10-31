@@ -214,6 +214,7 @@ impl Core {
                 .cloned()
                 .chain(["me".to_owned(), "local".to_owned()])
                 .collect(),
+            machine: self.federation.machine.clone(),
         }))
     }
 

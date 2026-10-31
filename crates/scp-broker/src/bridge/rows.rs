@@ -910,37 +910,6 @@ impl Core {
         Ok(out)
     }
 
-    /// whether a link of `row` under `key` closes a cycle in what this broker mirrors
-    async fn loops(&self, row: &Row, key: &str) -> Result<bool, RpcError> {
-        let own = text(row, "remote").map(str::to_owned);
-        let id = text(row, "id").unwrap_or_default().to_owned();
-        let mut at = if valid_remote(key) {
-            self.by_remote(key).await?
-        } else {
-            None
-        };
-        let mut seen = HashSet::new();
-        while let Some(next) = at {
-            let next_id = text(&next, "id").unwrap_or_default().to_owned();
-            if next_id == id
-                || own
-                    .as_deref()
-                    .is_some_and(|o| text(&next, "remote") == Some(o))
-            {
-                return Ok(true);
-            }
-            if !seen.insert(next_id) || seen.len() > 64 {
-                return Ok(false);
-            }
-            at = match (text(&next, "parent_ep"), text(&next, "parent_addr")) {
-                (Some(parent), _) => self.by_id(parent).await?,
-                (None, Some(addr)) if valid_remote(addr) => self.by_remote(addr).await?,
-                _ => None,
-            };
-        }
-        Ok(false)
-    }
-
     /// an earlier holder's queue goes when another incarnation of a mirrored agent takes its row
     async fn drop_earlier_holder(
         &self,

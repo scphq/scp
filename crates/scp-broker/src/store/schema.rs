@@ -196,6 +196,7 @@ const ENDPOINT_COLUMNS: &[(&str, &str)] = &[
     ("mirrored_presence", "TEXT"),
     ("waking_until", "INTEGER"),
     ("mirrored_active", "INTEGER"),
+    ("link_under", "TEXT"),
 ];
 
 fn error(message: impl std::fmt::Display) -> StoreError {

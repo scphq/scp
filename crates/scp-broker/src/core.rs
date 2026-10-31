@@ -156,7 +156,16 @@ impl Core {
             self.touch(&endpoint).await?;
         }
         match method {
-            "whoami" => self.view(&self.must_endpoint(&endpoint).await?).await,
+            "whoami" => {
+                let row = self.must_endpoint(&endpoint).await?;
+                let mut view = self.view(&row).await?;
+                if connection.mode != Mode::Transient
+                    && let Some(pending) = Core::link_pending_of(&row)
+                {
+                    view["link_pending"] = json!(pending);
+                }
+                Ok(view)
+            }
             "list" => self.list_for(conn, params).await,
             "rename" => {
                 let was = self

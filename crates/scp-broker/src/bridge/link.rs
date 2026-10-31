@@ -1390,11 +1390,26 @@ impl Bridge {
 
 /// the claims' pending links under a parent on another machine, tried again once its endpoints arrived; true when one linked and `sync` asks for a resync
 async fn link_pending(core: &mut Core, sync: bool) -> bool {
-    let linked = crate::claims::retry_link_under(core).await;
-    for (address, parent) in &linked {
+    let retried = match crate::claims::retry_link_under(core).await {
+        Ok(retried) => retried,
+        Err(error) => {
+            log(&format!(
+                "relay bridge: pending links were not tried: {}",
+                error.message
+            ));
+            return false;
+        }
+    };
+    for (address, parent) in &retried.linked {
         log(&format!("relay bridge: {address} linked under {parent}"));
     }
-    sync && !linked.is_empty()
+    for (address, pending) in &retried.refused {
+        log(&format!(
+            "relay bridge: {address} is still not linked under {} ({}: {})",
+            pending.under, pending.code, pending.message
+        ));
+    }
+    sync && !retried.linked.is_empty()
 }
 
 #[cfg(test)]

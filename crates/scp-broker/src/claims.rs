@@ -5,6 +5,7 @@ use crate::store::{Row, SqlValue};
 use crate::views::{address, opt, presence};
 use rand::RngCore;
 use scp_core::protocol::ErrorCode;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -1350,20 +1351,28 @@ impl Core {
         }
         let claimed = self.claim_row(&harness, &fields, &scope, transient).await?;
         let row = &claimed.row;
-        if let Some(under) = clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty())
-            && text(row, "parent_ep").is_none()
-        {
-            let linked = match self.lookup(&under).await {
-                Ok(parent) if !self.may_link_under(row, &parent).await? => Err(unreachable(&under)),
-                Ok(parent) => self.link_endpoint(row, &parent, "session").await,
-                Err(error) => Err(error),
-            };
-            match linked {
-                Ok(()) => {}
-                Err(error) => {
-                    self.audit("claim_under_refused",text(row,"id"),None,json!({"target":address(row),"under":under,"code":error.data.map(|v|v.code)})).await?;
-                }
+        if let Some(under) = &fields.under {
+            if let Some(pending) = self.claim_under(row, under).await? {
+                let tried = if self.federation.bridge.is_some() {
+                    " and is tried again as the hub's endpoints arrive"
+                } else {
+                    ""
+                };
+                eprintln!(
+                    "relay broker: {} is not linked under {} ({}: {}); it stays a root{tried}",
+                    address(row),
+                    pending.under,
+                    pending.code,
+                    pending.message
+                );
             }
+        } else if !transient && !exact {
+            self.store
+                .all(
+                    "UPDATE endpoints SET link_under = NULL WHERE id = ? AND link_under IS NOT NULL",
+                    &[opt(text(row, "id"))],
+                )
+                .await?;
         }
         Ok(Claimed {
             row: self.must_endpoint(text(row, "id").unwrap_or("")).await?,
@@ -1705,7 +1714,181 @@ async fn hello_transaction(
     core.claim_agent(claim, transient, params.get("self")).await
 }
 
-/// tries the pending links of local claims under a parent on another machine again, now that its endpoints arrived; the (address, parent) pairs that linked
-pub async fn retry_link_under(_core: &mut Core) -> Vec<(String, String)> {
-    Vec::new()
+/// a claim's link under a parent that was refused and is tried again: the address it asked for, and why it is refused
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPending {
+    pub under: String,
+    pub code: String,
+    pub message: String,
+}
+
+impl LinkPending {
+    pub fn parse(value: Option<&str>) -> Option<Self> {
+        serde_json::from_str(value?).ok()
+    }
+
+    fn of(under: &str, error: &RpcError) -> Option<Self> {
+        let code = serde_json::to_value(error.data.as_ref()?.code).ok()?;
+        Some(Self {
+            under: under.to_owned(),
+            code: code.as_str()?.to_owned(),
+            message: error.message.clone(),
+        })
+    }
+
+    fn text(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod link_pending_tests {
+    use super::LinkPending;
+
+    #[test]
+    fn a_pending_link_keeps_its_field_order_and_refuses_partial_text() {
+        let pending = LinkPending {
+            under: "me/desk/lead".into(),
+            code: "not_found".into(),
+            message: "no endpoint me/desk/lead".into(),
+        };
+        let text = pending.text();
+        assert_eq!(
+            text,
+            r#"{"under":"me/desk/lead","code":"not_found","message":"no endpoint me/desk/lead"}"#
+        );
+        assert_eq!(LinkPending::parse(Some(&text)), Some(pending));
+        assert_eq!(
+            LinkPending::parse(Some(r#"{"under":"x","code":"y"}"#)),
+            None
+        );
+        assert_eq!(
+            LinkPending::parse(Some(r#"{"under":1,"code":"y","message":"z"}"#)),
+            None
+        );
+        assert_eq!(LinkPending::parse(Some("not json")), None);
+        assert_eq!(LinkPending::parse(None), None);
+    }
+}
+
+/// the pending links of claims tried again: the (address, parent) pairs that linked, and those still refused for a new reason
+#[derive(Debug, Default)]
+pub struct Retried {
+    pub linked: Vec<(String, String)>,
+    pub refused: Vec<(String, LinkPending)>,
+}
+
+impl Core {
+    /// links a claimed root under `under` as a join under does; a refusal keeps it a root with the request pending on the row
+    async fn claim_under(&self, row: &Row, under: &str) -> Result<Option<LinkPending>, RpcError> {
+        if text(row, "kind") != Some("agent") || !Core::is_local_row(row) {
+            return Ok(None);
+        }
+        if text(row, "parent_ep").is_some() || text(row, "parent_addr").is_some() {
+            self.clear_link_under(row).await?;
+            return Ok(None);
+        }
+        Ok(self
+            .try_under(row, under)
+            .await?
+            .map(|(pending, _)| pending))
+    }
+
+    async fn clear_link_under(&self, row: &Row) -> Result<(), RpcError> {
+        if text(row, "link_under").is_some() {
+            self.store
+                .all(
+                    "UPDATE endpoints SET link_under = NULL WHERE id = ?",
+                    &[opt(text(row, "id"))],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// links `me`, a local root, under `under`; the pending request it keeps when refused, and whether its reason is new, audited `claim_under_refused` then
+    async fn try_under(
+        &self,
+        me: &Row,
+        under: &str,
+    ) -> Result<Option<(LinkPending, bool)>, RpcError> {
+        let linked = match self.lookup(under).await {
+            Ok(parent) if !self.may_link_under(me, &parent).await? => Err(unreachable(under)),
+            Ok(parent) => self.link_endpoint(me, &parent, "session").await,
+            Err(error) => Err(error),
+        };
+        let error = match linked {
+            Ok(()) => {
+                self.clear_link_under(me).await?;
+                return Ok(None);
+            }
+            Err(error) => error,
+        };
+        let Some(pending) = LinkPending::of(under, &error) else {
+            return Err(error);
+        };
+        let value = pending.text();
+        let changed = text(me, "link_under") != Some(value.as_str());
+        if changed {
+            let id = text(me, "id");
+            self.store
+                .all(
+                    "UPDATE endpoints SET link_under = ? WHERE id = ?",
+                    &[opt(Some(&value)), opt(id)],
+                )
+                .await?;
+            self.audit(
+                "claim_under_refused",
+                id,
+                None,
+                json!({"target": address(me), "under": under, "code": pending.code}),
+            )
+            .await?;
+        }
+        Ok(Some((pending, changed)))
+    }
+
+    /// the link under a parent the endpoint's claim asked for and is still refused, for whoami
+    pub fn link_pending_of(row: &Row) -> Option<LinkPending> {
+        if text(row, "parent_ep").is_some() || text(row, "parent_addr").is_some() {
+            return None;
+        }
+        LinkPending::parse(text(row, "link_under"))
+    }
+
+    async fn retry_under(&self) -> Result<Retried, RpcError> {
+        let mut out = Retried::default();
+        let rows = self
+            .store
+            .all("SELECT * FROM endpoints WHERE link_under IS NOT NULL", &[])
+            .await?;
+        for row in rows {
+            let pending = LinkPending::parse(text(&row, "link_under"));
+            let Some(pending) = pending.filter(|_| {
+                text(&row, "kind") == Some("agent")
+                    && Core::is_local_row(&row)
+                    && text(&row, "parent_ep").is_none()
+                    && text(&row, "parent_addr").is_none()
+            }) else {
+                self.clear_link_under(&row).await?;
+                continue;
+            };
+            match self.try_under(&row, &pending.under).await? {
+                None => {
+                    let id = text(&row, "id").unwrap_or_default();
+                    let parent = self.parent_address(&self.must_endpoint(id).await?).await?;
+                    out.linked.push((address(&row), parent));
+                }
+                Some((pending, true)) => out.refused.push((address(&row), pending)),
+                Some(_) => {}
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// tries the pending links of local claims under a parent on another machine again, now that its endpoints arrived
+pub async fn retry_link_under(core: &mut Core) -> Result<Retried, RpcError> {
+    let store = core.store.clone();
+    crate::store::transaction(store, core.retry_under()).await
 }

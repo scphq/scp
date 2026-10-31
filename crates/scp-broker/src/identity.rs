@@ -157,6 +157,17 @@ impl Core {
             )
             .await?;
         self.rewrite_selectors(from, handle).await?;
+        if let Some(machine) = self.federation.machine.clone() {
+            self.store
+                .all(
+                    "UPDATE endpoints SET parent_addr = ? WHERE parent_addr = ?",
+                    &[
+                        opt(Some(&format!("{machine}/{handle}"))),
+                        opt(Some(&format!("{machine}/{from}"))),
+                    ],
+                )
+                .await?;
+        }
         self.state
             .addresses
             .insert(id.into(), format!("me/{handle}"));
@@ -171,6 +182,28 @@ impl Core {
     pub async fn link(&self, row: &Row, parent: &Row, by: Value) -> Result<(), RpcError> {
         let id = text(row, "id").ok_or_else(RpcError::internal)?;
         let parent_id = text(parent, "id").ok_or_else(RpcError::internal)?;
+        if !Core::is_local_row(parent) {
+            let key = self.link_across(row, parent).await?;
+            if text(row, "parent_addr") == Some(key.as_str()) {
+                return Ok(());
+            }
+            if text(row, "parent_ep").is_some() || text(row, "parent_addr").is_some() {
+                return Err(self.already_linked(row).await?);
+            }
+            self.store
+                .all(
+                    "UPDATE endpoints SET parent_addr = ?,linked = ?,link_under = NULL WHERE id = ?",
+                    &[opt(Some(&key)), SqlValue::Int(now_ms()), opt(Some(id))],
+                )
+                .await?;
+            let request = by.get("request").and_then(Value::as_str).map(str::to_owned);
+            let mut detail = by;
+            detail["target"] = json!(address(row));
+            detail["parent"] = json!(address(parent));
+            return self
+                .audit("adopt", Some(id), request.as_deref(), detail)
+                .await;
+        }
         if text(parent, "kind") != Some("agent") {
             return Err(RpcError::invalid_params("the parent is an agent endpoint"));
         }
@@ -188,14 +221,7 @@ impl Core {
             ));
         }
         if text(row, "parent_ep").is_some() || text(row, "parent_addr").is_some() {
-            return Err(RpcError::new(
-                ErrorCode::ScopeRefused,
-                format!(
-                    "{} already sits under {}; unlink it first",
-                    address(row),
-                    self.parent_address(row).await?
-                ),
-            ));
+            return Err(self.already_linked(row).await?);
         }
         let depth = integer(parent, "depth").unwrap_or(0) + 1;
         let shift = depth - integer(row, "depth").unwrap_or(0);
@@ -216,7 +242,7 @@ impl Core {
                 });
             }
         }
-        self.store.all("UPDATE endpoints SET parent_ep = ?,parent_addr = NULL,tree = ?,depth = ?,linked = ?,caps = ? WHERE id = ?",&[opt(Some(parent_id)),opt(Some(tree)),SqlValue::Int(depth),SqlValue::Int(now_ms()),caps_json(&mut caps),opt(Some(id))]).await?;
+        self.store.all("UPDATE endpoints SET parent_ep = ?,parent_addr = NULL,tree = ?,depth = ?,linked = ?,caps = ?,link_under = NULL WHERE id = ?",&[opt(Some(parent_id)),opt(Some(tree)),SqlValue::Int(depth),SqlValue::Int(now_ms()),caps_json(&mut caps),opt(Some(id))]).await?;
         let request = by.get("request").and_then(Value::as_str).map(str::to_owned);
         let mut detail = by;
         detail["target"] = json!(address(row));
@@ -443,7 +469,7 @@ impl Core {
         }
         let named = named.ok_or_else(|| RpcError::invalid_params("endpoint is an address"))?;
         let target = self.lookup(named).await?;
-        if text(&target, "kind") != Some("agent") {
+        if text(&target, "kind") != Some("agent") || !Core::is_local_row(&target) {
             return Err(RpcError::invalid_params(
                 "only a local agent endpoint can be linked",
             ));
@@ -692,7 +718,7 @@ impl Core {
                 "an agent unlinks only itself",
             ));
         }
-        if text(&target, "kind") != Some("agent") {
+        if text(&target, "kind") != Some("agent") || !Core::is_local_row(&target) {
             return Err(RpcError::invalid_params(
                 "only a local agent endpoint can be unlinked",
             ));
@@ -723,7 +749,7 @@ impl Core {
         if text(&target, "parent_ep").is_none() {
             self.store
                 .all(
-                    "UPDATE endpoints SET parent_addr = NULL,linked = NULL WHERE id = ?",
+                    "UPDATE endpoints SET parent_addr = NULL,linked = NULL,link_under = NULL WHERE id = ?",
                     &[opt(Some(&id))],
                 )
                 .await?;
@@ -733,7 +759,7 @@ impl Core {
             caps.caps.retain(|cap| cap.by != "policy");
             crate::store::transaction(self.store.clone(), async {
                 self.store.all("WITH RECURSIVE below(id) AS (SELECT id FROM endpoints WHERE parent_ep = ? UNION SELECT e.id FROM endpoints e JOIN below b ON e.parent_ep = b.id) UPDATE endpoints SET tree = ?, depth = depth - ? WHERE id IN (SELECT id FROM below)",&[opt(Some(&id)),opt(Some(&id)),SqlValue::Int(shift)]).await?;
-                self.store.all("UPDATE endpoints SET tree = NULL,parent_ep = NULL,depth = 0,linked = NULL,caps = ? WHERE id = ?",&[caps_json(&mut caps),opt(Some(&id))]).await?;
+                self.store.all("UPDATE endpoints SET tree = NULL,parent_ep = NULL,depth = 0,linked = NULL,caps = ?,link_under = NULL WHERE id = ?",&[caps_json(&mut caps),opt(Some(&id))]).await?;
                 Ok::<_, RpcError>(())
             })
             .await?;
@@ -741,13 +767,31 @@ impl Core {
         self.audit("unlink", Some(&id), None, detail).await?;
         Ok(json!({"endpoint": self.view(&self.must_endpoint(&id).await?).await?, "parent": from}))
     }
-    async fn parent_address(&self, row: &Row) -> Result<String, RpcError> {
+    /// the address of the parent `row` sits under, local or on another machine
+    pub(crate) async fn parent_address(&self, row: &Row) -> Result<String, RpcError> {
         if let Some(parent) = text(row, "parent_ep")
             && let Some(parent) = self.by_id(parent).await?
         {
             return Ok(address(&parent));
         }
-        Ok(text(row, "parent_addr").unwrap_or("another agent").into())
+        Ok(match text(row, "parent_addr") {
+            Some(key) => self
+                .linked_parent(row, None)
+                .await?
+                .unwrap_or_else(|| key.to_owned()),
+            None => "another agent".into(),
+        })
+    }
+    /// a link of `row`, which already sits under a parent, to another one
+    async fn already_linked(&self, row: &Row) -> Result<RpcError, RpcError> {
+        Ok(RpcError::new(
+            ErrorCode::ScopeRefused,
+            format!(
+                "{} already sits under {}; unlink it first",
+                address(row),
+                self.parent_address(row).await?
+            ),
+        ))
     }
     pub async fn relink(
         &mut self,

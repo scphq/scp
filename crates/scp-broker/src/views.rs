@@ -117,6 +117,8 @@ impl Core {
                 .as_ref()
                 .map(address)
                 .map_or(Value::Null, Value::String);
+        } else if text(row, "kind") == Some("agent") && text(row, "parent_addr").is_some() {
+            view["parent"] = json!(self.linked_parent(row, None).await?);
         }
         Ok(view)
     }
@@ -210,6 +212,8 @@ impl Core {
                 }
                 if text(&row, "parent_ep").is_some_and(|p| !shown.contains(p)) {
                     view["parent"] = Value::Null;
+                } else if text(&row, "parent_ep").is_none() && text(&row, "kind") == Some("agent") {
+                    view["parent"] = json!(self.linked_parent(&row, Some(shown)).await?);
                 }
             }
             endpoints.push(view);
