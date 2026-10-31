@@ -20,5 +20,7 @@ pub mod server;
 pub mod session;
 pub mod state;
 pub mod store;
+pub mod sweep;
+pub mod sweep_seam;
 pub mod views;
 pub mod world;
