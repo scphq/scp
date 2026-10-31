@@ -112,14 +112,14 @@ impl Core {
     }
 
     /// the via record of a worker its runner started on another machine, under the record's spawner; a worker of this machine has none
-    async fn via_for(&self, row: &Row) -> Result<Option<Row>, RpcError> {
+    pub(crate) async fn via_for(&self, row: &Row) -> Result<Option<Row>, RpcError> {
         if self.local_row(row) {
             return Ok(None);
         }
         let Some(parent) = text(row, "parent_addr") else {
             return Ok(None);
         };
-        let spawner = self.lookup(parent).await.ok();
+        let spawner = self.by_key(parent).await?;
         let spawner = spawner.as_ref().and_then(|s| text(s, "id"));
         Ok(self
             .store

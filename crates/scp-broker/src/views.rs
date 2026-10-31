@@ -134,6 +134,15 @@ impl Core {
         } else if text(row, "kind") == Some("agent") && text(row, "parent_addr").is_some() {
             view["parent"] = json!(self.linked_parent(row, None).await?);
         }
+        if let Some(via) = self.via_for(row).await? {
+            let mut runner = json!({"name": text(&via, "runner")});
+            for key in ["ref", "attach"] {
+                if let Some(value) = text(&via, key) {
+                    runner[key] = json!(value);
+                }
+            }
+            view["runner"] = runner;
+        }
         Ok(view)
     }
     pub async fn ancestors(&self, row: &Row) -> Result<Vec<String>, RpcError> {
