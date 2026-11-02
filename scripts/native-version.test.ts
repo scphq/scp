@@ -21,13 +21,16 @@ test("native packages stay pinned to the CLI version", () => {
     writeFileSync(file, JSON.stringify(cli));
     expect(() => checkVersion(root)).toThrow("optionalDependencies");
     for (const name of nativeNames) expect(publishTargets(nativeRoot)).toContain(name);
-    const binary = join(root, "scp-hook");
-    writeFileSync(binary, "binary fixture");
+    const hook = join(root, "scp-hook");
+    const swarm = join(root, "swarm");
+    writeFileSync(hook, "hook fixture");
+    writeFileSync(swarm, "swarm fixture");
     const out = join(root, "pkg");
-    nativePackage("linux-x64-gnu", binary, out);
+    nativePackage("linux-x64-gnu", { hook, swarm }, out);
     const pkg = JSON.parse(readFileSync(join(out, "package.json"), "utf8"));
     expect(pkg).toMatchObject({ name: "@scp-dev/native-linux-x64-gnu", version: nativeVersion(), os: ["linux"], cpu: ["x64"], libc: ["glibc"] });
-    expect(readFileSync(join(out, "bin/scp-hook"), "utf8")).toBe("binary fixture");
+    expect(readFileSync(join(out, "bin/scp-hook"), "utf8")).toBe("hook fixture");
+    expect(readFileSync(join(out, "bin/swarm"), "utf8")).toBe("swarm fixture");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

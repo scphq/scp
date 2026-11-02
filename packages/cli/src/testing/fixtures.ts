@@ -39,6 +39,12 @@ function newest(dir: string): number {
 }
 
 /** builds the CLI and the packages it runs on when a dist entry is missing or older than its sources */
+/** what sends a test's `swarm mcp` to the native server when the run names one: test-setup keeps these past its SCP_ clear */
+export function nativeMcpEnv(): Record<string, string> {
+  const bin = process.env.SCP_MCP_BIN
+  return process.env.SCP_NATIVE === "1" && bin ? { SCP_NATIVE: "1", SCP_MCP_BIN: bin } : {}
+}
+
 export function ensureBuilt() {
   const stale = ENTRIES.some(([entry, src]) => (statSync(join(packages, entry), { throwIfNoEntry: false })?.mtimeMs ?? 0) < newest(join(packages, src)))
   if (!stale) return

@@ -1691,6 +1691,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "scp-mcp"
+version = "0.4.4"
+dependencies = [
+ "hex",
+ "libc",
+ "rand 0.8.5",
+ "scp-dev-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "scp-relay-server"
 version = "0.4.4"
 dependencies = [
@@ -1731,6 +1745,19 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "scp-swarm"
+version = "0.4.4"
+dependencies = [
+ "clap",
+ "libc",
+ "scp-broker",
+ "scp-hook",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
