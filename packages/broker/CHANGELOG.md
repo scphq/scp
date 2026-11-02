@@ -1,5 +1,14 @@
 # @scp-dev/broker
 
+## 0.13.6
+
+### Patch Changes
+
+- 2038a9c: An endpoint's name, mail and title never pass to an unrelated session. A claim takes over a released endpoint of another harness session only at a handle it was given (never a derived default it walked to), with the grant that endpoint spent, or from the harness process that holds it; the CLI marks its default handles with the new claim field `derived`. A session whose shim takes back its own name after its hooks claimed a default one is no longer moved back onto that default. `swarm relink --check` lists each endpoint at a background session's name, or moved off it, that another session now holds, and changes nothing.
+- Updated dependencies [2038a9c]
+  - @scp-dev/core@0.18.6
+  - @scp-dev/hub@0.13.6
+
 ## 0.13.5
 
 ### Patch Changes
