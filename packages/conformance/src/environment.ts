@@ -6,6 +6,8 @@ export const containerImage = process.env.SCP_CONFORMANCE_IMAGE;
 export const selectedTargets = process.env.SCP_CONFORMANCE_TARGETS?.split(",").map((name) => name.trim());
 export const brokerBinary = process.env.SCP_BROKER_BIN;
 export const brokerNode = process.env.SCP_BROKER_NODE;
+/** the native `swarm` the `ts-native` broker target runs through the CLI under SCP_NATIVE=1 */
+export const swarmBinary = process.env.SCP_SWARM_BIN;
 export const selectedBrokerTargets = process.env.SCP_BROKER_TARGETS?.split(",").map((name) => name.trim());
 export const brokerReferenceWakers = process.env.SCP_BROKER_WAKERS === "1";
 export const compatConformance = process.env.SCP_CONFORMANCE_COMPAT === "1";

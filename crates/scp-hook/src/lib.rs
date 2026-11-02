@@ -651,6 +651,12 @@ fn fallback(
     }
 }
 
+/// `run` as a binary entry: silent on panic and on errors, since a hook never fails its harness
+pub fn entry(origin: u64, argv: &[String]) {
+    std::panic::set_hook(Box::new(|_| {}));
+    let _ = std::panic::catch_unwind(|| run(origin, argv));
+}
+
 pub fn run(origin: u64, argv: &[String]) -> io::Result<()> {
     let Some((launcher, args)) = parse_argv(argv) else {
         return Ok(());

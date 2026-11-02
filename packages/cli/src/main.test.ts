@@ -1415,7 +1415,7 @@ describe("swarm status, a summary", () => {
     const status = await swarm(["status"], env)
     expect(status.code).toBe(0)
     expect(status.stdout.split("\n")).toEqual([
-      `broker ${broker.socket} (pid ${process.pid}); no policy at ${join(process.env.HOME!, "summary-policy.json")}, open`,
+      `broker ${broker.socket} (pid ${process.pid}, engine ts); no policy at ${join(process.env.HOME!, "summary-policy.json")}, open`,
       "",
       "agents: 4 online, 0 idle, 1 offline",
       "  claude-code: 1 waiting, 1 no status",

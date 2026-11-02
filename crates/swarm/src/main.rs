@@ -1,0 +1,200 @@
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use scp_broker::daemon::{self, DEFAULT_IDLE_S, idle_seconds};
+use scp_broker::paths::Paths;
+
+const VERSION: &str = env!("SWARM_VERSION");
+const USAGE: &str = "usage:
+  swarm daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground
+  swarm daemon stop|restart                        stop the running broker, or replace it with a fresh one
+  swarm hook <harness> [args]                      run a harness hook (also [launcher...] hook <args>)
+  swarm mcp                                        the MCP server
+  swarm --version";
+
+#[derive(Parser)]
+#[command(name = "swarm daemon", no_binary_name = true)]
+struct Daemon {
+    /// stop or restart
+    action: Option<String>,
+    #[arg(long, value_parser = idle_seconds)]
+    idle: Option<f64>,
+    #[arg(long)]
+    policy: Option<PathBuf>,
+}
+
+fn main() {
+    let origin = scp_hook::now();
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let code = match args.first().map(String::as_str) {
+        Some("--version" | "-V") => {
+            let _ = writeln!(std::io::stdout(), "swarm {VERSION}");
+            0
+        }
+        Some("--help" | "-h" | "help") => {
+            let _ = writeln!(std::io::stdout(), "{USAGE}");
+            0
+        }
+        Some("daemon") => daemon_command(&args[1..]),
+        Some("mcp") => {
+            eprintln!("swarm mcp: not yet native; run the npm CLI's swarm mcp");
+            1
+        }
+        _ if args.iter().any(|arg| arg == "hook") => {
+            scp_hook::entry(origin, &args);
+            0
+        }
+        Some(other) => {
+            eprintln!(
+                "swarm: {other} is not native yet; this binary runs daemon, hook and mcp\n{USAGE}"
+            );
+            2
+        }
+        None => {
+            eprintln!("{USAGE}");
+            2
+        }
+    };
+    std::process::exit(code);
+}
+
+fn daemon_command(args: &[String]) -> i32 {
+    let options = match Daemon::try_parse_from(args) {
+        Ok(options) => options,
+        Err(error) => {
+            let _ = error.print();
+            return 2;
+        }
+    };
+    match options.action.as_deref() {
+        None => foreground(options),
+        Some(action @ ("stop" | "restart"))
+            if options.idle.is_none() && options.policy.is_none() =>
+        {
+            match control(action == "restart") {
+                Ok(line) => {
+                    println!("{line}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("swarm: {error}");
+                    1
+                }
+            }
+        }
+        Some(_) => {
+            eprintln!(
+                "swarm daemon takes stop or restart, or --idle and --policy to run in the foreground"
+            );
+            2
+        }
+    }
+}
+
+fn foreground(options: Daemon) -> i32 {
+    let idle = match options.idle {
+        Some(idle) => idle,
+        None => match std::env::var("SCP_IDLE") {
+            Ok(raw) => match idle_seconds(&raw) {
+                Ok(idle) => idle,
+                Err(error) => {
+                    eprintln!("swarm: SCP_IDLE: {error}");
+                    return 2;
+                }
+            },
+            Err(_) => DEFAULT_IDLE_S,
+        },
+    };
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("swarm broker: {error}");
+            return 1;
+        }
+    };
+    match runtime.block_on(daemon::run(idle, options.policy)) {
+        Ok(()) => 0,
+        Err(error) if daemon::already_runs(error.as_ref()) => {
+            eprintln!("swarm broker: {error}");
+            0
+        }
+        Err(error) => {
+            eprintln!("swarm broker: {error}");
+            1
+        }
+    }
+}
+
+fn control(restart: bool) -> Result<String, Box<dyn std::error::Error>> {
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let paths = Paths::from_env(&env)?;
+    let stopped = daemon::stop(&paths.dir)?;
+    if !restart {
+        return Ok(match stopped {
+            None => "no relay broker runs".into(),
+            Some(pid) => {
+                format!("stopped the relay broker (pid {pid}); the next command starts a fresh one")
+            }
+        });
+    }
+    let pid = start_detached(&paths)?;
+    Ok(match stopped {
+        None => format!("started a fresh one (pid {pid})"),
+        Some(old) => format!("replaced the relay broker (pid {old}) with a fresh one (pid {pid})"),
+    })
+}
+
+/// starts `swarm daemon` for `paths` detached, its output in broker.log, and waits until it serves
+fn start_detached(paths: &Paths) -> Result<i32, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(&paths.dir)?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(paths.dir.join("broker.log"))?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("daemon")
+        .env("SCP_DIR", &paths.dir)
+        .current_dir(&paths.dir)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe and detaches the child from this terminal
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = command.spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&paths.socket).is_ok()
+            && let Some(pid) = daemon::broker_pid(&paths.dir)
+        {
+            return Ok(pid);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the relay broker (pid {}) did not start within 12 s; see {}",
+                child.id(),
+                paths.dir.join("broker.log").display()
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
