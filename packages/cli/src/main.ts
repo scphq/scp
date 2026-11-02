@@ -302,7 +302,7 @@ agent sessions:
   ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first; --resume of a live bg session attaches
   ${CLI_NAME} claude ls [--all] [--json]          the background sessions, orchestrators first, with their role and endpoint
   ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop and remove finished workers now; the broker
-                                                 also stops one done and idle 600 s and removes it once historic, keeping it wakeable
+                                                 also stops one done and idle 600 s and removes it from claude agents, keeping it wakeable
   ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude-bg hibernation of background sessions
                                                  ${CLI_NAME} claude --bg did not start; stops nothing
   ${CLI_NAME} join [<handle>]                    put the session that runs this shell on the relay (it then shows in list,

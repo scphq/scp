@@ -120,7 +120,7 @@ function input(overrides: Partial<PlanInput> = {}): PlanInput {
     attached: new Set(),
     processes: helpers,
     now,
-    config: { stopAfterS: 600, idleAfterS: 600, remove: true },
+    config: { stopAfterS: 600, idleAfterS: 600, remove: "historic" },
     ...overrides,
   }
 }
@@ -130,7 +130,13 @@ function fixture() {
   cleanups.push(() => rmSync(home, { recursive: true, force: true }))
   const bin = join(home, "bin")
   mkdirSync(bin)
-  const env = { HOME: home, SCP_DIR: join(home, "state"), XDG_CONFIG_HOME: join(home, "config"), PATH: `${bin}:/usr/bin:/bin` }
+  const env: { HOME: string; SCP_DIR: string; XDG_CONFIG_HOME: string; PATH: string; SCP_CLAUDE_BG_REMOVE?: string } = {
+    HOME: home,
+    SCP_DIR: join(home, "state"),
+    XDG_CONFIG_HOME: join(home, "config"),
+    PATH: `${bin}:/usr/bin:/bin`,
+    SCP_CLAUDE_BG_REMOVE: "historic",
+  }
   mkdirSync(bgDir(env), { recursive: true })
   const stateFile = join(home, "claude-state.json")
   const callsFile = join(home, "calls.log")
@@ -186,9 +192,9 @@ writeFileSync(file, JSON.stringify(entries));
           .split("\n")
           .map((line) => JSON.parse(line))
       : []
-  const record = (short = id, handle = "w1") => {
+  const record = (short = id, handle = "w1", grant = "") => {
     const file = join(bgDir(env), `${crypto.randomUUID()}.json`)
-    writeFileSync(file, JSON.stringify({ mcpServers: { scp: { env: { SCP_NAME: handle, SCP_GRANT: "" } } } }), { mode: 0o600 })
+    writeFileSync(file, JSON.stringify({ mcpServers: { scp: { env: { SCP_NAME: handle, SCP_GRANT: grant } } } }), { mode: 0o600 })
     symlinkSync(file, join(bgDir(env), `${short}.json`))
     return file
   }
@@ -295,9 +301,12 @@ describe("planning", () => {
     ["waiting", { entries: [entry({ status: "waiting" })] }],
     ["idle 1 s of 600 s", { agents: [agent({ worked_at: new Date(now - 1000).toISOString() })] }],
     ["idle 1 s of 600 s", { agents: [agent({ state: "working", worked_at: new Date(now - 1000).toISOString() })] }],
-    ["not done, and idle_after_s is Infinity", { agents: [agent({ state: "working" })], config: { stopAfterS: 600, idleAfterS: Infinity, remove: true } }],
-    ["stop_after_s and idle_after_s are Infinity", { config: { stopAfterS: Infinity, idleAfterS: Infinity, remove: true } }],
-    ["idle 3600 s of 7200 s", { config: { stopAfterS: 7200, idleAfterS: 7200, remove: true } }],
+    [
+      "not done, and idle_after_s is Infinity",
+      { agents: [agent({ state: "working" })], config: { stopAfterS: 600, idleAfterS: Infinity, remove: "historic" } },
+    ],
+    ["stop_after_s and idle_after_s are Infinity", { config: { stopAfterS: Infinity, idleAfterS: Infinity, remove: "historic" } }],
+    ["idle 3600 s of 7200 s", { config: { stopAfterS: 7200, idleAfterS: 7200, remove: "historic" } }],
   ]
   for (const [index, [reason, overrides]] of guards.entries()) {
     test(`keeps a guarded worker in case ${index + 1}`, () => {
@@ -306,7 +315,7 @@ describe("planning", () => {
   }
   test("treats handed back work as finished", () => {
     const handedBack = { agents: [agent({ state: "working", handed_back: true })] }
-    expect(plan(input({ ...handedBack, config: { stopAfterS: 600, idleAfterS: Infinity, remove: true } }))[0]?.kind).toBe("stop")
+    expect(plan(input({ ...handedBack, config: { stopAfterS: 600, idleAfterS: Infinity, remove: "historic" } }))[0]?.kind).toBe("stop")
   })
   test("stops an unfinished idle worker after idle_after_s, and a finished one after the sooner threshold", () => {
     expect(plan(input({ agents: [agent({ state: "working" })] }))).toMatchObject([{ kind: "stop", id }])
@@ -314,8 +323,8 @@ describe("planning", () => {
       [7200, 1800],
       [1800, 7200],
     ] as const)
-      expect(plan(input({ config: { stopAfterS, idleAfterS, remove: true } }))[0]?.kind).toBe("stop")
-    expect(plan(input({ agents: [agent({ state: "working" })], config: { stopAfterS: 1800, idleAfterS: 7200, remove: true } }))).toMatchObject([
+      expect(plan(input({ config: { stopAfterS, idleAfterS, remove: "historic" } }))[0]?.kind).toBe("stop")
+    expect(plan(input({ agents: [agent({ state: "working" })], config: { stopAfterS: 1800, idleAfterS: 7200, remove: "historic" } }))).toMatchObject([
       { kind: "keep", reason: "idle 3600 s of 7200 s" },
     ])
   })
@@ -323,7 +332,7 @@ describe("planning", () => {
     const children = [child({ historic: true }), child({ id: "c2", address: "me/c2", presence: "offline", state: "done" })]
     expect(plan(input({ agents: [agent({ children: 2 }), ...children] }))).toMatchObject([{ kind: "stop", id }])
     const historic = plan(input({ agents: [agent({ children: 2, historic: true }), ...children] }))
-    expect(historic).toMatchObject([{ kind: "stop", id }])
+    expect(historic).toMatchObject([{ kind: "remove", id, live: true }])
   })
   test("never stops or removes a session swarm did not start, but clears a stale hibernation once it runs again", () => {
     const unrecorded = input({ records: new Map(), agents: [agent({ state: "working" })] })
@@ -358,18 +367,19 @@ describe("planning", () => {
     expect(plan(aged)).toMatchObject([{ kind: "remove", live: true }])
     expect(plan({ ...aged, olderThanS: 7200 })).toMatchObject([{ kind: "keep", reason: "idle 3600 s of 7200 s" }])
   })
-  test("removes a live historic leaf worker only once it is idle past its stop threshold", () => {
+  test("removes a live historic worker only once it is idle past its stop threshold", () => {
     const live = input({ agents: [agent({ historic: true })] })
     expect(plan(live)).toMatchObject([{ kind: "remove", live: true }])
     expect(plan({ ...live, agents: [agent({ historic: true, state: "working" })] })).toMatchObject([{ kind: "remove", live: true }])
-    const never = { stopAfterS: 600, idleAfterS: Infinity, remove: true }
+    const never = { stopAfterS: 600, idleAfterS: Infinity, remove: "historic" } as const
     expect(plan({ ...live, agents: [agent({ historic: true, state: "working" })], config: never })).toMatchObject([
       { kind: "keep", reason: "not done, and idle_after_s is Infinity" },
     ])
     expect(plan({ ...live, config: { ...never, stopAfterS: Infinity } })).toMatchObject([
       { kind: "keep", reason: "stop_after_s and idle_after_s are Infinity" },
     ])
-    expect(plan({ ...live, agents: [agent({ historic: true, children: 1 }), child({ historic: true })] })).toMatchObject([{ kind: "stop", id }])
+    expect(plan({ ...live, agents: [agent({ historic: true, children: 1 }), child({ historic: true })] })).toMatchObject([{ kind: "remove", id, live: true }])
+    expect(plan({ ...live, agents: [agent({ historic: true, children: 1 }), child()] })).toMatchObject([{ kind: "keep", reason: "1 live worker" }])
     expect(plan({ ...live, agents: [agent({ historic: true, parent: null })] })).toMatchObject([{ kind: "keep", reason: "a root" }])
   })
   test("holds a refused removal for one day unless retried", () => {
@@ -384,6 +394,71 @@ describe("planning", () => {
   })
   test("unhibernates a connected live session", () => {
     expect(plan(input({ agents: [agent({ hibernate: "claude-bg" })] }))[0]).toMatchObject({ kind: "unhibernate", id })
+  })
+  describe("removing on stop", () => {
+    const onStop = { stopAfterS: 600, idleAfterS: 600, remove: "on_stop" } as const
+    test("removes a worker where it would stop it, and a stopped one at once, historic or not", () => {
+      expect(plan(input({ config: onStop }))).toMatchObject([{ kind: "remove", id, live: true }])
+      expect(plan(input({ config: onStop, entries: [stoppedEntry()] }))).toMatchObject([{ kind: "remove", id, live: false }])
+      expect(plan(input({ config: onStop, entries: [stoppedEntry({ state: "done" })], agents: [agent({ state: "working" })] }))).toMatchObject([
+        { kind: "remove", live: false },
+      ])
+      const finished = [agent({ children: 1 }), child({ historic: true, presence: "hibernated", state: "done" })]
+      expect(plan(input({ config: onStop, entries: [stoppedEntry()], agents: finished }))).toMatchObject([{ kind: "remove", live: false }])
+    })
+    test("keeps the stop guards and thresholds", () => {
+      expect(plan(input({ config: onStop, agents: [agent({ worked_at: new Date(now - 1000).toISOString() })] }))).toMatchObject([
+        { kind: "keep", reason: "idle 1 s of 600 s" },
+      ])
+      const stopped = { config: onStop, entries: [stoppedEntry()] }
+      for (const [reason, overrides] of [
+        ["a root", { agents: [agent({ parent: null })] }],
+        ["1 live worker", { agents: [agent({ children: 1 }), child()] }],
+        ["2 live workers", { agents: [agent({ subagents: 2 })] }],
+        ["attached", { attached: new Set([id]) }],
+        ["the caller's own session", { self: new Set([sessionId]) }],
+        ["not started by swarm claude --bg, so no wake ticket would take its endpoint back", { records: new Map() }],
+      ] satisfies [string, Partial<PlanInput>][])
+        expect(plan(input({ ...stopped, ...overrides }))).toMatchObject([{ kind: "keep", reason }])
+      expect(plan(input({ config: onStop, processes: running }))).toMatchObject([{ kind: "keep", reason: "running a background command" }])
+    })
+    test("only stops with stop only, or while a refused removal is held", () => {
+      expect(plan(input({ config: onStop, stopOnly: true }))).toMatchObject([{ kind: "stop", id }])
+      expect(plan(input({ config: onStop, entries: [stoppedEntry()], stopOnly: true }))).toMatchObject([{ kind: "keep", reason: "stopped" }])
+      const states = new Map([[id, { sessionId, cwd: "/work", rmRefused: { at: now - 1000, reason: "unpushed" } }]])
+      expect(plan(input({ config: onStop, states }))).toMatchObject([{ kind: "stop", id }])
+      expect(plan(input({ config: onStop, states, entries: [stoppedEntry()] }))).toMatchObject([{ kind: "keep", reason: "claude rm refused: unpushed" }])
+    })
+    test("keeps a historic worker stopped with remove historic until its endpoint turns historic, and with remove false", () => {
+      const stopped = input({ entries: [stoppedEntry()] })
+      expect(plan(stopped)).toMatchObject([{ kind: "keep", reason: "stopped" }])
+      expect(plan({ ...stopped, config: { ...onStop, remove: false } })).toMatchObject([{ kind: "keep", reason: "stopped" }])
+    })
+  })
+  describe("orphans", () => {
+    const parented = new Map([[id, { file: "/record.json", handle: "w1", parented: true }]])
+    const orphan = (overrides: Partial<PlanInput> = {}) => input({ entries: [stoppedEntry()], agents: [], records: parented, ...overrides })
+    test("removes a stopped worker whose endpoint is gone", () => {
+      expect(plan(orphan())).toMatchObject([{ kind: "orphan", id, record: { file: "/record.json" } }])
+      expect(plan(orphan({ config: { stopAfterS: 600, idleAfterS: 600, remove: "on_stop" } }))).toMatchObject([{ kind: "orphan", id }])
+      expect(plan(orphan({ agents: [agent({ harness_session: "another", handle: "w2" })] }))).toMatchObject([{ kind: "orphan", id }])
+    })
+    test("keeps a root, a live one, an attached one, the caller's own, a held refusal, and any with remove false or stop only", () => {
+      const states = new Map([[id, { sessionId, cwd: "/work", rmRefused: { at: now - 1000, reason: "unpushed" } }]])
+      for (const [reason, overrides] of [
+        ["no endpoint, and it started as a root", { records: new Map([[id, { file: "/record.json", handle: "w1" }]]) }],
+        ["no endpoint", { entries: [entry()] }],
+        ["no endpoint", { config: { stopAfterS: 600, idleAfterS: 600, remove: false } }],
+        ["no endpoint", { config: { stopAfterS: 600, idleAfterS: 600, remove: false }, olderThanS: 60 }],
+        ["no endpoint", { stopOnly: true }],
+        ["attached", { attached: new Set(["lane"]) }],
+        ["the caller's own session", { self: new Set([sessionId]) }],
+        ["claude rm refused: unpushed", { states }],
+        ["no SCP endpoint, so nothing could wake it", { records: new Map() }],
+      ] satisfies [string, Partial<PlanInput>][])
+        expect(plan(orphan(overrides))).toMatchObject([{ kind: "keep", reason }])
+      expect(plan(orphan({ states, retryRefused: true }))).toMatchObject([{ kind: "orphan", id }])
+    })
   })
 })
 
@@ -468,7 +543,8 @@ describe("configuration", () => {
   }
   test("reads defaults and file settings with environment precedence", () => {
     const f = fixture()
-    expect(bgConfig(f.env)).toEqual({ stopAfterS: 120, idleAfterS: 600, remove: true })
+    delete f.env.SCP_CLAUDE_BG_REMOVE
+    expect(bgConfig(f.env)).toEqual({ stopAfterS: 120, idleAfterS: 600, remove: "on_stop" })
     for (const [value, seconds] of [
       ["900", 900],
       ["10m", 600],
@@ -481,7 +557,28 @@ describe("configuration", () => {
       })
     configure(f.env, { claude_bg: { stop_after_s: "Infinity", remove: false } })
     expect(bgConfig(f.env)).toEqual({ stopAfterS: Infinity, idleAfterS: 600, remove: false })
-    expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: "900", SCP_CLAUDE_BG_REMOVE: "1" })).toEqual({ stopAfterS: 900, idleAfterS: 600, remove: true })
+    expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_STOP_AFTER_S: "900", SCP_CLAUDE_BG_REMOVE: "1" })).toEqual({
+      stopAfterS: 900,
+      idleAfterS: 600,
+      remove: "on_stop",
+    })
+    for (const [value, remove] of [
+      ["on_stop", "on_stop"],
+      ["true", "on_stop"],
+      ["historic", "historic"],
+      ["false", false],
+      ["bogus", false],
+    ] as const)
+      expect(bgConfig({ ...f.env, SCP_CLAUDE_BG_REMOVE: value }).remove).toBe(remove)
+    for (const [value, remove] of [
+      [true, "on_stop"],
+      ["on_stop", "on_stop"],
+      ["historic", "historic"],
+      ["bogus", "on_stop"],
+    ] as const) {
+      configure(f.env, { claude_bg: { remove: value } })
+      expect(bgConfig(f.env).remove).toBe(remove)
+    }
   })
   test("reads the claude bg idle threshold from its own names before the shared ones, the environment first at each level", () => {
     const f = fixture()
@@ -709,6 +806,161 @@ describe("background task", () => {
     expect(readState(f.env, id)).toMatchObject({ sessionId, removedAt: now })
     expect(f.facts.hibernate).toBe("claude-bg")
     expect(f.events.some((event) => event[0] === "unhibernate")).toBe(false)
+  })
+})
+
+describe("removing on stop in the background task", () => {
+  const ticket = `kwt_${"ef".repeat(32)}`
+  const listing = ["agents", "--json", "--all"]
+  function onStop() {
+    const f = fixture()
+    f.env.SCP_CLAUDE_BG_REMOVE = "on_stop"
+    return f
+  }
+  test("removes a worker right after its stop, keeps its endpoint hibernated, and lists claude for it no more", async () => {
+    const f = onStop()
+    f.record()
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, ["stop", id], listing, ["rm", id]])
+    expect(readState(f.env, id)).toEqual({ sessionId, cwd: f.home, name: "lane", handle: "w1", stoppedAt: now, removedAt: now })
+    expect(f.facts.hibernate).toBe("claude-bg")
+    expect(f.events.filter((event) => event[0] === "hibernate")).toHaveLength(1)
+    expect(f.events).toContainEqual(["log", `swarm claude: removed ${id} (me/w1)`])
+    f.facts = { ...f.facts, presence: "hibernated", connections: 0 }
+    for (let n = 0; n < 3; n++) await task.run(f.context)
+    expect(f.calls()).toHaveLength(5)
+  })
+  test("removes a worker stopped earlier on the next pass, then a message resumes it into the list on the same endpoint", async () => {
+    const f = onStop()
+    const record = f.record()
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ hibernate: "claude-bg", presence: "hibernated", connections: 0 })
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, ["rm", id]])
+    expect(readState(f.env, id)).toMatchObject({ sessionId, cwd: f.home, name: "lane", handle: "w1", removedAt: now })
+    expect(f.events.some((event) => event[0] === "hibernate" || event[0] === "unhibernate" || event[0] === "kick")).toBe(false)
+    const wake = { ...f.env, SCP_WAKE_REF: reviveRef(sessionId, f.home, "lane"), SCP_WAKE_HANDLE: "w1", SCP_WAKE_ENDPOINT: "me/w1", SCP_WAKE_TICKET: ticket }
+    expect(await claudeWakeCommand(wake, { stdout: () => {} })).toBe(0)
+    expect(f.calls().at(-1)).toEqual({
+      argv: ["--bg", "--resume", sessionId, "--name", "lane", "You were woken by an SCP message: read it with relay_inbox.", "--mcp-config", record],
+      cwd: f.home,
+    })
+    expect(JSON.parse(readFileSync(record, "utf8")).mcpServers.scp.env.SCP_WAKE_TICKET).toBe(ticket)
+    expect(readState(f.env, id)?.removedAt).toBeUndefined()
+    expect(JSON.parse(readFileSync(join(f.home, "claude-state.json"), "utf8"))).toMatchObject([{ id, sessionId, name: "lane", cwd: f.home, pid: 4242 }])
+    f.facts = { ...f.facts, presence: "online", connections: 1, worked_at: new Date(now).toISOString(), mail_at: new Date(now).toISOString() }
+    await task.run(f.context)
+    expect(f.events.at(-1)).toEqual(["unhibernate", "worker-id"])
+    expect(f.calls().filter((call) => call.argv[0] === "rm" || call.argv[0] === "stop")).toHaveLength(1)
+  })
+  test("removes a stopped worker whose endpoint is gone, once, and never a root's", async () => {
+    for (const grant of ["kgr_grant", ""]) {
+      const f = onStop()
+      f.record(id, "w1", grant)
+      f.save([stoppedEntry({ cwd: f.home })])
+      f.facts = agent({ id: "other-id", address: "me/other", handle: "other", harness_session: "other-session", parent: null })
+      const task = claudeBgTask(f.env, f.deps)
+      for (let n = 0; n < 3; n++) await task.run(f.context)
+      if (!grant) {
+        expect(f.calls().map((call) => call.argv)).toEqual([listing])
+        expect(readState(f.env, id)).toBeUndefined()
+        continue
+      }
+      expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, ["rm", id]])
+      expect(readState(f.env, id)).toEqual({ sessionId, cwd: f.home, name: "lane", removedAt: now })
+      expect(f.events).toContainEqual(["log", `swarm claude: removed ${id} (no endpoint)`])
+      expect(f.events.some((event) => event[0] === "hibernate" || event[0] === "kick")).toBe(false)
+    }
+  })
+  test("removes a worker whose endpoint goes away after the listing, and holds a refused orphan removal", async () => {
+    const f = fixture()
+    f.record(id, "w1", "kgr_grant")
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ hibernate: "claude-bg", presence: "hibernated", connections: 0 })
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing])
+    f.facts = agent({ id: "other-id", address: "me/other", handle: "other", harness_session: "other-session", parent: null })
+    writeFileSync(join(f.home, "rm-refuse"), "")
+    await task.run(f.context)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, listing, ["rm", id]])
+    expect(readState(f.env, id)?.rmRefused?.reason).toStartWith(`cannot remove ${id}`)
+    expect(f.events.filter((event) => event[0] === "log").map((event) => event[1])).toEqual([
+      `swarm claude: kept ${id} (no endpoint): claude rm refused: ${readState(f.env, id)?.rmRefused?.reason}`,
+    ])
+  })
+  test("keeps an orphan whose endpoint shows up again right before the removal", async () => {
+    const f = onStop()
+    f.record(id, "w1", "kgr_grant")
+    f.save([stoppedEntry({ cwd: f.home })])
+    f.facts = agent({ id: "other-id", address: "me/other", handle: "other", harness_session: "other-session", parent: null })
+    let reads = 0
+    f.onAgents = () => {
+      if (++reads === 4) f.facts = agent({ hibernate: "claude-bg", presence: "hibernated", connections: 0 })
+    }
+    await f.run()
+    expect(f.calls().map((call) => call.argv)).toEqual([listing])
+    expect(f.events.at(-1)).toEqual(["log", `swarm claude: kept ${id} (no endpoint): it has an endpoint again`])
+  })
+  test("removes a worker it stopped earlier once its endpoint turns historic, with remove historic", async () => {
+    const f = fixture()
+    f.record()
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, ["stop", id]])
+    f.facts = { ...f.facts, presence: "hibernated", connections: 0 }
+    await task.run(f.context)
+    expect(f.calls()).toHaveLength(3)
+    f.facts = { ...f.facts, historic: true }
+    await task.run(f.context)
+    expect(
+      f
+        .calls()
+        .map((call) => call.argv)
+        .slice(3),
+    ).toEqual([listing, listing, ["rm", id]])
+    expect(readState(f.env, id)).toMatchObject({ stoppedAt: now, removedAt: now })
+  })
+  test("tries a removal claude refused after the stop again a day later", async () => {
+    const f = onStop()
+    f.record()
+    writeFileSync(join(f.home, "rm-refuse"), "")
+    let at = now
+    f.deps.now = () => at
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, ["stop", id], listing, ["rm", id]])
+    f.facts = { ...f.facts, presence: "hibernated", connections: 0 }
+    await task.run(f.context)
+    expect(f.calls()).toHaveLength(5)
+    at = now + 86_400_000
+    rmSync(join(f.home, "rm-refuse"))
+    await task.run(f.context)
+    expect(
+      f
+        .calls()
+        .map((call) => call.argv)
+        .slice(5),
+    ).toEqual([listing, listing, ["rm", id]])
+    expect(readState(f.env, id)?.removedAt).toBe(at)
+  })
+  test("keeps an orphan a claude attach took, or that claude lists running again, right before the removal", async () => {
+    for (const race of ["attach", "running"] as const) {
+      const f = onStop()
+      f.record(id, "w1", "kgr_grant")
+      f.save([stoppedEntry({ cwd: f.home })])
+      f.facts = agent({ id: "other-id", address: "me/other", handle: "other", harness_session: "other-session", parent: null })
+      let reads = 0
+      f.deps.ps = async () => (race === "attach" && reads++ ? `/usr/bin/claude attach ${id}` : "")
+      if (race === "running") f.onAgents = () => f.calls().length && f.save([entry({ cwd: f.home })])
+      await f.run()
+      expect(f.calls().map((call) => call.argv[0])).not.toContain("rm")
+      expect(f.events.at(-1)?.[1]).toBe(`swarm claude: kept ${id} (no endpoint): ${race === "attach" ? "attached" : "claude shows it running again (idle)"}`)
+    }
   })
 })
 
@@ -1107,6 +1359,35 @@ describe("broker commands", () => {
     ])
     for (const flag of [["--stop-only"], ["--older-than", "1h"]])
       await expect(f.prune(["--unhibernate-unrecorded", ...flag])).rejects.toThrow("does not go with --stop-only or --older-than")
+  })
+  test("prunes with remove on_stop: a worker is removed as it stops, and an orphan is removed with it", async () => {
+    const f = await brokerFixture()
+    f.env.SCP_CLAUDE_BG_REMOVE = "on_stop"
+    const orphanId = "5a2b3c4d"
+    f.record(orphanId, "w9", "kgr_grant")
+    f.save([entry({ cwd: f.home }), stoppedEntry({ id: orphanId, sessionId: `${orphanId}-0000-4000-8000-000000000001`, name: "gone", cwd: f.home })])
+    expect(await f.prune(["--dry-run"])).toBe(0)
+    expect(f.lines).toEqual([`would remove ${id} me/w1`, `would remove ${orphanId} no endpoint`])
+    const rows: string[] = []
+    expect(await claudeBgCommand("ls", ["--all", "--json"], f.env, (line) => rows.push(line), f.deps)).toBe(0)
+    expect(JSON.parse(rows[0]!)).toMatchObject([
+      { id, policy: "due: remove" },
+      { id: orphanId, policy: "due: remove, no endpoint" },
+    ])
+    f.lines.length = 0
+    expect(await f.prune([])).toBe(0)
+    expect(f.lines).toEqual([`removed ${id} me/w1`, `removed ${orphanId} no endpoint`])
+    expect(
+      f
+        .calls()
+        .filter((call) => call.argv[0] === "stop" || call.argv[0] === "rm")
+        .map((call) => call.argv),
+    ).toEqual([
+      ["stop", id],
+      ["rm", id],
+      ["rm", orphanId],
+    ])
+    expect(f.broker.core.whoami(f.worker.endpoint.id)).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg", revivable: true })
   })
   test("names the missing broker when pruning cannot connect", async () => {
     const f = fixture()
