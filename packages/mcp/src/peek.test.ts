@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PREAMBLE } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
+import { type ServerMode, serverModes, startNative } from "./native-test"
 import { runRelayMcp, TOOLS } from "./server"
 
 setDefaultTimeout(20_000)
@@ -11,30 +12,41 @@ setDefaultTimeout(20_000)
 type Result = { content?: { text: string }[]; isError?: boolean }
 type Message = { id?: number; result?: Result }
 
-/** an in-process MCP client around runRelayMcp, initialized */
-function shim(broker: Broker, handle: string) {
-  const lines: string[] = []
-  const queue: (string | null)[] = []
-  let waiting: (() => void) | undefined
-  const push = (chunk: string | null) => {
-    queue.push(chunk)
-    waiting?.()
-  }
-  async function* input() {
-    for (;;) {
-      while (!queue.length) await new Promise<void>((resolve) => (waiting = resolve))
-      const chunk = queue.shift()!
-      if (chunk === null) return
-      yield chunk
+/** an MCP client around runRelayMcp in process or the native server, initialized */
+function shimFor(mode: ServerMode, broker: Broker, handle: string) {
+  const claim = { handle, harness: "claude-code", cwd: "/work/proj" }
+  const env = { HOME: "/work" }
+  let lines: string[] = []
+  let push: (chunk: string | null) => void
+  let done: Promise<void>
+  if (mode === "native") {
+    const native = startNative({ socket: broker.socket, claim, env })
+    lines = native.lines
+    push = native.raw
+    done = native.done
+  } else {
+    const queue: (string | null)[] = []
+    let waiting: (() => void) | undefined
+    push = (chunk) => {
+      queue.push(chunk)
+      waiting?.()
     }
+    async function* input() {
+      for (;;) {
+        while (!queue.length) await new Promise<void>((resolve) => (waiting = resolve))
+        const chunk = queue.shift()!
+        if (chunk === null) return
+        yield chunk
+      }
+    }
+    done = runRelayMcp({
+      connect: () => RelayClient.connect(broker.socket),
+      claim,
+      input: input(),
+      output: (line) => lines.push(line),
+      env,
+    })
   }
-  const done = runRelayMcp({
-    connect: () => RelayClient.connect(broker.socket),
-    claim: { handle, harness: "claude-code", cwd: "/work/proj" },
-    input: input(),
-    output: (line) => lines.push(line),
-    env: { HOME: "/work" },
-  })
   push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
   let nextId = 1
   async function call(name: string, args: object = {}): Promise<Result> {
@@ -58,7 +70,8 @@ function shim(broker: Broker, handle: string) {
 
 const textOf = (result: Result) => result.content![0]!.text
 
-describe("relay MCP peek tools", () => {
+describe.each(serverModes)("relay MCP peek tools (%s)", (mode) => {
+  const shim = (broker: Broker, handle: string) => shimFor(mode, broker, handle)
   let broker: Broker
   let dir: string
   const id = (address: string) => broker.core.list({ all: true }).find((e) => e.address === address)!.id

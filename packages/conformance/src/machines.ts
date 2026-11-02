@@ -6,7 +6,7 @@ import { RelayClient, socketPath } from "@scp-dev/broker";
 import type { EndpointView, Envelope, SendResult } from "@scp-dev/core";
 import type { Subprocess } from "bun";
 import { ensureBuilt } from "../../cli/src/testing/fixtures";
-import { brokerBinary, machineBrokers } from "./environment";
+import { brokerBinary, machineBrokers, mcpBinary } from "./environment";
 import { command, type Target, terminate, waitFor } from "./targets";
 
 export const cli = join(import.meta.dir, "../../cli/dist/cli.js");
@@ -47,6 +47,7 @@ export class Machine {
       CODEX_HOME: join(this.root, "codex"),
       CLAUDE_CONFIG_DIR: join(this.root, "harness"),
       GEMINI_CLI_HOME: this.root,
+      ...(mcpBinary ? { SCP_NATIVE: "1", SCP_MCP_BIN: mcpBinary } : {}),
     });
     this.assertIsolated();
     mkdirSync(this.env.SCP_DIR!, { recursive: true });

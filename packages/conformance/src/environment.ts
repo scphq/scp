@@ -5,6 +5,8 @@ export const slowConformance = process.env.SCP_CONFORMANCE_SLOW === "1";
 export const containerImage = process.env.SCP_CONFORMANCE_IMAGE;
 export const selectedTargets = process.env.SCP_CONFORMANCE_TARGETS?.split(",").map((name) => name.trim());
 export const brokerBinary = process.env.SCP_BROKER_BIN;
+/** the native MCP server binary: packages/mcp tests run each server test against it too */
+export const mcpBinary = process.env.SCP_MCP_BIN;
 export const brokerNode = process.env.SCP_BROKER_NODE;
 export const selectedBrokerTargets = process.env.SCP_BROKER_TARGETS?.split(",").map((name) => name.trim());
 export const brokerReferenceWakers = process.env.SCP_BROKER_WAKERS === "1";

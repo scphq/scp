@@ -11,6 +11,9 @@ process.env.XDG_DATA_HOME = join(home, ".local", "share")
 process.env.CLAUDE_CONFIG_DIR = join(home, ".claude")
 process.env.CODEX_HOME = join(home, ".codex")
 process.env.GEMINI_CLI_HOME = home
+const nativeMcp = process.env.SCP_MCP_BIN
 for (const key of Object.keys(process.env)) if (key.startsWith("SCP_")) delete process.env[key]
 process.env.SCP_HARNESS_DETECT = "0"
+// With a native MCP server binary given, every `swarm mcp` the tests start runs on it.
+if (nativeMcp) Object.assign(process.env, { SCP_NATIVE: "1", SCP_MCP_BIN: nativeMcp })
 process.on("exit", () => rmSync(home, { recursive: true, force: true }))
