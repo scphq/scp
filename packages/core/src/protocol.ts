@@ -308,6 +308,11 @@ export interface Claim {
   lineage?: string[]
   /** a `krt_` grant from `spawn-env`: places the claim at or below its lineage placement, with the grant's caps and groups */
   grant?: string
+  /**
+   * the handle is the client's default for its harness and cwd, not a name given: it takes over no released endpoint another harness session
+   * holds, not even at that handle
+   */
+  derived?: boolean
   /** the handle as named (`--as`): never suffixed; it takes over or joins that endpoint where the rules allow, else the claim is refused */
   exact?: boolean
   /**

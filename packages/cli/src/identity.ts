@@ -766,7 +766,8 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
   const cwd = isAbsolute(input.cwd) ? input.cwd : resolve(input.cwd)
   const own = processKey(pid, input.startOf)
   const launched = harness === "muse" && !input.env.SCP_NAME && !input.env.SCP_GRANT ? readMuseLaunch(own, input.env, input.stateDir) : undefined
-  const handle = input.as ?? input.env.SCP_NAME ?? launched?.name ?? (harness === "claude-cowork" ? coworkHandle(input.env) : deriveHandle(harness, cwd))
+  const given = input.as ?? input.env.SCP_NAME ?? launched?.name
+  const handle = given ?? (harness === "claude-cowork" ? coworkHandle(input.env) : deriveHandle(harness, cwd))
   const grant = input.env.SCP_GRANT || launched?.grant
   const under = input.env.SCP_UNDER || launched?.under
   const harnessProcess = launched?.launcher ?? own
@@ -799,6 +800,7 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
     ...(under ? { under } : {}),
     ...(threaded ? { lineage: keys.filter((key) => key !== own && key !== `pid:${pid}`) } : keys.length ? { lineage: keys } : {}),
     ...(grant ? { grant } : {}),
+    ...(given === undefined ? { derived: true } : {}),
     ...(harnessSession ? { harness_session: harnessSession } : {}),
     ...(origin ? { harness_origin: origin, ...(backgroundHandoff(input.env) ? { harness_handoff: true } : {}) } : {}),
   }

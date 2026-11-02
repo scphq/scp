@@ -83,6 +83,7 @@ function agent(overrides: Partial<LocalAgent> = {}): LocalAgent {
     children: 0,
     subagents: 0,
     harness_session: sessionId,
+    harness_origin: null,
     state: "done",
     presence: "online",
     historic: false,

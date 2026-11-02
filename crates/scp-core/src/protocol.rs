@@ -525,6 +525,9 @@ pub struct Claim {
     /// Take over the idle origin endpoint for this background session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_handoff: Option<bool>,
+    /// The handle is the client's default, not a name given: no other session's endpoint is taken for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived: Option<bool>,
     /// Ancestor process keys, nearest first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<Vec<String>>,
@@ -1349,13 +1352,14 @@ mod tests {
             "handle": "worker", "harness": "agent", "model": "model", "cwd": "/work",
             "parent": "ep-parent", "labels": {"team": "core"}, "session": "session",
             "process": "pid:12:34", "harness_session": "resume", "harness_origin": "origin",
-            "harness_handoff": true, "lineage": ["pid:12:34"], "grant": "grant", "exact": false,
+            "harness_handoff": true, "derived": true, "lineage": ["pid:12:34"], "grant": "grant", "exact": false,
             "subagent": {"id": "sub", "type": "explore", "stop": false},
             "scope": "tree", "in": ["*"], "out": ["parent"], "groups": ["team"],
             "under": "me/root", "ticket": "ticket"
         });
         let claim: Claim = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(claim.harness_handoff, Some(true));
+        assert_eq!(claim.derived, Some(true));
         assert_eq!(claim.r#in, Some(vec!["*".into()]));
         assert_eq!(
             claim.subagent.as_ref().unwrap().r#type.as_deref(),

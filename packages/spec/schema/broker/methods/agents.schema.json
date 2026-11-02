@@ -57,6 +57,12 @@
                   "null"
                 ]
               },
+              "harness_origin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "state": {
                 "anyOf": [
                   {
@@ -115,6 +121,7 @@
               "children",
               "subagents",
               "harness_session",
+              "harness_origin",
               "state",
               "presence",
               "historic",

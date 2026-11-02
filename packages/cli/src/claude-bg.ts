@@ -423,6 +423,21 @@ export function readState(env: Env, id: string): BgState | undefined {
   }
 }
 
+/** every background session a state file records, by short id */
+export function readAllStates(env: Env): (BgState & { id: string })[] {
+  let names: string[] = []
+  try {
+    names = readdirSync(bgDir(env))
+  } catch {
+    return []
+  }
+  return names.flatMap((name) => {
+    const id = name.slice(0, -".state.json".length)
+    const state = name.endsWith(".state.json") && SHORT_ID.test(id) ? readState(env, id) : undefined
+    return state ? [{ ...state, id }] : []
+  })
+}
+
 function writeState(env: Env, id: string, state: BgState): void {
   const path = statePath(env, id)
   privateDir(bgDir(env))
