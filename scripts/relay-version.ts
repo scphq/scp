@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 export const relayRoot = resolve(import.meta.dir, "..");
 export const relayAnchor = "crates/package.json";
 export const relayCrates = ["scp-dev-core", "scp-relay-server", "scp-relay-store"] as const;
-const workspaceCrates = [...relayCrates, "scp-broker", "scp-mcp"] as const;
+const workspaceCrates = [...relayCrates, "scp-broker", "scp-mcp", "scp-swarm"] as const;
 const pins = [
   ["crates/scp-relay/Cargo.toml", "scp-relay-store"],
   ["crates/scp-relay/Cargo.toml", "scp-core"],

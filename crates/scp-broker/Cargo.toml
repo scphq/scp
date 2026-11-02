@@ -20,11 +20,11 @@ libc = "=0.2.191"
 rand.workspace = true
 regex = "=1.13.1"
 reqwest = { workspace = true, features = ["rustls-tls"] }
-scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.4" }
+scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.5" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "json"] }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

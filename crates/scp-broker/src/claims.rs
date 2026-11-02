@@ -169,6 +169,8 @@ pub(crate) struct Fields {
     pub(crate) harness_origin: Option<String>,
     pub(crate) harness_handoff: bool,
     pub(crate) under: Option<String>,
+    /// the handle is the client's default for its harness and cwd, not a name given
+    pub(crate) derived: bool,
 }
 #[derive(Clone)]
 pub(crate) struct Scope {
@@ -403,6 +405,36 @@ impl Core {
         parent.and_then(|r| text(r, "id")) == text(row, "parent_ep")
             || (parent.is_none() && integer(row, "linked").is_some())
     }
+    /// whether a claim that walked to `row`, a released row, by its `n`th handle may take it over: a row of no other harness session (none
+    /// reported on either side, the claim's own, or its origin), one at the claim's own handle that was given rather than derived, one whose grant the
+    /// claim redeems, or one its own harness process holds. A handle collision alone never passes a session's endpoint to another
+    async fn proven(
+        &self,
+        row: &Row,
+        n: usize,
+        scope: &Scope,
+        fields: &Fields,
+        harness: &str,
+        hooks: Option<&Row>,
+    ) -> Result<bool, RpcError> {
+        let reported = text(row, "harness_session");
+        let foreign = reported.is_some()
+            && fields.harness_session.is_some()
+            && reported != fields.harness_session.as_deref()
+            && reported != fields.harness_origin.as_deref();
+        if !foreign || (n == 1 && !fields.derived) {
+            return Ok(true);
+        }
+        if fields
+            .process
+            .as_deref()
+            .zip(text(row, "process"))
+            .is_some_and(|(a, b)| same_harness(a, b))
+        {
+            return Ok(true);
+        }
+        self.redeems(row, scope, fields, harness, hooks).await
+    }
     async fn returns(
         &self,
         row: &Row,
@@ -465,7 +497,11 @@ impl Core {
             {
                 continue;
             }
-            if instead.is_some_and(|r| text(r, "id") == text(&row, "id")) {
+            if instead.is_some_and(|r| {
+                text(r, "id") == text(&row, "id")
+                    || integer(&row, "created_at").unwrap_or(0)
+                        > integer(r, "created_at").unwrap_or(0)
+            }) {
                 continue;
             }
             if !harness_fits(text(&row, "harness"), harness)
@@ -647,8 +683,12 @@ impl Core {
                 let handle = suffixed(&scope.handle, n);
                 let held = self.by_handle(&handle).await?;
                 if let Some(held) = held {
-                    if self.released(&held).await
+                    if !revivable(&held)
+                        && self.released(&held).await
                         && harness_fits(text(&held, "harness"), harness)
+                        && self
+                            .proven(&held, n, scope, fields, harness, Some(&hooks))
+                            .await?
                         && self
                             .returns(
                                 &held,
@@ -717,11 +757,12 @@ impl Core {
                 let other_session = text(&held, "harness_session").is_some()
                     && fields.harness_session.is_some()
                     && text(&held, "harness_session") != fields.harness_session.as_deref()
-                    && fields
-                        .process
-                        .as_deref()
-                        .zip(text(&held, "process"))
-                        .is_some_and(|(a, b)| same_harness(a, b));
+                    && (crate::wake::broker_wake(&held)
+                        || fields
+                            .process
+                            .as_deref()
+                            .zip(text(&held, "process"))
+                            .is_some_and(|(a, b)| same_harness(a, b)));
                 let outlived = integer(&held, "connections").unwrap_or(0) > 0
                     && match text(&held, "process") {
                         Some(key) => {
@@ -745,12 +786,13 @@ impl Core {
                         })
                 });
                 if text(&held, "kind") == Some("agent")
+                    && !revivable(&held)
                     && (self.released(&held).await || (!transient && outlived))
                     && harness_fits(text(&held, "harness"), harness)
                     && !other_session
                     && !foreign_sub
                 {
-                    own = transient
+                    let mine = transient
                         && fields
                             .process
                             .as_deref()
@@ -765,7 +807,8 @@ impl Core {
                             Some(key) => !self.procs.alive(key).await,
                             None => false,
                         };
-                    if (!transient || own || ended)
+                    if (!transient || mine || ended)
+                        && self.proven(&held, n, scope, fields, harness, None).await?
                         && self
                             .returns(
                                 &held,
@@ -777,6 +820,7 @@ impl Core {
                             .await?
                     {
                         row = Some(held);
+                        own = mine;
                         break;
                     }
                 } else if exact
@@ -828,7 +872,7 @@ impl Core {
                 .await?;
             self.store
                 .all(
-                    "UPDATE endpoints SET session = NULL,hook_seen = NULL WHERE id = ?",
+                    "UPDATE endpoints SET session = NULL,hook_seen = NULL,harness_session = NULL,harness_origin = NULL WHERE id = ?",
                     &[opt(text(&hooks, "id"))],
                 )
                 .await?;
@@ -1264,7 +1308,7 @@ impl Core {
                 "handle is not valid: lowercase letters, digits, . _ -",
             ));
         }
-        let fields = Fields {
+        let mut fields = Fields {
             model: clean_text(claim.get("model"), "model", 128)?,
             cwd: clean_text(claim.get("cwd"), "cwd", 1024)?,
             parent: clean_text(claim.get("parent"), "parent", 128)?,
@@ -1275,6 +1319,7 @@ impl Core {
             harness_origin: clean_text(claim.get("harness_origin"), "harness_origin", 128)?,
             harness_handoff: claim.get("harness_handoff") == Some(&Value::Bool(true)),
             under: clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty()),
+            derived: claim.get("derived") == Some(&Value::Bool(true)),
         };
         if fields
             .process
@@ -1319,6 +1364,9 @@ impl Core {
             .is_some_and(|v| !v.is_boolean())
         {
             return Err(RpcError::invalid_params("harness_handoff is true or false"));
+        }
+        if claim.get("derived").is_some_and(|v| !v.is_boolean()) {
+            return Err(RpcError::invalid_params("derived is true or false"));
         }
         let lineage = lineage_keys(claim.get("lineage"))?;
         let keys = lineage_keys(self_keys)?;
@@ -1372,6 +1420,7 @@ impl Core {
             scope.grant = text(&bound, "token_hash").map(str::to_owned);
             if let Some(name) = text(&bound, "name") {
                 scope.handle = name.into();
+                fields.derived = false;
             }
         }
         let claimed = self.claim_row(&harness, &fields, &scope, transient).await?;

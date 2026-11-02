@@ -11,6 +11,8 @@ process.env.XDG_DATA_HOME = join(home, ".local", "share")
 process.env.CLAUDE_CONFIG_DIR = join(home, ".claude")
 process.env.CODEX_HOME = join(home, ".codex")
 process.env.GEMINI_CLI_HOME = home
+/** a native `swarm` for the tests that run it, read before the SCP variables are cleared */
+export const swarmBinary = process.env.SCP_SWARM_BIN
 const nativeMcp = process.env.SCP_MCP_BIN
 for (const key of Object.keys(process.env)) if (key.startsWith("SCP_")) delete process.env[key]
 process.env.SCP_HARNESS_DETECT = "0"

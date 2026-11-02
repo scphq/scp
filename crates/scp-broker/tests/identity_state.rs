@@ -564,3 +564,107 @@ async fn handoff_and_live_relink_skip_ineligible_origins() {
         tokio::fs::remove_dir_all(dir).await.expect("cleanup");
     }
 }
+
+#[tokio::test]
+async fn a_shim_taking_back_its_name_after_its_hooks_derived_claim_is_never_rehomed_onto_it() {
+    let (mut core, dir) = fixture().await;
+    let (lane_conn, lane) = hello(
+        &mut core,
+        json!({"claim":{"handle":"lane-a","harness":"agent-test","harness_session":"lane"}}),
+    )
+    .await;
+    call(
+        &mut core,
+        lane_conn,
+        "event",
+        json!({"kind":"tool","session_id":"lane"}),
+    )
+    .await;
+    core.disconnect(lane_conn).await;
+    let lane_id = lane["endpoint"]["id"].as_str().expect("id").to_owned();
+    core.store
+        .all(
+            "UPDATE endpoints SET created_at = ?,hook_seen = NULL,session = NULL WHERE id = ?",
+            &[
+                SqlValue::Int(scp_broker::core::now_ms() - 120_000),
+                SqlValue::Text(lane_id.clone()),
+            ],
+        )
+        .await
+        .expect("ended lane");
+    let process = format!("pid:{}:Mon-Jan-1-00:00:00-1900", std::process::id());
+    let derived = json!({"transient":true,"claim":{"handle":"app","harness":"agent-test","session":"next-process","process":process,"harness_session":"next","derived":true}});
+    let (hook, _) = hello(&mut core, derived.clone()).await;
+    call(
+        &mut core,
+        hook,
+        "event",
+        json!({"kind":"tool","session_id":"next"}),
+    )
+    .await;
+    let (_, shim) = hello(
+        &mut core,
+        json!({"claim":{"handle":"lane-a","harness":"agent-test","session":"next-process","process":process,"harness_session":"next"}}),
+    )
+    .await;
+    assert_eq!(shim["endpoint"]["id"], json!(lane_id));
+    let (_, again) = hello(&mut core, derived).await;
+    assert_eq!(again["endpoint"]["id"], json!(lane_id));
+    assert_eq!(again["endpoint"]["address"], "me/lane-a");
+    drop(core);
+    tokio::fs::remove_dir_all(dir).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn a_derived_claim_takes_no_ended_endpoint_of_another_session() {
+    let (mut core, dir) = fixture().await;
+    let (conn, old) = hello(
+        &mut core,
+        json!({"claim":{"handle":"app","harness":"agent-test","harness_session":"lane","derived":true}}),
+    )
+    .await;
+    call(
+        &mut core,
+        conn,
+        "event",
+        json!({"kind":"tool","session_id":"lane"}),
+    )
+    .await;
+    core.disconnect(conn).await;
+    core.store
+        .all(
+            "UPDATE endpoints SET hook_seen = NULL,session = NULL WHERE id = ?",
+            &[SqlValue::Text(
+                old["endpoint"]["id"].as_str().unwrap().into(),
+            )],
+        )
+        .await
+        .expect("ended lane");
+    let (_, fresh) = hello(
+        &mut core,
+        json!({"claim":{"handle":"app","harness":"agent-test","harness_session":"other","derived":true}}),
+    )
+    .await;
+    assert_ne!(fresh["endpoint"]["id"], old["endpoint"]["id"]);
+    assert_eq!(fresh["endpoint"]["address"], "me/app-2");
+    let (_, back) = hello(
+        &mut core,
+        json!({"claim":{"handle":"app","harness":"agent-test","harness_session":"lane","derived":true}}),
+    )
+    .await;
+    assert_eq!(back["endpoint"]["id"], old["endpoint"]["id"]);
+    let conn = core.state.connect();
+    let error = core
+        .dispatch(
+            conn,
+            "hello",
+            json!({"protocol":"scp/1","claim":{"derived":"yes"}})
+                .as_object()
+                .unwrap(),
+        )
+        .await
+        .expect_err("invalid flag");
+    assert_eq!(error.message, "derived is true or false");
+    drop(core);
+    tokio::fs::remove_dir_all(dir).await.expect("cleanup");
+}

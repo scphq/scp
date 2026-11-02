@@ -85,6 +85,12 @@ pub struct Wakers {
     tx: StdMutex<Option<mpsc::UnboundedSender<String>>>,
 }
 
+/// `$SCP_CLI_ARGV`, a JSON array of the words that start the CLI, when it names at least one
+pub fn cli_argv(env: &std::collections::BTreeMap<String, String>) -> Option<Vec<String>> {
+    let words: Vec<String> = serde_json::from_str(env.get("SCP_CLI_ARGV")?).ok()?;
+    (!words.is_empty() && words.iter().all(|w| !w.is_empty())).then_some(words)
+}
+
 impl Wakers {
     pub fn new(path: PathBuf, builtin: WakerConfigs) -> Self {
         Self {
@@ -97,6 +103,11 @@ impl Wakers {
 
     /// the wakers the broker always knows, by the CLI's own wake commands
     pub fn builtin() -> WakerConfigs {
+        Self::builtin_for(&["swarm".to_owned()])
+    }
+
+    /// the built-in wakers run through `cli`, the words that start the CLI
+    pub fn builtin_for(cli: &[String]) -> WakerConfigs {
         [
             (SPAWN_PROVIDER, "spawn-wake", 60),
             ("codex-queue", "codex-wake", 120),
@@ -107,12 +118,16 @@ impl Wakers {
             (
                 provider.to_owned(),
                 WakerConfig {
-                    command: vec!["swarm".into(), command.into()],
+                    command: cli.iter().cloned().chain([command.into()]).collect(),
                     timeout_s,
                 },
             )
         })
         .collect()
+    }
+
+    pub fn set_builtin(&mut self, builtin: WakerConfigs) {
+        self.builtin = builtin;
     }
 
     /// the built-in wakers under those of the file, read again when its mtime or size changes; a malformed file configures nothing
@@ -200,7 +215,7 @@ struct RunResult {
     stdout: String,
 }
 
-fn broker_wake(row: &Row) -> bool {
+pub(crate) fn broker_wake(row: &Row) -> bool {
     text(row, "hibernate").is_none()
         && text(row, "wake").is_some_and(|w| BROKER_WAKES.iter().any(|b| b.wire() == w))
 }

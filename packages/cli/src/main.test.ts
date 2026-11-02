@@ -1005,6 +1005,13 @@ describe("swarm, lineage and scope arguments", () => {
     expect(none).not.toHaveProperty("grant")
   })
 
+  test("only a default handle is marked derived: --as, SCP_NAME and a launcher's name are names given", () => {
+    const base = { fallbackHarness: "codex", cwd: "/tmp", harnessPid: () => 999, lineageOf: () => [] }
+    expect(relayIdentity({ ...base, env: {} })).toMatchObject({ handle: "codex-tmp", derived: true })
+    expect(relayIdentity({ ...base, env: {}, as: "lane-a" })).not.toHaveProperty("derived")
+    expect(relayIdentity({ ...base, env: { SCP_NAME: "lane-a" } })).not.toHaveProperty("derived")
+  })
+
   test("selector lists are comma-separated, spawn-env flags become grant params", () => {
     expect(selectorList("tree:parent, tree:children,,")).toEqual(["tree:parent", "tree:children"])
     expect(selectorList(["a,b", "c"])).toEqual(["a", "b", "c"])
@@ -1415,7 +1422,7 @@ describe("swarm status, a summary", () => {
     const status = await swarm(["status"], env)
     expect(status.code).toBe(0)
     expect(status.stdout.split("\n")).toEqual([
-      `broker ${broker.socket} (pid ${process.pid}); no policy at ${join(process.env.HOME!, "summary-policy.json")}, open`,
+      `broker ${broker.socket} (pid ${process.pid}, engine ts); no policy at ${join(process.env.HOME!, "summary-policy.json")}, open`,
       "",
       "agents: 4 online, 0 idle, 1 offline",
       "  claude-code: 1 waiting, 1 no status",

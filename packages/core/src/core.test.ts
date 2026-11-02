@@ -1994,6 +1994,26 @@ describe("spawn bindings", () => {
     expect(used()).toBe(endpoint.id)
   })
 
+  test("a bound grant names its worker: a derived claim with it takes the ended worker of that name of another session as a new spawn", () => {
+    const { core, actor, shim, clock } = spawned()
+    const first = shim(6, { harness_session: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a01", derived: true }).endpoint
+    core.event(first.id, { kind: "tool", tool: "Bash", session_id: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a01" }, { transient: true, process: key(6) })
+    core.disconnect(first.id)
+    core.event(first.id, { kind: "session_end" }, { transient: true, process: key(6) })
+    clock.now += (LIMITS.restartGraceS + 1) * 1000
+    core.grant(actor, { name: "wm1", scope: "parent", bind_process: key(8) })
+    const next = core.claim({
+      handle: "muse-work",
+      harness: "muse",
+      process: key(9),
+      session: key(9),
+      lineage: [key(9), key(8), key(1)],
+      harness_session: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a02",
+      derived: true,
+    }).endpoint
+    expect([next.id, next.address, next.parent]).toEqual([first.id, "me/wm1", "me/main"])
+  })
+
   test("a claim without the key, a claim with its own grant and an exact claim leave the bound grant alone", () => {
     const { core, actor, shim, used } = spawned()
     expect(core.claim({ handle: "muse-work", harness: "muse", process: key(7), lineage: [key(7), key(1)] }).endpoint.address).toBe("me/muse-work")

@@ -16,6 +16,7 @@ import {
   type JudgeRedacted,
   LIMITS,
   type LinkPending,
+  type LocalAgent,
   depthText,
   type MessageReceipts,
   PREAMBLE,
@@ -58,7 +59,7 @@ import {
 } from "./common"
 import { SPAWN_HELP } from "./help-spawn"
 import { shortHostname } from "./identity"
-import { relinkReport } from "./relink"
+import { mismatchReport, relinkReport } from "./relink"
 import type { RelayTransport } from "./remote"
 import type { UpValues } from "./up"
 import { exitFlushed, FAILED, note, parseSeconds, printTable, SELF } from "./term"
@@ -321,6 +322,9 @@ agent sessions:
                                                  the pairs; --live also takes a name an idle origin still holds from the
                                                  background session it handed off to, closing the origin's connections; for
                                                  the human at a terminal
+  ${CLI_NAME} relink --check                     list each endpoint at a background session's name, or moved off it, that
+                                                 another harness session now holds, with its id for name --endpoint; changes
+                                                 nothing
   ${CLI_NAME} join [<handle>] --under <parent>   link the session under the agent <parent> (one it may message), as if
                                                  <parent> had spawned it: it shows under <parent> in list --tree, the dashboard
                                                  and the graph, and takes on a worker's scope (the policy's child_default: by
@@ -456,7 +460,7 @@ const VERBS: Record<string, Option[]> = {
   end: IDENTITY,
   machine: [...IDENTITY, "secret-env", "clear"],
   name: [...IDENTITY, "endpoint", "take-over"],
-  relink: [...IDENTITY, "dry-run", "live"],
+  relink: [...IDENTITY, "dry-run", "live", "check"],
   inbox: [...IDENTITY, "wait", "ack", "keep"],
   reply: IDENTITY,
   ack: [...IDENTITY, "all"],
@@ -1115,11 +1119,12 @@ async function runVerb(
         return 0
       }
       const snapshot = await client.request<Snapshot>("snapshot", { all: values.all === true })
+      const engine = broker && snapshot.broker ? (await import("./native")).brokerEngine(snapshot.broker.pid) : undefined
       if (asJson) {
-        json(snapshot)
+        json(snapshot.broker && engine ? { ...snapshot, broker: { ...snapshot.broker, engine } } : snapshot)
         return 0
       }
-      out(snapshot.broker ? brokerLine(snapshot.broker) : where)
+      out(snapshot.broker ? brokerLine(snapshot.broker, engine) : where)
       const quotedAgents = printSummary(snapshot, me, values.all === true)
       const activity = values.activity === true && snapshot.activity.length > 0
       if (activity) {
@@ -1205,7 +1210,27 @@ async function runVerb(
       return 0
     }
     case "relink": {
-      if (positionals.length) throw new RelayUsage(`${CLI_NAME} relink takes no arguments: ${CLI_NAME} relink [--dry-run] [--live]`)
+      if (positionals.length) throw new RelayUsage(`${CLI_NAME} relink takes no arguments: ${CLI_NAME} relink [--dry-run] [--live] [--check]`)
+      if (values.check === true) {
+        if (values.live === true) throw new RelayUsage(`${CLI_NAME} relink --check changes nothing: drop --live`)
+        const { readAllStates, readRecords } = await import("./claude-bg")
+        const sessions = [
+          ...[...readRecords(process.env)].map(([id, record]) => ({ id, ...(record.handle ? { handle: record.handle } : {}) })),
+          ...readAllStates(process.env).map((state) => ({ id: state.id, ...(state.handle ? { handle: state.handle } : {}) })),
+        ]
+        const { agents } = await client.request<{ agents: LocalAgent[] }>("agents")
+        const rehomes: AuditRow[] = []
+        for (let since = 0; ; ) {
+          const { rows } = await client.request<{ rows: AuditRow[] }>("log", { since, limit: 1000 })
+          rehomes.push(...rows.filter((row) => row.event === "rehome"))
+          if (rows.length < 1000) break
+          since = rows.at(-1)!.id
+        }
+        const lines = mismatchReport(sessions, agents, rehomes)
+        if (asJson) json({ mismatched: lines.filter((line) => line.startsWith("me/")) })
+        else out(lines.join("\n"))
+        return 0
+      }
       const dryRun = values["dry-run"] === true
       const live = values.live === true
       const result = await client.request<{ relinked: { from: string; to: string; by: string; live?: boolean; retired?: string }[] }>("relink", {
@@ -1748,6 +1773,9 @@ function printAsk(result: AskResult, asJson: boolean, to = "the receiver"): numb
 }
 
 async function daemon(idle: string | undefined, policyFile: string | undefined): Promise<number> {
+  const { nativeBroker, nativeDaemon } = await import("./native")
+  const native = nativeBroker()
+  if (native) return nativeDaemon(native, relayDir(), idle, policyFile)
   const text = idle ?? process.env.SCP_IDLE
   const idleMs = text === undefined ? undefined : parseSeconds(text, "--idle") * 1000
   process.on("unhandledRejection", (reason) => {

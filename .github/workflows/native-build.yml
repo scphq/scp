@@ -1,4 +1,4 @@
-name: Build native hooks
+name: Build native binaries
 
 on:
   workflow_call:
@@ -46,12 +46,14 @@ jobs:
           TARGET: ${{ matrix.target }}
           CC_x86_64_unknown_linux_musl: musl-gcc
         shell: bash
-        run: cargo build --release --locked --bin scp-hook --target "$TARGET"
+        run: cargo build --release --locked -p scp-hook -p scp-swarm --bin scp-hook --bin swarm --target "$TARGET"
       - name: Archive and checksum
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
-        run: python scripts/relay-archive.py pack "$TARGET" artifacts scp-hook
+        run: |
+          python scripts/relay-archive.py pack "$TARGET" artifacts scp-hook
+          python scripts/relay-archive.py pack "$TARGET" artifacts swarm
       - uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.target }}

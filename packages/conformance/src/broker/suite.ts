@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, test as bunTest, describe, expect, setDefaultTimeout } from "bun:test";
 import { ensureBuilt } from "../../../cli/src/testing/fixtures";
 import { brokerReferenceWakers } from "../environment";
-import { type BrokerFiles, BrokerTarget, brokerTargetEnabled, brokerTargetNames } from "./target";
+import { type BrokerFiles, BrokerTarget, brokerTargetEnabled, brokerTargetNames, nativeBrokerTarget } from "./target";
 import { BrokerWire, type Hello, violations } from "./wire";
 
 export type Claim = { handle: string; harness?: string; [key: string]: unknown };
@@ -49,17 +49,17 @@ export class BrokerFixture {
 
 export type Start = (files?: BrokerFiles) => Promise<BrokerFixture>;
 
-/** suites the native engine does not implement yet; they are registered as pending on the `rust` target */
+/** suites the native engine does not implement yet; they are registered as pending on its targets */
 export const rustPending = new Set<string>([]);
 
-/** single tests the native engine does not implement yet, as `<suite title> > <test name>`; they are todo on the `rust` target */
+/** single tests the native engine does not implement yet, as `<suite title> > <test name>`; they are todo on its targets */
 export const rustPendingTests = new Set<string>([]);
 
 let registering: { title: string; name: string } | undefined;
 
-/** bun's `test`, registered as todo on the `rust` target when {@link rustPendingTests} lists it */
+/** bun's `test`, registered as todo on the native engine's targets when {@link rustPendingTests} lists it */
 export const test = Object.assign((name: string, fn: () => void | Promise<unknown>, timeout?: number) => {
-  if (registering?.name === "rust" && rustPendingTests.has(`${registering.title} > ${name}`)) return bunTest.todo(name);
+  if (registering && nativeBrokerTarget(registering.name) && rustPendingTests.has(`${registering.title} > ${name}`)) return bunTest.todo(name);
   return bunTest(name, fn, timeout);
 }, bunTest) as typeof bunTest;
 
@@ -70,8 +70,8 @@ export const test = Object.assign((name: string, fn: () => void | Promise<unknow
 export function brokerSuite(title: string, body: (start: Start) => void, options: { referenceWakers?: boolean } = {}) {
   setDefaultTimeout(30_000);
   for (const name of brokerTargetNames) {
-    const skipped = !brokerTargetEnabled(name) || (options.referenceWakers === true && name === "rust" && !brokerReferenceWakers);
-    if (name === "rust" && rustPending.has(title)) {
+    const skipped = !brokerTargetEnabled(name) || (options.referenceWakers === true && nativeBrokerTarget(name) && !brokerReferenceWakers);
+    if (nativeBrokerTarget(name) && rustPending.has(title)) {
       describe.todo(`${title} [${name}]`, () => {});
       continue;
     }

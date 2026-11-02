@@ -20,6 +20,7 @@ import {
   readShimBinding,
   sessionKey,
 } from "./identity"
+import { nativeBroker, nativeDaemonEnv } from "./native"
 import { membership } from "./session"
 import { parseSeconds, SELF } from "./term"
 import type { RelayTransport } from "./remote"
@@ -90,6 +91,7 @@ export const OPTIONS = {
   "take-over": { type: "boolean" },
   "dry-run": { type: "boolean" },
   live: { type: "boolean" },
+  check: { type: "boolean" },
   parent: { type: "string" },
   via: { type: "string" },
   wake: { type: "string" },
@@ -171,7 +173,7 @@ const DAEMON_ENV = [
 ]
 const LOG_MAX_BYTES = 1024 * 1024
 
-/** the broker for `dir`, detached, with a fixed environment and its stderr in broker.log */
+/** the broker for `dir`, detached, with a fixed environment and its stderr in broker.log; the native one under SCP_NATIVE=1 */
 export function startDaemon(dir: string): void {
   privateDir(dir)
   const logFile = join(dir, "broker.log")
@@ -180,10 +182,12 @@ export function startDaemon(dir: string): void {
   try {
     const env: Record<string, string> = { SCP_DIR: dir }
     for (const key of DAEMON_ENV) if (process.env[key] !== undefined) env[key] = process.env[key]!
-    const child = spawn(SELF[0]!, [...SELF.slice(1), "daemon"], {
+    const native = nativeBroker()
+    const argv = native ? [native, "daemon"] : [...SELF, "daemon"]
+    const child = spawn(argv[0]!, argv.slice(1), {
       detached: true,
       stdio: ["ignore", log, log],
-      env,
+      env: native ? nativeDaemonEnv(env) : env,
       cwd: dir,
     })
     child.unref()
@@ -389,14 +393,14 @@ export function localClient(client: RelayTransport, broker: BrokerInfo | null, v
   return client as RelayClient
 }
 
-export function brokerLine(broker: BrokerInfo): string {
+export function brokerLine(broker: BrokerInfo, engine?: string): string {
   const policy =
     broker.policy.state === "open"
       ? `no policy at ${broker.policy.file}, open`
       : broker.policy.state === "loaded"
         ? `policy ${broker.policy.file}`
         : `policy ${broker.policy.file} unusable, sends refused`
-  return `broker ${broker.socket} (pid ${broker.pid}); ${policy}`
+  return `broker ${broker.socket} (pid ${broker.pid}${engine ? `, engine ${engine}` : ""}); ${policy}`
 }
 
 /** `a,b, c` as a selector list; repeated flags add up */
