@@ -212,6 +212,11 @@ function childrenOf(agents: AgentFacts[]): Map<string, AgentFacts[]> {
   return index
 }
 
+/** a session in a worktree Claude Code made for it (`claude -w`): `claude rm` deletes that worktree when clean, so a wake could not resume it */
+const claudeWorktree = (cwd: string | undefined): boolean => cwd?.includes("/.claude/worktrees/") === true
+/** `on_stop` waits for historic for a session `claude rm` would take its worktree from */
+const removeModeOf = (config: BgConfig, cwd: string | undefined): RemoveMode =>
+  config.remove === "on_stop" && claudeWorktree(cwd) ? "historic" : config.remove
 const finishedOf = (agent: AgentFacts): boolean => agent.state === "done" || agent.handed_back
 /** the idle seconds before the policy stops a session */
 const stopAfter = (agent: AgentFacts, config: BgConfig): number => (finishedOf(agent) ? Math.min(config.stopAfterS, config.idleAfterS) : config.idleAfterS)
@@ -302,14 +307,15 @@ export function plan(input: PlanInput): Action[] {
     const refused = refusal(input, id)
     const threshold = older ?? stopAfter(agent, input.config)
     const due = !live || idleMs >= threshold * 1000
-    const mode = input.config.remove
+    const mode = removeModeOf(input.config, entry.cwd)
     const removable = older !== undefined ? idleMs >= older * 1000 : mode === "on_stop" ? due : mode === "historic" && agent.historic && due
     if (!input.stopOnly && !refused && removable) {
       actions.push({ kind: "remove", id, entry, agent, record, live })
       continue
     }
     if (!live) {
-      keep(refused ? `claude rm refused: ${refused.reason}` : "stopped", agent)
+      const waits = !input.stopOnly && input.config.remove === "on_stop" && mode === "historic"
+      keep(refused ? `claude rm refused: ${refused.reason}` : waits ? "in a claude worktree until historic" : "stopped", agent)
       continue
     }
     if (!Number.isFinite(threshold)) {
@@ -946,7 +952,16 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
       const isDue = () =>
         agents.some((agent) => {
           const id = idOf(agent)
-          if (id !== undefined && records.has(id)) return maybeDue(agent, agents, () => readState(env, id), config, now(), true, stopped.has(id))
+          if (id !== undefined && records.has(id))
+            return maybeDue(
+              agent,
+              agents,
+              () => readState(env, id),
+              { ...config, remove: removeModeOf(config, stopped.get(id)?.cwd) },
+              now(),
+              true,
+              stopped.has(id),
+            )
           return unrecorded(agent) && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0
         }) || orphaned()
       if (listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return

@@ -429,6 +429,16 @@ describe("planning", () => {
       expect(plan(input({ config: onStop, states }))).toMatchObject([{ kind: "stop", id }])
       expect(plan(input({ config: onStop, states, entries: [stoppedEntry()] }))).toMatchObject([{ kind: "keep", reason: "claude rm refused: unpushed" }])
     })
+    test("removes a session in a claude worktree only once its endpoint is historic, since claude rm takes the worktree", () => {
+      const cwd = "/repo/.claude/worktrees/lane"
+      expect(plan(input({ config: onStop, entries: [entry({ cwd })] }))).toMatchObject([{ kind: "stop", id }])
+      expect(plan(input({ config: onStop, entries: [stoppedEntry({ cwd })] }))).toMatchObject([{ kind: "keep", reason: "in a claude worktree until historic" }])
+      expect(plan(input({ config: onStop, entries: [stoppedEntry({ cwd })], agents: [agent({ historic: true })] }))).toMatchObject([
+        { kind: "remove", live: false },
+      ])
+      expect(plan(input({ entries: [stoppedEntry({ cwd })] }))).toMatchObject([{ kind: "keep", reason: "stopped" }])
+      expect(plan(input({ config: onStop, entries: [stoppedEntry({ cwd: "/repo/worktrees/lane" })] }))).toMatchObject([{ kind: "remove" }])
+    })
     test("keeps a historic worker stopped with remove historic until its endpoint turns historic, and with remove false", () => {
       const stopped = input({ entries: [stoppedEntry()] })
       expect(plan(stopped)).toMatchObject([{ kind: "keep", reason: "stopped" }])
@@ -905,6 +915,26 @@ describe("removing on stop in the background task", () => {
     await f.run()
     expect(f.calls().map((call) => call.argv)).toEqual([listing])
     expect(f.events.at(-1)).toEqual(["log", `swarm claude: kept ${id} (no endpoint): it has an endpoint again`])
+  })
+  test("stops a worker in a claude worktree without removing it, and removes it once its endpoint turns historic", async () => {
+    const f = onStop()
+    const cwd = join(f.home, ".claude", "worktrees", "lane")
+    f.record()
+    f.save([entry({ cwd })])
+    const task = claudeBgTask(f.env, f.deps)
+    await task.run(f.context)
+    expect(f.calls().map((call) => call.argv)).toEqual([listing, listing, ["stop", id]])
+    f.facts = { ...f.facts, presence: "hibernated", connections: 0 }
+    await task.run(f.context)
+    expect(f.calls()).toHaveLength(3)
+    f.facts = { ...f.facts, historic: true }
+    await task.run(f.context)
+    expect(
+      f
+        .calls()
+        .map((call) => call.argv)
+        .slice(3),
+    ).toEqual([listing, listing, ["rm", id]])
   })
   test("removes a worker it stopped earlier once its endpoint turns historic, with remove historic", async () => {
     const f = fixture()
