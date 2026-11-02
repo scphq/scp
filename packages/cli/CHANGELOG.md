@@ -1,5 +1,21 @@
 # @scp-dev/cli
 
+## 0.19.0
+
+### Minor Changes
+
+- 704e6f2: `SCP_NATIVE=1` runs the native `swarm` broker for `swarm daemon` and on-demand starts, falling back to the TypeScript broker with a note, and `swarm status` names the broker engine.
+
+### Patch Changes
+
+- 4860318: Native MCP server: the Rust `scp-mcp` crate serves `swarm mcp` with the same tools, instructions, identity and channel push, opt-in under `SCP_NATIVE=1`.
+- 2038a9c: An endpoint's name, mail and title never pass to an unrelated session. A claim takes over a released endpoint of another harness session only at a handle it was given (never a derived default it walked to), with the grant that endpoint spent, or from the harness process that holds it; the CLI marks its default handles with the new claim field `derived`. A session whose shim takes back its own name after its hooks claimed a default one is no longer moved back onto that default. `swarm relink --check` lists each endpoint at a background session's name, or moved off it, that another session now holds, and changes nothing.
+- Updated dependencies [2038a9c]
+  - @scp-dev/broker@0.13.6
+  - @scp-dev/core@0.18.6
+  - @scp-dev/mcp@0.5.15
+  - @scp-dev/hub@0.13.6
+
 ## 0.18.8
 
 ### Patch Changes
