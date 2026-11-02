@@ -2,7 +2,7 @@ import { afterAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { brokerEngine, goneCommand, mcpMount, mcpWords, mountVars, mountWith, nativeBroker, nativeDaemonEnv, nativeSwarm } from "./native"
+import { brokerEngine, goneCommand, mcpMount, mcpWords, mountVars, mountWith, nativeBroker, nativeDaemonEnv, nativeSwarm, resetMountNote } from "./native"
 import { SELF } from "./term"
 import { swarmBinary } from "./test-setup"
 import { alive, waitFor } from "./testing/fixtures"
@@ -147,6 +147,7 @@ describe("MCP mounts", () => {
 
   test("a missing or mismatched native swarm falls back to the node mount, noted once", () => {
     const { bin } = fakeSwarm("mount-old", "0.0.1")
+    resetMountNote()
     const notes: string[] = []
     const write = spyOn(process.stderr, "write").mockImplementation((chunk) => {
       notes.push(String(chunk))

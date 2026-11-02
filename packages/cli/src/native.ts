@@ -107,6 +107,11 @@ export const NATIVE_MOUNT_VARS = ["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_CLI_ARGV"]
 
 let mountNoted = false
 
+/** forgets that a missing native swarm was noted, so the next mount notes it again */
+export const resetMountNote = (): void => {
+  mountNoted = false
+}
+
 /** with `SCP_NATIVE=1`, the native `swarm` whose `swarm mcp` a mount runs directly, else undefined; a missing or mismatched one is noted once and mounts run through Node */
 export function nativeMountBin(env: Record<string, string | undefined>, version = pkg.version): string | undefined {
   if (env.SCP_NATIVE !== "1") return undefined
