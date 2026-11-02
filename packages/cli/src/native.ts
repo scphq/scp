@@ -21,7 +21,13 @@ function linuxGlibc(): boolean {
 }
 
 /** `override`, else `name` from this platform's native package, when it is an executable file whose `--version` prints `<name> <version>` */
-function nativeBinary(name: string, override: string | undefined, env: Record<string, string | undefined>, version: string, timeout = 2000): string | undefined {
+function nativeBinary(
+  name: string,
+  override: string | undefined,
+  env: Record<string, string | undefined>,
+  version: string,
+  timeout = 2000,
+): string | undefined {
   try {
     const key = nativeKey()
     const bin = override !== undefined ? resolve(override) : key ? require.resolve(`@scp-dev/native-${key}/bin/${name}`) : undefined

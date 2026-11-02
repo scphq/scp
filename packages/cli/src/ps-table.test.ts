@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { type Broker, startBroker } from "@scp-dev/broker"
 import { walkNow } from "./common"
 import { harnessLineage, readPsTable, SHELL_PS_TIMEOUT_MS, spawnerKey } from "./identity"
+import { nativeMcpEnv } from "./testing/fixtures"
 
 setDefaultTimeout(60_000)
 
@@ -43,7 +44,7 @@ function withPath<T>(bin: string, run: () => T): T {
 function env(extra: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !MARKERS.test(key)) out[key] = value
-  return { ...out, SCP_DIR: dir, ...extra }
+  return { ...out, ...nativeMcpEnv(), SCP_DIR: dir, ...extra }
 }
 
 beforeAll(async () => {

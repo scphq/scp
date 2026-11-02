@@ -25,7 +25,7 @@ import { safeCwd } from "./cwd"
 /** how often the shim checks that the harness that started it still runs: one reparented away from it exits, freeing the endpoint */
 const ORPHAN_CHECK_MS = 5000
 
-type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean; "cowork-only"?: boolean }
+export type Values = { as?: string; harness?: string; human?: boolean; channels?: boolean; "cowork-only"?: boolean }
 
 /** `$SCP_WAKE_TICKET` as a claim's `ticket`: a waker that revives a session hands it to the session's shim, which takes the endpoint back with it */
 export function wakeTicket(env: Record<string, string | undefined>): { ticket?: string } {
@@ -44,24 +44,7 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
   if (positionals.length) throw new RelayUsage(`${CLI_NAME} mcp takes no arguments (did you mean ${CLI_NAME} mcp install?)`)
   if (values.human) throw new RelayUsage("the relay MCP shim is always an agent: --human is not available to it")
   if (await coworkMcpGuard(values, { env: process.env, input: process.stdin, output: (line) => void process.stdout.write(line) })) return 0
-  let table: { value: PsCommTable | undefined } | undefined
-  let pid: number | undefined
-  const input: IdentityInput = {
-    ...(values.as !== undefined ? { as: values.as } : {}),
-    ...(values.harness !== undefined ? { harness: values.harness } : {}),
-    fallbackHarness: "mcp",
-    cwd: safeCwd(),
-    env: process.env,
-    harnessPid: () => {
-      pid ??= launcherPid(process.env) ?? harnessPid()
-      return pid
-    },
-    inferHarness: (at) => harnessAt(at, input.psTable!() ?? new Map()),
-    psTable: () => {
-      if (!table?.value) table = { value: readPsTable(SHELL_PS_TIMEOUT_MS) }
-      return table.value
-    },
-  }
+  const input = shimIdentityInput(values)
   const claim = { ...relayIdentity(input), ...wakeTicket(process.env) }
   if (!validHandle(claim.handle)) throw new RelayUsage(`${JSON.stringify(claim.handle)} is not a valid agent handle (me, user and relay are reserved)`)
   const dir = relayDir(process.env)
@@ -100,6 +83,29 @@ export async function relayMcpCommand(values: Values, positionals: string[]): Pr
     unbind()
   }
   return 0
+}
+
+/** the identity input of the shim for this process: its flags, its cwd and environment, and a process table read once it succeeds */
+export function shimIdentityInput(values: Values): IdentityInput {
+  let table: { value: PsCommTable | undefined } | undefined
+  let pid: number | undefined
+  const input: IdentityInput = {
+    ...(values.as !== undefined ? { as: values.as } : {}),
+    ...(values.harness !== undefined ? { harness: values.harness } : {}),
+    fallbackHarness: "mcp",
+    cwd: safeCwd(),
+    env: process.env,
+    harnessPid: () => {
+      pid ??= launcherPid(process.env) ?? harnessPid()
+      return pid
+    },
+    inferHarness: (at) => harnessAt(at, input.psTable!() ?? new Map()),
+    psTable: () => {
+      if (!table?.value) table = { value: readPsTable(SHELL_PS_TIMEOUT_MS) }
+      return table.value
+    },
+  }
+  return input
 }
 
 /** what in a shim's environment or flags names its session or thread: a shim with any of it is never thread-hosted */

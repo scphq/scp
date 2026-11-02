@@ -4,12 +4,13 @@ import { resolve } from "node:path";
 export const relayRoot = resolve(import.meta.dir, "..");
 export const relayAnchor = "crates/package.json";
 export const relayCrates = ["scp-dev-core", "scp-relay-server", "scp-relay-store"] as const;
-const workspaceCrates = [...relayCrates, "scp-broker", "scp-swarm"] as const;
+const workspaceCrates = [...relayCrates, "scp-broker", "scp-mcp", "scp-swarm"] as const;
 const pins = [
   ["crates/scp-relay/Cargo.toml", "scp-relay-store"],
   ["crates/scp-relay/Cargo.toml", "scp-core"],
   ["crates/scp-relay-store/Cargo.toml", "scp-core"],
   ["crates/scp-broker/Cargo.toml", "scp-core"],
+  ["crates/scp-mcp/Cargo.toml", "scp-core"],
 ] as const;
 const pinEntry = (dep: string) => new RegExp(`^(${dep} = .*version = ")([^"]+)`, "m");
 export const platformKeys = ["darwin-arm64", "darwin-x64", "linux-x64-gnu", "linux-arm64-gnu", "linux-x64-musl", "win32-x64"] as const;
