@@ -1,5 +1,12 @@
 # @scp-dev/cli
 
+## 0.20.0
+
+### Minor Changes
+
+- eb2a72b: `SCP_NATIVE=1` mounts the native `swarm mcp` directly: `swarm setup`, `swarm claude --bg`, `swarm codex` and codex spawns and wakes run the native binary with no Node process resident per session, falling back to the Node mount with a note. `swarm mcp` prefers the native `swarm` (`SCP_MCP_BIN` still overrides), and the native `swarm mcp` starts the native broker itself.
+- 4e3f8e5: Claude Code background workers leave `claude agents` as they hibernate: the broker runs `claude rm` right after it stops a worker `swarm claude --bg` started, and a message resumes it with `claude --bg --resume` on the same endpoint, name and directory. `claude_bg.remove` (`$SCP_CLAUDE_BG_REMOVE`) is now `on_stop` (default; `true` and `1` mean it too), `historic` (the previous behaviour: only once the endpoint is historic) or `false`. A worker in a worktree Claude made for it keeps the `historic` timing, since `claude rm` deletes that worktree. A worker whose own workers have all finished is removed too, where it used to be kept for having any worker at all, and a stopped worker whose endpoint is gone, so nothing could wake it, is removed unless it started as a root; its transcript stays for `claude --resume`.
+
 ## 0.19.0
 
 ### Minor Changes
