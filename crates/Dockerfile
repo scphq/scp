@@ -8,6 +8,7 @@ COPY scp-relay-store ./scp-relay-store
 COPY scp-relay ./scp-relay
 COPY scp-hook ./scp-hook
 COPY scp-broker ./scp-broker
+COPY scp-mcp ./scp-mcp
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked --bin scp-relay && \
