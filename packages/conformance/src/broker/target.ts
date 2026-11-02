@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { Subprocess } from "bun";
-import { brokerBinary, brokerNode, selectedBrokerTargets } from "../environment";
+import { brokerBinary, brokerNode, selectedBrokerTargets, swarmBinary } from "../environment";
 import { terminate, waitFor } from "../targets";
 import { BrokerWire } from "./wire";
 
@@ -17,9 +17,15 @@ export function socketPath(dir: string): string {
 
 export const cli = join(import.meta.dir, "../../../cli/dist/cli.js");
 
-/** `ts` runs the built CLI's foreground broker under Bun, `ts-node` under Node, `rust` the engine named by SCP_BROKER_BIN */
-export const brokerTargetNames = ["ts", "ts-node", "rust"].filter((name) => !selectedBrokerTargets || selectedBrokerTargets.includes(name));
-export const brokerTargetEnabled = (name: string) => (name === "ts" ? true : name === "ts-node" ? !!brokerNode : !!brokerBinary);
+/**
+ * `ts` runs the built CLI's foreground broker under Bun, `ts-node` under Node, `rust` the engine named by SCP_BROKER_BIN, and
+ * `ts-native` the built CLI's foreground broker under SCP_NATIVE=1, which runs the native swarm named by SCP_SWARM_BIN
+ */
+export const brokerTargetNames = ["ts", "ts-node", "rust", "ts-native"].filter((name) => !selectedBrokerTargets || selectedBrokerTargets.includes(name));
+export const brokerTargetEnabled = (name: string) =>
+  name === "ts" ? true : name === "ts-node" ? !!brokerNode : name === "ts-native" ? !!swarmBinary : !!brokerBinary;
+/** the targets whose broker is the native engine */
+export const nativeBrokerTarget = (name: string) => name === "rust" || name === "ts-native";
 
 export type BrokerFiles = {
   limits?: Record<string, number | null>;
@@ -57,6 +63,7 @@ export class BrokerTarget {
       CLAUDE_CONFIG_DIR: join(this.home, "claude"),
       GEMINI_CLI_HOME: this.home,
     });
+    if (name === "ts-native") Object.assign(this.env, { SCP_NATIVE: "1", SCP_SWARM_BIN: resolve(swarmBinary!) });
     if (files.limits !== undefined) this.env.SCP_LIMITS = JSON.stringify(files.limits);
     if (files.policy !== undefined) this.write(this.policyPath, typeof files.policy === "string" ? files.policy : JSON.stringify(files.policy));
     for (const [path, text] of Object.entries(files.files ?? {})) this.write(join(this.home, path), text);
@@ -95,6 +102,8 @@ export class BrokerTarget {
       `${this.name} broker socket`,
       20000,
     );
+    if (this.name === "ts-native" && Number(readFileSync(join(this.dir, "broker.lock"), "utf8").split(":")[0]) === child.pid)
+      throw new Error(`ts-native ran the TypeScript broker: ${this.stderr}`);
   }
   get pid() {
     return this.child?.pid;

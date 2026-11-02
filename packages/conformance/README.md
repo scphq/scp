@@ -105,16 +105,19 @@ Appendices A to E), so any engine can be plugged in:
 bun test packages/conformance/src/broker
 SCP_BROKER_NODE=node bun test packages/conformance/src/broker
 SCP_BROKER_BIN=./scp-broker bun test packages/conformance/src/broker
+SCP_SWARM_BIN=./swarm bun test packages/conformance/src/broker
 ```
 
 `ts` runs the built CLI's foreground broker under Bun and always runs. `ts-node` runs the
 same broker under Node when `SCP_BROKER_NODE` names a Node binary. `rust` runs the engine at
-`SCP_BROKER_BIN` and is explicitly skipped without it. `SCP_BROKER_TARGETS` is a
-comma-separated target filter.
+`SCP_BROKER_BIN` and is explicitly skipped without it. `ts-native` runs the built CLI's
+foreground broker with `SCP_NATIVE=1`, so the CLI runs the native `swarm` at `SCP_SWARM_BIN`;
+it is explicitly skipped without it and fails when the CLI falls back to its own broker.
+`SCP_BROKER_TARGETS` is a comma-separated target filter.
 
 The native engine in `crates/scp-broker` (`cargo build -p scp-broker`, binary `scp-broker`) is
 the `rust` engine. Suites it does not implement yet are listed in `rustPending` in
-`src/broker/suite.ts` and show as todo on the `rust` target; identity and framing run in full.
+`src/broker/suite.ts` and show as todo on the `rust` and `ts-native` targets; identity and framing run in full.
 
 The launcher contract is a harness requirement separate from SPEC conformance.
 An engine is started as `<engine> daemon --idle <seconds> --policy <file>` in the

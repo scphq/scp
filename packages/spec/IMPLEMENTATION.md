@@ -37,6 +37,10 @@ Variables marked "binding" are fixed by SPEC Appendix E; the others are this imp
 | `SCP_IDLE_AFTER_S`, `SCP_CLAUDE_BG_IDLE_AFTER_S`, `SCP_SPAWN_IDLE_AFTER_S`, `SCP_CLAUDE_BG_STOP_AFTER_S`, `SCP_CLAUDE_BG_REMOVE` | When the broker stops an idle Claude Code background worker (`SCP_CLAUDE_BG_IDLE_AFTER_S`), how long a detached spawn holds a resumable worker (`SCP_SPAWN_IDLE_AFTER_S`, "Spawn launcher"), the shared default of both (`SCP_IDLE_AFTER_S`), when the broker stops a finished worker, and whether it removes a historic one ("Claude Code background sessions"). |
 | `SCP_HISTORIC_AFTER_S` | Seconds (or a duration, or `Infinity`) without activity before the broker shows an agent historic (`LIMITS.historicAfterS`); else `historic_after_s` (alias `lifecycle.historic_after_s`) in `~/.config/scp/config.json`. |
 | `SCP_LSOF_BIN`, `SCP_FUSER_BIN`, `SCP_OPEN_BIN` | The `lsof`, `fuser` and `open` that `swarm codex-wake` and `swarm codex` run. |
+| `SCP_NATIVE` | `1` runs the native broker for `swarm daemon` and the on-demand start; any other value leaves the TypeScript broker. |
+| `SCP_SWARM_BIN` | Overrides the native `swarm` binary path. |
+| `SCP_HOOK_BIN` | Overrides the native hook client path. |
+| `SCP_CLI_ARGV` | A JSON array of the words that start the CLI, set for the native broker, whose built-in wakers run `<words> spawn-wake`, `codex-wake` and `claude-wake`; without it they run `swarm` from `PATH`. |
 
 ## Local broker
 
@@ -441,3 +445,5 @@ Each integration registers the MCP server under the name `scp`: `setup` mounts `
 The daemon installs the optional hook RPC handler. Thin clients negotiate `hook`, send a filtered environment and process ancestry, and confirm output only after a complete write. The handler uses an in-process broker client for the existing transient hook flow.
 
 The optional native hook client (`scp-hook`) sends hook RPC requests and falls back to the supplied CLI launcher when the broker lacks hook support. Setup uses it only when its version matches the CLI, otherwise it keeps the Node command; `--engine ts` forces Node and `--engine native` requires the matching client.
+
+The native packages (`@scp-dev/native-<platform>`) ship `swarm` (`daemon`, `hook`, `mcp`) next to `scp-hook`. With `SCP_NATIVE=1`, `swarm daemon` runs the native `swarm daemon` in the foreground (`--idle` passed on, `--policy` made absolute, `SCP_DIR` set, SIGTERM and SIGINT forwarded, SIGHUP as SIGTERM, its exit code returned), and the on-demand start runs it detached with the same fixed environment, both with `SCP_CLI_ARGV`. The CLI takes the binary only when `swarm --version` prints `swarm <cli version>`; without one it notes so on stderr and runs the TypeScript broker. Without `SCP_NATIVE=1` no native binary is checked or run. `swarm status` names the broker's engine, `ts` or `native` (a native executable is named `swarm` or `scp-broker`), in its broker line and as `broker.engine` in `--json`.

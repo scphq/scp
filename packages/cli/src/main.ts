@@ -1115,11 +1115,12 @@ async function runVerb(
         return 0
       }
       const snapshot = await client.request<Snapshot>("snapshot", { all: values.all === true })
+      const engine = broker && snapshot.broker ? (await import("./native")).brokerEngine(snapshot.broker.pid) : undefined
       if (asJson) {
-        json(snapshot)
+        json(snapshot.broker && engine ? { ...snapshot, broker: { ...snapshot.broker, engine } } : snapshot)
         return 0
       }
-      out(snapshot.broker ? brokerLine(snapshot.broker) : where)
+      out(snapshot.broker ? brokerLine(snapshot.broker, engine) : where)
       const quotedAgents = printSummary(snapshot, me, values.all === true)
       const activity = values.activity === true && snapshot.activity.length > 0
       if (activity) {
@@ -1748,6 +1749,9 @@ function printAsk(result: AskResult, asJson: boolean, to = "the receiver"): numb
 }
 
 async function daemon(idle: string | undefined, policyFile: string | undefined): Promise<number> {
+  const { nativeBroker, nativeDaemon } = await import("./native")
+  const native = nativeBroker()
+  if (native) return nativeDaemon(native, relayDir(), idle, policyFile)
   const text = idle ?? process.env.SCP_IDLE
   const idleMs = text === undefined ? undefined : parseSeconds(text, "--idle") * 1000
   process.on("unhandledRejection", (reason) => {

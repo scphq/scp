@@ -24,7 +24,7 @@ scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.4" 
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "json"] }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

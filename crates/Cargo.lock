@@ -1748,6 +1748,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scp-swarm"
+version = "0.4.4"
+dependencies = [
+ "clap",
+ "libc",
+ "scp-broker",
+ "scp-hook",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.219"
 source = "registry+https://github.com/rust-lang/crates.io-index"

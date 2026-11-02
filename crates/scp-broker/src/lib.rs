@@ -4,6 +4,7 @@ pub mod authority;
 pub mod bridge;
 pub mod claims;
 pub mod core;
+pub mod daemon;
 pub mod grants;
 pub mod groups;
 pub mod hibernate;
