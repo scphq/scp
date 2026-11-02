@@ -1731,6 +1731,9 @@
         "harness_handoff": {
           "type": "boolean"
         },
+        "derived": {
+          "type": "boolean"
+        },
         "lineage": {
           "type": "array",
           "items": {

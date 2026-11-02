@@ -215,7 +215,7 @@ struct RunResult {
     stdout: String,
 }
 
-fn broker_wake(row: &Row) -> bool {
+pub(crate) fn broker_wake(row: &Row) -> bool {
     text(row, "hibernate").is_none()
         && text(row, "wake").is_some_and(|w| BROKER_WAKES.iter().any(|b| b.wire() == w))
 }

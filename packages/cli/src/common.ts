@@ -91,6 +91,7 @@ export const OPTIONS = {
   "take-over": { type: "boolean" },
   "dry-run": { type: "boolean" },
   live: { type: "boolean" },
+  check: { type: "boolean" },
   parent: { type: "string" },
   via: { type: "string" },
   wake: { type: "string" },

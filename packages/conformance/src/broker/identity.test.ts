@@ -392,6 +392,55 @@ brokerSuite("broker resumed sessions", (start) => {
     expect(await fresh.request("whoami")).toMatchObject({ address: "me/lead" });
   });
 
+  /** the ended lane of harness session lane-a on the derived `app`, or on `name` given, titled, with unread mail, under `boss` unless a root */
+  async function endedLane(start: Start, root = false, name?: string) {
+    const broker = await start();
+    await broker.agent("boss", "codex");
+    const handle = name ?? "app";
+    const lane = { ...session(process.pid), harness_session: "lane-a", ...(name ? {} : { derived: true }) };
+    const old = await broker.agent(handle, "claude-code", {}, lane);
+    const hook = await broker.hook({ handle, ...lane });
+    await hook.request("event", { kind: "tool", session_id: "lane-a" });
+    await old.request("title", { text: "the lane" });
+    const human = await broker.human();
+    if (!root) await human.request("adopt", { endpoint: handle, parent: "boss" });
+    await human.request("send", { to: handle, body: "for the lane" });
+    await hook.request("event", { kind: "session_end" });
+    await old.close();
+    await waitFor(
+      async () => (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === old.id)?.presence === "offline",
+      "lane offline",
+    );
+    const listed = async () => (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === old.id);
+    return { broker, human, old, listed };
+  }
+
+  test("an unrelated session claiming the ended lane's derived name never inherits its row, title, mail or parent", async () => {
+    const { broker, human, old, listed } = await endedLane(start);
+    const hook = await broker.hook({ handle: "app", ...session(2), harness_session: "other-a", derived: true });
+    const shim = await broker.agent("app", "claude-code", {}, { ...session(1), harness_session: "other-b", derived: true });
+    for (const claimed of [hook.hello.endpoint!, shim.hello.endpoint!]) {
+      expect(claimed.id).not.toBe(old.id);
+      expect(claimed).toMatchObject({ title: null, parent: null });
+    }
+    expect(await shim.request("inbox")).toMatchObject({ messages: [] });
+    expect(await listed()).toMatchObject({ address: "me/app", title: "the lane", parent: "me/boss" });
+    expect((await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.filter((e) => e.address === "me/app")).toHaveLength(1);
+  });
+
+  for (const by of ["session", "origin"] as const) {
+    test(`a resumed session takes back only its own ended endpoint, by its ${by}`, async () => {
+      const { broker, old, listed } = await endedLane(start, true);
+      const unrelated = await broker.agent("app", "claude-code", {}, { ...session(2), harness_session: "other-a", derived: true });
+      expect(unrelated.id).not.toBe(old.id);
+      const resumed = by === "session" ? { harness_session: "lane-a" } : { harness_session: "fork-a", harness_origin: "lane-a" };
+      const back = await broker.agent("app", "claude-code", {}, { ...session(1), ...resumed, derived: true });
+      expect(back.hello.endpoint).toMatchObject({ id: old.id, address: "me/app", title: "the lane" });
+      expect(await back.request("inbox")).toMatchObject({ messages: [{ body: { text: "for the lane" } }] });
+      expect(await listed()).toMatchObject({ address: "me/app" });
+    });
+  }
+
   test("a hand-off claim that asks to sit under its origin never takes the origin's name", async () => {
     const broker = await start();
     const origin = { ...session(process.pid), harness_session: "origin-a" };
@@ -438,4 +487,47 @@ brokerSuite("broker resumed sessions", (start) => {
       expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "while away" } }] });
     });
   }
+
+  test("a shim taking back its name after its hook's derived claim is never moved onto the hook's endpoint", async () => {
+    const { broker, old, listed } = await endedLane(start, true, "lane-a");
+    const next = { ...session(1), harness_session: "next-a" };
+    const hook = await broker.hook({ handle: "app", ...next, derived: true });
+    await hook.request("event", { kind: "tool", session_id: "next-a" });
+    const shim = await broker.agent("lane-a", "claude-code", {}, { ...next, harness_origin: "lane-a" });
+    expect(shim.hello.endpoint).toMatchObject({ id: old.id, address: "me/lane-a" });
+    const again = await broker.hook({ handle: "app", ...next, derived: true });
+    expect(again.hello.endpoint).toMatchObject({ id: old.id, address: "me/lane-a" });
+    expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "for the lane" } }] });
+    expect(await listed()).toMatchObject({ address: "me/lane-a", title: "the lane" });
+  });
+
+  test("a resumed session given a name claims that name, never another lane's ended endpoint", async () => {
+    const { broker, old, listed } = await endedLane(start, true);
+    const next = { ...session(1), harness_session: "next-a" };
+    const hook = await broker.hook({ handle: "app", ...next, derived: true });
+    expect(hook.hello.endpoint?.id).not.toBe(old.id);
+    await hook.request("event", { kind: "tool", session_id: "next-a" });
+    const named = await broker.agent("renamed", "claude-code", {}, next);
+    expect(named.hello.endpoint).toMatchObject({ address: "me/renamed", title: null });
+    expect(named.id).not.toBe(old.id);
+    expect((await broker.hook({ handle: "app", ...next, derived: true })).hello.endpoint).toMatchObject({ id: named.id, address: "me/renamed" });
+    expect(await listed()).toMatchObject({ address: "me/app", title: "the lane" });
+  });
+
+  test("a colliding claim never displaces a live holder, connected or reporting from a running process", async () => {
+    const broker = await start();
+    const holder = await broker.agent("app", "claude-code", {}, { ...session(process.pid), harness_session: "live-a", derived: true });
+    const running = `pid:${process.ppid}`;
+    const hooked = await broker.hook({ handle: "lane-b", process: running, session: running, lineage: [running], harness_session: "live-b" });
+    await hooked.request("event", { kind: "tool", session_id: "live-b" });
+    for (const claim of [{ derived: true }, {}]) {
+      const other = await broker.agent("app", "claude-code", {}, { ...session(2), harness_session: "other-a", ...claim });
+      expect(other.id).not.toBe(holder.id);
+    }
+    const hook = await broker.hook({ handle: "app", ...session(3), harness_session: "other-b", derived: true });
+    expect(hook.hello.endpoint?.id).not.toBe(holder.id);
+    const named = await broker.agent("lane-b", "claude-code", {}, { ...session(4), harness_session: "other-c" });
+    expect(named.id).not.toBe(hooked.hello.endpoint?.id);
+    expect(await holder.request("whoami")).toMatchObject({ address: "me/app" });
+  });
 });
