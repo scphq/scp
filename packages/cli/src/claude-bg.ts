@@ -64,10 +64,14 @@ export interface ClaudeEntry {
   status?: string
 }
 
-/** a background session `swarm claude --bg` started: its `<id>.json` MCP config and the handle that config claims */
+/**
+ * a background session `swarm claude --bg` started: its `<id>.json` MCP config, the handle that config claims, and whether it asked for a
+ * parent (a grant or `SCP_UNDER`), which tells a worker from a root once its endpoint is gone
+ */
 export interface BgRecord {
   file: string
   handle?: string
+  parented?: boolean
 }
 
 /** what `<id>.state.json` keeps of a worker this policy stopped or removed, so its waker can bring it back */
@@ -81,14 +85,17 @@ export interface BgState {
   rmRefused?: { at: number; reason: string }
 }
 
+/** when a worker leaves Claude's agents list: as it stops (`on_stop`), once its endpoint is historic (`historic`), or never (false) */
+export type RemoveMode = "on_stop" | "historic" | false
+
 /**
  * `stopAfterS`: idle seconds before a finished worker stops; `idleAfterS`: idle seconds before any worker stops, finished or not;
- * `Infinity` never; `remove`: whether a historic worker is removed
+ * `Infinity` never; `remove`: when a worker is removed
  */
 export interface BgConfig {
   stopAfterS: number
   idleAfterS: number
-  remove: boolean
+  remove: RemoveMode
 }
 
 export type AgentFacts = Pick<
@@ -115,10 +122,13 @@ export type AgentFacts = Pick<
 
 /** `record` is absent for a session `swarm claude --bg` did not start: such a session is stopped, never removed */
 type Target = { id: string; entry: ClaudeEntry; agent: AgentFacts; record?: BgRecord }
+/** a stopped worker `swarm claude --bg` started whose endpoint is gone: nothing can wake it, so it only leaves Claude's list */
+type Orphan = { kind: "orphan"; id: string; entry: ClaudeEntry; record: BgRecord; agent?: undefined }
 export type Action =
   | ({ kind: "stop" } & Target)
   | ({ kind: "remove"; live: boolean } & Target)
   | ({ kind: "unhibernate" } & Target)
+  | Orphan
   | { kind: "keep"; id: string; entry: ClaudeEntry; agent?: AgentFacts; reason: string }
 
 export interface PlanInput {
@@ -202,17 +212,42 @@ function childrenOf(agents: AgentFacts[]): Map<string, AgentFacts[]> {
   return index
 }
 
-/** a worker with no workers of its own: the only kind ever removed */
-const leaf = (agent: AgentFacts): boolean => agent.parent !== null && agent.children === 0
+/** a session in a worktree Claude Code made for it (`claude -w`): `claude rm` deletes that worktree when clean, so a wake could not resume it */
+const claudeWorktree = (cwd: string | undefined): boolean => cwd?.includes("/.claude/worktrees/") === true
+/** `on_stop` waits for historic for a session `claude rm` would take its worktree from */
+const removeModeOf = (config: BgConfig, cwd: string | undefined): RemoveMode =>
+  config.remove === "on_stop" && claudeWorktree(cwd) ? "historic" : config.remove
 const finishedOf = (agent: AgentFacts): boolean => agent.state === "done" || agent.handed_back
 /** the idle seconds before the policy stops a session */
 const stopAfter = (agent: AgentFacts, config: BgConfig): number => (finishedOf(agent) ? Math.min(config.stopAfterS, config.idleAfterS) : config.idleAfterS)
 
+/** a refused `claude rm` of the session is held: tried again only after a day, or at once with `retryRefused` */
+function refusal(input: PlanInput, id: string): BgState["rmRefused"] | undefined {
+  const refused = input.states.get(id)?.rmRefused
+  return refused !== undefined && !input.retryRefused && input.now - refused.at < RM_RETRY_MS ? refused : undefined
+}
+
+const ownSession = (input: PlanInput, entry: ClaudeEntry, agent?: AgentFacts): boolean =>
+  [entry.sessionId, agent?.harness_session].some((key) => typeof key === "string" && input.self?.has(key)) ||
+  (typeof entry.pid === "number" && input.selfPids?.has(entry.pid) === true)
+
+/** why a session `swarm claude --bg` started, whose endpoint is gone, stays in Claude's list; null when it leaves it */
+function orphanKept(input: PlanInput, entry: ClaudeEntry, record: BgRecord): string | null {
+  if (typeof entry.pid === "number") return "no endpoint"
+  if (!record.parented) return "no endpoint, and it started as a root"
+  if (input.stopOnly || input.config.remove === false) return "no endpoint"
+  if (attachedTo(entry, input.attached)) return "attached"
+  if (ownSession(input, entry)) return "the caller's own session"
+  const refused = refusal(input, entry.id!)
+  return refused ? `claude rm refused: ${refused.reason}` : null
+}
+
 /**
  * what to do with each background session: only a worker, an endpoint linked under a parent, with no live workers, no
  * `claude attach` and not the caller's own is ever stopped, and only while Claude shows it exactly idle. Such a worker stops after
- * `idleAfterS` without work, a finished one (done or handed back) after `stopAfterS` when sooner; a historic worker `swarm claude --bg`
- * started, with no children, is removed; `olderThanS` replaces the thresholds
+ * `idleAfterS` without work, a finished one (done or handed back) after `stopAfterS` when sooner. A worker `swarm claude --bg` started
+ * is removed as it stops (`on_stop`), or once its endpoint is historic (`historic`); a stopped one whose endpoint is gone and that
+ * asked for a parent is removed too, since nothing could wake it. `olderThanS` replaces the thresholds
  */
 export function plan(input: PlanInput): Action[] {
   const actions: Action[] = []
@@ -223,7 +258,9 @@ export function plan(input: PlanInput): Action[] {
     const record = input.records.get(id)
     const agent = endpointOf(entry, record, input.agents)
     if (!agent) {
-      keep(record ? "no endpoint" : "no SCP endpoint, so nothing could wake it")
+      const kept = record ? orphanKept(input, entry, record) : "no SCP endpoint, so nothing could wake it"
+      if (kept === null) actions.push({ kind: "orphan", id, entry, record: record! })
+      else keep(kept)
       continue
     }
     const live = typeof entry.pid === "number"
@@ -246,10 +283,7 @@ export function plan(input: PlanInput): Action[] {
       keep("attached", agent)
       continue
     }
-    if (
-      [entry.sessionId, agent.harness_session].some((key) => typeof key === "string" && input.self?.has(key)) ||
-      (typeof entry.pid === "number" && input.selfPids?.has(entry.pid))
-    ) {
+    if (ownSession(input, entry, agent)) {
       keep("the caller's own session", agent)
       continue
     }
@@ -270,19 +304,18 @@ export function plan(input: PlanInput): Action[] {
     }
     const idleMs = input.now - Date.parse(agent.worked_at)
     const older = input.olderThanS
-    const refused = input.states.get(id)?.rmRefused
-    const holding = refused !== undefined && !input.retryRefused && input.now - refused.at < RM_RETRY_MS
+    const refused = refusal(input, id)
     const threshold = older ?? stopAfter(agent, input.config)
-    const removable =
-      record !== undefined &&
-      leaf(agent) &&
-      (older !== undefined ? idleMs >= older * 1000 : input.config.remove && agent.historic && (!live || idleMs >= threshold * 1000))
-    if (!input.stopOnly && !holding && removable) {
+    const due = !live || idleMs >= threshold * 1000
+    const mode = removeModeOf(input.config, entry.cwd)
+    const removable = older !== undefined ? idleMs >= older * 1000 : mode === "on_stop" ? due : mode === "historic" && agent.historic && due
+    if (!input.stopOnly && !refused && removable) {
       actions.push({ kind: "remove", id, entry, agent, record, live })
       continue
     }
     if (!live) {
-      keep(holding ? `claude rm refused: ${refused.reason}` : "stopped", agent)
+      const waits = !input.stopOnly && input.config.remove === "on_stop" && mode === "historic"
+      keep(refused ? `claude rm refused: ${refused.reason}` : waits ? "in a claude worktree until historic" : "stopped", agent)
       continue
     }
     if (!Number.isFinite(threshold)) {
@@ -311,8 +344,10 @@ function seconds(value: unknown): number | undefined {
   }
 }
 
-function flag(value: unknown): boolean | undefined {
-  if (value === true || value === "1" || value === "true") return true
+/** `on_stop` (also true or 1), `historic`, or false (also 0); undefined when unreadable */
+function removeMode(value: unknown): RemoveMode | undefined {
+  if (value === true || value === "1" || value === "true" || value === "on_stop") return "on_stop"
+  if (value === "historic") return "historic"
   if (value === false || value === "0" || value === "false") return false
   return undefined
 }
@@ -344,7 +379,7 @@ export const spawnIdleAfterS = (env: Env): number | undefined => idleSetting(env
 
 /**
  * `$SCP_CLAUDE_BG_STOP_AFTER_S` and `$SCP_CLAUDE_BG_REMOVE`, else `claude_bg.stop_after_s` and `claude_bg.remove` in config.json, else 120 s
- * and true; the idle time as `idleAfterS` says
+ * and `on_stop`; the idle time as `idleAfterS` says
  */
 export function bgConfig(env: Env): BgConfig {
   const file = configFile(env)
@@ -352,7 +387,7 @@ export function bgConfig(env: Env): BgConfig {
   return {
     stopAfterS: seconds(env.SCP_CLAUDE_BG_STOP_AFTER_S) ?? seconds(bg.stop_after_s) ?? STOP_AFTER_S,
     idleAfterS: idleSetting(env, file, "SCP_CLAUDE_BG_IDLE_AFTER_S", "claude_bg") ?? IDLE_AFTER_S,
-    remove: flag(env.SCP_CLAUDE_BG_REMOVE) ?? flag(bg.remove) ?? true,
+    remove: removeMode(env.SCP_CLAUDE_BG_REMOVE) ?? removeMode(bg.remove) ?? "on_stop",
   }
 }
 
@@ -399,9 +434,11 @@ export function readRecords(env: Env): Map<string, BgRecord> {
     try {
       const record = cachedRead(recordCache, join(dir, name), (path) => {
         const file = realpathSync(path)
-        const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { env?: { SCP_NAME?: unknown } } } }
-        const handle = config.mcpServers?.scp?.env?.SCP_NAME
-        return { file, ...(typeof handle === "string" && handle ? { handle } : {}) }
+        const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { env?: Record<string, unknown> } } }
+        const vars = config.mcpServers?.scp?.env ?? {}
+        const handle = vars.SCP_NAME
+        const parented = [vars.SCP_GRANT, vars.SCP_UNDER].some((value) => typeof value === "string" && value !== "")
+        return { file, ...(typeof handle === "string" && handle ? { handle } : {}), ...(parented ? { parented } : {}) }
       })
       records.set(id, record)
     } catch {}
@@ -820,6 +857,33 @@ async function removeWorker(target: Target & { live: boolean }, port: BgPort, ru
   return null
 }
 
+/**
+ * removes a stopped session whose endpoint is gone from Claude's list: no hibernation to keep and no waker to run, so it only checks
+ * the endpoint is still gone, no `claude attach` took it and Claude still lists it stopped, then runs `claude rm`; its transcript stays
+ * for a `claude --resume` by hand
+ */
+async function removeOrphan({ id, entry, record }: Orphan, port: BgPort, run: Run): Promise<string | null> {
+  const { claude, env, now } = run
+  const sessionId = entry.sessionId
+  if (!sessionId || !SESSION_ID.test(sessionId) || !entry.cwd) return "no session id or cwd"
+  if (endpointOf(entry, record, await port.agents())) return "it has an endpoint again"
+  const table = await run.ps()
+  if (table === null) return "ps failed, so attached sessions are unknown"
+  if (attachedTo(entry, attachTargets(table))) return "attached"
+  const why = await stillStopped(claude, id)
+  if (why) return why
+  const { removedAt: _removed, rmRefused: _refused, ...earlier } = readState(env, id) ?? {}
+  const state: BgState = { ...earlier, sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}) }
+  const removed = await claude.exec(claude.bin, ["rm", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
+  if (removed.code !== 0) {
+    const reason = firstLine(removed.out) || `exit ${removed.code}`
+    writeState(env, id, { ...state, rmRefused: { at: now(), reason } })
+    return `claude rm refused: ${reason}`
+  }
+  writeState(env, id, { ...state, removedAt: now() })
+  return null
+}
+
 const acts = (actions: Action[]): Act[] => actions.filter((action): action is Act => action.kind !== "keep")
 
 async function apply(actions: Act[], port: BgPort, run: Run): Promise<Outcome[]> {
@@ -830,7 +894,8 @@ async function apply(actions: Act[], port: BgPort, run: Run): Promise<Outcome[]>
       if (action.kind === "unhibernate") {
         await port.unhibernate(action.agent)
         failed = null
-      } else failed = action.kind === "stop" ? await stopWorker(action, port, run) : await removeWorker(action, port, run)
+      } else if (action.kind === "orphan") failed = await removeOrphan(action, port, run)
+      else failed = action.kind === "stop" ? await stopWorker(action, port, run) : await removeWorker(action, port, run)
     } catch (error) {
       failed = error instanceof Error ? error.message : String(error)
     }
@@ -839,19 +904,28 @@ async function apply(actions: Act[], port: BgPort, run: Run): Promise<Outcome[]>
   return outcomes
 }
 
-const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind === "remove" ? "removed" : "woke")
+const verb = (action: Act) => (action.kind === "stop" ? "stopped" : action.kind === "unhibernate" ? "woke" : "removed")
+/** the endpoint an action names, or what an orphan lacks */
+const where = (action: Act): string => action.agent?.address ?? "no endpoint"
+
+const removable = (state: BgState | undefined, now: number): boolean => !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
 
 /**
  * whether a worker may be due for a stop or a removal, read from the broker alone, so an idle broker never runs claude; only one
- * `swarm claude --bg` started (`recorded`) is ever removed
+ * `swarm claude --bg` started (`recorded`) is ever removed, and a stopped one only while the last listing showed it stopped (`stopped`)
  */
-function maybeDue(agent: AgentFacts, agents: AgentFacts[], stateOf: () => BgState | undefined, config: BgConfig, now: number, recorded: boolean): boolean {
+function maybeDue(
+  agent: AgentFacts,
+  agents: AgentFacts[],
+  stateOf: () => BgState | undefined,
+  config: BgConfig,
+  now: number,
+  recorded: boolean,
+  stopped: boolean,
+): boolean {
   if (agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0) return true
   if (!agent.parent || liveChildren(agent, agents) > 0) return false
-  if (recorded && config.remove && agent.historic && leaf(agent)) {
-    const state = stateOf()
-    return !state?.removedAt && !(state?.rmRefused && now - state.rmRefused.at < RM_RETRY_MS)
-  }
+  if (recorded && stopped && (config.remove === "on_stop" || (config.remove === "historic" && agent.historic))) return removable(stateOf(), now)
   if (agent.hibernate === CLAUDE_BG_PROVIDER) return false
   return now - Date.parse(agent.worked_at) >= stopAfter(agent, config) * 1000
 }
@@ -865,6 +939,8 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
   const sessions = new Map<string, string>()
   /** the records the last listing covered */
   const seen = new Set<string>()
+  /** the sessions with a record the last listing showed stopped, by short id */
+  const stopped = new Map<string, ClaudeEntry>()
   let listed = false
   return {
     name: "claude-bg",
@@ -882,12 +958,27 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
       const handles = new Map([...records].flatMap(([id, record]) => (record.handle ? [[record.handle, id] as const] : [])))
       const idOf = (agent: AgentFacts) =>
         agent.harness_session !== null ? (sessions.get(agent.harness_session) ?? handles.get(agent.handle)) : handles.get(agent.handle)
+      const orphaned = () =>
+        config.remove !== false &&
+        [...stopped].some(([id, entry]) => {
+          const record = records.get(id)
+          return record?.parented === true && !endpointOf(entry, record, agents) && removable(readState(env, id), now())
+        })
       const isDue = () =>
         agents.some((agent) => {
           const id = idOf(agent)
-          if (id !== undefined && records.has(id)) return maybeDue(agent, agents, () => readState(env, id), config, now(), true)
+          if (id !== undefined && records.has(id))
+            return maybeDue(
+              agent,
+              agents,
+              () => readState(env, id),
+              { ...config, remove: removeModeOf(config, stopped.get(id)?.cwd) },
+              now(),
+              true,
+              stopped.has(id),
+            )
           return unrecorded(agent) && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0
-        })
+        }) || orphaned()
       if (listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return
       const claude = claudeOf(env, deps)
       if (!claude) return
@@ -897,9 +988,11 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
       seen.clear()
       for (const id of records.keys()) seen.add(id)
       sessions.clear()
+      stopped.clear()
       for (const entry of entries)
         if (entry.kind === "background" && entry.id && SHORT_ID.test(entry.id) && entry.sessionId) {
           sessions.set(entry.sessionId, entry.id)
+          if (typeof entry.pid !== "number" && records.has(entry.id)) stopped.set(entry.id, entry)
         }
       agents = context.agents()
       if (!isDue()) return
@@ -919,9 +1012,16 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
         selfPids,
       })
       const log = deps.log ?? context.log
-      for (const { action, ok, note } of await apply(acts(actions), taskPort(context), runOf(claude, env, now, ps)))
+      for (const { action, ok, note } of await apply(acts(actions), taskPort(context), runOf(claude, env, now, ps))) {
         if (action.kind !== "unhibernate" || !ok)
-          log(`${CLI_NAME} claude: ${ok ? verb(action) : "kept"} ${action.id} (${action.agent.address})${ok ? "" : `: ${note}`}`)
+          log(`${CLI_NAME} claude: ${ok ? verb(action) : "kept"} ${action.id} (${where(action)})${ok ? "" : `: ${note}`}`)
+        if (action.kind === "unhibernate" || !records.has(action.id)) continue
+        if (ok && action.kind !== "stop") stopped.delete(action.id)
+        else if (ok || action.kind === "remove") {
+          const { pid: _pid, ...after } = action.entry
+          stopped.set(action.id, after)
+        }
+      }
     },
   }
 }
@@ -997,7 +1097,14 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
       selfPids: (await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()) ?? new Set(),
     }))
       if (action.kind !== "unhibernate")
-        policy.set(action.id, action.kind === "keep" ? `kept: ${action.reason}` : table === null ? "ps failed, so attached is unknown" : `due: ${action.kind}`)
+        policy.set(
+          action.id,
+          action.kind === "keep"
+            ? `kept: ${action.reason}`
+            : table === null
+              ? "ps failed, so attached is unknown"
+              : `due: ${action.kind === "orphan" ? "remove, no endpoint" : action.kind}`,
+        )
   }
   const known = agents ?? []
   const rows = entries
@@ -1100,13 +1207,13 @@ async function pruneCommand(argv: string[], env: Env, out: (line: string) => voi
     for (const action of actions) if (action.kind === "keep") out(`keep ${action.id}${action.agent ? ` ${action.agent.address}` : ""}: ${action.reason}`)
     const acting = acts(actions).filter((action) => action.kind !== "unhibernate")
     if (dryRun) {
-      for (const action of acting) out(`would ${action.kind} ${action.id} ${action.agent.address}`)
+      for (const action of acting) out(`would ${action.kind === "orphan" ? "remove" : action.kind} ${action.id} ${where(action)}`)
       return 0
     }
     let failed = 0
     for (const { action, ok, note: why } of await apply(acting, opened.port, runOf(claude, env, now, ps))) {
       if (!ok) failed++
-      out(ok ? `${verb(action)} ${action.id} ${action.agent.address}` : `kept ${action.id} ${action.agent.address}: ${why}`)
+      out(ok ? `${verb(action)} ${action.id} ${where(action)}` : `kept ${action.id} ${where(action)}: ${why}`)
     }
     return failed ? 1 : 0
   } finally {

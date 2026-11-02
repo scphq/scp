@@ -396,7 +396,8 @@ ${CLI_NAME} claude ls [--all] [--json]          the background sessions (--all: 
                                                  (orchestrator: a root or one with workers; worker; unknown: no endpoint), endpoint, policy
                                                  (kept: why, or due: stop or remove) and cwd
 ${CLI_NAME} claude prune [--dry-run] [--stop-only] [--older-than <dur>]   stop the idle workers ${CLI_NAME} claude --bg started
-                                                 now, then remove the historic ones: never a root, the caller's own session, one with live
+                                                 now and remove them from claude agents, and the stopped ones whose endpoint is
+                                                 gone: never a root, the caller's own session, one with live
                                                  workers or subagents, or one claude attach holds, that is not exactly
                                                  idle or that still runs a Bash tool command (kept: running a background
                                                  command), though a session busy only polling its inbox in a loop counts as idle,
@@ -407,8 +408,9 @@ ${CLI_NAME} claude prune --unhibernate-unrecorded [--dry-run]   clear the claude
   The broker does the same on its own, for the workers ${CLI_NAME} claude --bg started: idle without work one stops after
   $SCP_CLAUDE_BG_IDLE_AFTER_S (config.json claude_bg.idle_after_s), else the shared $SCP_IDLE_AFTER_S (lifecycle.idle_after_s;
   600 s, Infinity never), a done (or handed back) one after
-  $SCP_CLAUDE_BG_STOP_AFTER_S (120 s) when sooner, and it is removed once historic unless
-  $SCP_CLAUDE_BG_REMOVE=0; config.json claude_bg {stop_after_s, remove} sets those. $SCP_HISTORIC_AFTER_S (historic_after_s) sets
+  $SCP_CLAUDE_BG_STOP_AFTER_S (120 s) when sooner, and it leaves claude agents as it stops: $SCP_CLAUDE_BG_REMOVE is
+  on_stop (the default; 1 and true mean it too), historic (removed only once its endpoint is historic) or 0 (the broker never removes);
+  config.json claude_bg {stop_after_s, remove} sets those. $SCP_HISTORIC_AFTER_S (historic_after_s) sets
   when an agent turns historic.
   A stopped or removed worker keeps its endpoint and mail: a message that arrives after the stop respawns it (unread mail
   it already had does not), or resumes it in its directory after a removal
