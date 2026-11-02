@@ -442,17 +442,42 @@ impl Core {
         scope: &Scope,
         fields: &Fields,
         harness: &str,
+        hooks: Option<&Row>,
     ) -> Result<bool, RpcError> {
         if self.restarts(row, parent, fields.process.as_deref()) {
             return Ok(true);
         }
-        if self.redeems(row, scope, fields, harness, None).await? {
+        if self.redeems(row, scope, fields, harness, hooks).await? {
             return Ok(true);
         }
         Ok(parent.is_none()
             && scope.grant.is_none()
             && fields.harness_session.is_some()
             && text(row, "harness_session") == fields.harness_session.as_deref())
+    }
+    /// the row at the wanted handle that rule 6 takes back for a connecting claim's harness session, else its origin, once its hooks'
+    /// endpoint lets go: a revivable row too, as a resumed session that forked under a new id takes back its stopped worker's name
+    async fn resumed_for(
+        &self,
+        harness: &str,
+        scope: &Scope,
+        fields: &Fields,
+        hooks: &Row,
+    ) -> Result<Option<Row>, RpcError> {
+        for reported in [&fields.harness_session, &fields.harness_origin]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(found) = self
+                .resumable(harness, reported, scope, fields, None, Some(hooks))
+                .await?
+                && text(&found, "id") != text(hooks, "id")
+                && text(&found, "handle") == Some(scope.handle.as_str())
+            {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
     }
     async fn resumable(
         &self,
@@ -461,6 +486,7 @@ impl Core {
         scope: &Scope,
         fields: &Fields,
         instead: Option<&Row>,
+        hooks: Option<&Row>,
     ) -> Result<Option<Row>, RpcError> {
         let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND harness_session = ? AND connections = 0 AND (session IS NULL OR substr(session,1,4) != 'sub:') AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY named IS NULL,COALESCE(last_seen,created_at) DESC",&[opt(Some(session))]).await?;
         if rows.is_empty() {
@@ -472,7 +498,7 @@ impl Core {
                 None => None,
             }
         } else {
-            self.placement(scope, None, None).await?.parent
+            self.placement(scope, None, hooks).await?.parent
         };
         let spender = if let Some(grant) = &scope.grant {
             Some(
@@ -520,6 +546,7 @@ impl Core {
                             ..fields.clone()
                         },
                         harness,
+                        hooks,
                     )
                     .await?
             {
@@ -669,17 +696,31 @@ impl Core {
             }
         }
         let mut moved_hooks = None;
+        let mut back = None;
         if !transient
             && let Some(hooks) = row.clone()
             && text(&hooks, "token_hash").is_none()
             && integer(&hooks, "named").is_none()
             && text(&hooks, "handle") != Some(scope.handle.as_str())
-            && !text(&hooks, "handle").unwrap_or("").starts_with(&format!(
+        {
+            let suffixed_hooks = text(&hooks, "handle").unwrap_or("").starts_with(&format!(
                 "{}-",
                 scope.handle.chars().take(58).collect::<String>()
-            ))
-        {
-            for n in 1..if scope.exact { 2 } else { 1000 } {
+            ));
+            if !scope.exact {
+                back = self.resumed_for(harness, scope, fields, &hooks).await?;
+            }
+            if back.is_some() {
+                moved_hooks = Some(hooks.clone());
+                row = back.clone();
+            }
+            for n in 1..if back.is_some() || suffixed_hooks {
+                1
+            } else if scope.exact {
+                2
+            } else {
+                1000
+            } {
                 let handle = suffixed(&scope.handle, n);
                 let held = self.by_handle(&handle).await?;
                 if let Some(held) = held {
@@ -699,6 +740,7 @@ impl Core {
                                 scope,
                                 fields,
                                 harness,
+                                None,
                             )
                             .await?
                     {
@@ -724,13 +766,16 @@ impl Core {
             row = Some(found);
             session = fields.session.clone();
             resumed = true;
+        } else if back.is_some() {
+            session = fields.session.clone();
+            resumed = true;
         } else if row.is_none() && open && !exact && scope.subagent.is_none() {
             for reported in [&fields.harness_session, &fields.harness_origin]
                 .into_iter()
                 .flatten()
             {
                 if let Some(found) = self
-                    .resumable(harness, reported, scope, fields, None)
+                    .resumable(harness, reported, scope, fields, None, None)
                     .await?
                 {
                     row = Some(found);
@@ -816,6 +861,7 @@ impl Core {
                                 scope,
                                 fields,
                                 harness,
+                                None,
                             )
                             .await?
                     {
@@ -1005,7 +1051,7 @@ impl Core {
                 .flatten()
             {
                 if let Some(held) = self
-                    .resumable(harness, reported, scope, fields, Some(&result))
+                    .resumable(harness, reported, scope, fields, Some(&result), None)
                     .await?
                 {
                     if text(&result, "parent_ep").is_none()

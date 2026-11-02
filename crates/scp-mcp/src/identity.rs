@@ -772,7 +772,11 @@ pub fn relay_identity(input: &IdentityInput) -> Claim {
     };
     let args_of = |at: i64| ps().and_then(|t| t.get(&at).map(|e| e.args.clone()));
     let forked = if provider == "claude-code" {
-        fork_origin(args_of(pid).as_deref())
+        fork_origin(args_of(pid).as_deref()).or_else(|| {
+            truthy(env, "SCP_HARNESS_ORIGIN")
+                .filter(|id| session_shaped(id))
+                .map(String::from)
+        })
     } else {
         None
     };
@@ -1021,6 +1025,19 @@ mod tests {
         assert_eq!(named["under"], "me/boss");
         assert_eq!(named["parent"], "me/p");
         assert!(!named.contains_key("derived"));
+        let resumed = |origin: &str| {
+            relay_identity(&input(
+                env(&[
+                    ("CLAUDECODE", "1"),
+                    ("CLAUDE_CODE_SESSION_ID", "sess-2"),
+                    ("SCP_HARNESS_ORIGIN", origin),
+                ]),
+                &cwd,
+            ))
+        };
+        assert_eq!(resumed("sess-1")["harness_origin"], "sess-1");
+        assert!(!resumed("sess-2").contains_key("harness_origin"));
+        assert!(!resumed("-bad").contains_key("harness_origin"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
