@@ -57,7 +57,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn version_usage_and_stub() {
+fn version_usage_and_errors() {
     let temp = Temp::new();
     let version = output(temp.swarm(&["--version"]));
     assert!(version.status.success());
@@ -68,9 +68,9 @@ fn version_usage_and_stub() {
         text(&version.stdout),
         format!("swarm {}\n", cli["version"].as_str().unwrap())
     );
-    let mcp = output(temp.swarm(&["mcp"]));
-    assert_eq!(mcp.status.code(), Some(1));
-    assert!(text(&mcp.stderr).contains("not yet native"));
+    let mcp = output(temp.swarm(&["mcp", "extra"]));
+    assert_eq!(mcp.status.code(), Some(125));
+    assert!(text(&mcp.stderr).contains("mcp takes no arguments"));
     let unknown = output(temp.swarm(&["frobnicate"]));
     assert_eq!(unknown.status.code(), Some(2));
     assert_eq!(output(temp.swarm(&[])).status.code(), Some(2));
@@ -78,6 +78,48 @@ fn version_usage_and_stub() {
     assert_eq!(bad.status.code(), Some(2));
     let idle = output(temp.swarm(&["daemon", "--idle", "soon"]));
     assert_eq!(idle.status.code(), Some(2));
+}
+
+#[test]
+fn mcp_serves_stdio_in_process() {
+    let temp = Temp::new();
+    let mut command = temp.swarm(&["mcp", "--harness", "claude"]);
+    command
+        .env("SCP_CLI_ARGV", r#"["/usr/bin/false"]"#)
+        .env("SCP_HARNESS_DETECT", "0");
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    ] {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let replies: Vec<Value> = text(&out.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "scp");
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| tool["name"] == "relay_whoami"));
+}
+
+#[test]
+fn mcp_help_never_hands_itself_on() {
+    let temp = Temp::new();
+    let bin = temp.0.join("bin");
+    fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_swarm"), bin.join("swarm")).unwrap();
+    let mut command = temp.swarm(&["mcp", "--help"]);
+    command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    let out = output(command);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).starts_with("usage: swarm mcp "));
 }
 
 #[test]

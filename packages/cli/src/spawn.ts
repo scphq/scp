@@ -69,7 +69,8 @@ import {
 import { steerPrompt } from "./hooks"
 import { CODEX_VALUED, detectHarness, type MuseLaunch, processKey, writeMuseLaunch } from "./identity"
 import { readConversation } from "./resume"
-import { agyRules, agySettingsFile, mcpFile, mountedEntry, whichOnPath } from "./setup"
+import { goneCommand, mcpMount, mcpWords } from "./native"
+import { agyRules, agySettingsFile, entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF, note } from "./term"
 
 export { SPAWN_HELP } from "./help-spawn"
@@ -80,6 +81,8 @@ type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 
 const SERVER = "scp"
+/** the words of Codex's `swarm mcp` mount */
+const CODEX_MCP = ["--harness", "codex"]
 
 /** what the relay MCP shim reads to claim its endpoint and find the broker; codex hands an MCP server only these when named in env_vars */
 const SHIM_ENV = [
@@ -114,14 +117,19 @@ export function toml(value: unknown): string {
   return JSON.stringify(value)
 }
 
-/** Pass shim variables by name to keep the grant out of argv. Headless Codex needs tool approval unless the mount sets it. */
+/**
+ * Pass shim variables by name to keep the grant out of argv. Headless Codex needs tool approval unless the mount sets it. Under SCP_NATIVE=1
+ * the server is the native `swarm mcp`, with the mount's words when there is one; a mount whose command is gone runs this CLI's instead.
+ */
 export function codexOverrides(env: Env, mount: Json | undefined, self: string[]): string[] {
   const kept = Array.isArray(mount?.env_vars) ? (mount.env_vars as unknown[]) : []
   const names = SHIM_ENV.filter((name) => env[name] !== undefined && !kept.includes(name))
   const key = (field: string) => `mcp_servers.${SERVER}.${field}`
   const set = (field: string, value: unknown) => ["-c", `${key(field)}=${toml(value)}`]
+  const server = mcpMount(self, mount ? mcpWords(entryArgv("codex", mount), CODEX_MCP) : CODEX_MCP, env)
   return [
-    ...(mount ? [] : [...set("command", self[0]), ...set("args", [...self.slice(1), "mcp", "--harness", "codex"])]),
+    ...(mount && !server.native && !goneCommand(mount.command) ? [] : [...set("command", server.argv[0]), ...set("args", server.argv.slice(1))]),
+    ...Object.entries(server.env).flatMap(([name, value]) => set(`env.${name}`, value)),
     ...set("env_vars", [...kept, ...names]),
     ...set("enabled", true),
     ...(mount && "default_tools_approval_mode" in mount ? [] : set("default_tools_approval_mode", "approve")),

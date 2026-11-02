@@ -28,7 +28,7 @@ import { RelayUsage } from "./common"
 import { AGY_HOOK_SET, agyHookSet, BLOCK_STOP, claudeVersionFile, hasOurHooks, hookEntries, mergeHooks, musePlugin, opencodePlugin, shellQuote } from "./hooks"
 import { hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
-import { nativeHook } from "./native"
+import { type Mount, mountVars, mountWith, nativeHook, nativeSwarm } from "./native"
 import { launcher } from "./launcher"
 import { coworkSetup } from "./cowork"
 import { CLAUDE_DESKTOP_HELP, claudeDesktopSetup, parseClaudeDesktopArgs } from "./mcpb"
@@ -59,6 +59,8 @@ export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [
   until it runs ${CLI_NAME} join <name> (or calls relay_join); saved in ~/.config/scp/config.json with --write.
   --engine auto uses a matching native hook client when installed; ts forces Node, native requires it.
   SCP_ENGINE sets the default engine; SCP_HOOK_BIN overrides the native binary path.
+  With SCP_NATIVE=1 every mount runs the native swarm's mcp directly (no node stays resident), when one matching this
+  CLI is installed or SCP_SWARM_BIN names it; without one the mounts run through node, as without SCP_NATIVE.
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
   The Claude Code and codex hooks and every mount run ${CLI_NAME} by absolute paths (a node script as absolute node plus its
   real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or ${CLI_NAME}.
@@ -242,18 +244,40 @@ const LOCAL_TYPE: Partial<Record<SetupHarness, string>> = { claude: "stdio", ope
 /** keys of a remote server entry, dropped when a JSON entry becomes the local mount */
 const REMOTE_KEYS = ["url", "httpUrl", "serverUrl", "headers", "oauth"]
 
-/** whether `entry` is the local mount running `argv`, enabled */
-function entryRight(harness: SetupHarness, entry: Json, argv: string[]): boolean {
+/** the key of an entry's environment */
+const envKey = (harness: SetupHarness): string => (harness === "opencode" ? "environment" : "env")
+
+/** an entry's string variables */
+function entryVars(harness: SetupHarness, entry: Json | undefined): Record<string, string> {
+  const vars = entry?.[envKey(harness)]
+  return isObject(vars) ? Object.fromEntries(Object.entries(vars).filter((pair): pair is [string, string] => typeof pair[1] === "string")) : {}
+}
+
+/** whether an entry's variables are the ones a native mount sets: setup wrote it under SCP_NATIVE=1 */
+const nativeVars = (vars: Record<string, string>): boolean => vars.SCP_NATIVE === "1" && vars.SCP_CLI_ARGV !== undefined
+
+/** whether `entry` is the local mount `mount` (a bare argv: one with no variables of its own), enabled */
+function entryRight(harness: SetupHarness, entry: Json, mount: Mount | string[]): boolean {
+  const { argv, env } = Array.isArray(mount) ? { argv: mount, env: {} } : mount
   const type = LOCAL_TYPE[harness]
   const local = !["url", "httpUrl", "serverUrl"].some((key) => key in entry) && (entry.type === undefined || type === undefined || entry.type === type)
-  return local && entryEnabled(harness, entry) && entryArgv(harness, entry).join("\0") === argv.join("\0")
+  const vars = entryVars(harness, entry)
+  return (
+    local &&
+    entryEnabled(harness, entry) &&
+    entryArgv(harness, entry).join("\0") === argv.join("\0") &&
+    Object.entries(env).every(([key, value]) => vars[key] === value)
+  )
 }
 
 const withoutRemote = (entry: Json): Json => Object.fromEntries(Object.entries(entry).filter(([key]) => !REMOTE_KEYS.includes(key)))
 
-/** the command a harness's mount runs */
-export function mountArgv(harness: SetupHarness, launch: string[]): string[] {
-  return [...launch, "mcp", "--harness", harness, ...(harness === "claude" ? ["--channels"] : [])]
+/** the words after `mcp` in a harness's mount */
+const mountWords = (harness: SetupHarness): string[] => ["--harness", harness, ...(harness === "claude" ? ["--channels"] : [])]
+
+/** a harness's mount: the native `swarm mcp` when `native` names it, told that `launch` starts this CLI; else `launch` with `mcp` */
+export function setupMount(harness: SetupHarness, launch: string[], native: string | undefined, env: Env): Mount {
+  return mountWith(native, launch, mountWords(harness), env)
 }
 
 export function agyRules(): string[] {
@@ -557,11 +581,11 @@ function claudeShadows(file: string, cwd: string): string[] {
 }
 
 /** the mount step for one harness, or a note when it is already in place */
-function planMount(plan: Plan, harness: SetupHarness, launch: string[], ctx: Ctx) {
+function planMount(plan: Plan, harness: SetupHarness, mount: Mount, ctx: Ctx) {
   const { now, run } = ctx
   const cli = ctx.found.get(harness)!
   const file = mcpFile(harness, ctx.env)
-  const argv = mountArgv(harness, launch)
+  const { argv } = mount
   const blocked = linkProblem(file, harness !== "opencode" && harness !== "muse")
   if (blocked) {
     problem(plan, harness, `mcp: skipped, ${blocked}`)
@@ -576,11 +600,15 @@ function planMount(plan: Plan, harness: SetupHarness, launch: string[], ctx: Ctx
   }
   if (harness === "claude")
     for (const shadow of claudeShadows(file, ctx.cwd)) note(plan, harness, `mcp: warning, ${shadow}: in that project it is used instead of the user mount`)
-  if (entry && entryRight(harness, entry, argv)) {
+  if (entry && entryRight(harness, entry, mount)) {
     note(plan, harness, `mcp: up to date in ${file}`)
     return
   }
   const current = entry ? entryArgv(harness, entry) : undefined
+  const had = entryVars(harness, entry)
+  const revars = mount.native || nativeVars(had)
+  const vars = revars ? mountVars(had, mount) : had
+  const withVars: Json = revars ? { [envKey(harness)]: vars } : {}
   const manifest = entry ? undefined : remember({ harness, kind: "mcp", file })
   const verb = entry
     ? `update ${SERVER} (now: ${current?.map(shellWord).join(" ") || "unparsed"}${entryEnabled(harness, entry) ? "" : ", disabled; setup enables it"})`
@@ -606,10 +634,14 @@ function planMount(plan: Plan, harness: SetupHarness, launch: string[], ctx: Ctx
   switch (harness) {
     case "claude": {
       if (!entry) {
-        cliStep([[cli, "mcp", "add", "--scope", "user", SERVER, "--", ...argv]])
+        cliStep([
+          Object.keys(mount.env).length
+            ? [cli, "mcp", "add-json", "--scope", "user", SERVER, JSON.stringify({ type: LOCAL_TYPE.claude, command: argv[0], args: argv.slice(1), env: vars })]
+            : [cli, "mcp", "add", "--scope", "user", SERVER, "--", ...argv],
+        ])
         return
       }
-      const merged = { ...withoutRemote(entry), type: LOCAL_TYPE.claude, command: argv[0], args: argv.slice(1) }
+      const merged = { ...withoutRemote(entry), type: LOCAL_TYPE.claude, command: argv[0], args: argv.slice(1), ...withVars }
       if (dropped.length) note(plan, harness, `mcp: the update drops ${dropped.join(", ")} from the entry; the backup keeps them`)
       cliStep(
         [
@@ -623,11 +655,11 @@ function planMount(plan: Plan, harness: SetupHarness, launch: string[], ctx: Ctx
     case "codex":
     case "grok":
     case "agy": {
-      const vars = isObject(entry?.env) ? Object.entries(entry.env) : []
-      const flags = vars.filter(([, value]) => typeof value === "string").flatMap(([key, value]) => ["--env", `${key}=${value}`])
+      const raw = isObject(entry?.env) ? Object.entries(entry.env) : []
+      const flags = Object.entries(vars).flatMap(([key, value]) => ["--env", `${key}=${value}`])
       const lost = [
         ...Object.keys(entry ?? {}).filter((key) => !CLI_KEEPS[harness].has(key)),
-        ...vars.filter(([, value]) => typeof value !== "string").map(([key]) => `env.${key}`),
+        ...raw.filter(([, value]) => typeof value !== "string").map(([key]) => `env.${key}`),
       ]
       cliStep([[cli, "mcp", "add", ...(harness === "grok" ? ["--scope", "user"] : []), ...flags, SERVER, "--", ...argv]])
       if (lost.length) note(plan, harness, `mcp: ${harness} mcp add writes the entry anew and drops ${lost.join(", ")} from it; the backup keeps them`)
@@ -639,12 +671,14 @@ function planMount(plan: Plan, harness: SetupHarness, launch: string[], ctx: Ctx
     case "muse": {
       const key = harness === "opencode" ? "mcp" : "mcpServers"
       const fresh: Json =
-        harness === "opencode" ? { type: "local", command: argv, enabled: true } : { type: "stdio", command: argv[0], args: argv.slice(1), mode: "optional" }
+        harness === "opencode"
+          ? { type: "local", command: argv, enabled: true, ...withVars }
+          : { type: "stdio", command: argv[0], args: argv.slice(1), mode: "optional", ...withVars }
       const type = entry && entry.type !== LOCAL_TYPE[harness] ? { type: LOCAL_TYPE[harness] } : {}
       const changed: Json =
         harness === "opencode"
-          ? { ...type, command: argv, enabled: true }
-          : { ...type, command: argv[0], args: argv.slice(1), ...(entry && "enabled" in entry ? { enabled: true } : {}) }
+          ? { ...type, command: argv, enabled: true, ...withVars }
+          : { ...type, command: argv[0], args: argv.slice(1), ...(entry && "enabled" in entry ? { enabled: true } : {}), ...withVars }
       let value = fresh
       let edit: ReturnType<typeof jsonEdit>
       try {
@@ -669,7 +703,7 @@ function planMount(plan: Plan, harness: SetupHarness, launch: string[], ctx: Ctx
       if (!edit) return
       const detail = entry
         ? `${Object.entries(changed)
-            .map(([name, inner]) => `${key}.${SERVER}.${name} = ${JSON.stringify(inner)}`)
+            .map(([name, inner]) => `${key}.${SERVER}.${name} = ${JSON.stringify((redacted({ [name]: inner }) as Json)[name])}`)
             .join(", ")} (its other keys kept${dropped.length ? `, and ${dropped.join(", ")} dropped` : ""})`
         : `${key}.${SERVER} = ${JSON.stringify(redacted(value))}`
       addStep(plan, { harness, label: "mcp", file, plan: [`${verb} in ${file}`, detail], apply: edit.apply, manifest })
@@ -1122,7 +1156,7 @@ const LISTING: Partial<Record<SetupHarness, string[]>> = {
 }
 
 /**
- * Whether a harness's own MCP listing shows the mount (`expected` is its argv) or, without `expected`, that it
+ * Whether a harness's own MCP listing shows the mount (`want`, or its argv) or, without `want`, that it
  * is gone. Claude and OpenCode start the server and report it connected; Codex, Grok and agy only list it.
  */
 export function verifyMount(
@@ -1130,15 +1164,16 @@ export function verifyMount(
   cli: string,
   env: Env,
   run: (argv: string[]) => RunResult,
-  expected?: string[],
+  want?: string[] | Mount,
 ): { ok: boolean; line: string } {
+  const expected = Array.isArray(want) ? want : want?.argv
   const args = LISTING[harness]
   if (!args) {
     let entry: Json | undefined
     try {
       entry = mountedEntry(harness, mcpFile(harness, env))
     } catch {}
-    const right = Boolean(entry) && (!expected || entryRight(harness, entry!, expected))
+    const right = Boolean(entry) && (!want || entryRight(harness, entry!, want))
     const where = `in ${mcpFile(harness, env)} (Muse has no MCP listing command)`
     if (!expected) return { ok: !entry, line: `${entry ? "still configured" : "removed"} ${where}` }
     return { ok: right, line: `${right ? "configured" : entry ? "failed: a different scp is configured" : "failed: missing"} ${where}` }
@@ -1173,7 +1208,7 @@ export function verifyMount(
     try {
       entry = mountedEntry(harness, file)
     } catch {}
-    if (!entry || !entryRight(harness, entry, expected))
+    if (!entry || !entryRight(harness, entry, want!))
       return { ok: false, line: `failed: the ${SERVER} in ${file} is not this local one (${command} lists a ${SERVER})` }
   }
   if (harness === "claude" || harness === "opencode") {
@@ -1260,6 +1295,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
   }
   if (options.hooks === false) out(`hooks: ${options.undo ? "kept (--no-hooks)" : "not installed (--no-hooks); only the MCP shim is mounted"}`)
   const mounts = launcher(bin, env, which)
+  let nativeServer: string | undefined
   let hookLaunch: string[] | undefined = onPath ? launcher(onPath, env, which).argv : undefined
   if (!options.undo) {
     const how = mounts.node ? `, run by ${mounts.node} since it is a node script and a desktop app's PATH may have no node` : ""
@@ -1271,6 +1307,15 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
       )
     }
     if (mounts.problem) out(`! ${mounts.problem}: a harness started without your PATH may not start the mount`)
+    if (env.SCP_NATIVE === "1") {
+      const version = deps.version ?? "0.0.0"
+      nativeServer = nativeSwarm(env, version)
+      out(
+        nativeServer
+          ? `native MCP: the mounts run ${nativeServer} mcp directly (SCP_NATIVE=1, version ${version}), told to start ${CLI_NAME} as above; rerun setup after an upgrade that moves it`
+          : `! SCP_NATIVE=1 but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): the mounts run ${CLI_NAME} mcp through node`,
+      )
+    }
     const help = run([...mounts.argv, "help", "--all"]).output
     if (!help.includes(`${CLI_NAME} mcp`)) {
       out(`! ${bin} has no \`${CLI_NAME} mcp\` (its \`help --all\` does not list it): update it, or pass --bin with a ${CLI_NAME} that has the relay`)
@@ -1321,7 +1366,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
   }
   for (const harness of options.undo ? wanted : selected) {
     if (options.undo) planUnmount(plan, harness, ctx)
-    else planMount(plan, harness, mounts.argv, ctx)
+    else planMount(plan, harness, setupMount(harness, mounts.argv, nativeServer, env), ctx)
     if (harness === "agy") planAgyRules(plan, ctx, options.undo === true)
     if (hooks) (options.undo ? planUnhooks : planHooks)(plan, harness, ctx)
   }
@@ -1391,7 +1436,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
         }
         continue
       }
-      const result = verifyMount(harness, cli, env, runNeutral, mountArgv(harness, mounts.argv))
+      const result = verifyMount(harness, cli, env, runNeutral, setupMount(harness, mounts.argv, nativeServer, env))
       check(result.ok, `${harness}: ${result.line}`)
       if (harness === "agy") {
         let allow: unknown

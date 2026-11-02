@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
-import { nativeMcpBin, runNativeMcp } from "./mcp-native"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import pkg from "../package.json" with { type: "json" }
+import { nativeMcp, runNativeMcp } from "./mcp-native"
 
 const root = mkdtempSync(join(process.env.HOME!, "mcp-native-"))
 const entry = join(import.meta.dir, "cli.ts")
@@ -16,16 +17,30 @@ function fakeServer(code: number): { bin: string; record: string } {
   return { bin, record }
 }
 
-test("the native server serves only with SCP_NATIVE=1 and an executable SCP_MCP_BIN", () => {
+/** a stand-in native swarm that prints `swarm <version>` and records its other words */
+function fakeSwarm(version: string): string {
+  const bin = join(root, `swarm-${version}`, "swarm")
+  mkdirSync(dirname(bin), { recursive: true })
+  writeFileSync(bin, `#!/bin/sh\nif [ "$1" = --version ]; then echo "swarm ${version}"; exit 0; fi\nprintf '%s\\n' "$*" > '${bin}.words'\nexit 4\n`)
+  chmodSync(bin, 0o755)
+  return bin
+}
+
+test("the native server serves only with SCP_NATIVE=1: SCP_MCP_BIN when it is an executable file, else the native swarm", () => {
   const { bin } = fakeServer(0)
-  expect(nativeMcpBin({ SCP_MCP_BIN: bin })).toBeUndefined()
-  expect(nativeMcpBin({ SCP_NATIVE: "1", SCP_MCP_BIN: bin })).toBe(bin)
-  expect(nativeMcpBin({ SCP_NATIVE: "1" })).toBeUndefined()
-  expect(nativeMcpBin({ SCP_NATIVE: "1", SCP_MCP_BIN: "server-0" })).toBeUndefined()
-  expect(nativeMcpBin({ SCP_NATIVE: "1", SCP_MCP_BIN: root })).toBeUndefined()
+  expect(nativeMcp({ SCP_MCP_BIN: bin })).toBeUndefined()
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_MCP_BIN: bin })).toEqual({ bin, words: [] })
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_MCP_BIN: "server-0" })).toBeUndefined()
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_MCP_BIN: root })).toBeUndefined()
   const plain = join(root, "plain")
   writeFileSync(plain, "")
-  expect(nativeMcpBin({ SCP_NATIVE: "1", SCP_MCP_BIN: plain })).toBeUndefined()
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_MCP_BIN: plain })).toBeUndefined()
+  const swarm = fakeSwarm("1.2.3")
+  expect(nativeMcp({ SCP_SWARM_BIN: swarm }, "1.2.3")).toBeUndefined()
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: swarm }, "1.2.3")).toEqual({ bin: swarm, words: ["mcp"] })
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: swarm, SCP_MCP_BIN: bin }, "1.2.3")).toEqual({ bin, words: [] })
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: swarm }, "1.2.4")).toBeUndefined()
+  expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "missing") }, "1.2.3")).toBeUndefined()
 })
 
 test("the server gets the words, this process's parent and this CLI, and its exit code is passed on", async () => {
@@ -38,8 +53,9 @@ test("the server gets the words, this process's parent and this CLI, and its exi
 test("swarm mcp routes to the native server, mcp install and an unusable binary do not", async () => {
   const { bin, record } = fakeServer(3)
   const run = async (args: string[], env: Record<string, string>) => {
+    const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "SCP_MCP_BIN" && key !== "SCP_SWARM_BIN"))
     const child = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", ...args], {
-      env: { ...process.env, ...env },
+      env: { ...base, ...env },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -61,4 +77,11 @@ test("swarm mcp routes to the native server, mcp install and an unusable binary 
   const unusable = await run(["--human"], { SCP_NATIVE: "1", SCP_MCP_BIN: join(root, "missing") })
   expect(unusable.stderr).toContain("no usable native MCP server")
   expect(unusable.stderr).toContain("--human is not available")
+  const swarm = fakeSwarm(pkg.version)
+  const single = await run(["--as", "native-s"], { SCP_NATIVE: "1", SCP_SWARM_BIN: swarm })
+  expect(single.code).toBe(4)
+  expect(readFileSync(`${swarm}.words`, "utf8")).toBe("mcp --as native-s\n")
+  const none = await run(["--human"], { SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "missing") })
+  expect(none.stderr).toContain("no native swarm")
+  expect(none.stderr).toContain("--human is not available")
 })

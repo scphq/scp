@@ -46,8 +46,10 @@ fn main() {
         }
         Some("daemon") => daemon_command(&args[1..]),
         Some("mcp") => {
-            eprintln!("swarm mcp: not yet native; run the npm CLI's swarm mcp");
-            1
+            if let Ok(exe) = std::env::current_exe() {
+                scp_mcp::spawn::set_native_daemon(exe);
+            }
+            scp_mcp::main(&args[1..])
         }
         _ if args.iter().any(|arg| arg == "hook") => {
             scp_hook::entry(origin, &args);

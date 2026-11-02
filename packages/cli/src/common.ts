@@ -169,6 +169,8 @@ const DAEMON_ENV = [
   "SCP_OPEN_BIN",
   "SCP_LSOF_BIN",
   "SCP_FUSER_BIN",
+  "SCP_NATIVE",
+  "SCP_SWARM_BIN",
 ]
 const LOG_MAX_BYTES = 1024 * 1024
 

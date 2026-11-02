@@ -3,12 +3,13 @@ import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSyn
 import { join } from "node:path"
 import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, readOwnedFile, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
-import { bgDir, LAUNCHER_IDENTITY } from "./claude"
+import { bgDir, CLAUDE_MCP, LAUNCHER_IDENTITY } from "./claude"
 import { RelayUsage, terminalAttached } from "./common"
+import { goneCommand, mcpMount, mcpWords, mountVars } from "./native"
 import { configDir } from "./relay"
 import { whichOnPath } from "./setup"
 import { claudeTranscripts } from "./spawn"
-import { note, parseSeconds, printTable } from "./term"
+import { note, parseSeconds, printTable, SELF } from "./term"
 import { safeCwd } from "./cwd"
 
 type Env = Record<string, string | undefined>
@@ -744,7 +745,7 @@ async function stopWorker(target: Target, port: BgPort, run: Run): Promise<strin
     return null
   }
   await port.unhibernate(agent)
-  if (target.record) armTicket(target.record.file, undefined)
+  if (target.record) armTicket(target.record.file, undefined, run.env)
   const respawned = await claude.exec(claude.bin, ["respawn", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
   if (respawned.code === 0) return "mail raced the stop, so it was respawned"
   await port.hibernate(agent, ref)
@@ -1151,18 +1152,26 @@ const decline = (out: (text: string) => void, reason: string): number => {
 
 /**
  * puts the run's wake ticket in the scp server env of a session's MCP config, or takes a stale one out, so the revived session's shim takes
- * its endpoint back with it (SPEC section 6.4 rule 6); false when the config cannot be read or written
+ * its endpoint back with it (SPEC section 6.4 rule 6); a server whose command is gone runs this CLI's mount instead. False when the config
+ * cannot be read or written
  */
-function armTicket(file: string, ticket: string | undefined): boolean {
+function armTicket(file: string, ticket: string | undefined, env: Env): boolean {
   let temp: string | undefined
   try {
-    const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { env?: Record<string, string> } } }
+    const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { command?: unknown; args?: unknown; env?: Record<string, string> } } }
     const scp = config.mcpServers?.scp
     if (!scp || typeof scp !== "object") return false
     const vars = scp.env && typeof scp.env === "object" ? scp.env : {}
-    if (vars.SCP_WAKE_TICKET === ticket) return true
+    const stale = goneCommand(scp.command)
+    if (vars.SCP_WAKE_TICKET === ticket && !stale) return true
     const { SCP_WAKE_TICKET: _, ...rest } = vars
-    scp.env = ticket ? { ...rest, SCP_WAKE_TICKET: ticket } : rest
+    const armed = ticket ? { ...rest, SCP_WAKE_TICKET: ticket } : rest
+    if (stale) {
+      const mount = mcpMount(SELF, mcpWords([String(scp.command), ...(Array.isArray(scp.args) ? scp.args.map(String) : [])], CLAUDE_MCP), env)
+      scp.command = mount.argv[0]
+      scp.args = mount.argv.slice(1)
+      scp.env = mountVars(armed, mount)
+    } else scp.env = armed
     const candidate = `${file}.${crypto.randomUUID()}.tmp`
     const fd = openSync(candidate, "wx", 0o600)
     temp = candidate
@@ -1240,7 +1249,7 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
     (revive && (revive.harness !== "claude-code" || (state !== undefined && state.sessionId !== revive.session)))
   )
     return decline(out, "unresumable")
-  if (record && !armTicket(record.file, ticket)) {
+  if (record && !armTicket(record.file, ticket, env)) {
     note(`${CLI_NAME} claude-wake: could not update the wake ticket`)
     return 1
   }
