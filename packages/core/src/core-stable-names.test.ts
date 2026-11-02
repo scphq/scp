@@ -217,3 +217,131 @@ describe("relink", () => {
     expect(core.whoami(fresh.id).address).toBe("me/claude-app")
   })
 })
+
+const S3 = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d"
+
+/**
+ * session H of process 9 on the derived `claude-app` (or `claude-app-2` with a live holder of `claude-app`), titled, linked under `boss`,
+ * with a grant it issued and unread mail, then ended
+ */
+function lane(options: { taken?: boolean; handle?: string; root?: boolean } = {}) {
+  const ctx = setup()
+  const { core, clock, hook, shim, tool, peer } = ctx
+  core.claim({ handle: "boss", harness: "codex" })
+  const holder = options.taken ? shim(30, { harness_session: S3, derived: true }).endpoint : undefined
+  const extra = options.handle ? { handle: options.handle } : { derived: true }
+  const old = shim(9, { harness_session: H, ...extra }).endpoint
+  hook(9, { harness_session: H, ...extra })
+  tool(old.id, 9, H)
+  const handle = old.address.slice(3)
+  core.title(old.id, "the lane")
+  if (!options.root) core.adopt(HUMAN, { endpoint: handle, parent: "boss" })
+  const grant = core.grant(self(old.id), { name: "w1" }).token
+  core.send(peer.id, { to: handle, body: "for the lane" })
+  core.disconnect(old.id)
+  core.event(old.id, { kind: "session_end" }, { transient: true, process: key(9) })
+  clock.now += (LIMITS.restartGraceS + 1) * 1000
+  expect(core.whoami(old.id).presence).toBe("offline")
+  return { ...ctx, old, handle, holder, grant, parent: options.root ? null : "me/boss" }
+}
+
+/** that the ended lane kept its handle, title, place, mail and grants */
+function kept(ctx: ReturnType<typeof lane>) {
+  const { core, old, handle, grant, parent } = ctx
+  expect(core.whoami(old.id)).toMatchObject({ address: `me/${handle}`, title: "the lane", parent })
+  expect(core.inbox(old.id).map((m) => m.body.text)).toEqual(["for the lane"])
+  expect(core.claim({ handle: "w1", harness: "codex", grant }).endpoint.parent).toBe(`me/${handle}`)
+}
+
+describe("an unrelated session claiming a colliding name", () => {
+  for (const how of ["shim", "hook"] as const)
+    for (const taken of [false, true])
+      test(`never inherits the ended lane's row, title, mail, place or grants (${how}, ${taken ? "walked to -2" : "own handle"})`, () => {
+        const ctx = lane({ taken })
+        const claim = how === "shim" ? ctx.shim : ctx.hook
+        const fresh = claim(10, { harness_session: S0, derived: true }).endpoint
+        expect(fresh.id).not.toBe(ctx.old.id)
+        expect(fresh).toMatchObject({ title: null, parent: null })
+        expect(ctx.core.inbox(fresh.id)).toEqual([])
+        kept(ctx)
+      })
+
+  test("a hook with no derived flag walking past its own handle still gets a new row", () => {
+    const ctx = lane({ taken: true })
+    const fresh = ctx.hook(10, { harness_session: S0 }).endpoint
+    expect(fresh.id).not.toBe(ctx.old.id)
+    expect(fresh.address).toBe("me/claude-app-3")
+    kept(ctx)
+  })
+
+  test("an explicit name restarts its own endpoint, with its mail, from another session", () => {
+    const ctx = lane({ handle: "lane-a" })
+    const back = ctx.shim(10, { handle: "lane-a", harness_session: S0 }).endpoint
+    expect(back).toMatchObject({ id: ctx.old.id, address: "me/lane-a", title: "the lane" })
+    expect(ctx.core.inbox(back.id).map((m) => m.body.text)).toEqual(["for the lane"])
+  })
+
+  test("a live holder is never displaced: neither a connected one nor one whose hooks report from a running process", () => {
+    const ctx = lane({ taken: true })
+    const { core, hook, shim } = ctx
+    for (const extra of [{ derived: true }, {}]) expect(shim(10, { harness_session: S0, ...extra }).endpoint.id).not.toBe(ctx.holder!.id)
+    const hooked = hook(31, { handle: "lane-b", harness_session: S3 }).endpoint
+    expect(shim(11, { handle: "lane-b", harness_session: S0 }).endpoint.address).toBe("me/lane-b-2")
+    expect(core.whoami(hooked.id).address).toBe("me/lane-b")
+    expect(core.whoami(ctx.holder!.id).address).toBe("me/claude-app")
+  })
+})
+
+describe("a resumed session", () => {
+  for (const how of ["shim", "hook"] as const)
+    test(`takes back only its own ended row: by its session or its origin, never an unrelated one's (${how})`, () => {
+      for (const extra of [{ harness_session: H }, { harness_session: S0, harness_origin: H }]) {
+        const ctx = lane()
+        const claim = how === "shim" ? ctx.shim : ctx.hook
+        expect(claim(10, { ...extra, derived: true }).endpoint).toMatchObject({ id: ctx.old.id, address: "me/claude-app", title: "the lane" })
+      }
+      const ctx = lane()
+      const claim = how === "shim" ? ctx.shim : ctx.hook
+      expect(claim(10, { harness_session: S3, derived: true }).endpoint.id).not.toBe(ctx.old.id)
+      kept(ctx)
+    })
+
+  for (const origin of [true, false])
+    test(`a shim taking back its explicit name after its hook's derived claim keeps it (${origin ? "with" : "without"} origin)`, () => {
+      const ctx = lane({ handle: "lane-a", root: true })
+      const { core, clock, hook, shim, tool, old } = ctx
+      const derived = hook(10, { harness_session: S0, derived: true }).endpoint
+      tool(derived.id, 10, S0)
+      clock.now += 1000
+      const named = shim(10, { handle: "lane-a", harness_session: S0, ...(origin ? { harness_origin: H } : {}) }).endpoint
+      expect(named).toMatchObject({ id: old.id, address: "me/lane-a" })
+      const again = hook(10, { harness_session: S0, derived: true })
+      expect([again.endpoint.id, again.endpoint.address, again.rehomed]).toEqual([old.id, "me/lane-a", undefined])
+      tool(old.id, 10, S0)
+      expect(hook(10, { harness_session: S0, derived: true }).endpoint.address).toBe("me/lane-a")
+      expect(core.log({}).filter((row) => row.event === "rehome")).toEqual([])
+      expect(core.inbox(old.id).map((m) => m.body.text)).toEqual(["for the lane"])
+    })
+
+  test("a launcher's name given on resume lands the session on that name, never on another lane's row", () => {
+    const ctx = lane({ handle: "lane-a", root: true })
+    const { core, clock, hook, shim, tool } = ctx
+    const holder = shim(30, { harness_session: S3, derived: true }).endpoint
+    const other = shim(32, { harness_session: "older-lane", derived: true }).endpoint
+    tool(other.id, 32, "older-lane")
+    expect(other.address).toBe("me/claude-app-2")
+    core.title(other.id, "older lane")
+    core.disconnect(other.id)
+    core.event(other.id, { kind: "session_end" }, { transient: true, process: key(32) })
+    clock.now += (LIMITS.restartGraceS + 1) * 1000
+    const derived = hook(10, { harness_session: S0, derived: true }).endpoint
+    tool(derived.id, 10, S0)
+    const named = shim(10, { handle: "renamed", harness_session: S0, harness_origin: H }).endpoint
+    expect(named.address).toBe("me/renamed")
+    expect([named.id === other.id, named.id === ctx.old.id]).toEqual([false, false])
+    expect(hook(10, { harness_session: S0, derived: true }).endpoint.address).toBe("me/renamed")
+    expect(core.whoami(other.id)).toMatchObject({ address: "me/claude-app-2", title: "older lane" })
+    expect(core.whoami(holder.id)).toMatchObject({ address: "me/claude-app", presence: "idle" })
+    kept(ctx)
+  })
+})
