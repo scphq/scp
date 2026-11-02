@@ -51,6 +51,8 @@ const DAEMON_ENV: &[&str] = &[
     "SCP_OPEN_BIN",
     "SCP_LSOF_BIN",
     "SCP_FUSER_BIN",
+    "SCP_NATIVE",
+    "SCP_SWARM_BIN",
 ];
 
 pub fn now() -> u64 {

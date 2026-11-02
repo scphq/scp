@@ -709,9 +709,9 @@ export async function relayMain(argv: string[], cwd = safeCwd()): Promise<number
     return daemon(values.idle as string | undefined, values.policy as string | undefined)
   }
   if (verb === "mcp" && positionals[0] !== "install") {
-    const { nativeMcpBin, runNativeMcp } = await import("./mcp-native")
-    const bin = nativeMcpBin(process.env)
-    const code = bin === undefined ? undefined : await runNativeMcp(bin, rest)
+    const { nativeMcp, runNativeMcp } = await import("./mcp-native")
+    const server = nativeMcp(process.env)
+    const code = server === undefined ? undefined : await runNativeMcp(server.bin, [...server.words, ...rest])
     if (code !== undefined) return code
   }
   if (verb === "mcp")

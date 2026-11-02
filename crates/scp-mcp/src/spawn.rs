@@ -12,9 +12,10 @@ use std::fs;
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use tokio::io::AsyncReadExt;
 
 /// the environment variable a detached runner reads its caller's walk from
@@ -22,7 +23,7 @@ pub const SPAWN_RUNNER: &str = "SCP_SPAWN_RUNNER";
 /// this CLI as a command line, as a JSON array of words
 pub const CLI_ARGV: &str = "SCP_CLI_ARGV";
 
-const DAEMON_ENV: [&str; 20] = [
+const DAEMON_ENV: [&str; 22] = [
     "PATH",
     "LANG",
     "LC_ALL",
@@ -43,8 +44,34 @@ const DAEMON_ENV: [&str; 20] = [
     "SCP_OPEN_BIN",
     "SCP_LSOF_BIN",
     "SCP_FUSER_BIN",
+    "SCP_NATIVE",
+    "SCP_SWARM_BIN",
 ];
 const LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+static NATIVE_DAEMON: OnceLock<PathBuf> = OnceLock::new();
+
+/// names the native `swarm` this server runs in, which then starts the broker itself (`<exe> daemon`) under `SCP_NATIVE=1`
+pub fn set_native_daemon(exe: PathBuf) {
+    let _ = NATIVE_DAEMON.set(exe);
+}
+
+/// the native `swarm` that starts the broker for `env`: `exe` under `SCP_NATIVE=1`
+fn native_daemon<'a>(env: &Env, exe: Option<&'a Path>) -> Option<&'a Path> {
+    exe.filter(|_| env.get("SCP_NATIVE").is_some_and(|v| v == "1"))
+}
+
+/// the broker command: `native daemon` when there is one, else the launcher's `daemon`
+fn daemon_argv(env: &Env, native: Option<&Path>) -> Vec<String> {
+    match native {
+        Some(exe) => vec![exe.to_string_lossy().into_owned(), "daemon".into()],
+        None => {
+            let mut argv = launcher(env);
+            argv.push("daemon".into());
+            argv
+        }
+    }
+}
 
 /// the CLI that starts the broker and runners: `$SCP_CLI_ARGV`, else `swarm` on PATH
 pub fn launcher(env: &Env) -> Vec<String> {
@@ -90,11 +117,11 @@ pub fn start_daemon(dir: &str, env: &Env) -> io::Result<()> {
         .append(true)
         .mode(0o600)
         .open(&log_file)?;
-    let argv = launcher(env);
+    let native = native_daemon(env, NATIVE_DAEMON.get().map(PathBuf::as_path));
+    let argv = daemon_argv(env, native);
     let mut command = tokio::process::Command::new(&argv[0]);
     command
         .args(&argv[1..])
-        .arg("daemon")
         .env_clear()
         .env("SCP_DIR", dir)
         .current_dir(dir)
@@ -105,6 +132,11 @@ pub fn start_daemon(dir: &str, env: &Env) -> io::Result<()> {
         if let Some(value) = env.get(key) {
             command.env(key, value);
         }
+    }
+    if native.is_some()
+        && let Some(words) = env.get(CLI_ARGV)
+    {
+        command.env(CLI_ARGV, words);
     }
     detached(&mut command, None);
     command.spawn().map(drop)
@@ -498,6 +530,27 @@ mod tests {
         assert_eq!(launcher(&env), vec!["/bin/bun", "/x/cli.js"]);
         env.insert(CLI_ARGV.into(), "[]".into());
         assert_eq!(launcher(&env), vec!["swarm"]);
+    }
+
+    #[test]
+    fn the_broker_is_native_only_under_scp_native() {
+        let exe = Path::new("/opt/native/swarm");
+        let mut env = Env::new();
+        env.insert(CLI_ARGV.into(), r#"["/bin/node","/x/cli.js"]"#.into());
+        assert_eq!(native_daemon(&env, Some(exe)), None);
+        assert_eq!(
+            daemon_argv(&env, None),
+            vec!["/bin/node", "/x/cli.js", "daemon"]
+        );
+        env.insert("SCP_NATIVE".into(), "1".into());
+        assert_eq!(native_daemon(&env, None), None);
+        assert_eq!(native_daemon(&env, Some(exe)), Some(exe));
+        assert_eq!(
+            daemon_argv(&env, Some(exe)),
+            vec!["/opt/native/swarm", "daemon"]
+        );
+        env.insert("SCP_NATIVE".into(), "0".into());
+        assert_eq!(native_daemon(&env, Some(exe)), None);
     }
 
     #[test]

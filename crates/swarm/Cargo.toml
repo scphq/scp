@@ -17,6 +17,7 @@ clap.workspace = true
 libc = "=0.2.191"
 scp-broker = { path = "../scp-broker" }
 scp-hook = { path = "../scp-hook" }
+scp-mcp = { path = "../scp-mcp" }
 tokio.workspace = true
 tracing-subscriber.workspace = true
 

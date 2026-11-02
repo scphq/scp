@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import pkg from "../package.json" with { type: "json" }
 import { Database } from "bun:sqlite"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { lineage, processKey, readPsTable, spawnerKey } from "./identity"
@@ -1163,6 +1164,44 @@ describe("harness argv and environment", () => {
     })
     const bare = codexOverrides(env, undefined, ['/odd "dir"/bun\u007f', "main.js"])
     expect((Bun.TOML.parse(`v = ${bare[1]!.slice(bare[1]!.indexOf("=") + 1)}`) as { v: string }).v).toBe('/odd "dir"/bun\u007f')
+  })
+
+  test("under SCP_NATIVE=1 codex mounts the native swarm's mcp directly, with the mount's words, and falls back to node without one", () => {
+    const dir = mkdtempSync(join(process.env.HOME!, "codex-native-"))
+    const bin = join(dir, "swarm")
+    writeFileSync(bin, `#!/bin/sh\nprintf 'swarm ${pkg.version}\\n'\n`, { mode: 0o755 })
+    const parsed = (overrides: string[]) =>
+      Object.fromEntries(
+        overrides.filter((_, i) => i % 2).map((o) => [o.slice(0, o.indexOf("=")), (Bun.TOML.parse(`v = ${o.slice(o.indexOf("=") + 1)}`) as { v: unknown }).v]),
+      )
+    const env = { ...spawnEnvironment({ XDG_STATE_HOME: "/s" }, grant), SCP_NATIVE: "1", SCP_SWARM_BIN: bin }
+    const launch = ["/opt/node", "/opt/cli.js"]
+    const native = { SCP_NATIVE: "1", SCP_SWARM_BIN: bin, SCP_CLI_ARGV: JSON.stringify(launch) }
+    expect(parsed(codexOverrides(env, undefined, launch))).toMatchObject({
+      "mcp_servers.scp.command": bin,
+      "mcp_servers.scp.args": ["mcp", "--harness", "codex"],
+      "mcp_servers.scp.env.SCP_NATIVE": "1",
+      "mcp_servers.scp.env.SCP_SWARM_BIN": bin,
+      "mcp_servers.scp.env.SCP_CLI_ARGV": native.SCP_CLI_ARGV,
+    })
+    expect(parsed(codexOverrides(env, { command: "/old/swarm", args: ["mcp", "--harness", "codex", "--as", "w"] }, launch))).toMatchObject({
+      "mcp_servers.scp.command": bin,
+      "mcp_servers.scp.args": ["mcp", "--harness", "codex", "--as", "w"],
+    })
+    const gone = parsed(
+      codexOverrides({ ...env, SCP_NATIVE: undefined }, { command: join(dir, "removed", "swarm"), args: ["mcp", "--harness", "codex"] }, launch),
+    )
+    expect([gone["mcp_servers.scp.command"], gone["mcp_servers.scp.args"]]).toEqual(["/opt/node", ["/opt/cli.js", "mcp", "--harness", "codex"]])
+    for (const off of [
+      { ...env, SCP_NATIVE: undefined },
+      { ...env, SCP_SWARM_BIN: join(dir, "missing") },
+    ]) {
+      const keys = Object.keys(parsed(codexOverrides(off, undefined, launch)))
+      expect(keys).toContain("mcp_servers.scp.command")
+      expect(keys.filter((key) => key.startsWith("mcp_servers.scp.env."))).toEqual([])
+      expect(parsed(codexOverrides(off, undefined, launch))["mcp_servers.scp.args"]).toEqual(["/opt/cli.js", "mcp", "--harness", "codex"])
+      expect(Object.keys(parsed(codexOverrides(off, { command: "swarm" }, launch))).filter((key) => key.endsWith(".command"))).toEqual([])
+    }
   })
 
   test("claude -p and grok headless get the relay tools allowed at the end, unless the user passed a permission flag", () => {
