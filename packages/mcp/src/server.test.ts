@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type Claim, CLI_NAME, LIMITS, PREAMBLE, type Wake } from "@scp-dev/core"
 import { type Broker, readSessionMarker, RelayClient, startBroker } from "@scp-dev/broker"
 import { createServer } from "node:net"
+import { type NativeSpec, type ServerMode, serverModes, startNative } from "./native-test"
 import { MCP_PROTOCOLS, type RelayMcpOptions, runRelayMcp, type SessionInbox, type SpawnRequest, TOOLS } from "./server"
 
 setDefaultTimeout(20_000)
@@ -17,9 +18,10 @@ type Message = {
   params?: Record<string, unknown>
 }
 
-/** an in-process MCP client around runRelayMcp */
-function shim(
-  broker: Broker,
+/** an MCP client around runRelayMcp in process, or around the native server (which takes no functions: only fixed membership and spawns) */
+function shimFor(
+  mode: ServerMode,
+  broker: { socket: string },
   options: {
     handle: string
     channels?: boolean
@@ -30,48 +32,77 @@ function shim(
     initialize?: false
     claim?: Partial<Claim>
     spawn?: (request: SpawnRequest) => Promise<{ name: string; pid: number }>
+    /** the native server's spawn, for a test that checks what relay_spawn asks for */
+    nativeSpawn?: NativeSpec["spawn"]
+    /** the native server's thread claims, by the `_meta.threadId` that names them */
+    threadClaims?: Record<string, Claim>
     membership?: () => { dark: string } | { handle?: string }
     env?: Record<string, string>
     sessionInbox?: SessionInbox
     extra?: Partial<RelayMcpOptions>
   },
 ) {
-  const lines: string[] = []
+  let lines: string[] = []
+  let logged: string[] = []
   let push!: (chunk: string | null) => void
-  const queue: (string | null)[] = []
-  let waiting: (() => void) | undefined
-  push = (chunk) => {
-    queue.push(chunk)
-    waiting?.()
-  }
-  async function* input() {
-    for (;;) {
-      while (!queue.length) await new Promise<void>((resolve) => (waiting = resolve))
-      const chunk = queue.shift()!
-      if (chunk === null) return
-      yield chunk
+  let done: Promise<void>
+  const claim = {
+    handle: options.handle,
+    harness: "claude-code",
+    cwd: "/work/proj",
+    ...(options.session === undefined ? {} : { session: options.session }),
+    ...options.claim,
+  } as Claim
+  const env = { HOME: "/work", ...options.env }
+  if (mode === "native") {
+    if (options.connect || options.membership) throw new Error("the native server takes no connect or membership function")
+    const native = startNative({
+      socket: broker.socket,
+      claim,
+      env,
+      ...(options.channels === undefined ? {} : { channels: options.channels }),
+      ...(options.launched === undefined ? {} : { launched: options.launched }),
+      ...(options.wake === undefined ? {} : { wake: options.wake }),
+      ...(options.sessionInbox === undefined ? {} : { session_inbox: options.sessionInbox }),
+      ...(options.nativeSpawn ? { spawn: options.nativeSpawn } : options.spawn ? { spawn: { pid: 1, name: "w" } } : {}),
+      ...(options.extra?.deferClaim ? { defer_claim: true } : {}),
+      ...(options.extra?.heartbeatMs === undefined ? {} : { heartbeat_ms: options.extra.heartbeatMs }),
+      ...(options.threadClaims ? { thread_claims: options.threadClaims } : {}),
+    })
+    lines = native.lines
+    logged = native.logged
+    push = native.raw
+    done = native.done
+  } else {
+    const queue: (string | null)[] = []
+    let waiting: (() => void) | undefined
+    push = (chunk) => {
+      queue.push(chunk)
+      waiting?.()
     }
+    async function* input() {
+      for (;;) {
+        while (!queue.length) await new Promise<void>((resolve) => (waiting = resolve))
+        const chunk = queue.shift()!
+        if (chunk === null) return
+        yield chunk
+      }
+    }
+    done = runRelayMcp({
+      connect: options.connect ?? (() => RelayClient.connect(broker.socket)),
+      claim,
+      input: input(),
+      output: (line) => lines.push(line),
+      env,
+      ...(options.launched === undefined ? {} : { launchedWithChannels: options.launched }),
+      ...(options.channels === undefined ? {} : { channels: options.channels }),
+      ...(options.wake === undefined ? {} : { wake: options.wake }),
+      ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
+      ...(options.membership === undefined ? {} : { membership: options.membership }),
+      ...(options.sessionInbox === undefined ? {} : { sessionInbox: options.sessionInbox }),
+      ...options.extra,
+    })
   }
-  const done = runRelayMcp({
-    connect: options.connect ?? (() => RelayClient.connect(broker.socket)),
-    claim: {
-      handle: options.handle,
-      harness: "claude-code",
-      cwd: "/work/proj",
-      ...(options.session === undefined ? {} : { session: options.session }),
-      ...options.claim,
-    },
-    input: input(),
-    output: (line) => lines.push(line),
-    env: { HOME: "/work", ...options.env },
-    ...(options.launched === undefined ? {} : { launchedWithChannels: options.launched }),
-    ...(options.channels === undefined ? {} : { channels: options.channels }),
-    ...(options.wake === undefined ? {} : { wake: options.wake }),
-    ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
-    ...(options.membership === undefined ? {} : { membership: options.membership }),
-    ...(options.sessionInbox === undefined ? {} : { sessionInbox: options.sessionInbox }),
-    ...options.extra,
-  })
   let nextId = 1
   if (options.initialize !== false) push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
   const messages = () => lines.map((l) => JSON.parse(l) as Message)
@@ -88,6 +119,8 @@ function shim(
   const call = async (name: string, args: object = {}) => (await request("tools/call", { name, arguments: args })).result!
   return {
     lines,
+    /** the native server's stderr lines; empty in process */
+    logged,
     messages,
     request,
     call,
@@ -98,9 +131,20 @@ function shim(
   }
 }
 
+/** the spawn requests the native server logged */
+const spawned = (log: string): SpawnRequest[] =>
+  existsSync(log)
+    ? readFileSync(log, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as SpawnRequest)
+    : []
+
 const textOf = (result: { content?: { text: string }[] }) => result.content![0]!.text
 
-describe("relay MCP shim, in process", () => {
+describe.each(serverModes)("relay MCP shim, in process (%s)", (mode) => {
+  const native = mode === "native"
+  const shim = (broker: { socket: string }, options: Parameters<typeof shimFor>[2]) => shimFor(mode, broker, options)
   let broker: Broker
   let dir: string
 
@@ -203,33 +247,37 @@ describe("relay MCP shim, in process", () => {
     expect(TOOLS).toHaveLength(20)
   })
 
-  test("a dark session's shim claims nothing until relay_join, which names it; relay_leave takes it offline; relay_send warns or refuses with live", async () => {
-    const proc = "pid:4242:Thu-Oct-15-10:00:00-2026"
-    const membership = (): { dark: string } | { handle?: string } => {
-      const marker = readSessionMarker(join(dir, "relay"), proc)
-      if (!marker?.joined) return { dark: marker ? "this session left the relay" : "this session has not joined the relay" }
-      return marker.handle ? { handle: marker.handle } : {}
-    }
-    const s = shim(broker, { handle: "claude-dark", session: proc, claim: { process: proc }, membership })
-    expect(textOf(await s.call("relay_whoami"))).toBe("unavailable: this session has not joined the relay")
-    expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/claude-dark")
-    expect(textOf(await s.call("relay_join", { name: "mcp-lead" }))).toBe(
-      "joined the relay as me/mcp-lead: peers can message you, and new messages reach you after your tool calls",
-    )
-    expect(textOf(await s.call("relay_whoami"))).toContain("address: me/mcp-lead")
-    expect(textOf(await s.call("relay_leave"))).toContain("me/mcp-lead left the relay")
-    expect(textOf(await s.call("relay_whoami"))).toBe("unavailable: this session left the relay")
-    expect(broker.core.list({ all: true }).find((e) => e.address === "me/mcp-lead")?.presence).toBe("offline")
-    const t = shim(broker, { handle: "mcp-sender" })
-    expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "queued" }))).toContain("queued: no live session holds me/mcp-lead")
-    expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "no", live: true }))).toBe(
-      "not_live: no live session holds me/mcp-lead: nothing was queued",
-    )
-    for (const x of [s, t]) {
-      x.close()
-      await x.done
-    }
-  })
+  // the membership here follows the session marker as it changes; the native server only takes a fixed one
+  test.skipIf(native)(
+    "a dark session's shim claims nothing until relay_join, which names it; relay_leave takes it offline; relay_send warns or refuses with live",
+    async () => {
+      const proc = "pid:4242:Thu-Oct-15-10:00:00-2026"
+      const membership = (): { dark: string } | { handle?: string } => {
+        const marker = readSessionMarker(join(dir, "relay"), proc)
+        if (!marker?.joined) return { dark: marker ? "this session left the relay" : "this session has not joined the relay" }
+        return marker.handle ? { handle: marker.handle } : {}
+      }
+      const s = shim(broker, { handle: "claude-dark", session: proc, claim: { process: proc }, membership })
+      expect(textOf(await s.call("relay_whoami"))).toBe("unavailable: this session has not joined the relay")
+      expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/claude-dark")
+      expect(textOf(await s.call("relay_join", { name: "mcp-lead" }))).toBe(
+        "joined the relay as me/mcp-lead: peers can message you, and new messages reach you after your tool calls",
+      )
+      expect(textOf(await s.call("relay_whoami"))).toContain("address: me/mcp-lead")
+      expect(textOf(await s.call("relay_leave"))).toContain("me/mcp-lead left the relay")
+      expect(textOf(await s.call("relay_whoami"))).toBe("unavailable: this session left the relay")
+      expect(broker.core.list({ all: true }).find((e) => e.address === "me/mcp-lead")?.presence).toBe("offline")
+      const t = shim(broker, { handle: "mcp-sender" })
+      expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "queued" }))).toContain("queued: no live session holds me/mcp-lead")
+      expect(textOf(await t.call("relay_send", { to: "mcp-lead", body: "no", live: true }))).toBe(
+        "not_live: no live session holds me/mcp-lead: nothing was queued",
+      )
+      for (const x of [s, t]) {
+        x.close()
+        await x.done
+      }
+    },
+  )
 
   test("a deferred shim claims nothing before a tools/call, then the thread its _meta names for good; a call naming another or none keeps it", async () => {
     let connects = 0
@@ -241,16 +289,21 @@ describe("relay MCP shim, in process", () => {
       typeof meta.threadId === "string"
         ? { handle: `thread-${meta.threadId}`, harness: "codex", cwd: "/work/proj", session: `codex:${meta.threadId}` }
         : undefined
-    const bound: (string | undefined)[] = []
-    const logged: string[] = []
+    const threadClaims = Object.fromEntries(["aaa", "bbb", "ccc"].map((id) => [id, threadClaim({ threadId: id })!]))
+    const boundTo: (string | undefined)[] = []
+    const log: string[] = []
     const s = shim(broker, {
       handle: "deferred-shim",
       claim: { harness: "codex" },
-      connect,
-      extra: { deferClaim: true, threadClaim, bound: (claim) => bound.push(claim.session), log: (line) => logged.push(line), heartbeatMs: 20 },
+      ...(native ? {} : { connect }),
+      threadClaims,
+      extra: { deferClaim: true, threadClaim, bound: (claim) => boundTo.push(claim.session), log: (line) => log.push(line), heartbeatMs: 20 },
     })
+    const bound = native ? () => s.logged.flatMap((l) => (l.startsWith("test: bound ") ? [l.slice(12)] : [])) : () => boundTo
+    const logged = () => (native ? s.logged : log)
+    const connected = () => (native ? s.logged.filter((l) => l === "test: connect").length : connects)
     await Bun.sleep(150)
-    expect(connects).toBe(0)
+    expect(connected()).toBe(0)
     const call = async (meta?: Record<string, unknown>) =>
       textOf((await s.request("tools/call", { name: "relay_whoami", arguments: {}, ...(meta ? { _meta: meta } : {}) })).result!)
     expect(await call({ threadId: "aaa" })).toContain("address: me/thread-aaa")
@@ -259,11 +312,11 @@ describe("relay MCP shim, in process", () => {
     expect(await call({ threadId: "ccc" })).toContain("address: me/thread-aaa")
     const view = (address: string) => broker.core.list({ all: true }).find((e) => e.address === address)!
     expect(broker.core.sessionOf(view("me/thread-aaa").id)).toBe("codex:aaa")
-    expect(bound).toEqual(["codex:aaa"])
-    expect(logged.filter((line) => line.includes("stays bound to codex:aaa"))).toHaveLength(1)
+    expect(bound()).toEqual(["codex:aaa"])
+    expect(logged().filter((line) => line.includes("stays bound to codex:aaa"))).toHaveLength(1)
     expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/thread-bbb")
     expect(broker.core.list({ all: true }).map((e) => e.address)).not.toContain("me/deferred-shim")
-    const t = shim(broker, { handle: "deferred-fallback", claim: { harness: "codex" }, extra: { deferClaim: true, threadClaim } })
+    const t = shim(broker, { handle: "deferred-fallback", claim: { harness: "codex" }, threadClaims, extra: { deferClaim: true, threadClaim } })
     expect(textOf(await t.call("relay_whoami"))).toContain("address: me/deferred-fallback")
     for (const x of [s, t]) {
       x.close()
@@ -380,8 +433,11 @@ describe("relay MCP shim, in process", () => {
 
   test("relay_spawn hands its command, or harness and task, to the spawn as the calling agent and says how the worker's results reach it; a failed spawn is a tool error with its message", async () => {
     const asked: SpawnRequest[] = []
+    const log = join(dir, "spawns-mcp.jsonl")
+    const requests = () => (native ? spawned(log) : asked)
     const a = shim(broker, {
       handle: "spawner-mcp",
+      nativeSpawn: { pid: 4242, fallback: "codex-ab1c2", refuse: { refused: "--handback-bytes takes whole bytes, 1 to 16384" }, log },
       spawn: async (request) => {
         asked.push(request)
         if (request.name === "refused") throw new Error("--handback-bytes takes whole bytes, 1 to 16384")
@@ -403,7 +459,7 @@ describe("relay MCP shim, in process", () => {
       expect(started.structuredContent).toEqual({ name: "rev", pid: 4242 })
       await a.call("relay_spawn", { harness: "codex", task: "fix the lint", model: "large" })
       await a.call("relay_spawn", { harness: "claude", task: "list TODOs" })
-      expect(asked).toEqual([
+      expect(requests()).toEqual([
         {
           command: ["claude", "-p", "review it", "--model", "small"],
           as: "me/spawner-mcp",
@@ -430,7 +486,7 @@ describe("relay MCP shim, in process", () => {
         const result = await a.call("relay_spawn", bad)
         expect([JSON.stringify(bad), result.isError, textOf(result)]).toEqual([JSON.stringify(bad), true, expect.stringMatching(/^invalid_params: /)])
       }
-      expect(asked).toHaveLength(4)
+      expect(requests()).toHaveLength(4)
     } finally {
       a.close()
       await a.done
@@ -441,9 +497,12 @@ describe("relay MCP shim, in process", () => {
     const here = mkdtempSync(join(tmpdir(), "mcp-spawn-cwd-"))
     const there = mkdtempSync(join(tmpdir(), "mcp-spawn-there-"))
     const asked: SpawnRequest[] = []
+    const log = join(dir, "spawns-cwd.jsonl")
+    const requests = () => (native ? spawned(log) : asked)
     const a = shim(broker, {
       handle: "spawner-cwd",
       claim: { cwd: here },
+      nativeSpawn: { pid: 1, name: "w", log },
       spawn: async (request) => {
         asked.push(request)
         return { name: "w", pid: 1 }
@@ -452,12 +511,12 @@ describe("relay MCP shim, in process", () => {
     try {
       await a.call("relay_spawn", { command: ["codex", "exec", "x"] })
       await a.call("relay_spawn", { command: ["codex", "exec", "x"], cwd: there })
-      expect(asked.map((r) => r.cwd)).toEqual([here, there])
+      expect(requests().map((r) => r.cwd)).toEqual([here, there])
       for (const cwd of ["rel/dir", join(there, "missing"), 7]) {
         const result = await a.call("relay_spawn", { command: ["codex", "exec", "x"], cwd })
         expect([result.isError, textOf(result)]).toEqual([true, expect.stringMatching(/^invalid_params: cwd /)])
       }
-      expect(asked).toHaveLength(2)
+      expect(requests()).toHaveLength(2)
     } finally {
       a.close()
       await a.done
@@ -663,30 +722,39 @@ describe("relay MCP shim, in process", () => {
   test("after the broker restarts, the next call reconnects to the same endpoint", async () => {
     const own = mkdtempSync(join(tmpdir(), "relay-mcp-restart-"))
     let b = await startBroker({ dir: join(own, "relay"), idleMs: 0, policyPath: join(own, "policy.json"), log: () => {} })
-    const lines: string[] = []
+    const claim = { handle: "phoenix", harness: "codex", session: "pid:1" }
+    let lines: string[] = []
+    let send: (line: string) => void
     let end!: () => void
-    const closed = new Promise<void>((resolve) => (end = resolve))
-    const requests: string[] = []
-    let wake: (() => void) | undefined
-    async function* input() {
-      for (;;) {
-        while (!requests.length) {
-          const next = await Promise.race([new Promise<"more">((resolve) => (wake = () => resolve("more"))), closed.then(() => "end" as const)])
-          if (next === "end") return
+    let done: Promise<void>
+    if (native) {
+      const server = startNative({ socket: b.socket, claim })
+      lines = server.lines
+      send = server.raw
+      end = () => server.raw(null)
+      done = server.done
+    } else {
+      const closed = new Promise<void>((resolve) => (end = resolve))
+      const requests: string[] = []
+      let wake: (() => void) | undefined
+      async function* input() {
+        for (;;) {
+          while (!requests.length) {
+            const next = await Promise.race([new Promise<"more">((resolve) => (wake = () => resolve("more"))), closed.then(() => "end" as const)])
+            if (next === "end") return
+          }
+          yield requests.shift()!
         }
-        yield requests.shift()!
       }
+      send = (line) => {
+        requests.push(line)
+        wake?.()
+      }
+      done = runRelayMcp({ connect: () => RelayClient.connect(b.socket), claim, input: input(), output: (l) => lines.push(l) })
     }
-    const done = runRelayMcp({
-      connect: () => RelayClient.connect(b.socket),
-      claim: { handle: "phoenix", harness: "codex", session: "pid:1" },
-      input: input(),
-      output: (l) => lines.push(l),
-    })
-    requests.push(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
+    send(`${JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`)
     const ask = async (id: number) => {
-      requests.push(`${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "relay_whoami", arguments: {} } })}\n`)
-      wake?.()
+      send(`${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "relay_whoami", arguments: {} } })}\n`)
       for (let i = 0; i < 500 && !lines.some((l) => JSON.parse(l).id === id); i++) await Bun.sleep(10)
       return JSON.parse(lines.find((l) => JSON.parse(l).id === id)!) as Message
     }
@@ -773,7 +841,8 @@ describe("relay MCP shim, in process", () => {
     }
   })
 
-  test("--channels advertises the wake again on a reconnect", async () => {
+  // drops the shim's broker connection from outside, through its connect
+  test.skipIf(native)("--channels advertises the wake again on a reconnect", async () => {
     const clients: RelayClient[] = []
     const connect = async () => {
       const client = await RelayClient.connect(broker.socket)
@@ -1110,7 +1179,8 @@ describe("relay MCP shim, in process", () => {
   })
 })
 
-describe("relay MCP shim with a judging broker", () => {
+describe.each(serverModes)("relay MCP shim with a judging broker (%s)", (mode) => {
+  const shim = (broker: { socket: string }, options: Parameters<typeof shimFor>[2]) => shimFor(mode, broker, options)
   let broker: Broker
   let dir: string
   const judged = (fields: Record<string, unknown>) => JSON.stringify({ verdict: "pass", categories: [], reason: "fine", redactions: [], ...fields })

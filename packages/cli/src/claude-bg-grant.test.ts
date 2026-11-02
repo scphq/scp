@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { type Broker, startBroker } from "@scp-dev/broker"
+import { nativeMcpEnv } from "./testing/fixtures"
 
 setDefaultTimeout(30_000)
 
@@ -24,7 +25,7 @@ afterAll(async () => {
 function env(extra: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !MARKERS.test(key)) out[key] = value
-  return { ...out, SCP_DIR: dir, SCP_SESSION: "claude-bg", CLAUDECODE: "1", ...extra }
+  return { ...out, ...nativeMcpEnv(), SCP_DIR: dir, SCP_SESSION: "claude-bg", CLAUDECODE: "1", ...extra }
 }
 
 /** runs the MCP shim as the session's tool surface and returns its relay_whoami reply */
