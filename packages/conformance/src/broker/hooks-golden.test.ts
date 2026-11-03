@@ -44,7 +44,6 @@ async function hook(broker: BrokerFixture, harness: Harness, event: string, ids:
     muse: "MUSE_SESSION_ID",
     grok: "GROK_SESSION_ID",
   };
-  const began = performance.now();
   const child = Bun.spawn([process.execPath, "--no-env-file", cli, "hook", ...args], {
     cwd: broker.target.home,
     env: {
@@ -52,6 +51,8 @@ async function hook(broker: BrokerFixture, harness: Harness, event: string, ids:
       SCP_SESSION: "golden",
       SCP_NAME: "subject",
       SCP_TLDR_EVERY: "0",
+      // the goldens pin output, not the hook deadline, so a loaded machine must not reach it
+      SCP_HOOK_DEADLINE_MS: "60000",
       CLAUDE_PID: String(process.pid),
       OPENCODE_PID: String(process.pid),
       [markers[harness]!]: "1",
@@ -68,17 +69,13 @@ async function hook(broker: BrokerFixture, harness: Harness, event: string, ids:
     .replace(/\bmsg_[A-Za-z0-9_-]+\b/g, "<MSG_ID>")
     .replace(/\bthr_[A-Za-z0-9_-]+\b/g, "<THREAD_ID>")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "<TIMESTAMP>");
-  return { stdout: normalized, elapsedMs: performance.now() - began };
+  return normalized;
 }
 
-/** Retry deadline fallbacks even when the expected output is empty. */
-async function golden(harness: Harness, event: string, run: () => Promise<{ stdout: string; elapsedMs: number }>) {
+async function golden(harness: Harness, event: string, run: () => Promise<string>) {
   const path = join(goldenDir, `${harness}-${event}.txt`);
   const expected = updateGolden ? undefined : readFileSync(path, "utf8");
-  let result = await run();
-  for (let attempt = 1; attempt < 3 && result.stdout === "" && result.elapsedMs >= 3500; attempt++) result = await run();
-  expect(result.stdout === "" && result.elapsedMs >= 3500, "hook deadline fallback after three attempts").toBe(false);
-  const { stdout } = result;
+  const stdout = await run();
   if (updateGolden) {
     mkdirSync(goldenDir, { recursive: true });
     writeFileSync(path, stdout);
