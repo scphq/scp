@@ -21,6 +21,9 @@ temporary home, configuration and broker directories, and starts foreground brok
 processes. Persistent local wire clients keep the CLI-claimed agents online.
 The runner invokes the built CLI on the destination machine and uses a bounded
 worker lifetime. Teardown stops only spawned processes and removes fixture state.
+`SCP_MACHINE_BROKERS=rust` runs every machine's broker on the native engine at
+`SCP_BROKER_BIN`, `mixed` every other one; with `SCP_SWARM_BIN` the native machines run
+`swarm daemon` instead, and so do the brokers their CLI starts.
 
 Scenarios cover:
 
@@ -30,6 +33,10 @@ Scenarios cover:
   process restart, and a queued delivery surviving another relay restart.
 - Cross-machine parent views, the mirrored `parent_addr`, and spawn-via handback.
 - Direct cloud claims, send and inbox, and discovery of both bridged machines.
+- The `cloud status` view of a linked broker, relinking in place after `swarm login` or
+  `cloud enable` (also after the hub replaced the bridge), a restart when the config names
+  another machine or appears under a local-only broker, `cloud disable` keeping the link
+  until the broker exits, and a hibernated agent's waker run by another machine's message.
 - Authentication bodies, HTTP methods, hello requirements and metadata, machine
   validation and ownership, bridge replacement, oversized frames, mirror changes,
   forward validation, replay cursors, acknowledgements and refusal notices.

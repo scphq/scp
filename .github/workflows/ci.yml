@@ -284,7 +284,8 @@ jobs:
           SCP_CONFORMANCE_PG: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: bun test packages/conformance/src/*.test.ts
 
-      # the machine fixtures again, with native brokers on every machine and then on every other one
+      # the machine fixtures again, with native brokers on every machine and then on every other one;
+      # the all-native run goes through the swarm binary, which brokers the CLI starts then run too
       - name: Multi-machine conformance with native brokers
         env:
           SCP_CONFORMANCE_COMPAT: "1"
@@ -293,6 +294,6 @@ jobs:
           SCP_BROKER_BIN: ${{ github.workspace }}/crates/target/debug/scp-broker
           SCP_CONFORMANCE_TARGETS: ts,rust-sqlite
         run: |
-          files="packages/conformance/src/cli.test.ts packages/conformance/src/lifecycle.test.ts packages/conformance/src/wire-hub.test.ts packages/conformance/src/compat.test.ts"
-          SCP_MACHINE_BROKERS=rust bun test $files
+          files="packages/conformance/src/cli.test.ts packages/conformance/src/lifecycle.test.ts packages/conformance/src/wire-hub.test.ts packages/conformance/src/compat.test.ts packages/conformance/src/bridge.test.ts"
+          SCP_MACHINE_BROKERS=rust SCP_SWARM_BIN=${{ github.workspace }}/crates/target/debug/swarm bun test $files
           SCP_MACHINE_BROKERS=mixed bun test $files

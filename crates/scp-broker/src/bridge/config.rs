@@ -7,6 +7,8 @@ use serde_json::Value;
 use scp_core::protocol::CLI_NAME;
 
 pub const DEFAULT_RELAY: &str = "https://app.scp.dev";
+/// a policy's rule cap, which the mirror selectors share
+const MIRROR_SELECTORS: usize = 256;
 
 /// how the broker links to the hub, from the cloud file beside the relay selection and the credential store
 #[derive(Clone, Debug)]
@@ -191,6 +193,11 @@ pub fn read_cloud_file(
     let mirror = match value.get("mirror") {
         None => None,
         Some(Value::Array(list)) => {
+            if list.len() > MIRROR_SELECTORS {
+                return Err(format!(
+                    "{shown}: mirror is a list of at most {MIRROR_SELECTORS} selectors"
+                ));
+            }
             let mut selectors = Vec::new();
             for sel in list {
                 let Some(sel) = sel.as_str() else {
@@ -264,6 +271,7 @@ pub fn daemon_bridge(env: &BTreeMap<String, String>, log: impl Fn(&str)) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn env(dir: &std::path::Path) -> BTreeMap<String, String> {
         BTreeMap::from([("XDG_CONFIG_HOME".into(), dir.display().to_string())])
@@ -317,6 +325,35 @@ mod tests {
         )
         .unwrap();
         assert!(daemon_bridge(&env, |_| {}).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mirror_selectors_are_capped_like_policy_rules() {
+        let dir = std::env::temp_dir().join(format!("scp-bridge-mirror-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scp")).unwrap();
+        let mut env = env(&dir);
+        env.insert("SCP_RELAY".into(), "http://localhost:7".into());
+        let path = dir.join("scp/cloud.json");
+        let write = |count: usize| {
+            let mirror = vec!["*"; count];
+            std::fs::write(
+                &path,
+                json!({"bridge": true, "machine": "desk", "mirror": mirror}).to_string(),
+            )
+            .unwrap();
+        };
+        write(256);
+        assert_eq!(
+            read_cloud_file(&path, &env).unwrap().mirror.unwrap().len(),
+            256
+        );
+        write(257);
+        let error = read_cloud_file(&path, &env).err().unwrap();
+        assert!(
+            error.ends_with("mirror is a list of at most 256 selectors"),
+            "{error}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

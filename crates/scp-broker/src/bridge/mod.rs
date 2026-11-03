@@ -239,3 +239,110 @@ impl Core {
         Some(bridge.mirror_now(self, ids).await)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::paths::Paths;
+    use crate::proto::Limits;
+    use crate::store::sqlite::SqliteStore;
+
+    async fn core(dir: &std::path::Path) -> Core {
+        let paths = Paths::new(dir.join("broker"));
+        std::fs::create_dir_all(&paths.dir).unwrap();
+        let mut core = Core::new(
+            Arc::new(SqliteStore::open(&paths.database).unwrap()),
+            Limits::default(),
+            paths,
+            dir.join("policy.json"),
+        )
+        .await
+        .unwrap();
+        core.federation.env = BTreeMap::from([
+            ("XDG_CONFIG_HOME".into(), dir.display().to_string()),
+            ("SCP_RELAY".into(), "http://localhost:7".into()),
+            ("SCP_TOKEN".into(), "t".into()),
+        ]);
+        core
+    }
+
+    fn cloud(dir: &std::path::Path, machine: Option<&str>) {
+        let path = dir.join("scp/cloud.json");
+        match machine {
+            Some(machine) => std::fs::write(
+                path,
+                json!({"bridge": true, "machine": machine}).to_string(),
+            )
+            .unwrap(),
+            None => std::fs::remove_file(path).unwrap(),
+        }
+    }
+
+    async fn restarts(core: &Core) -> bool {
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            core.federation.restart.notified(),
+        )
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn relink_keeps_the_link_in_place_unless_the_config_names_another_hub_or_machine() {
+        let dir = std::env::temp_dir().join(format!("scp-relink-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir_all(dir.join("scp")).unwrap();
+        let mut local = core(&dir).await;
+        assert_eq!(local.bridge_relink(), json!({"enabled": false}));
+        assert!(!restarts(&local).await);
+        cloud(&dir, Some("desk"));
+        assert_eq!(
+            local.bridge_relink(),
+            json!({"enabled": false, "restarting": true})
+        );
+        assert!(restarts(&local).await);
+
+        let mut linked = core(&dir).await;
+        let config = daemon_bridge(&linked.federation.env, |_| {}).unwrap();
+        Bridge::attach(config, &mut linked);
+        let status = linked.bridge_relink();
+        assert_eq!(
+            (&status["enabled"], &status["machine"], &status["url"]),
+            (&json!(true), &json!("desk"), &json!("http://localhost:7"))
+        );
+        assert!(!restarts(&linked).await);
+        cloud(&dir, None);
+        assert_eq!(linked.bridge_relink()["enabled"], true);
+        assert!(!restarts(&linked).await);
+        cloud(&dir, Some("box"));
+        assert_eq!(
+            linked.bridge_relink(),
+            json!({"enabled": false, "restarting": true})
+        );
+        assert!(restarts(&linked).await);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_has_the_typescript_bridges_fields() {
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        let status = json!({"enabled": true, "machine": "m", "url": "u", "connected": false, "last_error": null, "since": "s"});
+        let config = BridgeConfig::new("http://localhost:7", "desk", None);
+        let dir = std::env::temp_dir().join(format!("scp-status-{:032x}", rand::random::<u128>()));
+        let mut core = core(&dir).await;
+        let bridge = Bridge::attach(config, &mut core);
+        let shown = bridge.status();
+        assert_eq!(keys(&shown), keys(&status));
+        assert_eq!(
+            shown["last_error"],
+            "no hub credential; the broker runs local-only"
+        );
+        let since = shown["since"].as_str().unwrap();
+        assert!(
+            since.len() == 24 && since.ends_with('Z') && since.as_bytes()[19] == b'.',
+            "{since}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
