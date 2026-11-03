@@ -57,9 +57,16 @@ export function nativeDaemonEnv(base: Record<string, string | undefined>): Recor
   return env
 }
 
+/** what `SCP_NATIVE` runs natively: `all` for `1` (the broker and the MCP server), `mcp` for `mcp` (the MCP server on the TypeScript broker), else `off` */
+export type NativeMode = "all" | "mcp" | "off"
+
+export function nativeMode(env: Record<string, string | undefined>): NativeMode {
+  return env.SCP_NATIVE === "1" ? "all" : env.SCP_NATIVE === "mcp" ? "mcp" : "off"
+}
+
 /** with `SCP_NATIVE=1`, the native `swarm` that runs the broker, else undefined; a missing or mismatched one is noted and the TypeScript broker runs */
 export function nativeBroker(env: Record<string, string | undefined> = process.env, version = pkg.version): string | undefined {
-  if (env.SCP_NATIVE !== "1") return undefined
+  if (nativeMode(env) !== "all") return undefined
   const bin = nativeSwarm(env, version)
   if (!bin) {
     const key = nativeKey()
@@ -112,35 +119,42 @@ export const resetMountNote = (): void => {
   mountNoted = false
 }
 
-/** with `SCP_NATIVE=1`, the native `swarm` whose `swarm mcp` a mount runs directly, else undefined; a missing or mismatched one is noted once and mounts run through Node */
+/** with `SCP_NATIVE=1` or `mcp`, the native `swarm` whose `swarm mcp` a mount runs directly, else undefined; a missing or mismatched one is noted once and mounts run through Node */
 export function nativeMountBin(env: Record<string, string | undefined>, version = pkg.version): string | undefined {
-  if (env.SCP_NATIVE !== "1") return undefined
+  if (nativeMode(env) === "off") return undefined
   const bin = nativeSwarm(env, version)
   if (!bin && !mountNoted) {
     mountNoted = true
     const key = nativeKey()
     const fix = key ? `install @scp-dev/native-${key} or set SCP_SWARM_BIN` : "set SCP_SWARM_BIN"
-    note(`SCP_NATIVE=1 but no native swarm ${version} binary for ${process.platform}-${process.arch} (${fix}); MCP mounts run swarm mcp through Node`)
+    note(
+      `SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} binary for ${process.platform}-${process.arch} (${fix}); MCP mounts run swarm mcp through Node`,
+    )
   }
   return bin
 }
 
 /**
- * the mount that runs `swarm mcp <words>`: under `SCP_NATIVE=1` the native `swarm` itself, told the words that start this CLI (`launch`)
- * and that it is native, so no Node process stays resident; otherwise `launch` followed by `mcp`
+ * the mount that runs `swarm mcp <words>`: under `SCP_NATIVE=1` or `mcp` the native `swarm` itself, told the words that start this CLI
+ * (`launch`) and the mode, so no Node process stays resident and the broker it starts is the one the mode names; otherwise `launch` followed by `mcp`
  */
 export function mcpMount(launch: string[], words: string[], env: Record<string, string | undefined>, version = pkg.version): Mount {
   return mountWith(nativeMountBin(env, version), launch, words, env)
 }
 
-/** the mount that runs `swarm mcp <words>` on the native `bin` when there is one, else on `launch` */
+/** the mount that runs `swarm mcp <words>` on the native `bin` when there is one, else on `launch`; a native one keeps `SCP_NATIVE=mcp`, else sets 1 */
 export function mountWith(bin: string | undefined, launch: string[], words: string[], env: Record<string, string | undefined>): Mount {
   if (!bin) return { argv: [...launch, "mcp", ...words], env: {}, native: false }
   return {
     argv: [bin, "mcp", ...words],
-    env: { SCP_NATIVE: "1", ...(env.SCP_SWARM_BIN ? { SCP_SWARM_BIN: bin } : {}), SCP_CLI_ARGV: JSON.stringify(launch) },
+    env: { SCP_NATIVE: nativeMode(env) === "mcp" ? "mcp" : "1", ...(env.SCP_SWARM_BIN ? { SCP_SWARM_BIN: bin } : {}), SCP_CLI_ARGV: JSON.stringify(launch) },
     native: true,
   }
+}
+
+/** a kept mount's variables under `env`: with `SCP_NATIVE=mcp`, a saved `SCP_NATIVE=1` becomes mcp, so the mount never starts the native broker */
+export function pinMode(vars: Record<string, string>, env: Record<string, string | undefined>): Record<string, string> {
+  return nativeMode(env) === "mcp" && vars.SCP_NATIVE === "1" ? { ...vars, SCP_NATIVE: "mcp" } : vars
 }
 
 /** the words after `mcp` in a mount's command line, else `fallback` */

@@ -7,7 +7,7 @@ import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { type AttributeDeps, attribute, attributed, validateUnder, underText, type Attribution } from "./attribute"
 import { CHANNELS_ENV, CLAUDE_SESSION_ENV, RelayUsage } from "./common"
 import { deriveHandle } from "./identity"
-import { goneCommand, mcpMount, mcpWords, mountVars } from "./native"
+import { goneCommand, mcpMount, mcpWords, mountVars, pinMode } from "./native"
 import { joinMode } from "./relay"
 import { entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF } from "./term"
@@ -122,7 +122,7 @@ export function bgMount(env: Env, name: string | undefined, origin?: string): Re
     command: argv[0],
     args: argv.slice(1),
     env: {
-      ...(fresh.native || repaired ? mountVars(base, fresh) : base),
+      ...(fresh.native || repaired ? mountVars(base, fresh) : pinMode(base, env)),
       ...vars,
       ...(name !== undefined ? { SCP_NAME: name } : {}),
       SCP_UNDER: env.SCP_UNDER ?? "",

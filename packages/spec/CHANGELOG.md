@@ -1,5 +1,18 @@
 # @scp-dev/spec
 
+## 0.6.10
+
+### Patch Changes
+
+- 0f59570: `hibernate` takes `id` with `endpoint`: the endpoint id the caller expects the address to name, refused `not_found` with nothing changed when the address names another endpoint since. `swarm claude prune` and the claude-bg task pass it, so a worker renamed while they ran, whose old handle another endpoint took, never has that endpoint hibernated or cleared in its place.
+
+## 0.6.9
+
+### Patch Changes
+
+- 1ef6cc9: The native broker serves the hook RPC: it renders every harness's hooks (Claude Code, Codex, Grok, agy, OpenCode, Muse) itself, so a native `swarm hook` or `scp-hook` no longer starts Node for each hook, and a bare `swarm hook` works against a native broker. The native broker also answers `agents`, the local agents' facts `swarm relink --check` and `swarm claude ls` read, for the human only. The `agents` result schema lists `unread_at`, which brokers already send.
+- 448fc2a: `SCP_NATIVE=mcp` runs only the MCP server natively and keeps the TypeScript broker: `swarm setup`, `swarm claude --bg`, `swarm codex` and codex spawns and wakes mount the native `swarm mcp` directly, as under `SCP_NATIVE=1`, but the mounts carry `SCP_NATIVE=mcp`, so a native server that finds no broker starts the TypeScript one through the CLI, and every broker any session or hook starts stays TypeScript. Under `SCP_NATIVE=mcp` the native `swarm daemon` refuses to run, and mounts kept as saved have a saved `SCP_NATIVE=1` replaced with `mcp`. `SCP_NATIVE=1` still runs both natively. `swarm status` names each harness mount's MCP engine and mode next to the broker engine (`mcp` in `--json`), and warns when the broker is native while a mount asks for the TypeScript one.
+
 ## 0.6.8
 
 ### Patch Changes

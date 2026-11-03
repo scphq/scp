@@ -69,7 +69,7 @@ import {
 import { steerPrompt } from "./hooks"
 import { CODEX_VALUED, detectHarness, type MuseLaunch, processKey, writeMuseLaunch } from "./identity"
 import { readConversation } from "./resume"
-import { goneCommand, mcpMount, mcpWords } from "./native"
+import { goneCommand, mcpMount, mcpWords, pinMode } from "./native"
 import { agyRules, agySettingsFile, entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF, note } from "./term"
 
@@ -129,11 +129,17 @@ export function codexOverrides(env: Env, mount: Json | undefined, self: string[]
   const server = mcpMount(self, mount ? mcpWords(entryArgv("codex", mount), CODEX_MCP) : CODEX_MCP, env)
   return [
     ...(mount && !server.native && !goneCommand(mount.command) ? [] : [...set("command", server.argv[0]), ...set("args", server.argv.slice(1))]),
-    ...Object.entries(server.env).flatMap(([name, value]) => set(`env.${name}`, value)),
+    ...Object.entries(server.native ? server.env : pinnedMode(mount, env)).flatMap(([name, value]) => set(`env.${name}`, value)),
     ...set("env_vars", [...kept, ...names]),
     ...set("enabled", true),
     ...(mount && "default_tools_approval_mode" in mount ? [] : set("default_tools_approval_mode", "approve")),
   ]
+}
+
+/** the variable a kept codex mount needs set so it keeps the mode of `env`: `SCP_NATIVE=mcp` over a saved 1 */
+function pinnedMode(mount: Json | undefined, env: Env): Record<string, string> {
+  const vars = mount?.env && typeof mount.env === "object" ? (mount.env as Record<string, string>) : {}
+  return pinMode(vars, env) === vars ? {} : { SCP_NATIVE: "mcp" }
 }
 
 /** codex subcommands that start a session and take their own `-c`, which replaces the top-level ones */

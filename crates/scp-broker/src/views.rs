@@ -447,6 +447,98 @@ impl Core {
         self.list_endpoints(params, viewer.as_deref()).await
     }
 
+    /// the local agents' facts for the human, retired and in-process subagent rows aside
+    pub async fn agents(&self, conn: ConnectionId) -> Result<Value, RpcError> {
+        if !matches!(self.actor_of(conn)?, Actor::Human { .. }) {
+            return Err(RpcError::new(
+                ErrorCode::Unauthorized,
+                "only the human lists the local agents' facts",
+            ));
+        }
+        let now = now_ms();
+        let live = crate::world::LIVE_HANDLE;
+        let rows = self
+            .store
+            .all(&format!("SELECT * FROM endpoints WHERE kind = 'agent' AND {live} AND remote IS NULL AND (session IS NULL OR substr(session,1,4) != 'sub:') ORDER BY handle"), &[])
+            .await?;
+        let mut children = std::collections::HashMap::new();
+        for row in self.store.all(&format!("SELECT parent_ep AS parent, COUNT(*) AS n FROM endpoints WHERE parent_ep IS NOT NULL AND {live} AND (session IS NULL OR substr(session,1,4) != 'sub:') GROUP BY parent_ep"), &[]).await? {
+            if let (Some(parent), Some(n)) = (text(&row, "parent"), integer(&row, "n")) {
+                children.insert(parent.to_owned(), n);
+            }
+        }
+        let mut subagents = std::collections::HashMap::<String, i64>::new();
+        for row in self.store.all(&format!("SELECT * FROM endpoints WHERE kind = 'agent' AND parent_ep IS NOT NULL AND substr(session,1,4) = 'sub:' AND {live} AND (status_state IS NULL OR status_state != 'done')"), &[]).await? {
+            let Some(parent) = text(&row, "parent_ep") else { continue };
+            if self.current_subagent(&row, parent).await? {
+                *subagents.entry(parent.to_owned()).or_default() += 1;
+            }
+        }
+        let handed_back: HashSet<String> = self
+            .store
+            .all("SELECT DISTINCT used_by FROM grants WHERE used_by IS NOT NULL AND handback IS NOT NULL", &[])
+            .await?
+            .iter()
+            .filter_map(|row| text(row, "used_by").map(str::to_owned))
+            .collect();
+        let unread = self.unread_at().await?;
+        let historic_after = self.limits.get("historicAfterS");
+        let mut agents = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id = text(row, "id").unwrap_or_default();
+            let parent = match text(row, "parent_ep") {
+                Some(parent) => self.by_id(parent).await?.as_ref().map(address),
+                None => text(row, "parent_addr").map(str::to_owned),
+            };
+            let at = |key: &str| integer(row, key).unwrap_or(0);
+            let worked = at("created_at")
+                .max(at("hook_seen"))
+                .max(at("last_received_at"))
+                .max(at("mail_at"));
+            let active = worked.max(at("last_seen"));
+            let unread_at = unread.get(id).copied();
+            agents.push(json!({
+                "id": id,
+                "address": address(row),
+                "handle": text(row, "handle"),
+                "harness": text(row, "harness"),
+                "cwd": text(row, "cwd"),
+                "parent": parent,
+                "children": children.get(id).copied().unwrap_or(0),
+                "subagents": subagents.get(id).copied().unwrap_or(0),
+                "harness_session": text(row, "harness_session"),
+                "harness_origin": text(row, "harness_origin"),
+                "state": text(row, "status_state"),
+                "presence": presence(row, now),
+                "historic": historic_after.is_some_and(|s| now - active >= s as i64 * 1000),
+                "worked_at": timestamp(worked),
+                "mail_at": integer(row, "mail_at").and_then(timestamp),
+                "connections": integer(row, "connections").unwrap_or(0),
+                "hibernate": text(row, "hibernate"),
+                "unread": unread_at.is_some(),
+                "unread_at": unread_at.and_then(timestamp),
+                "handed_back": handed_back.contains(id),
+            }));
+        }
+        Ok(json!({"agents": agents}))
+    }
+
+    /// whether the in-process subagent `row` belongs to its root `parent`'s current session (`sub:<id>:<root session>`)
+    async fn current_subagent(&self, row: &Row, parent: &str) -> Result<bool, RpcError> {
+        let Some(session) = text(row, "session") else {
+            return Ok(false);
+        };
+        let Some(root) = self.by_id(parent).await? else {
+            return Ok(false);
+        };
+        let owner = session
+            .get(4..)
+            .and_then(|rest| rest.find(':').map(|at| &rest[at + 1..]))
+            .unwrap_or(session);
+        let key = text(&root, "session").or(text(&root, "id")).unwrap_or("");
+        Ok(owner == key || (session.chars().count() == 128 && key.starts_with(owner)))
+    }
+
     pub async fn log_for(
         &self,
         conn: ConnectionId,

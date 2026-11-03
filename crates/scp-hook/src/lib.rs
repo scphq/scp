@@ -822,3 +822,15 @@ fn run_rpc(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DAEMON_ENV;
+
+    #[test]
+    fn a_started_broker_keeps_the_native_mode() {
+        for key in ["SCP_NATIVE", "SCP_SWARM_BIN"] {
+            assert!(DAEMON_ENV.contains(&key), "{key}");
+        }
+    }
+}

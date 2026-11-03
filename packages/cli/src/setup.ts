@@ -40,7 +40,7 @@ import {
 } from "./hooks"
 import { goneClientLine, goneClients, hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
-import { type Mount, mountVars, mountWith, nativeHook, nativeSwarm } from "./native"
+import { type Mount, type NativeMode, mountVars, mountWith, nativeHook, nativeMode, nativeSwarm, pinMode } from "./native"
 import { launcher } from "./launcher"
 import { coworkSetup } from "./cowork"
 import { CLAUDE_DESKTOP_HELP, claudeDesktopSetup, parseClaudeDesktopArgs } from "./mcpb"
@@ -72,7 +72,9 @@ export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [
   --engine auto uses a matching native hook client when installed; ts forces Node, native requires it.
   SCP_ENGINE sets the default engine; SCP_HOOK_BIN overrides the native binary path.
   With SCP_NATIVE=1 every mount runs the native swarm's mcp directly (no node stays resident), when one matching this
-  CLI is installed or SCP_SWARM_BIN names it; without one the mounts run through node, as without SCP_NATIVE.
+  CLI is installed or SCP_SWARM_BIN names it, and the broker it starts is the native one; SCP_NATIVE=mcp mounts the
+  same native server but keeps the TypeScript broker. Without a native swarm the mounts run through node, as without
+  SCP_NATIVE.
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
   The Claude Code and codex hooks and every mount run ${CLI_NAME} by absolute paths (a node script as absolute node plus its
   real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or ${CLI_NAME}.
@@ -265,8 +267,27 @@ function entryVars(harness: SetupHarness, entry: Json | undefined): Record<strin
   return isObject(vars) ? Object.fromEntries(Object.entries(vars).filter((pair): pair is [string, string] => typeof pair[1] === "string")) : {}
 }
 
-/** whether an entry's variables are the ones a native mount sets: setup wrote it under SCP_NATIVE=1 */
-const nativeVars = (vars: Record<string, string>): boolean => vars.SCP_NATIVE === "1" && vars.SCP_CLI_ARGV !== undefined
+/** whether an entry's variables are the ones a native mount sets: setup wrote it under SCP_NATIVE=1 or mcp */
+const nativeVars = (vars: Record<string, string>): boolean => nativeMode(vars) !== "off" && vars.SCP_CLI_ARGV !== undefined
+
+/** the MCP server a harness's user mount runs: `native` with the SCP_NATIVE mode it keeps, else `node` */
+export type MountEngine = { harness: SetupHarness; engine: "native" | "node"; mode: NativeMode }
+
+/** the engine of each harness's user mount (native: its command is the server, `<bin> mcp`, under SCP_NATIVE=1 or mcp), leaving out harnesses with none or an unreadable file */
+export function mountEngines(env: Env): MountEngine[] {
+  return SETUP_HARNESSES.flatMap((harness) => {
+    let entry: Json | undefined
+    try {
+      entry = mountedEntry(harness, mcpFile(harness, env))
+    } catch {
+      return []
+    }
+    if (!entry) return []
+    const vars = entryVars(harness, entry)
+    const native = entryArgv(harness, entry)[1] === "mcp" && nativeMode(vars) !== "off"
+    return [{ harness, engine: native ? "native" : "node", mode: native ? nativeMode(vars) : "off" }]
+  })
+}
 
 /** whether `entry` is the local mount `mount` (a bare argv: one with no variables of its own), enabled */
 function entryRight(harness: SetupHarness, entry: Json, mount: Mount | string[]): boolean {
@@ -612,15 +633,16 @@ function planMount(plan: Plan, harness: SetupHarness, mount: Mount, ctx: Ctx) {
   }
   if (harness === "claude")
     for (const shadow of claudeShadows(file, ctx.cwd)) note(plan, harness, `mcp: warning, ${shadow}: in that project it is used instead of the user mount`)
-  if (entry && entryRight(harness, entry, mount)) {
+  const had = entryVars(harness, entry)
+  const pinned = pinMode(had, ctx.env)
+  if (entry && entryRight(harness, entry, mount) && pinned === had) {
     note(plan, harness, `mcp: up to date in ${file}`)
     return
   }
   const current = entry ? entryArgv(harness, entry) : undefined
-  const had = entryVars(harness, entry)
   const revars = mount.native || nativeVars(had)
-  const vars = revars ? mountVars(had, mount) : had
-  const withVars: Json = revars ? { [envKey(harness)]: vars } : {}
+  const vars = revars ? mountVars(pinned, mount) : pinned
+  const withVars: Json = revars || pinned !== had ? { [envKey(harness)]: vars } : {}
   const manifest = entry ? undefined : remember({ harness, kind: "mcp", file })
   const verb = entry
     ? `update ${SERVER} (now: ${current?.map(shellWord).join(" ") || "unparsed"}${entryEnabled(harness, entry) ? "" : ", disabled; setup enables it"})`
@@ -1328,13 +1350,15 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
       )
     }
     if (mounts.problem) out(`! ${mounts.problem}: a harness started without your PATH may not start the mount`)
-    if (env.SCP_NATIVE === "1") {
+    const mode = nativeMode(env)
+    if (mode !== "off") {
       const version = deps.version ?? "0.0.0"
+      const broker = mode === "all" ? "the native broker" : "the TypeScript broker"
       nativeServer = nativeSwarm(env, version)
       out(
         nativeServer
-          ? `native MCP: the mounts run ${nativeServer} mcp directly (SCP_NATIVE=1, version ${version}), told to start ${CLI_NAME} as above; rerun setup after an upgrade that moves it`
-          : `! SCP_NATIVE=1 but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): the mounts run ${CLI_NAME} mcp through node`,
+          ? `native MCP: the mounts run ${nativeServer} mcp directly (SCP_NATIVE=${env.SCP_NATIVE}, version ${version}), told to start ${CLI_NAME} as above and ${broker}; rerun setup after an upgrade that moves it`
+          : `! SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): the mounts run ${CLI_NAME} mcp through node`,
       )
     }
     const help = run([...mounts.argv, "help", "--all"]).output

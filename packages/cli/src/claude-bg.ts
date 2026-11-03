@@ -5,7 +5,7 @@ import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, rea
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
 import { BACKGROUNDED, bgDir, CLAUDE_MCP, LAUNCHER_IDENTITY } from "./claude"
 import { RelayUsage, terminalAttached } from "./common"
-import { goneCommand, mcpMount, mcpWords, mountVars } from "./native"
+import { goneCommand, mcpMount, mcpWords, mountVars, pinMode } from "./native"
 import { configDir } from "./relay"
 import { whichOnPath } from "./setup"
 import { claudeTranscripts } from "./spawn"
@@ -936,101 +936,172 @@ function maybeDue(
 /** a Claude Code endpoint whose hooks named its session: it may run in a background session no record covers */
 const claudeAgent = (agent: AgentFacts): boolean => agent.harness === "claude-code" && agent.harness_session !== null
 
+/** what the claude-bg task remembers from one run to the next */
+export interface BgTaskState {
+  /** the short ids of the background sessions in the last listing, by session id */
+  sessions: Map<string, string>
+  /** the records the last listing covered */
+  seen: Set<string>
+  /** the sessions with a record the last listing showed stopped, by short id */
+  stopped: Map<string, ClaudeEntry>
+  listed: boolean
+}
+
+const newTaskState = (): BgTaskState => ({ sessions: new Map(), seen: new Set(), stopped: new Map(), listed: false })
+
 /** the broker's task: stops and removes idle workers by the configured policy, read again on each run */
 export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): BrokerTask {
-  /** the short ids of the background sessions in the last listing, by session id */
-  const sessions = new Map<string, string>()
-  /** the records the last listing covered */
-  const seen = new Set<string>()
-  /** the sessions with a record the last listing showed stopped, by short id */
-  const stopped = new Map<string, ClaudeEntry>()
-  let listed = false
+  const state = newTaskState()
   return {
     name: "claude-bg",
     everyMs: CLAUDE_BG_EVERY_MS,
-    async run(context) {
-      const records = readRecords(env)
-      const unrecorded = (agent: AgentFacts) => {
-        const id = agent.harness_session !== null ? sessions.get(agent.harness_session) : undefined
-        return claudeAgent(agent) && (id === undefined || !records.has(id))
-      }
-      let agents = context.agents()
-      if (!records.size && !agents.some(unrecorded)) return
-      const config = bgConfig(env)
-      const now = deps.now ?? Date.now
-      const handles = new Map([...records].flatMap(([id, record]) => (record.handle ? [[record.handle, id] as const] : [])))
-      const idOf = (agent: AgentFacts) =>
-        agent.harness_session !== null ? (sessions.get(agent.harness_session) ?? handles.get(agent.handle)) : handles.get(agent.handle)
-      const orphaned = () =>
-        config.remove !== false &&
-        [...stopped].some(([id, entry]) => {
-          const record = records.get(id)
-          return record?.parented === true && !endpointOf(entry, record, agents) && removable(readState(env, id), now())
-        })
-      const isDue = () =>
-        agents.some((agent) => {
-          const id = idOf(agent)
-          if (id !== undefined && records.has(id))
-            return maybeDue(
-              agent,
-              agents,
-              () => readState(env, id),
-              { ...config, remove: removeModeOf(config, stopped.get(id)?.cwd) },
-              now(),
-              true,
-              stopped.has(id),
-            )
-          return unrecorded(agent) && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0
-        }) || orphaned()
-      if (listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return
-      const claude = claudeOf(env, deps)
-      if (!claude) return
-      const entries = await listEntries(claude, true)
-      if (!entries) return
-      listed = true
-      seen.clear()
-      for (const id of records.keys()) seen.add(id)
-      sessions.clear()
-      stopped.clear()
-      for (const entry of entries)
-        if (entry.kind === "background" && entry.id && SHORT_ID.test(entry.id) && entry.sessionId) {
-          sessions.set(entry.sessionId, entry.id)
-          if (typeof entry.pid !== "number" && records.has(entry.id)) stopped.set(entry.id, entry)
-        }
-      agents = context.agents()
-      if (!isDue()) return
-      const ps = deps.ps ?? psTable(claude.env, claude.exec)
-      const table = await ps()
-      const selfPids = await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()
-      if (table === null || selfPids === null) return
-      const actions = plan({
-        entries,
-        agents: context.agents(),
-        records,
-        states: readStates(env, sessions.values()),
-        attached: attachTargets(table),
-        processes: table,
-        now: now(),
-        config,
-        selfPids,
-      })
-      const log = deps.log ?? context.log
-      for (const { action, ok, note } of await apply(acts(actions), taskPort(context), runOf(claude, env, now, ps))) {
-        if (action.kind !== "unhibernate" || !ok)
-          log(`${CLI_NAME} claude: ${ok ? verb(action) : "kept"} ${action.id} (${where(action)})${ok ? "" : `: ${note}`}`)
-        if (action.kind === "unhibernate" || !records.has(action.id)) continue
-        if (ok && action.kind !== "stop") stopped.delete(action.id)
-        else if (ok || action.kind === "remove") {
-          const { pid: _pid, ...after } = action.entry
-          stopped.set(action.id, after)
-        }
-      }
-    },
+    run: (context) => runBgTask(state, taskPort(context), context.log, env, deps),
+  }
+}
+
+async function runBgTask(state: BgTaskState, port: BgPort, fallbackLog: (line: string) => void, env: Env, deps: ClaudeBgDeps): Promise<void> {
+  const { sessions, seen, stopped } = state
+  const records = readRecords(env)
+  const unrecorded = (agent: AgentFacts) => {
+    const id = agent.harness_session !== null ? sessions.get(agent.harness_session) : undefined
+    return claudeAgent(agent) && (id === undefined || !records.has(id))
+  }
+  let agents = await port.agents()
+  if (!records.size && !agents.some(unrecorded)) return
+  const config = bgConfig(env)
+  const now = deps.now ?? Date.now
+  const handles = new Map([...records].flatMap(([id, record]) => (record.handle ? [[record.handle, id] as const] : [])))
+  const idOf = (agent: AgentFacts) =>
+    agent.harness_session !== null ? (sessions.get(agent.harness_session) ?? handles.get(agent.handle)) : handles.get(agent.handle)
+  const orphaned = () =>
+    config.remove !== false &&
+    [...stopped].some(([id, entry]) => {
+      const record = records.get(id)
+      return record?.parented === true && !endpointOf(entry, record, agents) && removable(readState(env, id), now())
+    })
+  const isDue = () =>
+    agents.some((agent) => {
+      const id = idOf(agent)
+      if (id !== undefined && records.has(id))
+        return maybeDue(
+          agent,
+          agents,
+          () => readState(env, id),
+          { ...config, remove: removeModeOf(config, stopped.get(id)?.cwd) },
+          now(),
+          true,
+          stopped.has(id),
+        )
+      return unrecorded(agent) && agent.hibernate === CLAUDE_BG_PROVIDER && agent.connections > 0
+    }) || orphaned()
+  if (state.listed && [...records.keys()].every((id) => seen.has(id)) && !isDue()) return
+  const claude = claudeOf(env, deps)
+  if (!claude) return
+  const entries = await listEntries(claude, true)
+  if (!entries) return
+  state.listed = true
+  seen.clear()
+  for (const id of records.keys()) seen.add(id)
+  sessions.clear()
+  stopped.clear()
+  for (const entry of entries)
+    if (entry.kind === "background" && entry.id && SHORT_ID.test(entry.id) && entry.sessionId) {
+      sessions.set(entry.sessionId, entry.id)
+      if (typeof entry.pid !== "number" && records.has(entry.id)) stopped.set(entry.id, entry)
+    }
+  agents = await port.agents()
+  if (!isDue()) return
+  const ps = deps.ps ?? psTable(claude.env, claude.exec)
+  const table = await ps()
+  const selfPids = await (deps.ancestors ?? psAncestors(claude.env, claude.exec))()
+  if (table === null || selfPids === null) return
+  const actions = plan({
+    entries,
+    agents: await port.agents(),
+    records,
+    states: readStates(env, sessions.values()),
+    attached: attachTargets(table),
+    processes: table,
+    now: now(),
+    config,
+    selfPids,
+  })
+  const log = deps.log ?? fallbackLog
+  for (const { action, ok, note } of await apply(acts(actions), port, runOf(claude, env, now, ps))) {
+    if (action.kind !== "unhibernate" || !ok) log(`${CLI_NAME} claude: ${ok ? verb(action) : "kept"} ${action.id} (${where(action)})${ok ? "" : `: ${note}`}`)
+    if (action.kind === "unhibernate" || !records.has(action.id)) continue
+    if (ok && action.kind !== "stop") stopped.delete(action.id)
+    else if (ok || action.kind === "remove") {
+      const { pid: _pid, ...after } = action.entry
+      stopped.set(action.id, after)
+    }
+  }
+}
+
+const taskStatePath = (env: Env): string => join(relayDir(env as NodeJS.ProcessEnv), "claude-bg-task.json")
+
+const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter((one): one is string => typeof one === "string") : [])
+
+function pairs<T>(value: unknown, valid: (one: unknown) => one is T): [string, T][] {
+  if (!Array.isArray(value)) return []
+  return value.filter((pair): pair is [string, T] => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string" && valid(pair[1]))
+}
+
+function readTaskState(env: Env): BgTaskState {
+  try {
+    const raw = JSON.parse(readFileSync(taskStatePath(env), "utf8")) as Record<string, unknown> | null
+    return {
+      sessions: new Map(pairs(raw?.sessions, (one): one is string => typeof one === "string")),
+      seen: new Set(strings(raw?.seen)),
+      stopped: new Map(pairs(raw?.stopped, (one): one is ClaudeEntry => one !== null && typeof one === "object" && !Array.isArray(one))),
+      listed: raw?.listed === true,
+    }
+  } catch {
+    return newTaskState()
+  }
+}
+
+function writeTaskState(env: Env, state: BgTaskState): void {
+  const path = taskStatePath(env)
+  const value = { sessions: [...state.sessions], seen: [...state.seen], stopped: [...state.stopped], listed: state.listed }
+  writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify(value)}\n`, { mode: 0o600 })
+  renameSync(`${path}.${process.pid}.tmp`, path)
+}
+
+/** one run of the claude-bg task on `port` with what the last run learnt, kept in `<relay dir>/claude-bg-task.json` */
+export async function runBgTaskFromFile(env: Env, port: BgPort, log: (line: string) => void, deps: ClaudeBgDeps = {}): Promise<void> {
+  const state = readTaskState(env)
+  try {
+    await runBgTask(state, port, log, env, deps)
+  } finally {
+    try {
+      writeTaskState(env, state)
+    } catch {}
+  }
+}
+
+/** `swarm claude-bg-task`: one run of the broker's claude-bg task on the broker's socket as the human; a native broker runs it on the task's interval */
+export async function claudeBgTaskCommand(env: Env = process.env, deps: ClaudeBgDeps = {}): Promise<number> {
+  let opened: Awaited<ReturnType<typeof socketPort>>
+  try {
+    opened = await socketPort(env)
+  } catch (error) {
+    note(`${CLI_NAME} claude-bg-task: no relay broker (${error instanceof Error ? error.message : String(error)})`)
+    return 1
+  }
+  try {
+    await runBgTaskFromFile(env, opened.port, (line) => console.error(line), deps)
+    return 0
+  } catch (error) {
+    console.error(`relay broker: task claude-bg failed: ${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  } finally {
+    opened.close()
   }
 }
 
 /** the broker over its socket as the human: `agents`, and `hibernate` with an endpoint, which also runs a due waker */
-async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
+export async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
   const dir = relayDir(env as NodeJS.ProcessEnv)
   const client = await connectBroker(dir, undefined, { env })
   try {
@@ -1039,12 +1110,20 @@ async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
     client.close()
     throw error
   }
+  const agents = async () => (await client.request<{ agents: AgentFacts[] }>("agents")).agents
+  /** the broker refuses the call when the address no longer names the planned endpoint; one that ignores `id` is caught after */
   const hibernate = async (agent: AgentFacts, wake: string, ref?: string) => {
-    await client.request("hibernate", { endpoint: agent.address, wake, ...(ref ? { ref } : {}) })
+    const result = await client.request<{ endpoint?: { id?: string } }>("hibernate", {
+      endpoint: agent.address,
+      id: agent.id,
+      wake,
+      ...(ref ? { ref } : {}),
+    })
+    if (result.endpoint?.id !== agent.id) throw new Error(`${agent.address} is another endpoint now`)
   }
   return {
     port: {
-      agents: async () => (await client.request<{ agents: AgentFacts[] }>("agents")).agents,
+      agents,
       hibernate: (agent, ref) => hibernate(agent, CLAUDE_BG_PROVIDER, ref),
       unhibernate: (agent) => hibernate(agent, "none"),
       kick: (agent, ref) => hibernate(agent, CLAUDE_BG_PROVIDER, ref),
@@ -1276,8 +1355,8 @@ const decline = (out: (text: string) => void, reason: string): number => {
 
 /**
  * puts the run's wake ticket in the scp server env of a session's MCP config, or takes a stale one out, so the revived session's shim takes
- * its endpoint back with it (SPEC section 6.4 rule 6); a server whose command is gone runs this CLI's mount instead. False when the config
- * cannot be read or written
+ * its endpoint back with it (SPEC section 6.4 rule 6); a server whose command is gone runs this CLI's mount instead, and under SCP_NATIVE=mcp a
+ * saved SCP_NATIVE=1 becomes mcp. False when the config cannot be read or written
  */
 function armTicket(file: string, ticket: string | undefined, env: Env, origin?: string): boolean {
   let temp: string | undefined
@@ -1287,8 +1366,8 @@ function armTicket(file: string, ticket: string | undefined, env: Env, origin?: 
     if (!scp || typeof scp !== "object") return false
     const vars = scp.env && typeof scp.env === "object" ? scp.env : {}
     const stale = goneCommand(scp.command)
-    if (vars.SCP_WAKE_TICKET === ticket && vars.SCP_HARNESS_ORIGIN === origin && !stale) return true
-    const { SCP_WAKE_TICKET: _, SCP_HARNESS_ORIGIN: __, ...rest } = vars
+    if (vars.SCP_WAKE_TICKET === ticket && vars.SCP_HARNESS_ORIGIN === origin && !stale && pinMode(vars, env) === vars) return true
+    const { SCP_WAKE_TICKET: _, SCP_HARNESS_ORIGIN: __, ...rest } = pinMode(vars, env)
     const armed = { ...rest, ...(ticket ? { SCP_WAKE_TICKET: ticket } : {}), ...(origin ? { SCP_HARNESS_ORIGIN: origin } : {}) }
     if (stale) {
       const mount = mcpMount(SELF, mcpWords([String(scp.command), ...(Array.isArray(scp.args) ? scp.args.map(String) : [])], CLAUDE_MCP), env)

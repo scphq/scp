@@ -177,13 +177,11 @@ async fn observer_hello_limits_and_line_cap() {
     assert!(hello["result"]["endpoint"].is_null());
     assert_eq!(hello["result"]["limits"]["bodyBytes"], 65536);
     assert!(hello["result"]["limits"]["hopMax"].is_null());
-    assert_eq!(
-        hello["result"]["capabilities"]
-            .as_array()
-            .expect("capabilities")
-            .len(),
-        7
-    );
+    let capabilities = hello["result"]["capabilities"]
+        .as_array()
+        .expect("capabilities");
+    assert_eq!(capabilities.len(), 8);
+    assert!(capabilities.contains(&json!("hook")));
     assert!(
         !hello["result"]["preamble"]
             .as_str()

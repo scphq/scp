@@ -174,6 +174,9 @@ impl Core {
         if all && params.contains_key("endpoint") {
             return Err(RpcError::invalid_params("all names no endpoint"));
         }
+        if params.contains_key("id") && !params.contains_key("endpoint") {
+            return Err(RpcError::invalid_params("id goes with endpoint"));
+        }
         let actor = self.actor_of(conn)?;
         let me = self.actor_row(conn).await?;
         let views = if all {
@@ -225,12 +228,28 @@ impl Core {
                     me.clone()
                 }
                 Some(value) => {
-                    self.lookup(
-                        value
-                            .as_str()
-                            .ok_or_else(|| RpcError::invalid_params("endpoint is an address"))?,
-                    )
-                    .await?
+                    let address = value
+                        .as_str()
+                        .ok_or_else(|| RpcError::invalid_params("endpoint is an address"))?;
+                    let expected = match params.get("id") {
+                        None => None,
+                        Some(Value::String(id)) => Some(id.as_str()),
+                        Some(_) => {
+                            return Err(RpcError::invalid_params(
+                                "id is the id of the endpoint named by endpoint",
+                            ));
+                        }
+                    };
+                    let row = self.lookup(address).await?;
+                    if let Some(id) = expected
+                        && text(&row, "id") != Some(id)
+                    {
+                        return Err(RpcError::new(
+                            ErrorCode::NotFound,
+                            format!("{address} is not endpoint {id}"),
+                        ));
+                    }
+                    row
                 }
             };
             if matches!(actor, Actor::Endpoint { .. }) && text(&target, "id") != text(&me, "id") {

@@ -280,6 +280,7 @@ impl Core {
             },
             "spawn_via" => self.spawn_via(conn, params).await,
             "wake" => self.wake_rpc(conn, params).await,
+            "agents" => self.agents(conn).await,
             "hibernate" => self.hibernate_rpc(conn, params).await,
             "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
                 self.review_hold(conn, method, params).await
@@ -622,11 +623,15 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// RFC 3339 in UTC with milliseconds, as JavaScript's toISOString writes it
 pub fn timestamp(ms: i64) -> Option<String> {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
-        .ok()?
-        .format(&Rfc3339)
-        .ok()
+    let at = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()?;
+    let seconds = at.replace_nanosecond(0).ok()?.format(&Rfc3339).ok()?;
+    Some(format!(
+        "{}.{:03}Z",
+        seconds.strip_suffix('Z')?,
+        at.millisecond()
+    ))
 }
 
 pub fn text<'a>(row: &'a Row, key: &str) -> Option<&'a str> {
@@ -640,5 +645,20 @@ pub fn integer(row: &Row, key: &str) -> Option<i64> {
     match row.get(key) {
         Some(SqlValue::Int(value)) => Some(*value),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timestamp;
+
+    #[test]
+    fn timestamps_always_carry_milliseconds() {
+        assert_eq!(timestamp(0).unwrap(), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            timestamp(1_762_171_200_120).unwrap(),
+            "2025-11-03T12:00:00.120Z"
+        );
+        assert_eq!(timestamp(-1).unwrap(), "1969-12-31T23:59:59.999Z");
     }
 }

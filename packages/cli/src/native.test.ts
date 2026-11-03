@@ -2,7 +2,21 @@ import { afterAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { brokerEngine, goneCommand, mcpMount, mcpWords, mountVars, mountWith, nativeBroker, nativeDaemonEnv, nativeSwarm, resetMountNote } from "./native"
+import { daemonEnv } from "./common"
+import { mcpLine } from "./main"
+import {
+  brokerEngine,
+  goneCommand,
+  mcpMount,
+  mcpWords,
+  mountVars,
+  mountWith,
+  nativeBroker,
+  nativeDaemonEnv,
+  nativeMode,
+  nativeSwarm,
+  resetMountNote,
+} from "./native"
 import { SELF } from "./term"
 import { swarmBinary } from "./test-setup"
 import { alive, waitFor } from "./testing/fixtures"
@@ -78,6 +92,46 @@ describe("SCP_NATIVE", () => {
     expect(readFileSync(calls, "utf8")).toBe("--version\n")
   })
 
+  test("mcp names the MCP server only: the broker stays the TypeScript one, with no version check", () => {
+    const { bin, calls } = fakeSwarm("mcp-only", pkg.version)
+    expect([nativeMode({ SCP_NATIVE: "1" }), nativeMode({ SCP_NATIVE: "mcp" }), nativeMode({ SCP_NATIVE: "MCP" }), nativeMode({})]).toEqual([
+      "all",
+      "mcp",
+      "off",
+      "off",
+    ])
+    expect(nativeBroker({ SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin })).toBeUndefined()
+    expect(existsSync(calls)).toBe(false)
+  })
+
+  test("a started broker keeps SCP_NATIVE and SCP_SWARM_BIN, and only the variables it is allowed", () => {
+    expect(daemonEnv("/relay", { SCP_NATIVE: "mcp", SCP_SWARM_BIN: "/b/swarm", SCP_CLI_ARGV: "[]", SCP_GRANT: "krt_x", HOME: "/h", UNSET: undefined })).toEqual(
+      {
+        SCP_DIR: "/relay",
+        SCP_NATIVE: "mcp",
+        SCP_SWARM_BIN: "/b/swarm",
+        HOME: "/h",
+      },
+    )
+  })
+
+  test("under SCP_NATIVE=mcp the on-demand broker is the TypeScript one, and status says so", async () => {
+    const { bin, calls } = fakeSwarm("mcp-broker", pkg.version)
+    const env = { SCP_DIR: join(root, "mcp-relay"), SCP_IDLE: "30s", SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin }
+    try {
+      const human = await swarm(["whoami", "--human"], env)
+      expect([human.code, human.stderr]).toEqual([0, ""])
+      const status = JSON.parse((await swarm(["status", "--json"], env)).stdout) as { broker: { engine: string }; mcp: { mode: string } }
+      expect([status.broker.engine, status.mcp.mode]).toEqual(["ts", "mcp"])
+      const text = (await swarm(["status"], env)).stdout
+      expect(text).toContain(`(pid ${lockPid(env.SCP_DIR)}, engine ts)`)
+      expect(text).not.toContain("mcp:")
+      expect(existsSync(calls)).toBe(false)
+    } finally {
+      expect((await swarm(["daemon", "stop"], env)).code).toBe(0)
+    }
+  })
+
   test("without it the on-demand broker is the TypeScript one, whatever SCP_SWARM_BIN names", async () => {
     const { bin, calls } = fakeSwarm("unused", pkg.version)
     const env = { SCP_DIR: join(root, "off-relay"), SCP_IDLE: "30s", SCP_SWARM_BIN: bin }
@@ -143,6 +197,33 @@ describe("MCP mounts", () => {
       native: true,
     })
     expect(mountWith("/pkg/bin/swarm", launch, words, {}).env).toEqual({ SCP_NATIVE: "1", SCP_CLI_ARGV: JSON.stringify(launch) })
+  })
+
+  test("with SCP_NATIVE=mcp the mount runs the native swarm too, and carries mcp so the broker it starts stays TypeScript", () => {
+    const { bin } = fakeSwarm("mount-mcp", pkg.version)
+    expect(mcpMount(launch, words, { SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin })).toEqual({
+      argv: [bin, "mcp", ...words],
+      env: { SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin, SCP_CLI_ARGV: JSON.stringify(launch) },
+      native: true,
+    })
+    expect(mountWith("/pkg/bin/swarm", launch, words, { SCP_NATIVE: "mcp" }).env).toEqual({ SCP_NATIVE: "mcp", SCP_CLI_ARGV: JSON.stringify(launch) })
+    expect(mountVars({ A: "1", SCP_NATIVE: "1", SCP_CLI_ARGV: "[]" }, mcpMount(launch, [], { SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin }))).toEqual({
+      A: "1",
+      SCP_NATIVE: "mcp",
+      SCP_SWARM_BIN: bin,
+      SCP_CLI_ARGV: JSON.stringify(launch),
+    })
+  })
+
+  test("the status line names each mount's engine", () => {
+    expect(mcpLine([])).toBeUndefined()
+    expect(
+      mcpLine([
+        { harness: "claude", engine: "native", mode: "mcp" },
+        { harness: "codex", engine: "native", mode: "all" },
+        { harness: "opencode", engine: "node", mode: "off" },
+      ]),
+    ).toBe("mcp: claude native (SCP_NATIVE=mcp), codex native (SCP_NATIVE=1), opencode node")
   })
 
   test("a missing or mismatched native swarm falls back to the node mount, noted once", () => {

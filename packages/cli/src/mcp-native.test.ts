@@ -26,7 +26,7 @@ function fakeSwarm(version: string): string {
   return bin
 }
 
-test("the native server serves only with SCP_NATIVE=1: SCP_MCP_BIN when it is an executable file, else the native swarm", () => {
+test("the native server serves only with SCP_NATIVE=1 or mcp: SCP_MCP_BIN when it is an executable file, else the native swarm", () => {
   const { bin } = fakeServer(0)
   expect(nativeMcp({ SCP_MCP_BIN: bin })).toBeUndefined()
   expect(nativeMcp({ SCP_NATIVE: "1", SCP_MCP_BIN: bin })).toEqual({ bin, words: [] })
@@ -41,6 +41,9 @@ test("the native server serves only with SCP_NATIVE=1: SCP_MCP_BIN when it is an
   expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: swarm, SCP_MCP_BIN: bin }, "1.2.3")).toEqual({ bin, words: [] })
   expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: swarm }, "1.2.4")).toBeUndefined()
   expect(nativeMcp({ SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "missing") }, "1.2.3")).toBeUndefined()
+  expect(nativeMcp({ SCP_NATIVE: "mcp", SCP_SWARM_BIN: swarm }, "1.2.3")).toEqual({ bin: swarm, words: ["mcp"] })
+  expect(nativeMcp({ SCP_NATIVE: "mcp", SCP_MCP_BIN: bin })).toEqual({ bin, words: [] })
+  expect(nativeMcp({ SCP_NATIVE: "0", SCP_SWARM_BIN: swarm }, "1.2.3")).toBeUndefined()
 })
 
 test("the server gets the words, this process's parent and this CLI, and its exit code is passed on", async () => {

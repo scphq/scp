@@ -198,6 +198,37 @@ fn hook_without_broker_is_silent() {
 }
 
 #[test]
+fn hook_renders_against_the_native_broker() {
+    let temp = Temp::new();
+    let start = output(temp.swarm(&["daemon", "restart"]));
+    assert!(start.status.success(), "{}", text(&start.stderr));
+    let mut command = temp.swarm(&["hook", "claude"]);
+    command
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_PID", std::process::id().to_string())
+        .env("SCP_SESSION", "native-hook")
+        .env("SCP_NAME", "subject")
+        .env("SCP_TLDR_EVERY", "0");
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"SessionStart","source":"startup"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let reply: Value = serde_json::from_str(&text(&out.stdout)).unwrap();
+    assert_eq!(reply["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    assert!(
+        reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("relay_set_title")
+    );
+}
+
+#[test]
 fn daemon_stop_and_restart() {
     let temp = Temp::new();
     let stop = output(temp.swarm(&["daemon", "stop"]));
@@ -244,4 +275,81 @@ fn builtin_wakers_run_the_named_cli() {
         Wakers::builtin()["codex-queue"].command,
         ["swarm", "codex-wake"]
     );
+}
+
+fn cold_start(temp: &Temp, mode: &str) -> Option<String> {
+    let script = temp.0.join("cli.sh");
+    let started = temp.0.join("started");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$*\" > '{}.tmp' && mv '{}.tmp' '{}'\n",
+            started.display(),
+            started.display(),
+            started.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = temp.swarm(&["mcp", "--harness", "claude"]);
+    command
+        .env("SCP_NATIVE", mode)
+        .env(
+            "SCP_CLI_ARGV",
+            serde_json::to_string(&[script.to_str().unwrap()]).unwrap(),
+        )
+        .env("SCP_HARNESS_DETECT", "0")
+        .env("SCP_NAME", "cold")
+        .stderr(Stdio::null());
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for request in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"relay_whoami","arguments":{}}}),
+    ] {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    let lock = temp.0.join("r/broker.lock");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut seen = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(&started) {
+            seen = Some(text.trim().to_owned());
+            break;
+        }
+        if lock.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    seen
+}
+
+#[test]
+fn scp_native_mcp_cold_starts_the_cli_broker_and_never_a_native_one() {
+    let temp = Temp::new();
+    assert_eq!(cold_start(&temp, "mcp").as_deref(), Some("daemon"));
+    assert!(!temp.0.join("r/broker.lock").exists());
+    for args in [
+        &["daemon"][..],
+        &["daemon", "restart"],
+        &["daemon", "--idle", "5"],
+    ] {
+        let mut command = temp.swarm(args);
+        command.env("SCP_NATIVE", "mcp");
+        let out = output(command);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(text(&out.stderr).contains("SCP_NATIVE=mcp keeps the TypeScript broker"));
+    }
+    assert!(!temp.0.join("r/broker.lock").exists());
+}
+
+#[test]
+fn scp_native_1_cold_starts_the_native_broker() {
+    let temp = Temp::new();
+    assert_eq!(cold_start(&temp, "1"), None);
+    assert!(temp.0.join("r/broker.lock").exists());
 }

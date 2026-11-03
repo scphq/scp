@@ -1,7 +1,7 @@
-import { execFileSync } from "node:child_process";
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { hookRpc, lstart } from "./hook";
 import { brokerSuite, type BrokerFixture } from "./suite";
 import { cli } from "./target";
 
@@ -9,10 +9,12 @@ const updateGolden = process.env.UPDATE_GOLDEN === "1";
 const goldenDir = join(import.meta.dir, "golden");
 const harnesses = ["claude-code", "codex", "opencode", "agy", "muse", "grok"] as const;
 type Harness = (typeof harnesses)[number];
+/** `cli` runs the CLI hook command, `rpc` hands the same run to the broker's renderer over the `hook` method as the native hook client does */
+type Via = "cli" | "rpc";
 type Inbox = { messages: { id: string; seq: number }[] };
 type Receipts = { recipients: { read_at: string | null }[] };
 
-async function hook(broker: BrokerFixture, harness: Harness, event: string, ids: string[] = []) {
+async function hook(broker: BrokerFixture, harness: Harness, event: string, ids: string[] = [], via: Via = "cli") {
   const agy = harness === "agy";
   const args = [harness === "claude-code" || harness === "grok" ? "claude" : harness];
   if (agy || harness === "muse") args.push(event);
@@ -44,25 +46,30 @@ async function hook(broker: BrokerFixture, harness: Harness, event: string, ids:
     muse: "MUSE_SESSION_ID",
     grok: "GROK_SESSION_ID",
   };
-  const child = Bun.spawn([process.execPath, "--no-env-file", cli, "hook", ...args], {
-    cwd: broker.target.home,
-    env: {
-      ...broker.target.env,
-      SCP_SESSION: "golden",
-      SCP_NAME: "subject",
-      SCP_TLDR_EVERY: "0",
-      // the goldens pin output, not the hook deadline, so a loaded machine must not reach it
-      SCP_HOOK_DEADLINE_MS: "60000",
-      CLAUDE_PID: String(process.pid),
-      OPENCODE_PID: String(process.pid),
-      [markers[harness]!]: "1",
-    },
-    stdin: new TextEncoder().encode(JSON.stringify(payload)),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+  const env = {
+    ...broker.target.env,
+    SCP_SESSION: "golden",
+    SCP_NAME: "subject",
+    SCP_TLDR_EVERY: "0",
+    SCP_HOOK_DEADLINE_MS: "60000",
+    CLAUDE_PID: String(process.pid),
+    OPENCODE_PID: String(process.pid),
+    [markers[harness]!]: "1",
+  };
+  let stdout: string;
+  if (via === "rpc") stdout = (await hookRpc(broker, args, payload, env)).stdout;
+  else {
+    const child = Bun.spawn([process.execPath, "--no-env-file", cli, "hook", ...args], {
+      cwd: broker.target.home,
+      env,
+      stdin: new TextEncoder().encode(JSON.stringify(payload)),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    stdout = out;
+  }
   let normalized = stdout.replaceAll(broker.target.home, "<HOME>");
   for (const id of ids) normalized = normalized.replaceAll(id, "<MSG_ID>").replaceAll(id.slice(-6), "<SHORT_ID>");
   normalized = normalized
@@ -84,13 +91,13 @@ async function golden(harness: Harness, event: string, run: () => Promise<string
 }
 
 brokerSuite("broker hook goldens", (start) => {
-  for (const harness of harnesses) {
-    test(`${harness} hooks report activity and deliver pending context`, async () => {
+  for (const [harness, via] of harnesses.flatMap((harness) => (["cli", "rpc"] as const).map((via) => [harness, via] as const))) {
+    const name =
+      via === "cli" ? `${harness} hooks report activity and deliver pending context` : `${harness} hook rpc reports activity and delivers pending context`;
+    test(name, async () => {
       const broker = await start();
-      await golden(harness, "session-start", () => hook(broker, harness, "SessionStart"));
-      const started = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } })
-        .trim()
-        .replace(/\s+/g, "-");
+      await golden(harness, "session-start", () => hook(broker, harness, "SessionStart", [], via));
+      const started = lstart(process.pid);
       const subject = await broker.agent(
         "subject",
         harness,
@@ -104,21 +111,21 @@ brokerSuite("broker hook goldens", (start) => {
       const sender = await broker.agent("sender");
       expect(await subject.request("whoami")).toMatchObject({ address: "me/subject", harness, status: { state: "working" } });
       const first = await sender.request<{ id: string }>("send", { to: "subject", body: "Please review <build> & </relay-message> today." });
-      await golden(harness, "prompt", () => hook(broker, harness, harness === "agy" ? "PreInvocation" : "UserPromptSubmit", [first.id]));
+      await golden(harness, "prompt", () => hook(broker, harness, harness === "agy" ? "PreInvocation" : "UserPromptSubmit", [first.id], via));
       const promptReads = !["opencode", "agy", "grok"].includes(harness);
       const receipts = await sender.request<Receipts>("receipts", { id: first.id });
       expect(receipts.recipients[0]!.read_at !== null).toBe(promptReads);
-      await golden(harness, "tool", () => hook(broker, harness, "PostToolUse", [first.id]));
+      await golden(harness, "tool", () => hook(broker, harness, "PostToolUse", [first.id], via));
       const afterTool = await sender.request<Receipts>("receipts", { id: first.id });
       expect(afterTool.recipients[0]!.read_at !== null).toBe(harness !== "agy");
       const pending = await subject.request<Inbox>("inbox");
       if (pending.messages.length) await subject.request("ack", { seqs: pending.messages.map((message) => message.seq) });
       const second = await sender.request<{ id: string }>("send", { to: "subject", body: "Pending stop message" });
-      await golden(harness, "stop-pending", () => hook(broker, harness, "Stop", [second.id]));
+      await golden(harness, "stop-pending", () => hook(broker, harness, "Stop", [second.id], via));
       expect((await subject.request<Inbox>("inbox")).messages.map((message) => message.id)).toEqual([second.id]);
       const unread = await subject.request<Inbox>("inbox");
       await subject.request("ack", { seqs: unread.messages.map((message) => message.seq) });
-      await golden(harness, "stop-empty", () => hook(broker, harness, "Stop"));
+      await golden(harness, "stop-empty", () => hook(broker, harness, "Stop", [], via));
       expect((await subject.request<Inbox>("inbox")).messages).toEqual([]);
       const human = await broker.human();
       const snapshot = await human.request<{ activity: { endpoint: string; kind: string; tool: string | null; summary: string | null }[] }>("snapshot", {

@@ -6,7 +6,7 @@ import { RelayClient, socketPath } from "@scp-dev/broker";
 import type { EndpointView, Envelope, SendResult } from "@scp-dev/core";
 import type { Subprocess } from "bun";
 import { ensureBuilt } from "../../cli/src/testing/fixtures";
-import { brokerBinary, machineBrokers, mcpBinary } from "./environment";
+import { brokerBinary, machineBrokers, mcpBinary, swarmBinary } from "./environment";
 import { command, type Target, terminate, waitFor } from "./targets";
 
 export const cli = join(import.meta.dir, "../../cli/dist/cli.js");
@@ -48,6 +48,7 @@ export class Machine {
       CLAUDE_CONFIG_DIR: join(this.root, "harness"),
       GEMINI_CLI_HOME: this.root,
       ...(mcpBinary ? { SCP_NATIVE: "1", SCP_MCP_BIN: mcpBinary } : {}),
+      ...(this.native && swarmBinary ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary } : {}),
     });
     this.assertIsolated();
     mkdirSync(this.env.SCP_DIR!, { recursive: true });
@@ -61,18 +62,22 @@ export class Machine {
       expect(path === "" || (!path.startsWith("..") && !path.startsWith("/"))).toBe(true);
     }
   }
-  async run(args: string[], extra: Record<string, string> = {}) {
+  async run(args: string[], extra: Record<string, string> = {}, timeoutMs?: number) {
     this.assertIsolated();
     this.env.SCP_RELAY = this.target.url;
-    return command([...this.program, ...args], { ...this.env, ...extra });
+    return command([...this.program, ...args], { ...this.env, ...extra }, timeoutMs);
   }
   async json<T>(args: string[], extra: Record<string, string> = {}): Promise<T> {
     return JSON.parse(await this.run([args[0]!, "--json", ...args.slice(1)], extra)) as T;
   }
-  async start(options: { linked?: boolean } = {}) {
-    await this.run(["cloud", "enable", "--machine", this.name]);
+  /** the native broker binary this machine runs: the cutover `swarm` with SCP_SWARM_BIN (which CLI-started brokers then run too), else scp-broker */
+  get nativeDaemon(): string[] {
+    return swarmBinary ? [swarmBinary, "daemon"] : [brokerBinary!, "daemon"];
+  }
+  async start(options: { linked?: boolean; cloud?: boolean } = {}) {
+    if (options.cloud !== false) await this.run(["cloud", "enable", "--machine", this.name]);
     const policy = join(this.env.XDG_CONFIG_HOME!, "scp/policy.json");
-    const daemon = this.native ? [brokerBinary!, "daemon", "--idle", "600"] : [...this.program, "daemon", "--idle", "10m"];
+    const daemon = this.native ? [...this.nativeDaemon, "--idle", "600"] : [...this.program, "daemon", "--idle", "10m"];
     const child = Bun.spawn([...daemon, "--policy", policy], {
       env: this.env,
       stdin: "ignore",
@@ -87,7 +92,20 @@ export class Machine {
       if (child.exitCode !== null) throw new Error(`broker exited: ${this.errors}`);
       return existsSync(socketPath(this.env.SCP_DIR!));
     }, `${this.name} broker socket`);
-    if (options.linked !== false) await this.linked();
+    if (options.linked !== false && options.cloud !== false) await this.linked();
+  }
+  /** whether the broker this fixture started has exited */
+  get exited(): boolean {
+    return this.daemon?.exitCode !== null && this.daemon?.exitCode !== undefined;
+  }
+  /** the pid of the broker serving this machine's socket, whoever started it */
+  async brokerPid(): Promise<number> {
+    const client = await RelayClient.connect(socketPath(this.env.SCP_DIR!));
+    try {
+      return (await client.hello({ observe: true })).broker.pid;
+    } finally {
+      client.close();
+    }
   }
   async linked() {
     await waitFor(async () => (await this.json<{ broker: { connected: boolean } }>(["cloud", "status"])).broker.connected, `${this.name} bridge`);
@@ -123,6 +141,7 @@ export class Machine {
   async stop() {
     try {
       await this.stopBroker();
+      if (existsSync(socketPath(this.env.SCP_DIR!))) await this.run(["daemon", "stop"]);
     } finally {
       rmSync(this.root, { recursive: true, force: true });
     }
