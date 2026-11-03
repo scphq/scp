@@ -28,6 +28,7 @@ pub mod spawn;
 pub mod state;
 pub mod store;
 pub mod sweep;
+pub mod tasks;
 pub mod views;
 pub mod wake;
 pub mod world;

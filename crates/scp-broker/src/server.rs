@@ -43,6 +43,7 @@ pub struct Broker {
     socket_inode: u64,
     idle: Duration,
     hook: Option<Arc<dyn HookHandler>>,
+    task: Option<crate::tasks::Task>,
 }
 
 impl Broker {
@@ -57,7 +58,7 @@ impl Broker {
         let lock = BrokerLock::acquire(&options.paths.lock).await?;
         let result = Self::initialize(options).await;
         match result {
-            Ok((listener, core, paths, idle, socket_inode)) => Ok(Self {
+            Ok((listener, core, paths, idle, socket_inode, task)) => Ok(Self {
                 listener,
                 core,
                 paths,
@@ -65,6 +66,7 @@ impl Broker {
                 lock,
                 socket_inode,
                 hook: None,
+                task,
             }),
             Err(error) => {
                 lock.release().await;
@@ -75,7 +77,14 @@ impl Broker {
 
     async fn initialize(
         options: BrokerOptions,
-    ) -> io::Result<(UnixListener, SharedCore, Paths, Duration, u64)> {
+    ) -> io::Result<(
+        UnixListener,
+        SharedCore,
+        Paths,
+        Duration,
+        u64,
+        Option<crate::tasks::Task>,
+    )> {
         let store = SqliteStore::open(&options.paths.database).map_err(io::Error::other)?;
         let mut core = Core::new(
             Arc::new(store),
@@ -89,10 +98,17 @@ impl Broker {
             eprintln!("{line}")
         })
         .map(|config| crate::bridge::Bridge::attach(config, &mut core));
-        if let Some(cli) = crate::wake::cli_argv(&options.env) {
+        let cli = crate::wake::cli_argv(&options.env);
+        if let Some(cli) = &cli {
             core.wakers
-                .set_builtin(crate::wake::Wakers::builtin_for(&cli));
+                .set_builtin(crate::wake::Wakers::builtin_for(cli));
         }
+        let task = cli.map(|cli| crate::tasks::Task {
+            cli,
+            dir: options.paths.dir.clone(),
+            env: options.env.clone(),
+            every: crate::tasks::CLAUDE_BG_EVERY,
+        });
         core.federation.env = options.env;
         core.sweep().await.map_err(io::Error::other)?;
         tokio::fs::set_permissions(
@@ -122,7 +138,7 @@ impl Broker {
         if let Some(bridge) = bridge {
             bridge.spawn(core.clone());
         }
-        Ok((listener, core, options.paths, options.idle, inode))
+        Ok((listener, core, options.paths, options.idle, inode, task))
     }
 
     async fn owns_socket(&self) -> bool {
@@ -132,7 +148,7 @@ impl Broker {
                 .is_ok_and(|meta| meta.ino() == self.socket_inode)
     }
 
-    pub async fn run(self, shutdown: impl Future<Output = ()>) -> io::Result<()> {
+    pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> io::Result<()> {
         tokio::pin!(shutdown);
         let (stop, stopping) = watch::channel(false);
         let mut connections = JoinSet::new();
@@ -143,8 +159,15 @@ impl Broker {
         sweeper.tick().await;
         let wakers = crate::wake::attach(&self.core).await;
         let mut presence = tokio::time::interval(PRESENCE_PASS);
+        let running = crate::tasks::TaskPid::default();
+        let tasks = self
+            .task
+            .take()
+            .map(|task| crate::tasks::attach(task, running.clone()));
+        let mut task_connections = std::collections::HashSet::new();
         let result = loop {
-            let deadline = if connections.is_empty() && !self.idle.is_zero() {
+            let users = connections.len() - task_connections.len();
+            let deadline = if users == 0 && !self.idle.is_zero() {
                 idle_since + self.idle
             } else {
                 Instant::now() + Duration::from_secs(86400)
@@ -152,7 +175,7 @@ impl Broker {
             tokio::select! {
                 _ = &mut shutdown => break Ok(()),
                 _ = restart.notified() => break Ok(()),
-                _ = tokio::time::sleep_until(deadline), if connections.is_empty() && !self.idle.is_zero() => break Ok(()),
+                _ = tokio::time::sleep_until(deadline), if users == 0 && !self.idle.is_zero() => break Ok(()),
                 _ = presence.tick() => {
                     let core = self.core.lock().await;
                     match core.wakeable().await {
@@ -172,16 +195,25 @@ impl Broker {
                         tracing::error!(%error, "sweep failed");
                     }
                 },
-                joined = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(Err(error)) = joined { tracing::error!(%error, "connection task failed"); }
-                    if connections.is_empty() { idle_since = Instant::now(); }
+                joined = connections.join_next_with_id(), if !connections.is_empty() => {
+                    let id = match joined {
+                        Some(Ok((id, ()))) => id,
+                        Some(Err(error)) => {
+                            tracing::error!(%error, "connection task failed");
+                            error.id()
+                        }
+                        None => continue,
+                    };
+                    if !task_connections.remove(&id) && connections.len() == task_connections.len() { idle_since = Instant::now(); }
                 }
                 accepted = self.listener.accept() => match accepted {
                     Ok((stream, _)) => {
+                        let task = running.is(stream.peer_cred().ok().and_then(|cred| cred.pid()));
                         let core = self.core.clone();
                         let stopping = stopping.clone();
                         let hook = self.hook.clone();
-                        connections.spawn(async move { serve_connection(stream, core, stopping, hook).await; });
+                        let handle = connections.spawn(async move { serve_connection(stream, core, stopping, hook).await; });
+                        if task { task_connections.insert(handle.id()); }
                     }
                     Err(error) => break Err(error),
                 }
@@ -198,6 +230,9 @@ impl Broker {
         let _ = stop.send(true);
         wakers.abort();
         let _ = wakers.await;
+        if let Some(tasks) = tasks {
+            tasks.abort();
+        }
         let drain = async { while connections.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_secs(2), drain)
             .await

@@ -3,7 +3,7 @@ import * as fs from "node:fs"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type BrokerTaskContext, RelayClient, startBroker } from "@scp-dev/broker"
+import { type BrokerTaskContext, RelayClient, relayDir, startBroker } from "@scp-dev/broker"
 import type { LocalAgent } from "@scp-dev/core"
 import { bgDir } from "./claude"
 import { SELF } from "./term"
@@ -21,11 +21,13 @@ import {
   idleAfterS,
   spawnIdleAfterS,
   plan,
+  taskPort,
   readRecords,
   readState,
   onlyPollsInbox,
   pollsInbox,
   runsCommand,
+  runBgTaskFromFile,
   refSession,
   reviveRef,
 } from "./claude-bg"
@@ -668,6 +670,17 @@ describe("background task", () => {
     await task.run(f.context)
     await task.run(f.context)
     expect(f.calls()).toHaveLength(1)
+  })
+  test("a run from the task file lists claude once for a Claude Code root, as the in-process task does", async () => {
+    const f = fixture()
+    f.facts = agent({ harness: "claude-code", parent: null })
+    const log = (line: string) => f.events.push(["log", line])
+    await runBgTaskFromFile(f.env, taskPort(f.context), log, f.deps)
+    await runBgTaskFromFile(f.env, taskPort(f.context), log, f.deps)
+    expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+    rmSync(join(relayDir(f.env as NodeJS.ProcessEnv), "claude-bg-task.json"))
+    await runBgTaskFromFile(f.env, taskPort(f.context), log, f.deps)
+    expect(f.calls()).toHaveLength(2)
   })
   test("aborts the stop when claude shows the session busy right before it", async () => {
     const f = fixture()

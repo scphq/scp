@@ -689,6 +689,7 @@ export async function relayMain(argv: string[], cwd = safeCwd()): Promise<number
   if (verb === "spawn-wake") return (await import("./hold")).spawnWakeCommand(rest)
   if (verb === "codex-wake") return (await import("./codex-queue")).codexWakeCommand()
   if (verb === "claude-wake") return (await import("./claude-bg")).claudeWakeCommand()
+  if (verb === "claude-bg-task") return (await import("./claude-bg")).claudeBgTaskCommand()
   const allowed = VERBS[verb]
   if (!allowed) throw new RelayUsage(`unknown command "${verb}"`)
   let parsed: { values: Values; positionals: string[] }
