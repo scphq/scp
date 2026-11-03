@@ -1370,6 +1370,8 @@ export class RelayCore {
     let exactFrom: EndpointRow | undefined
     let returning: string | undefined
     let back: EndpointRow | undefined
+    const hooksLeft = ticketed ? this.ticketHooks(ticketed, harness, fields) : undefined
+    if (hooksLeft) ({ moved, stopBlocks } = this.leaveHooks(hooksLeft, ticketed!.id))
     const open = !row || presenceOf(row, now) === "offline"
     if (row && presenceOf(row, now) === "offline") {
       this.sql.all(`UPDATE endpoints SET session = NULL WHERE id = ?`, row.id)
@@ -1549,6 +1551,23 @@ export class RelayCore {
     if (scope.grant !== null) this.takePending(row.id)
     if (!transient) this.wakeDone(row.id, "claim")
     return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
+  }
+
+  /**
+   * the auto-named endpoint the hooks of a ticketed claim's harness process registered before the claim, other than the ticketed row: it lets
+   * go of the session for that row, as rule 1's hooks' endpoint does
+   */
+  private ticketHooks(ticketed: EndpointRow, harness: string, fields: { session: string | null; process: string | null }): EndpointRow | undefined {
+    if (fields.session === null || fields.process === null) return undefined
+    const row = one<EndpointRow>(
+      this.sql,
+      `SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR ${GENERIC_SQL}) AND session = ? AND id != ? AND token_hash IS NULL AND named IS NULL
+       AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' LIMIT 1`,
+      harness,
+      fields.session,
+      ticketed.id,
+    )
+    return row && row.process !== null && sameHarness(row.process, fields.process) ? row : undefined
   }
 
   /**

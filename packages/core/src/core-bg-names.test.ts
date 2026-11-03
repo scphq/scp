@@ -180,6 +180,28 @@ describe("a background session the harness daemon runs", () => {
     })
   }
 
+  for (const origin of [false, true])
+    test(`woken by its waker's ticket under a new session id, its hooks first, leaves no second endpoint of that session (${origin ? "with" : "without"} origin)`, () => {
+      const { core, lead, hook, shim, tool, named, w1 } = stopped()
+      const ticket = core.wakeDue(w1.id)?.ticket
+      expect(ticket).toMatch(/^kwt_/)
+      const fresh = hook(13, { harness_session: S2 }).endpoint
+      expect(fresh.id).not.toBe(w1.id)
+      expect(shim(13, { ...named, harness_session: S2, ...(origin ? { harness_origin: S } : {}), ticket }).endpoint.id).toBe(w1.id)
+      expect(hook(13, { harness_session: S2 }).endpoint.id).toBe(w1.id)
+      tool(w1.id, 13, S2)
+      expect(core.whoami(w1.id)).toMatchObject({ address: "me/w1", parent: lead.address })
+      expect(core.list({ all: true }).find((view) => view.id === w1.id)?.presence).not.toBe("hibernated")
+      expect(core.inbox(w1.id).map((m) => m.body.text)).toEqual(["while stopped"])
+      expect(
+        core
+          .localAgents()
+          .filter((agent) => agent.harness_session === S2)
+          .map((agent) => agent.id),
+      ).toEqual([w1.id])
+      expect(local(core)).toEqual(["me/lead", "me/w1"])
+    })
+
   test("stopped under its default handle, a resume whose hooks walked to a suffix takes the handle back by its origin", () => {
     const ctx = setup()
     const { core, lead, hook, shim, tool, peer, dead, clock } = ctx

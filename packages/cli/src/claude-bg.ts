@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process"
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import { basename, join } from "node:path"
 import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, readOwnedFile, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
-import { bgDir, CLAUDE_MCP, LAUNCHER_IDENTITY } from "./claude"
+import { BACKGROUNDED, bgDir, CLAUDE_MCP, LAUNCHER_IDENTITY } from "./claude"
 import { RelayUsage, terminalAttached } from "./common"
 import { goneCommand, mcpMount, mcpWords, mountVars } from "./native"
 import { configDir } from "./relay"
@@ -84,6 +84,8 @@ export interface BgState {
   stoppedAt?: number
   removedAt?: number
   rmRefused?: { at: number; reason: string }
+  /** the short id a wake's resume brought the session back under, when Claude Code gave it a new one */
+  movedTo?: string
 }
 
 /** when a worker leaves Claude's agents list: as it stops (`on_stop`), once its endpoint is historic (`historic`), or never (false) */
@@ -1277,7 +1279,7 @@ const decline = (out: (text: string) => void, reason: string): number => {
  * its endpoint back with it (SPEC section 6.4 rule 6); a server whose command is gone runs this CLI's mount instead. False when the config
  * cannot be read or written
  */
-function armTicket(file: string, ticket: string | undefined, env: Env): boolean {
+function armTicket(file: string, ticket: string | undefined, env: Env, origin?: string): boolean {
   let temp: string | undefined
   try {
     const config = JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: { scp?: { command?: unknown; args?: unknown; env?: Record<string, string> } } }
@@ -1285,9 +1287,9 @@ function armTicket(file: string, ticket: string | undefined, env: Env): boolean 
     if (!scp || typeof scp !== "object") return false
     const vars = scp.env && typeof scp.env === "object" ? scp.env : {}
     const stale = goneCommand(scp.command)
-    if (vars.SCP_WAKE_TICKET === ticket && !stale) return true
-    const { SCP_WAKE_TICKET: _, ...rest } = vars
-    const armed = ticket ? { ...rest, SCP_WAKE_TICKET: ticket } : rest
+    if (vars.SCP_WAKE_TICKET === ticket && vars.SCP_HARNESS_ORIGIN === origin && !stale) return true
+    const { SCP_WAKE_TICKET: _, SCP_HARNESS_ORIGIN: __, ...rest } = vars
+    const armed = { ...rest, ...(ticket ? { SCP_WAKE_TICKET: ticket } : {}), ...(origin ? { SCP_HARNESS_ORIGIN: origin } : {}) }
     if (stale) {
       const mount = mcpMount(SELF, mcpWords([String(scp.command), ...(Array.isArray(scp.args) ? scp.args.map(String) : [])], CLAUDE_MCP), env)
       scp.command = mount.argv[0]
@@ -1312,6 +1314,25 @@ function armTicket(file: string, ticket: string | undefined, env: Env): boolean 
     }
     return false
   }
+}
+
+/**
+ * a resume Claude Code brought back under a new short id `moved`: its `<moved>.json` links to the session file the resume ran with, and its
+ * state carries the new session id, so the policy stops it again and its next wake resumes the new session
+ */
+async function followResume(env: Env, claude: Claude, moved: string, state: BgState, record: BgRecord | undefined): Promise<void> {
+  const dir = bgDir(env)
+  if (record) {
+    const link = join(dir, `${moved}.json`)
+    try {
+      unlinkSync(link)
+    } catch {}
+    try {
+      symlinkSync(basename(record.file), link)
+    } catch {}
+  }
+  const sessionId = (await listEntries(claude, true))?.find((one) => one.id === moved && one.kind === "background")?.sessionId
+  if (sessionId && SESSION_ID.test(sessionId) && sessionId.startsWith(moved)) writeState(env, moved, { ...state, sessionId })
 }
 
 /** whether Claude Code's transcripts are readable and none of them is the session's: its transcript is gone, so no resume can bring it back */
@@ -1371,15 +1392,17 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
     (revive && (revive.harness !== "claude-code" || (state !== undefined && state.sessionId !== revive.session)))
   )
     return decline(out, "unresumable")
-  if (record && !armTicket(record.file, ticket, env)) {
+  const moved = entry || !state?.movedTo ? undefined : entries.find((one) => one.id === state.movedTo && one.kind === "background")
+  const listed = entry ?? moved
+  if (record && !armTicket(record.file, ticket, env, listed ? undefined : ref)) {
     note(`${CLI_NAME} claude-wake: could not update the wake ticket`)
     return 1
   }
-  if (entry && typeof entry.pid === "number") return 0
-  if (entry) {
-    const run = await claude.exec(claude.bin, ["respawn", id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
+  if (listed && typeof listed.pid === "number") return 0
+  if (listed?.id) {
+    const run = await claude.exec(claude.bin, ["respawn", listed.id], { timeoutMs: ACT_TIMEOUT_MS, env: claude.env })
     if (run.code === 0) return 0
-    note(`${CLI_NAME} claude-wake: claude respawn ${id} failed: ${firstLine(run.out) || `exit ${run.code}`}`)
+    note(`${CLI_NAME} claude-wake: claude respawn ${listed.id} failed: ${firstLine(run.out) || `exit ${run.code}`}`)
     return 1
   }
   if (!state || state.sessionId !== ref) return decline(out, "unresumable")
@@ -1401,8 +1424,10 @@ export async function claudeWakeCommand(env: Env = process.env, deps: ClaudeBgDe
     { timeoutMs: ACT_TIMEOUT_MS, env: claude.env, cwd: state.cwd },
   )
   if (run.code === 0) {
-    const { removedAt: _removed, ...resumed } = state
-    writeState(env, id, resumed)
+    const { removedAt: _removed, movedTo: _moved, ...resumed } = state
+    const to = BACKGROUNDED.exec(run.out)?.[1]
+    writeState(env, id, to && to !== id ? { ...resumed, movedTo: to } : resumed)
+    if (to && to !== id) await followResume(env, claude, to, resumed, record)
     return 0
   }
   note(`${CLI_NAME} claude-wake: claude --bg --resume failed: ${firstLine(run.out) || `exit ${run.code}`}`)
