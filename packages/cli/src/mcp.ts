@@ -95,6 +95,7 @@ export function shimIdentityInput(values: Values): IdentityInput {
     fallbackHarness: "mcp",
     cwd: safeCwd(),
     env: process.env,
+    ...(process.env.SCP_HARNESS_ORIGIN ? { harnessOrigin: process.env.SCP_HARNESS_ORIGIN } : {}),
     harnessPid: () => {
       pid ??= launcherPid(process.env) ?? harnessPid()
       return pid

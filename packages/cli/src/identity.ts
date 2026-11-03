@@ -688,6 +688,8 @@ export interface IdentityInput {
   lineageOf?: (pid: number) => string[]
   /** a Claude Code hook's payload session id, over $CLAUDE_CODE_SESSION_ID; a codex hook's thread id, over $CODEX_THREAD_ID and $SCP_CODEX_THREAD */
   harnessSession?: string
+  /** the session a launcher resumed (a shim's $SCP_HARNESS_ORIGIN): the origin of a Claude Code claim whose command line names none */
+  harnessOrigin?: string
   /** whether T3 Code runs the harness process (default {@link t3Hosted}) */
   t3Hosted?: (pid: number) => boolean
   /** process table shared by hosted harness detection and lineage */
@@ -780,7 +782,8 @@ export function relayIdentity(input: IdentityInput): Claim & { handle: string; h
       : provider === "codex"
         ? [input.harnessSession, input.env.CODEX_THREAD_ID, input.env.SCP_CODEX_THREAD].find((id) => id !== undefined && CODEX_THREAD.test(id))
         : undefined
-  const forked = provider === "claude-code" ? forkOrigin(ps()?.get(pid)?.args) : undefined
+  const resumed = input.harnessOrigin !== undefined && HARNESS_SESSION.test(input.harnessOrigin) ? input.harnessOrigin : undefined
+  const forked = provider === "claude-code" ? (forkOrigin(ps()?.get(pid)?.args) ?? resumed) : undefined
   const origin = forked !== harnessSession ? forked : undefined
   const threaded =
     harnessSession !== undefined &&
