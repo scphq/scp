@@ -1120,6 +1120,8 @@ async function runVerb(
       }
       const snapshot = await client.request<Snapshot>("snapshot", { all: values.all === true })
       const engine = broker && snapshot.broker ? (await import("./native")).brokerEngine(snapshot.broker.pid) : undefined
+      const { goneClientLine, goneHookClients } = await import("./install")
+      for (const client of goneHookClients(process.env, cwd)) note(`! ${goneClientLine(client)}`)
       if (asJson) {
         json(snapshot.broker && engine ? { ...snapshot, broker: { ...snapshot.broker, engine } } : snapshot)
         return 0

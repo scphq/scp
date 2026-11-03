@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join } from "node:path"
-import { BLOCK_STOP, claudeVersionFile, hookEntries, hasOurHooks, shellQuote, mergeHooks, musePlugin, opencodePlugin } from "./hooks"
+import { spawnSync } from "node:child_process"
+import { renameSync } from "node:fs"
+import { BLOCK_STOP, claudeVersionFile, hookCommand, hookEntries, hasOurHooks, shellQuote, mergeHooks, musePlugin, opencodePlugin } from "./hooks"
+import { goneHookClients } from "./install"
 import { type Added, agyRules, manifestFile, parseSetupArgs, relaySetup, type RunResult, type SetupOptions, verifyMount, verifyMusePlugin } from "./setup"
 
 const SERVER = "scp"
@@ -1362,6 +1365,132 @@ describe("native setup hooks", () => {
       }
     }
     expect(mergeHooks({ hooks: { Stop: [{ hooks: [{ command: "echo /old/scp-hook swarm hook claude" }] }] } }, {})).toHaveProperty("hooks.Stop")
+    for (const native of ["/old/scp-hook", "/old space/scp-hook", "/old/custom-client"])
+      for (const launcher of [undefined, ["/old/swarm"], ["/old space/node", "/old/@scp-dev/cli/dist/cli.js"]]) {
+        const command = hookCommand({ native, ...(launcher ? { launcher } : {}) }, ["hook", "claude", BLOCK_STOP])
+        expect(mergeHooks({ hooks: { Stop: [{ hooks: [{ command }] }] } }, {})).toEqual({ hooks: {} })
+      }
+    const custom = hookCommand({ native: "/old/x", launcher: ["/opt/node", "/opt/scp/cli.js"] }, ["hook", "claude"])
+    expect(mergeHooks({ hooks: { Stop: [{ hooks: [{ command: custom }] }] } }, {}, ["/opt/node /opt/scp/cli.js"])).toEqual({ hooks: {} })
+    expect(mergeHooks({ hooks: { Stop: [{ hooks: [{ command: "[ -x /a ] && exec /b swarm hook claude" }] }] } }, {})).toHaveProperty("hooks.Stop")
+  })
+
+  test.each(["native", "na tive's"])(
+    "every hook runs the CLI through the harness's own shell once the native client in ~/%s is gone, and setup then names it",
+    (dir) => {
+      const f = fixture()
+      const bin = native(f, "0.0.0", join(f.home, dir, "scp-hook"))
+      const ran = join(f.home, "ran")
+      put(f.swarm, `#!/bin/sh\nprintf '%s ' "$@" >> ${shellQuote(ran)}\necho >> ${shellQuote(ran)}\ncat > /dev/null\n`, 0o755)
+      put(bin, `#!/bin/sh\nif [ "$1" = --version ]; then printf 'scp-hook 0.0.0\\n'; exit 0; fi\nprintf 'native ' >> ${shellQuote(ran)}\nexec "$@"\n`, 0o755)
+      expect(setup(f, { write: true }).code).toBe(0)
+      expect(setup(f, { write: true }).text).toContain("everything is in place; nothing to do")
+      const hooks = userHooks(f)
+      const claude = readJson(hooks.claude).hooks.UserPromptSubmit[0].hooks[0].command as string
+      const codex = readJson(hooks.codex).hooks.Stop[0].hooks[0].command as string
+      const agy = readJson(hooks.agy).scp.PreInvocation[0].command as string
+      const muse = readJson(join(f.home, ".config/scp/muse-plugin/.muse-plugin/plugin.json")).capabilities.hooks[1].command as string[]
+      const shells = ["/bin/sh", ...["/bin/bash", "/bin/zsh"].filter((shell) => existsSync(shell))]
+      const env = { ...f.env, PATH: `${dirname(f.swarm)}:${f.env.PATH}` }
+      const runAll = () => {
+        for (const shell of shells) for (const command of [claude, codex, agy]) expect(spawnSync(shell, ["-c", command], { input: "{}", env }).status).toBe(0)
+        expect(spawnSync(muse[0]!, muse.slice(1), { input: "{}", env }).status).toBe(0)
+        const lines = readFileSync(ran, "utf8").split("\n").filter(Boolean)
+        writeFileSync(ran, "")
+        return lines
+      }
+      const present = runAll()
+      expect(present).toHaveLength(shells.length * 3 + 1)
+      expect(present.every((line) => line.startsWith("native "))).toBe(true)
+      renameSync(bin, `${bin}.moved`)
+      const gone = runAll()
+      expect(gone).toEqual([...shells.flatMap(() => ["hook claude ", "hook codex --push-wait 600 ", "hook agy PreInvocation "]), "hook muse UserPromptSubmit "])
+      expect(goneHookClients(f.env, join(f.home, "work")).map((client) => [client.harness, client.guarded])).toEqual([
+        ["claude", true],
+        ["codex", true],
+        ["opencode", true],
+        ["agy", true],
+        ["muse", true],
+      ])
+      const plan = setup(f).text
+      expect(plan).toContain(`~/.claude/settings.json runs the native hook client ~/${dir}/scp-hook, which is gone: its hooks run through Node`)
+      expect(plan).toContain("merge the swarm hooks into ~/.claude/settings.json")
+      expect(setup(f, { write: true }).code).toBe(0)
+      expect(readFileSync(hooks.claude, "utf8")).not.toContain(bin)
+      expect(goneHookClients(f.env, join(f.home, "work"))).toEqual([])
+    },
+  )
+
+  test("a native client's own exit status stands and the fallback does not run after it", () => {
+    const f = fixture()
+    const bin = native(f)
+    const ran = join(f.home, "ran")
+    put(f.swarm, `#!/bin/sh\necho cli >> ${shellQuote(ran)}\n`, 0o755)
+    put(bin, `#!/bin/sh\nif [ "$1" = --version ]; then printf 'scp-hook 0.0.0\\n'; exit 0; fi\necho native >> ${shellQuote(ran)}\nexit 3\n`, 0o755)
+    expect(setup(f, { write: true }).code).toBe(0)
+    const command = readJson(userHooks(f).claude).hooks.Stop[0].hooks[0].command as string
+    for (const shell of ["/bin/sh", ...["/bin/bash", "/bin/zsh"].filter((path) => existsSync(path))])
+      expect(spawnSync(shell, ["-c", command], { input: "{}", env: f.env }).status).toBe(3)
+    expect(new Set(readFileSync(ran, "utf8").trim().split("\n"))).toEqual(new Set(["native"]))
+  })
+
+  test("undo removes the guarded hooks and keeps the hooks of others", () => {
+    const f = fixture()
+    native(f)
+    expect(setup(f, { write: true }).code).toBe(0)
+    const file = userHooks(f).claude
+    const settings = readJson(file)
+    const unrelated = [
+      { type: "command", command: "[ -x /opt/lint ] && exec /opt/lint || exec true" },
+      { type: "command", command: "notify-send done" },
+    ]
+    settings.hooks.Stop.push({ hooks: unrelated })
+    writeFileSync(file, JSON.stringify(settings, null, 2))
+    expect(setup(f, { undo: true, hooks: true, write: true }).code).toBe(0)
+    expect(readJson(file).hooks).toEqual({ Stop: [{ hooks: unrelated }] })
+  })
+
+  test("only the hook commands setup writes count as running a native client", () => {
+    const f = fixture()
+    const file = userHooks(f).claude
+    const commands = [
+      "[ -x /gone/lint ] && /gone/lint",
+      "[ -x /gone/lint ] && exec /gone/lint || exec true",
+      "[ -x /gone/scp-hook ] && exec /gone/scp-hook swarm hook claude || exec /other swarm hook claude",
+      "[ -x /gone/scp-hook ] && exec /gone/other swarm hook claude || exec swarm hook claude",
+      "/gone/scp-hook --version",
+      "echo /gone/scp-hook swarm hook claude",
+    ]
+    put(file, JSON.stringify({ hooks: { Stop: [{ hooks: commands.map((command) => ({ type: "command", command })) }] } }), 0o600)
+    const muse = join(f.home, ".config/scp/muse-plugin/.muse-plugin/plugin.json")
+    put(muse, JSON.stringify({ capabilities: { hooks: [{ command: ["/bin/sh", "-c", "exit 0", "/gone/scp-hook", "swarm", "hook", "muse", "Stop"] }] } }), 0o644)
+    expect(goneHookClients(f.env, join(f.home, "work"))).toEqual([])
+  })
+
+  test("a hooks file that runs a gone native client without the fallback is named as failing", () => {
+    const f = fixture()
+    const file = userHooks(f).claude
+    put(
+      file,
+      JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `${join(f.home, "gone", "scp-hook")} ${f.swarm} hook claude` }] }] } }),
+      0o600,
+    )
+    expect(goneHookClients(f.env, join(f.home, "work"))).toEqual([{ harness: "claude", file, bin: join(f.home, "gone", "scp-hook"), guarded: false }])
+    expect(setup(f).text).toContain(`~/.claude/settings.json runs every claude hook through ~/gone/scp-hook, which is gone: those hooks fail`)
+  })
+
+  test("the OpenCode plugin and the Muse manifest check the native client before each hook", () => {
+    const plugin = opencodePlugin({ native: "/n/scp-hook" })
+    expect(plugin).toContain('const NATIVE = "/n/scp-hook"')
+    expect(plugin).toContain('return [NATIVE, "swarm"]')
+    expect(plugin.match(/\.\.\.launch\(\), "hook", "opencode"/g)).toHaveLength(2)
+    expect(() => new Bun.Transpiler({ loader: "ts" }).transformSync(plugin)).not.toThrow()
+    expect(opencodePlugin()).not.toContain("NATIVE")
+    const stop = (musePlugin({ native: "/n/scp-hook" }).capabilities as { hooks: { event: string; command: string[] }[] }).hooks.find(
+      (h) => h.event === "Stop",
+    )!
+    expect(stop.command.slice(0, 2)).toEqual(["/bin/sh", "-c"])
+    expect(stop.command.slice(3)).toEqual(["/n/scp-hook", "swarm", "hook", "muse", "Stop", "--push-wait", "600"])
   })
 })
 

@@ -9,6 +9,7 @@ import {
   agyHookSet,
   BLOCK_STOP,
   hasOurHooks,
+  hookClient,
   hookEntries,
   type HookHarness,
   mergeHooks,
@@ -19,6 +20,7 @@ import {
   type Scope,
 } from "./hooks"
 import { gitToplevel } from "./identity"
+import { goneCommand } from "./native"
 
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
@@ -58,6 +60,58 @@ export function hooksTarget(harness: HookHarness, scope: Scope, env: Env, cwd: s
     case "muse":
       return join(env.XDG_CONFIG_HOME || join(home(env), ".config"), "scp", "muse-plugin", ".muse-plugin", "plugin.json")
   }
+}
+
+/** a native hook client a user-scope hooks file runs that is no longer an executable file; `guarded` hooks run the CLI without it */
+export type GoneClient = { harness: HookHarness; file: string; bin: string; guarded: boolean }
+
+const commands = (value: unknown): unknown[] =>
+  Array.isArray(value)
+    ? value.flatMap(commands)
+    : typeof value === "object" && value !== null
+      ? Object.entries(value).flatMap(([key, inner]) => (key === "command" ? [inner] : commands(inner)))
+      : []
+
+/** the gone native hook clients `file`, the hooks of `harness`, runs */
+export function goneClients(harness: HookHarness, file: string): GoneClient[] {
+  let found: { bin: string; guarded: boolean }[]
+  try {
+    if (!existsSync(file)) return []
+    const text = readFileSync(file, "utf8")
+    if (harness === "opencode") {
+      const guarded = /^const NATIVE = ("(?:[^"\\]|\\.)*")$/m.exec(text)
+      const plain = /const args = \[("(?:[^"\\]|\\.)*")/.exec(text)
+      const bin = guarded ? (JSON.parse(guarded[1]!) as string) : plain ? (JSON.parse(plain[1]!) as string) : undefined
+      found = bin && (guarded || basename(bin) === "scp-hook") ? [{ bin, guarded: Boolean(guarded) }] : []
+    } else {
+      const config = JSON.parse(text) as Json
+      const hooks = harness === "agy" ? config[AGY_HOOK_SET] : harness === "muse" ? (config.capabilities as Json | undefined)?.hooks : config.hooks
+      found = commands(hooks).flatMap((command) => hookClient(command) ?? [])
+    }
+  } catch {
+    return []
+  }
+  const seen = new Set<string>()
+  return found
+    .filter((client) => {
+      const key = `${client.bin}\0${client.guarded}`
+      if (seen.has(key) || !goneCommand(client.bin)) return false
+      seen.add(key)
+      return true
+    })
+    .map((client) => ({ harness, file, ...client }))
+}
+
+/** the gone native hook clients the user-scope hooks of every harness run */
+export function goneHookClients(env: Env, cwd: string): GoneClient[] {
+  return (["claude", "codex", "opencode", "agy", "muse"] as const).flatMap((harness) => goneClients(harness, hooksTarget(harness, "user", env, cwd)))
+}
+
+/** what to say about a gone native hook client */
+export function goneClientLine(client: GoneClient): string {
+  return client.guarded
+    ? `${client.file} runs the native hook client ${client.bin}, which is gone: its hooks run through Node until ${CLI_NAME} setup --write runs again`
+    : `${client.file} runs every ${client.harness} hook through ${client.bin}, which is gone: those hooks fail until ${CLI_NAME} setup --write runs again`
 }
 
 function stamp(now: Date): string {

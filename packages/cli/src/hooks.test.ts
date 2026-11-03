@@ -1,7 +1,7 @@
 import { Readable } from "node:stream"
 import { Database } from "bun:sqlite"
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { type ActivityRow, LIMITS, PREAMBLE, PREAMBLE_BRIEF } from "@scp-dev/core"
 import { type Broker, localHostName, RelayClient, socketPath, systemHostname } from "@scp-dev/broker"
@@ -1369,8 +1369,15 @@ for (const mode of hookModes)
         blockStop = true,
         enableWake = false,
         delayWake = false,
+        withNative = false,
       ) {
         const root = mkdtempSync(join(process.env.HOME!, "oc-plugin-"))
+        const native = join(root, "native", "scp-hook")
+        const nativeLog = join(root, "native.log")
+        if (withNative) {
+          mkdirSync(dirname(native))
+          writeFileSync(native, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${nativeLog}'\nexec "$@"\n`, { mode: 0o755 })
+        }
         const bin = join(root, "bin")
         mkdirSync(bin)
         const log = join(root, "calls.log")
@@ -1382,7 +1389,7 @@ for (const mode of hookModes)
           { mode: 0o755 },
         )
         const file = join(root, "scp.ts")
-        writeFileSync(file, opencodePlugin({ blockStop }))
+        writeFileSync(file, opencodePlugin({ blockStop, ...(withNative ? { native } : {}) }))
         const prompts: unknown[] = []
         const lookups: string[] = []
         const client = {
@@ -1431,8 +1438,38 @@ for (const mode of hookModes)
           settle,
           setReply: (next: unknown) => writeFileSync(replyFile, JSON.stringify(next)),
           restore: () => (process.env.PATH = path),
+          native,
+          nativeCalls: () => (existsSync(nativeLog) ? readFileSync(nativeLog, "utf8").trim().split("\n").filter(Boolean) : []),
         }
       }
+
+      test("hooks and the waiter run through the native client while it is executable, and through the CLI once it is not", async () => {
+        const oc = await load({}, {}, [], false, true, false, true)
+        try {
+          for (let i = 0; i < 100 && !oc.nativeCalls().length; i++) await Bun.sleep(50)
+          expect(oc.nativeCalls()[0]).toBe("swarm hook opencode --wake 50")
+          await oc.plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_root", info: { id: "ses_root" } } } })
+          await oc.plugin["tool.execute.after"]({ tool: "read", sessionID: "ses_root", args: {} }, { output: "out" })
+          await oc.settle(3)
+          const tools = () => oc.calls().filter((c) => c.payload.hook_event_name === "PostToolUse")
+          const nativeTools = () => oc.nativeCalls().filter((line) => !line.includes("--wake"))
+          const ran = nativeTools().length
+          expect(ran).toBe(oc.calls().filter((c) => !c.args.includes("--wake")).length)
+          expect(nativeTools().every((line) => line.startsWith("swarm hook opencode"))).toBe(true)
+          for (const gone of [() => chmodSync(oc.native, 0o644), () => rmSync(oc.native)]) {
+            gone()
+            const before = tools().length
+            await oc.plugin["tool.execute.after"]({ tool: "read", sessionID: "ses_root", args: {} }, { output: "out" })
+            for (let i = 0; i < 100 && tools().length === before; i++) await Bun.sleep(50)
+            expect(tools()).toHaveLength(before + 1)
+            expect(tools().at(-1)!.args.slice(0, 2)).toEqual(["hook", "opencode"])
+            expect(nativeTools()).toHaveLength(ran)
+          }
+        } finally {
+          await oc.plugin.event({ event: { type: "session.deleted", properties: { sessionID: "ses_root" } } })
+          oc.restore()
+        }
+      })
 
       test("one process waiter wakes the last idle root only while no root is busy", async () => {
         const oc = await load({ hookSpecificOutput: { additionalContext: "WAKE-CONTEXT" } }, { ses_child: "ses_root" }, [], false, true)

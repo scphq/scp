@@ -1164,15 +1164,65 @@ function stopArgs(options: { blockStop?: boolean; pushWait?: number }): { args: 
   return { args: [...(options.blockStop ? [BLOCK_STOP] : []), PUSH_WAIT, String(wait)], timeout: wait > 0 ? wait + PUSH_TIMEOUT_MARGIN_S : 5, waits: wait > 0 }
 }
 
+/** how a hook command starts this CLI: `launcher` (else `swarm` from PATH), behind the native hook client `native` when there is one */
+export type HookLaunch = { launcher?: string[]; native?: string }
+
+/** runs the native client while it is executable and the CLI straight once it is gone; every harness's shell takes it */
+const nativeGuard = (native: string, rest: string) => `[ -x ${shellQuote(native)} ] && exec ${shellQuote(native)} ${rest} || exec ${rest}`
+
+/** the shell command that runs `swarm <words>` as `launch` says */
+export function hookCommand(launch: HookLaunch, words: string[]): string {
+  const rest = [...(launch.launcher ?? [CLI_NAME]).map(shellQuote), ...words].join(" ")
+  return launch.native ? nativeGuard(launch.native, rest) : rest
+}
+
+const ARGV_GUARD = '[ -x "$0" ] && exec "$0" "$@"; exec "$@"'
+
+/** the same as an argv for a harness that runs it without a shell */
+export function hookArgv(launch: HookLaunch, words: string[]): string[] {
+  const rest = [...(launch.launcher ?? [CLI_NAME]), ...words]
+  return launch.native ? ["/bin/sh", "-c", ARGV_GUARD, launch.native, ...rest] : rest
+}
+
+/** whether `words` start this CLI's hook: a launcher of one or two words, then `hook` */
+const runsHook = (words: string[]) => words[1] === "hook" || words[2] === "hook"
+
+/** the native hook client a hook command of ours starts, and whether the command runs the CLI without it once it is gone */
+export function hookClient(command: unknown): { bin: string; guarded: boolean } | undefined {
+  if (Array.isArray(command)) {
+    const words = command.filter((word): word is string => typeof word === "string")
+    if (words.length !== command.length) return undefined
+    if (words[0] === "/bin/sh" && words[1] === "-c" && words[2] === ARGV_GUARD && words[3] && runsHook(words.slice(4))) return { bin: words[3], guarded: true }
+    return words[0] && basename(words[0]) === "scp-hook" && runsHook(words.slice(1)) ? { bin: words[0], guarded: false } : undefined
+  }
+  if (typeof command !== "string") return undefined
+  const parsed = shellWords(command)
+  if (!parsed) return undefined
+  const words = parsed.map((word) => (word.quoted ? `'${word.text}` : word.text))
+  const or = words.indexOf("||")
+  const bin = parsed[2]?.text
+  if (words[0] === "[" && words[1] === "-x" && bin && words[3] === "]" && words[4] === "&&" && words[5] === "exec" && words[6] === words[2] && or > 7) {
+    const rest = words.slice(7, or)
+    const fallback = words.slice(or + 1)
+    return fallback[0] === "exec" && fallback.slice(1).join("\0") === rest.join("\0") && runsHook(parsed.slice(7, or).map((word) => word.text))
+      ? { bin, guarded: true }
+      : undefined
+  }
+  return parsed[0] && basename(parsed[0].text) === "scp-hook" && runsHook(parsed.slice(1).map((word) => word.text))
+    ? { bin: parsed[0].text, guarded: false }
+    : undefined
+}
+
 /** Prompt, stop, session end and Claude subagent context run in the foreground; activity runs in the background. */
 export function hookEntries(
   harness: "claude" | "codex",
-  options: { blockStop?: boolean; pushWait?: number; launcher?: string[]; cowork?: boolean } = {},
+  options: { blockStop?: boolean; pushWait?: number; cowork?: boolean } & HookLaunch = {},
 ): Record<string, Group[]> {
-  const command = `${options.launcher ? `${options.launcher.map(shellQuote).join(" ")} hook` : HOOK_COMMAND} ${harness}${options.cowork ? " --cowork-only" : ""}`
+  const line = (...extra: string[]) => hookCommand(options, ["hook", harness, ...(options.cowork ? ["--cowork-only"] : []), ...extra])
+  const command = line()
   const background: Handler = { type: "command", command, timeout: 5, async: true }
   const foreground: Handler = { type: "command", command, timeout: 5 }
-  const subagent: Handler[] = harness === "claude" ? [{ type: "command", command: `${command} ${SUBAGENT}`, timeout: 5 }] : []
+  const subagent: Handler[] = harness === "claude" ? [{ type: "command", command: line(SUBAGENT), timeout: 5 }] : []
   const stop = stopArgs(options)
   return {
     SessionStart: [{ hooks: [background] }],
@@ -1180,7 +1230,7 @@ export function hookEntries(
     PostToolUse: [harness === "claude" ? { matcher: "*", hooks: [background, ...subagent] } : { hooks: [background] }],
     Stop: [
       {
-        hooks: [{ type: "command", command: [command, ...stop.args].join(" "), timeout: stop.timeout, ...(stop.waits ? { statusMessage: STOP_STATUS } : {}) }],
+        hooks: [{ type: "command", command: line(...stop.args), timeout: stop.timeout, ...(stop.waits ? { statusMessage: STOP_STATUS } : {}) }],
       },
     ],
     SubagentStop: [{ hooks: [background, ...subagent.map((handler) => ({ ...handler, async: true as const }))] }],
@@ -1192,6 +1242,7 @@ export function hookEntries(
 const WORD = String.raw`[^\s'";|&<>\x60$\\]*`
 const QUOTED = String.raw`(?:[^']|'\\'')*`
 const wordEnding = (ending: string) => `(?:${WORD}/${ending}|${ending}|'${QUOTED}/${ending}'|'${ending}')`
+const GUARDED = new RegExp(`^\\[ -x (${WORD}|'${QUOTED}') \\] && exec \\1 `)
 const OURS = new RegExp(
   `^(?:${wordEnding("scp-hook")}\\s+)?(?:${wordEnding(CLI_NAME)}\\s+hook(?:\\s|$)|${wordEnding("node")}\\s+(?:${WORD}/(?:@scp-dev|packages)/cli/dist/cli\\.js|'${QUOTED}/(?:@scp-dev|packages)/cli/dist/cli\\.js')\\s+hook\\s+[a-z][a-z0-9-]*(?:\\s|$))`,
 )
@@ -1202,7 +1253,8 @@ export function shellQuote(word: string): string {
 }
 const ours = (handler: unknown, prefixes: readonly string[]) => {
   if (typeof handler !== "object" || handler === null) return false
-  const command = String((handler as Json).command ?? "")
+  const full = String((handler as Json).command ?? "")
+  const command = full.replace(GUARDED, "")
   return OURS.test(command) || prefixes.some((prefix) => command.startsWith(`${prefix} hook `))
 }
 
@@ -1250,11 +1302,27 @@ export function mergeHooks(settings: unknown, entries: Record<string, Group[]>, 
 }
 
 /** Root sessions receive context and wake while idle, and a message to a server with no session yet opens one; failed or aborted sessions do not hold the stop. */
-export function opencodePlugin(options: { blockStop?: boolean; launcher?: string[] } = {}): string {
+export function opencodePlugin(options: { blockStop?: boolean } & HookLaunch = {}): string {
+  const words = (options.launcher ?? [CLI_NAME]).map((word) => JSON.stringify(word)).join(", ")
+  const launch = options.native ? "...launch()" : words
   return `// scp: reports this session to the local SCP broker and hands it new messages
 import { spawn } from "node:child_process"
-import { text as readAll } from "node:stream/consumers"
-const BLOCK_STOP = ${options.blockStop === true}
+${options.native ? 'import { accessSync, constants } from "node:fs"\n' : ""}import { text as readAll } from "node:stream/consumers"
+const BLOCK_STOP = ${options.blockStop === true}${
+    options.native
+      ? `
+const NATIVE = ${JSON.stringify(options.native)}
+/** the native hook client while it is executable, else the CLI straight */
+const launch = () => {
+  try {
+    accessSync(NATIVE, constants.X_OK)
+    return [NATIVE, ${words}]
+  } catch {
+    return [${words}]
+  }
+}`
+      : ""
+  }
 /** before a session exists, the waiter starts this long after load, so a session opened at launch claims the first message */
 const STARTUP_MS = 3000
 
@@ -1262,7 +1330,7 @@ type Reply = { hookSpecificOutput?: { additionalContext?: unknown }; decision?: 
 
 const hook = async (payload: Record<string, unknown>, wait: boolean, inject = true, hold = BLOCK_STOP): Promise<Reply> => {
   try {
-    const args = [${(options.launcher ?? [CLI_NAME]).map((word) => JSON.stringify(word)).join(", ")}, "hook", "opencode", ...(hold ? ["${BLOCK_STOP}"] : []), ...(inject ? [] : ["${NO_INJECT}"])]
+    const args = [${launch}, "hook", "opencode", ...(hold ? ["${BLOCK_STOP}"] : []), ...(inject ? [] : ["${NO_INJECT}"])]
     const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", wait ? "pipe" : "ignore", "ignore"] })
     const ended = new Promise<void>((resolve, reject) => {
       child.once("error", reject)
@@ -1318,7 +1386,7 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
         const began = Date.now()
         let text: string | undefined
         try {
-          const args = [${(options.launcher ?? [CLI_NAME]).map((word) => JSON.stringify(word)).join(", ")}, "hook", "opencode", "${WAKE}", "50"]
+          const args = [${launch}, "hook", "opencode", "${WAKE}", "50"]
           const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", "pipe", "ignore"] })
           waiter = child
           const ended = new Promise<void>((resolve, reject) => {
@@ -1442,28 +1510,24 @@ export const Scp = async ({ client, directory }: { client: any; directory: strin
 type AgyHandler = { type: "command"; command: string; timeout: number }
 
 /** agy names events in argv and receives context before model calls, never after tools. */
-export function agyHookSet(options: { blockStop?: boolean; launcher?: string[] } = {}): Record<string, unknown> {
-  const handler = (event: string, timeout = 1): AgyHandler => ({
-    type: "command",
-    command: `${options.launcher ? `${options.launcher.map(shellQuote).join(" ")} hook` : HOOK_COMMAND} agy ${event}`,
-    timeout,
-  })
+export function agyHookSet(options: { blockStop?: boolean } & HookLaunch = {}): Record<string, unknown> {
+  const handler = (event: string[], timeout = 1): AgyHandler => ({ type: "command", command: hookCommand(options, ["hook", "agy", ...event]), timeout })
   return {
     enabled: true,
-    SessionStart: [handler("SessionStart", 2)],
-    PreInvocation: [handler("PreInvocation")],
-    PostToolUse: [{ matcher: ".*", hooks: [handler("PostToolUse")] }],
-    Stop: [options.blockStop ? handler(`Stop ${BLOCK_STOP}`) : handler("Stop")],
+    SessionStart: [handler(["SessionStart"], 2)],
+    PreInvocation: [handler(["PreInvocation"])],
+    PostToolUse: [{ matcher: ".*", hooks: [handler(["PostToolUse"])] }],
+    Stop: [handler(["Stop", ...(options.blockStop ? [BLOCK_STOP] : [])])],
   }
 }
 
 /** the Muse plugin manifest: Muse loads hooks only from plugins, and applies no background hook's output; the stop's timeout covers its push wait */
-export function musePlugin(options: { blockStop?: boolean; pushWait?: number; launcher?: string[] } = {}): Record<string, unknown> {
+export function musePlugin(options: { blockStop?: boolean; pushWait?: number } & HookLaunch = {}): Record<string, unknown> {
   const stop = stopArgs(options)
   const hook = (id: string, event: string, extra: Record<string, unknown> = {}) => ({
     id,
     event,
-    command: [...(options.launcher ?? [CLI_NAME]), "hook", "muse", event],
+    command: hookArgv(options, ["hook", "muse", event]),
     timeoutMs: 5000,
     ...extra,
   })
@@ -1479,7 +1543,7 @@ export function musePlugin(options: { blockStop?: boolean; pushWait?: number; la
         hook("session-start", "SessionStart", { async: true }),
         hook("prompt", "UserPromptSubmit"),
         hook("post-tool", "PostToolUse"),
-        { ...hook("stop", "Stop"), command: [...(options.launcher ?? [CLI_NAME]), "hook", "muse", "Stop", ...stop.args], timeoutMs: stop.timeout * 1000 },
+        { ...hook("stop", "Stop"), command: hookArgv(options, ["hook", "muse", "Stop", ...stop.args]), timeoutMs: stop.timeout * 1000 },
         hook("session-end", "SessionEnd", { timeoutMs: 2000 }),
       ],
     },
