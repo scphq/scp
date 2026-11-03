@@ -244,7 +244,7 @@ describe("swarm, terminals and the daemon", () => {
   test("daemon --policy reads a relative path from the directory it was started in", async () => {
     const work = mkdtempSync(join(process.env.HOME!, "daemon-cwd-"))
     const dir = join(work, "relay")
-    const daemon = Bun.spawn([process.execPath, "--no-env-file", entry, "daemon", "--policy", "rel-policy.json", "--idle", "1s"], {
+    const daemon = Bun.spawn([process.execPath, "--no-env-file", entry, "daemon", "--policy", "rel-policy.json", "--idle", "10m"], {
       cwd: work,
       stdout: "pipe",
       stderr: "pipe",
@@ -254,6 +254,7 @@ describe("swarm, terminals and the daemon", () => {
     const status = JSON.parse((await swarm(["status", "--json"], { SCP_DIR: dir })).stdout) as { broker: { pid: number; policy: { file: string } } }
     expect(status.broker.pid).toBe(daemon.pid)
     expect(status.broker.policy.file).toBe(join(realpathSync(work), "rel-policy.json"))
+    expect((await swarm(["daemon", "stop"], { SCP_DIR: dir })).code).toBe(0)
     expect(await daemon.exited).toBe(0)
   })
 })

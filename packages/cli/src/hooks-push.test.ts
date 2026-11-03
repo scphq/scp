@@ -22,6 +22,7 @@ import {
 } from "./hooks"
 import { processKey } from "./identity"
 import { hookModes, testBroker, testHook } from "./hook-test"
+import { waitFor } from "./testing/fixtures"
 
 for (const mode of hookModes)
   describe(mode, () => {
@@ -363,7 +364,7 @@ for (const mode of hookModes)
         const deadlines: number[] = []
         const began = Date.now()
         const stopping = run("Stop", [PUSH_WAIT, "600"], deadlines)
-        await Bun.sleep(300)
+        await waitFor(() => deadlines.length, 10_000, "the stop to start waiting")
         expect(await run("UserPromptSubmit")).toBeUndefined()
         expect(await stopping).toBeUndefined()
         expect(Date.now() - began).toBeLessThan(3000)
@@ -373,8 +374,9 @@ for (const mode of hookModes)
       test("the hold ends once the spawn process of the worker that never joined is gone", async () => {
         const { run, spawn } = await spawning()
         const began = Date.now()
-        const stopping = run("Stop", [PUSH_WAIT, "600"])
-        await Bun.sleep(300)
+        const deadlines: number[] = []
+        const stopping = run("Stop", [PUSH_WAIT, "600"], deadlines)
+        await waitFor(() => deadlines.length, 10_000, "the stop to start waiting")
         spawn.kill()
         await spawn.exited
         expect(await stopping).toBeUndefined()
