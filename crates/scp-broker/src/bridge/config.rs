@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -7,6 +7,8 @@ use serde_json::Value;
 use scp_core::protocol::CLI_NAME;
 
 pub const DEFAULT_RELAY: &str = "https://app.scp.dev";
+/// a policy's rule cap, which the mirror selectors share
+const MIRROR_SELECTORS: usize = 256;
 
 /// how the broker links to the hub, from the cloud file beside the relay selection and the credential store
 #[derive(Clone, Debug)]
@@ -191,6 +193,11 @@ pub fn read_cloud_file(
     let mirror = match value.get("mirror") {
         None => None,
         Some(Value::Array(list)) => {
+            if list.len() > MIRROR_SELECTORS {
+                return Err(format!(
+                    "{shown}: mirror is a list of at most {MIRROR_SELECTORS} selectors"
+                ));
+            }
             let mut selectors = Vec::new();
             for sel in list {
                 let Some(sel) = sel.as_str() else {
@@ -261,9 +268,44 @@ pub fn daemon_bridge(env: &BTreeMap<String, String>, log: impl Fn(&str)) -> Opti
     Some(config)
 }
 
+/// `enabled` of mesh.json: false when it is absent or unreadable, true when it is not JSON
+fn mesh_enabled(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&text).map_or(true, |value| value["enabled"] == true)
+}
+
+/// the warning for a mesh.json in the broker's directory that enables the mesh, which this broker does not carry
+pub fn mesh_warning(dir: &Path) -> Option<String> {
+    let path = dir.join("mesh").join("mesh.json");
+    mesh_enabled(&path).then(|| {
+        format!(
+            "mesh is enabled in {} but this broker has no mesh module; running without it",
+            path.display()
+        )
+    })
+}
+
+/// the bridge a starting broker links with; without one, a mesh.json that enables the mesh only warns
+pub fn startup_bridge(
+    env: &BTreeMap<String, String>,
+    dir: &Path,
+    log: impl Fn(&str),
+) -> Option<BridgeConfig> {
+    let bridge = daemon_bridge(env, &log);
+    if bridge.is_none()
+        && let Some(warning) = mesh_warning(dir)
+    {
+        log(&warning);
+    }
+    bridge
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn env(dir: &std::path::Path) -> BTreeMap<String, String> {
         BTreeMap::from([("XDG_CONFIG_HOME".into(), dir.display().to_string())])
@@ -317,6 +359,84 @@ mod tests {
         )
         .unwrap();
         assert!(daemon_bridge(&env, |_| {}).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mirror_selectors_are_capped_like_policy_rules() {
+        let dir = std::env::temp_dir().join(format!("scp-bridge-mirror-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scp")).unwrap();
+        let mut env = env(&dir);
+        env.insert("SCP_RELAY".into(), "http://localhost:7".into());
+        let path = dir.join("scp/cloud.json");
+        let write = |count: usize| {
+            let mirror = vec!["*"; count];
+            std::fs::write(
+                &path,
+                json!({"bridge": true, "machine": "desk", "mirror": mirror}).to_string(),
+            )
+            .unwrap();
+        };
+        write(256);
+        assert_eq!(
+            read_cloud_file(&path, &env).unwrap().mirror.unwrap().len(),
+            256
+        );
+        write(257);
+        let error = read_cloud_file(&path, &env).err().unwrap();
+        assert!(
+            error.ends_with("mirror is a list of at most 256 selectors"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_mesh_json_that_enables_the_mesh_only_warns_without_a_bridge() {
+        let dir = std::env::temp_dir().join(format!("scp-bridge-mesh-{}", std::process::id()));
+        let broker = dir.join("broker");
+        std::fs::create_dir_all(broker.join("mesh")).unwrap();
+        std::fs::create_dir_all(dir.join("scp")).unwrap();
+        let env = env(&dir);
+        let mesh = broker.join("mesh/mesh.json");
+        let warned = |env: &BTreeMap<String, String>| {
+            let lines = std::cell::RefCell::new(Vec::new());
+            let bridge = startup_bridge(env, &broker, |line| {
+                lines.borrow_mut().push(line.to_owned())
+            });
+            (bridge.is_some(), lines.into_inner())
+        };
+        assert_eq!(warned(&env), (false, vec![]));
+        for (text, on) in [
+            (r#"{"enabled":false}"#, false),
+            ("null", false),
+            ("[true]", false),
+            (r#"{"enabled":"yes"}"#, false),
+            (r#"{"enabled":true}"#, true),
+            ("not json", true),
+        ] {
+            std::fs::write(&mesh, text).unwrap();
+            let expected = on.then(|| {
+                format!(
+                    "mesh is enabled in {} but this broker has no mesh module; running without it",
+                    mesh.display()
+                )
+            });
+            assert_eq!(
+                warned(&env),
+                (false, expected.into_iter().collect()),
+                "{text}"
+            );
+        }
+        std::fs::write(&mesh, r#"{"enabled":true}"#).unwrap();
+        std::fs::write(
+            dir.join("scp/cloud.json"),
+            r#"{"bridge":true,"machine":"desk","url":"http://localhost:7"}"#,
+        )
+        .unwrap();
+        let mut linked = env.clone();
+        linked.insert("SCP_TOKEN".into(), "t".into());
+        assert_eq!(warned(&linked), (true, vec![]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

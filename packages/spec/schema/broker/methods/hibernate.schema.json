@@ -9,6 +9,9 @@
         "endpoint": {
           "type": "string"
         },
+        "id": {
+          "type": "string"
+        },
         "all": {
           "const": true
         },

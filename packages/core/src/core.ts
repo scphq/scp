@@ -2870,7 +2870,7 @@ export class RelayCore {
    */
   hibernate(
     actor: ScopeActor,
-    params: { endpoint?: unknown; wake?: unknown; ref?: unknown; eta_s?: unknown },
+    params: { endpoint?: unknown; id?: unknown; wake?: unknown; ref?: unknown; eta_s?: unknown },
     options: { known?: (provider: string) => boolean } = {},
   ): { endpoint: EndpointView } {
     const me = this.actorRow(actor)
@@ -2878,7 +2878,10 @@ export class RelayCore {
     if (actor.kind === "endpoint" && actor.auth === "lineage")
       throw new RelayError("scope_refused", "only the session itself hibernates: run this from the session's own shell")
     if (params.endpoint === undefined && me.kind !== "agent") throw new RelayError("invalid_params", "the human names the endpoint")
+    if (params.id !== undefined && (typeof params.id !== "string" || params.endpoint === undefined))
+      throw new RelayError("invalid_params", "id is the id of the endpoint named by endpoint")
     const target = params.endpoint === undefined ? me : this.resolve(params.endpoint)
+    if (params.id !== undefined && target.id !== params.id) throw new RelayError("not_found", `${String(params.endpoint)} is not endpoint ${params.id}`)
     if (actor.kind === "endpoint" && target.id !== me.id) throw new RelayError("scope_refused", "an agent hibernates only itself")
     if (target.kind !== "agent" || !this.localRow(target)) throw new RelayError("invalid_params", "only a local agent endpoint hibernates")
     if (set.wake === SPAWN_PROVIDER && (target.hold_ref === null || set.ref !== target.hold_ref))

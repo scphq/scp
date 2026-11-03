@@ -311,7 +311,7 @@ fn signal_name(signal: i32) -> String {
 }
 
 /// kills the child's process group unless disarmed once the child was reaped
-struct Group(Option<i32>);
+pub(crate) struct Group(pub(crate) Option<i32>);
 
 impl Drop for Group {
     fn drop(&mut self) {

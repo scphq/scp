@@ -106,6 +106,20 @@ brokerSuite(
       expect(await human.request("hibernate", { endpoint: "lane", wake: "none" })).toMatchObject({ endpoint: { presence: "online", wake: null } });
     });
 
+    test("hibernate with id acts only while the address still names that endpoint", async () => {
+      const broker = await start({ files: files() });
+      await broker.agent("lane");
+      const human = await broker.human(false);
+      const listed = await human.request<{ endpoints: { id: string; address: string }[] }>("list", { all: true });
+      const id = listed.endpoints.find((row) => row.address.endsWith("/lane"))!.id;
+      expect(await refusal(human.request("hibernate", { endpoint: "lane", id: "ep_other", wake: "vm" }, { unchecked: true }))).toBe("not_found");
+      expect(await refusal(human.request("hibernate", { id, wake: "vm" }, { unchecked: true }))).toBe("invalid_params");
+      expect(await refusal(human.request("hibernate", { endpoint: "lane", id: 7, wake: "vm" }, { unchecked: true }))).toBe("invalid_params");
+      const after = await human.request<{ endpoints: { id: string; presence: string }[] }>("list", { all: true });
+      expect(after.endpoints.find((row) => row.id === id)?.presence).not.toBe("hibernated");
+      expect(await human.request("hibernate", { endpoint: "lane", id, wake: "vm" })).toMatchObject({ endpoint: { id, presence: "hibernated" } });
+    });
+
     test("the human hibernates live local agents together and clears their hibernation", async () => {
       const broker = await start({ files: files() });
       await broker.agent("lane");

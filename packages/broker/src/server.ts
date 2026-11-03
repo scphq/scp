@@ -1341,10 +1341,15 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         const set = { wake: params.wake, ref: params.ref, eta_s: params.eta_s }
         if (params.all !== undefined && params.all !== true) throw new RelayError("invalid_params", "all is true or absent")
         if (params.all === true && params.endpoint !== undefined) throw new RelayError("invalid_params", "all names no endpoint")
+        if (params.id !== undefined && params.endpoint === undefined) throw new RelayError("invalid_params", "id goes with endpoint")
         const result =
           params.all === true
             ? core.hibernateAll(actorOf(s), set, known)
-            : core.hibernate(actorOf(s), { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), ...set }, known)
+            : core.hibernate(
+                actorOf(s),
+                { ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}), ...(params.id !== undefined ? { id: params.id } : {}), ...set },
+                known,
+              )
         const views = "endpoints" in result ? result.endpoints : [result.endpoint]
         for (const view of views) presenceChanged(view)
         const mirrored = await mirrorBarrier(views.map((view) => view.id))
