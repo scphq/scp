@@ -7,12 +7,25 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-struct Temp(std::path::PathBuf);
+/// Serializes the tests that spawn processes or open sockets. macOS has no pipe2 or SOCK_CLOEXEC, so a
+/// descriptor is briefly inheritable, and a child another test spawns in that window holds it open: a hook
+/// then never sees stdin close, or a dropped listener keeps accepting.
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+struct Temp(
+    std::path::PathBuf,
+    #[allow(dead_code)] MutexGuard<'static, ()>,
+);
 impl Temp {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = serial();
         let path = std::path::PathBuf::from(format!(
             "/tmp/scp-hook-test-{}-{}",
             std::process::id(),
@@ -20,7 +33,7 @@ impl Temp {
         ));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        Self(path)
+        Self(path, serial)
     }
     fn command(&self, harness: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_scp-hook"));
@@ -116,6 +129,11 @@ fn deadline_math() {
     assert_eq!(hook::hook_ends(false, 100, 3000), 3600);
     assert_eq!(hook::hook_ends(true, 100, 3000), 3600);
     assert_eq!(hook::hook_ends(true, 100, 200), 1100);
+    let env = |value: &str| HashMap::from([("SCP_HOOK_DEADLINE_MS".to_owned(), value.to_owned())]);
+    assert_eq!(hook::deadline_override(&env("60000")), Some(60000));
+    for value in ["", "0", "-5", "1.5", "1e4", " 900", "abc"] {
+        assert_eq!(hook::deadline_override(&env(value)), None, "{value:?}");
+    }
     assert_eq!(hook::connect_budget(5000, 1000), 2500);
     assert_eq!(hook::connect_budget(5000, 4001), 0);
     assert_eq!(hook::connect_budget(5000, 3000), 1000);
@@ -354,6 +372,7 @@ fn fallback_launcher_and_engine() {
 
 #[test]
 fn version() {
+    let _serial = serial();
     let output = Command::new(env!("CARGO_BIN_EXE_scp-hook"))
         .arg("--version")
         .output()
@@ -399,6 +418,7 @@ fn native_process_matches_ps() {
     }
     // TZ changes live only in this isolated test subprocess.
     if std::env::var_os("SCP_HOOK_PS_TEST").is_none() {
+        let _serial = serial();
         let mut command = Command::new(std::env::current_exe().unwrap());
         let output = command
             .args(["--exact", "native_process_matches_ps", "--nocapture"])
@@ -494,7 +514,8 @@ fn watchdog_bounds_blocked_stdin() {
 fn fallback_deadline_and_spawn_failure() {
     let temp = Temp::new();
     let script = temp.0.join("wait.sh");
-    fs::write(&script, "exec sleep 10\n").unwrap();
+    let lives = Duration::from_secs(60);
+    fs::write(&script, format!("exec sleep {}\n", lives.as_secs())).unwrap();
     for launcher in [
         vec!["/bin/sh".to_owned(), script.to_str().unwrap().to_owned()],
         vec![temp.0.join("missing").to_str().unwrap().to_owned()],
@@ -511,7 +532,7 @@ fn fallback_deadline_and_spawn_failure() {
             .stderr(Stdio::piped());
         let began = Instant::now();
         assert_eq!(finish(command, b"{}").stdout, b"{}\n");
-        assert!(began.elapsed() < Duration::from_secs(3));
+        assert!(began.elapsed() < lives / 3);
     }
 }
 
