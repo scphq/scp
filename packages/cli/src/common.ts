@@ -175,6 +175,13 @@ const DAEMON_ENV = [
 ]
 const LOG_MAX_BYTES = 1024 * 1024
 
+/** the fixed environment a started broker for `dir` gets: `SCP_DIR` and the variables of `base` it keeps, `SCP_NATIVE` among them */
+export function daemonEnv(dir: string, base: Record<string, string | undefined> = process.env): Record<string, string> {
+  const env: Record<string, string> = { SCP_DIR: dir }
+  for (const key of DAEMON_ENV) if (base[key] !== undefined) env[key] = base[key]
+  return env
+}
+
 /** the broker for `dir`, detached, with a fixed environment and its stderr in broker.log; the native one under SCP_NATIVE=1 */
 export function startDaemon(dir: string): void {
   privateDir(dir)
@@ -182,8 +189,7 @@ export function startDaemon(dir: string): void {
   if ((statSync(logFile, { throwIfNoEntry: false })?.size ?? 0) > LOG_MAX_BYTES) truncateSync(logFile, 0)
   const log = openSync(logFile, "a", 0o600)
   try {
-    const env: Record<string, string> = { SCP_DIR: dir }
-    for (const key of DAEMON_ENV) if (process.env[key] !== undefined) env[key] = process.env[key]!
+    const env = daemonEnv(dir)
     const native = nativeBroker()
     const argv = native ? [native, "daemon"] : [...SELF, "daemon"]
     const child = spawn(argv[0]!, argv.slice(1), {

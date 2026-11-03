@@ -61,6 +61,7 @@ import { SPAWN_HELP } from "./help-spawn"
 import { shortHostname } from "./identity"
 import { mismatchReport, relinkReport } from "./relink"
 import type { RelayTransport } from "./remote"
+import type { MountEngine } from "./setup"
 import type { UpValues } from "./up"
 import { exitFlushed, FAILED, note, parseSeconds, printTable, SELF } from "./term"
 import { safeCwd } from "./cwd"
@@ -266,6 +267,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   may always reply in the thread to a message it got; a reply to another message of the thread is checked as a send.
   ${CLI_NAME} daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground (it otherwise starts on demand)
   ${CLI_NAME} daemon stop|restart                stop the running broker, or replace it with a fresh one
+  $SCP_NATIVE=1 runs the native broker and MCP server, and the mounts ${CLI_NAME} writes run the native ${CLI_NAME} mcp directly;
+  $SCP_NATIVE=mcp runs only the native MCP server, on the TypeScript broker; ${CLI_NAME} status names the broker's engine
+  and each harness mount's MCP engine
 
 agent sessions:
   ${CLI_NAME} mcp [--as NAME] [--harness H] [--channels] [--cowork-only]   the MCP shim a harness mounts: relay tools for one agent, never me/
@@ -1119,14 +1123,22 @@ async function runVerb(
         return 0
       }
       const snapshot = await client.request<Snapshot>("snapshot", { all: values.all === true })
-      const engine = broker && snapshot.broker ? (await import("./native")).brokerEngine(snapshot.broker.pid) : undefined
+      const { brokerEngine, nativeMode } = await import("./native")
+      const engine = broker && snapshot.broker ? brokerEngine(snapshot.broker.pid) : undefined
       const { goneClientLine, goneHookClients } = await import("./install")
       for (const client of goneHookClients(process.env, cwd)) note(`! ${goneClientLine(client)}`)
+      const mcp = { mode: nativeMode(process.env), mounts: (await import("./setup")).mountEngines(process.env) }
       if (asJson) {
-        json(snapshot.broker && engine ? { ...snapshot, broker: { ...snapshot.broker, engine } } : snapshot)
+        json({ ...(snapshot.broker && engine ? { ...snapshot, broker: { ...snapshot.broker, engine } } : snapshot), mcp })
         return 0
       }
       out(snapshot.broker ? brokerLine(snapshot.broker, engine) : where)
+      const line = mcpLine(mcp.mounts)
+      if (line) out(line)
+      if (engine === "native" && mcp.mounts.some((mount) => mount.mode === "mcp"))
+        note(
+          `! the broker is the native one, but mounts with SCP_NATIVE=mcp run on the TypeScript broker: ${CLI_NAME} daemon restart without SCP_NATIVE=1 replaces it`,
+        )
       const quotedAgents = printSummary(snapshot, me, values.all === true)
       const activity = values.activity === true && snapshot.activity.length > 0
       if (activity) {
@@ -1772,6 +1784,12 @@ function printAsk(result: AskResult, asJson: boolean, to = "the receiver"): numb
     for (const line of late) note(line)
   }
   return result.reply ? 0 : 2
+}
+
+/** the MCP line of `swarm status`: each harness mount's engine; undefined without mounts */
+export function mcpLine(mounts: MountEngine[]): string | undefined {
+  const words = mounts.map(({ harness, engine, mode }) => `${harness} ${engine}${engine === "native" ? ` (SCP_NATIVE=${mode === "all" ? "1" : mode})` : ""}`)
+  return words.length ? `mcp: ${words.join(", ")}` : undefined
 }
 
 async function daemon(idle: string | undefined, policyFile: string | undefined): Promise<number> {

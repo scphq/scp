@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { nativeKey, nativeSwarm } from "./native"
+import { nativeKey, nativeMode, nativeSwarm } from "./native"
 import { FAILED, note, SELF } from "./term"
 
 type Env = Record<string, string | undefined>
@@ -11,11 +11,11 @@ type Env = Record<string, string | undefined>
 export type NativeMcp = { bin: string; words: string[] }
 
 /**
- * with $SCP_NATIVE=1, the native MCP server: $SCP_MCP_BIN when set (an executable file, run with the words as is), else the native
+ * with $SCP_NATIVE=1 or mcp, the native MCP server: $SCP_MCP_BIN when set (an executable file, run with the words as is), else the native
  * `swarm` that matches this CLI (run as `swarm mcp`); undefined, with a note, when there is none
  */
 export function nativeMcp(env: Env, version = pkg.version): NativeMcp | undefined {
-  if (env.SCP_NATIVE !== "1") return undefined
+  if (nativeMode(env) === "off") return undefined
   const bin = env.SCP_MCP_BIN
   if (bin === undefined) {
     const swarm = nativeSwarm(env, version)

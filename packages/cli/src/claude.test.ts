@@ -277,6 +277,8 @@ describe("the background mount under SCP_NATIVE=1", () => {
     })
     const bare = bgMount({ HOME: join(f.home, "nowhere"), SCP_NATIVE: "1", SCP_SWARM_BIN: bin }, undefined)
     expect([bare.command, bare.args]).toEqual([bin, ["mcp", "--harness", "claude", "--channels"]])
+    const mcpOnly = bgMount({ ...f.env, SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin }, "worker")
+    expect([mcpOnly.command, (mcpOnly.env as Record<string, string>).SCP_NATIVE]).toEqual([bin, "mcp"])
   })
 
   test("without SCP_NATIVE, or without a matching native swarm, it is the node mount as before", () => {
@@ -292,6 +294,17 @@ describe("the background mount under SCP_NATIVE=1", () => {
     }
     const none = bgMount({ HOME: join(f.home, "nowhere"), SCP_NATIVE: "1", SCP_SWARM_BIN: bin }, undefined)
     expect([none.command, none.args]).toEqual([SELF[0], [...SELF.slice(1), "mcp", "--harness", "claude", "--channels"]])
+  })
+
+  test("under SCP_NATIVE=mcp a kept user mount that says SCP_NATIVE=1 gets mcp, also without a matching native swarm", () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const config = JSON.parse(readFileSync(join(f.home, ".claude.json"), "utf8"))
+    config.mcpServers.scp.env = { A: "b", SCP_NATIVE: "1", SCP_CLI_ARGV: '["/old"]' }
+    writeFileSync(join(f.home, ".claude.json"), JSON.stringify(config))
+    const mount = bgMount({ ...f.env, SCP_NATIVE: "mcp", SCP_SWARM_BIN: join(f.home, "missing", "swarm") }, "worker")
+    expect(mount.command).toBe("swarm")
+    expect(mount.env).toMatchObject({ A: "b", SCP_NATIVE: "mcp", SCP_CLI_ARGV: '["/old"]' })
+    expect((bgMount(f.env, "worker").env as Record<string, string>).SCP_NATIVE).toBe("1")
   })
 
   test("a user mount whose native swarm is gone runs this CLI's mount, without the native variables", () => {

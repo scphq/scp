@@ -56,29 +56,41 @@ pub fn set_native_daemon(exe: PathBuf) {
     let _ = NATIVE_DAEMON.set(exe);
 }
 
-/// the native `swarm` that starts the broker for `env`: `exe` under `SCP_NATIVE=1`
+/// the native `swarm` that starts the broker for `env`: `exe` under `SCP_NATIVE=1`; under `SCP_NATIVE=mcp`, as without it, the launcher starts the TypeScript broker
 fn native_daemon<'a>(env: &Env, exe: Option<&'a Path>) -> Option<&'a Path> {
     exe.filter(|_| env.get("SCP_NATIVE").is_some_and(|v| v == "1"))
 }
 
-/// the broker command: `native daemon` when there is one, else the launcher's `daemon`
-fn daemon_argv(env: &Env, native: Option<&Path>) -> Vec<String> {
+/// the broker command: `native daemon` when there is one, else the launcher's `daemon`; under `SCP_NATIVE=mcp` only a launcher
+/// `SCP_CLI_ARGV` names, since a bare `swarm` on PATH may be a native one
+fn daemon_argv(env: &Env, native: Option<&Path>) -> io::Result<Vec<String>> {
     match native {
-        Some(exe) => vec![exe.to_string_lossy().into_owned(), "daemon".into()],
+        Some(exe) => Ok(vec![exe.to_string_lossy().into_owned(), "daemon".into()]),
         None => {
-            let mut argv = launcher(env);
+            let mut argv = if env.get("SCP_NATIVE").is_some_and(|v| v == "mcp") {
+                named_launcher(env).ok_or_else(|| {
+                    io::Error::other(
+                        "SCP_NATIVE=mcp starts the TypeScript broker through SCP_CLI_ARGV, which is unset or unusable; rerun swarm setup --write",
+                    )
+                })?
+            } else {
+                launcher(env)
+            };
             argv.push("daemon".into());
-            argv
+            Ok(argv)
         }
     }
 }
 
-/// the CLI that starts the broker and runners: `$SCP_CLI_ARGV`, else `swarm` on PATH
-pub fn launcher(env: &Env) -> Vec<String> {
+fn named_launcher(env: &Env) -> Option<Vec<String>> {
     env.get(CLI_ARGV)
         .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
         .filter(|words| !words.is_empty() && !words[0].is_empty())
-        .unwrap_or_else(|| vec![CLI_NAME.to_string()])
+}
+
+/// the CLI that starts the broker and runners: `$SCP_CLI_ARGV`, else `swarm` on PATH
+pub fn launcher(env: &Env) -> Vec<String> {
+    named_launcher(env).unwrap_or_else(|| vec![CLI_NAME.to_string()])
 }
 
 fn detached(command: &mut tokio::process::Command, handshake: Option<i32>) {
@@ -118,7 +130,7 @@ pub fn start_daemon(dir: &str, env: &Env) -> io::Result<()> {
         .mode(0o600)
         .open(&log_file)?;
     let native = native_daemon(env, NATIVE_DAEMON.get().map(PathBuf::as_path));
-    let argv = daemon_argv(env, native);
+    let argv = daemon_argv(env, native)?;
     let mut command = tokio::process::Command::new(&argv[0]);
     command
         .args(&argv[1..])
@@ -539,18 +551,93 @@ mod tests {
         env.insert(CLI_ARGV.into(), r#"["/bin/node","/x/cli.js"]"#.into());
         assert_eq!(native_daemon(&env, Some(exe)), None);
         assert_eq!(
-            daemon_argv(&env, None),
+            daemon_argv(&env, None).unwrap(),
             vec!["/bin/node", "/x/cli.js", "daemon"]
         );
         env.insert("SCP_NATIVE".into(), "1".into());
         assert_eq!(native_daemon(&env, None), None);
         assert_eq!(native_daemon(&env, Some(exe)), Some(exe));
         assert_eq!(
-            daemon_argv(&env, Some(exe)),
+            daemon_argv(&env, Some(exe)).unwrap(),
             vec!["/opt/native/swarm", "daemon"]
         );
         env.insert("SCP_NATIVE".into(), "0".into());
         assert_eq!(native_daemon(&env, Some(exe)), None);
+    }
+
+    #[test]
+    fn scp_native_mcp_starts_the_typescript_broker_through_the_launcher() {
+        let exe = Path::new("/opt/native/swarm");
+        let mut env = Env::new();
+        env.insert(CLI_ARGV.into(), r#"["/bin/node","/x/cli.js"]"#.into());
+        env.insert("SCP_NATIVE".into(), "mcp".into());
+        let native = native_daemon(&env, Some(exe));
+        assert_eq!(native, None);
+        assert_eq!(
+            daemon_argv(&env, native).unwrap(),
+            vec!["/bin/node", "/x/cli.js", "daemon"]
+        );
+        for bad in [None, Some("[]"), Some("swarm")] {
+            match bad {
+                None => env.remove(CLI_ARGV),
+                Some(text) => env.insert(CLI_ARGV.into(), text.into()),
+            };
+            assert!(daemon_argv(&env, native).is_err(), "{bad:?}");
+        }
+        env.remove("SCP_NATIVE");
+        assert_eq!(daemon_argv(&env, None).unwrap(), vec!["swarm", "daemon"]);
+    }
+
+    #[test]
+    fn a_started_broker_keeps_the_native_mode_and_only_allowed_variables() {
+        let dir = std::env::temp_dir().join(format!("scp-mcp-daemon-{}", std::process::id()));
+        let relay = dir.join("relay");
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("cli.sh");
+        let seen = dir.join("seen");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{{ echo \"$*\"; env | sort; }} > '{}.tmp' && mv '{}.tmp' '{}'\n",
+                seen.display(),
+                seen.display(),
+                seen.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut env = Env::new();
+        env.insert(
+            CLI_ARGV.into(),
+            serde_json::to_string(&[script.to_str().unwrap()]).unwrap(),
+        );
+        env.insert("SCP_NATIVE".into(), "mcp".into());
+        env.insert("SCP_SWARM_BIN".into(), "/opt/native/swarm".into());
+        env.insert("SCP_GRANT".into(), "krt_secret".into());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(async { start_daemon(relay.to_str().unwrap(), &env) })
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !seen.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let text = fs::read_to_string(&seen).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("daemon"));
+        let vars: Vec<&str> = lines.collect();
+        assert!(vars.contains(&"SCP_NATIVE=mcp"));
+        assert!(vars.contains(&"SCP_SWARM_BIN=/opt/native/swarm"));
+        assert!(vars.contains(&format!("SCP_DIR={}", relay.display()).as_str()));
+        assert!(
+            !vars
+                .iter()
+                .any(|v| v.starts_with("SCP_GRANT=") || v.starts_with("SCP_CLI_ARGV="))
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
