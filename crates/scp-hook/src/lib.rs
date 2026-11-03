@@ -88,6 +88,14 @@ pub fn hook_ends(agy: bool, origin: u64, loaded: u64) -> u64 {
     }
 }
 
+/// `SCP_HOOK_DEADLINE_MS`: a hook's deadline from process start in place of 3500 ms and agy's, for a machine too loaded to meet them
+pub fn deadline_override(env: &HashMap<String, String>) -> Option<u64> {
+    env.get("SCP_HOOK_DEADLINE_MS")
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+}
+
 pub fn connect_budget(ends: u64, time: u64) -> u64 {
     ends.saturating_sub(time).saturating_sub(1000).min(2500)
 }
@@ -676,7 +684,11 @@ pub fn run(origin: u64, argv: &[String]) -> io::Result<()> {
         return Ok(());
     }
     let agy = args.first().is_some_and(|a| a == "agy");
-    let deadline = Deadline::new(hook_ends(agy, origin, now()), agy);
+    let ends = deadline_override(&env).map_or_else(
+        || hook_ends(agy, origin, now()),
+        |ms| origin.saturating_add(ms),
+    );
+    let deadline = Deadline::new(ends, agy);
     deadline.watchdog();
     let mut raw = Vec::new();
     if let Err(error) = io::stdin().take(STDIN_CAP).read_to_end(&mut raw) {

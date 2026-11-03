@@ -645,8 +645,17 @@ export function hookRetry(options: Pick<HookOptions, "remaining">): ConnectRetry
   return { budgetMs: Math.max(0, Math.floor(Math.min(HOOK_CONNECT_MS, left - HOOK_AFTER_CONNECT_MS))) }
 }
 
+/** `SCP_HOOK_DEADLINE_MS`: a hook's deadline from process start in place of {@link HOOK_DEADLINE_MS} and agy's, for a machine too loaded to meet them */
+export function hookDeadlineOverride(env: Record<string, string | undefined>): number | undefined {
+  const raw = env.SCP_HOOK_DEADLINE_MS
+  const ms = raw && /^\d+$/.test(raw) ? Number(raw) : 0
+  return ms > 0 && Number.isSafeInteger(ms) ? ms : undefined
+}
+
 /** when a hook process must be done, epoch ms: {@link HOOK_DEADLINE_MS} after `origin` (process start), agy's sooner once `loaded` */
-export function hookEnds(agy: boolean, origin: number, loaded: number): number {
+export function hookEnds(agy: boolean, origin: number, loaded: number, env: Record<string, string | undefined> = {}): number {
+  const override = hookDeadlineOverride(env)
+  if (override !== undefined) return origin + override
   const ceiling = origin + HOOK_DEADLINE_MS
   return agy ? Math.min(ceiling, loaded + AGY_DEADLINE_MS) : ceiling
 }
@@ -1069,7 +1078,7 @@ export async function relayHookCommand(args: string[], startDaemon: (dir: string
     if (!printed) quit()
   }
   if (args.includes(WAKE)) process.on("SIGTERM", terminate)
-  let ends = hookEnds(agy, origin, Date.now())
+  let ends = hookEnds(agy, origin, Date.now(), process.env)
   let timer = setTimeout(quit, Math.max(0, ends - Date.now()))
   const deadline = (ms: number) => {
     clearTimeout(timer)

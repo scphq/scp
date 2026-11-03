@@ -106,6 +106,12 @@ for (const mode of hookModes)
         expect(hookEnds(true, 1000, 1000 + HOOK_DEADLINE_MS)).toBe(1000 + HOOK_DEADLINE_MS)
       })
 
+      test("SCP_HOOK_DEADLINE_MS replaces both deadlines; anything but a positive integer is ignored", () => {
+        expect(hookEnds(false, 1000, 1900, { SCP_HOOK_DEADLINE_MS: "60000" })).toBe(61_000)
+        expect(hookEnds(true, 1000, 1100, { SCP_HOOK_DEADLINE_MS: "60000" })).toBe(61_000)
+        for (const value of ["", "0", "-5", "1.5", "1e4", " 900", "abc"]) expect(hookEnds(true, 1000, 1100, { SCP_HOOK_DEADLINE_MS: value })).toBe(2000)
+      })
+
       test("a hook that started late retries a busy broker only within what is left, and prints nothing", async () => {
         const dir = busyDir()
         const began = Date.now() - 2000
