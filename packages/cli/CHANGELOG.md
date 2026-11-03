@@ -1,5 +1,17 @@
 # @scp-dev/cli
 
+## 0.20.2
+
+### Patch Changes
+
+- 93f45ee: A removed Claude Code background worker woken by a message keeps its endpoint. The waker sets the resumed session as `SCP_HARNESS_ORIGIN` in the session file it resumes with. A ticketed claim now lets go of the auto-named endpoint the session's hooks registered first, so no `claude-<dir>-<n>` endpoint is left beside the woken worker. When Claude Code brings the session back under a new id, the waker links the new short id to the worker's session file and records the new session id. The policy then stops the worker again, and its next wake resumes the new session.
+- 0128553: Hooks keep working when the native hook client is missing, for example after an install that skipped the optional `@scp-dev/native-<platform>` package: `swarm setup` writes each hook so that it runs `scp-hook` only while that file is executable and otherwise runs the CLI through Node. Claude Code, Codex, Grok and agy get a shell guard, the Muse manifest goes through `/bin/sh`, and the OpenCode plugin checks the file before each spawn. `swarm status` and `swarm setup` warn when a hooks file runs a native client that is gone. Rerun `swarm setup --write` to rewrite existing hooks.
+- Updated dependencies [93f45ee]
+  - @scp-dev/core@0.18.8
+  - @scp-dev/broker@0.13.8
+  - @scp-dev/hub@0.13.8
+  - @scp-dev/mcp@0.5.17
+
 ## 0.20.1
 
 ### Patch Changes
