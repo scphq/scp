@@ -21,6 +21,7 @@ import {
   idleAfterS,
   spawnIdleAfterS,
   plan,
+  readRecords,
   readState,
   onlyPollsInbox,
   pollsInbox,
@@ -178,7 +179,7 @@ if (command === "stop") {
   Object.assign(entry, { pid: 4242, state: "working", status: "idle" });
   console.log("respawned " + id);
 } else if (command === "--bg") {
-  const sessionId = argv[argv.indexOf("--resume") + 1];
+  const sessionId = existsSync(root + "/fork") ? readFileSync(root + "/fork", "utf8").trim() : argv[argv.indexOf("--resume") + 1];
   const id = sessionId.slice(0, 8);
   entries.push({ id, sessionId, kind: "background", cwd: process.cwd(), name: argv[argv.indexOf("--name") + 1], pid: 4242, state: "working", status: "idle" });
   console.log("backgrounded · " + id);
@@ -1121,13 +1122,54 @@ describe("wake command", () => {
       f.state({ cwd: f.home })
       const ref = reviveRef(sessionId, f.home, "lane")
       expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: ref, SCP_WAKE_TICKET: ticket }, { stdout: () => {} })).toBe(0)
-      expect(scpEnv(record)).toEqual({ SCP_NAME: "w1", SCP_GRANT: "", SCP_WAKE_TICKET: ticket })
+      expect(scpEnv(record)).toEqual({
+        SCP_NAME: "w1",
+        SCP_GRANT: "",
+        SCP_WAKE_TICKET: ticket,
+        ...(scenario === "removed" ? { SCP_HARNESS_ORIGIN: sessionId } : {}),
+      })
       expect(f.calls().at(-1)?.argv[0]).toBe(scenario === "stopped" ? "respawn" : "--bg")
       f.save([stoppedEntry({ cwd: f.home })])
       expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: ref }, { stdout: () => {} })).toBe(0)
       expect(scpEnv(record)).toEqual({ SCP_NAME: "w1", SCP_GRANT: "" })
     })
   }
+  test("a removed worker resumed under a new session id gets its origin, stays recorded under the new id and wakes again", async () => {
+    const f = fixture()
+    const record = f.record()
+    f.save([])
+    f.state({ cwd: f.home })
+    const forked = "5e6f7a8b-0000-4000-8000-000000000009"
+    writeFileSync(join(f.home, "fork"), forked)
+    const wake = (ref: string) => claudeWakeCommand({ ...f.env, SCP_WAKE_REF: ref, SCP_WAKE_HANDLE: "w1", SCP_WAKE_TICKET: ticket }, { stdout: () => {} })
+    expect(await wake(reviveRef(sessionId, f.home, "lane"))).toBe(0)
+    expect(scpEnv(record)).toEqual({ SCP_NAME: "w1", SCP_GRANT: "", SCP_WAKE_TICKET: ticket, SCP_HARNESS_ORIGIN: sessionId })
+    expect(f.calls().at(-2)?.argv).toEqual(["--bg", "--resume", sessionId, "--name", "lane", expect.any(String), "--mcp-config", record])
+    expect(readRecords(f.env).get("5e6f7a8b")).toMatchObject({ file: record, handle: "w1" })
+    expect(readState(f.env, "5e6f7a8b")).toEqual({ sessionId: forked, cwd: f.home, name: "lane", handle: "w1" })
+    expect(readState(f.env, id)?.movedTo).toBe("5e6f7a8b")
+    const before = f.calls().length
+    expect(await wake(reviveRef(sessionId, f.home, "lane"))).toBe(0)
+    expect(
+      f
+        .calls()
+        .slice(before)
+        .map((call) => call.argv[0]),
+    ).toEqual(["agents"])
+    f.save([stoppedEntry({ id: "5e6f7a8b", sessionId: forked, cwd: f.home })])
+    expect(await wake(reviveRef(sessionId, f.home, "lane"))).toBe(0)
+    expect(f.calls().at(-1)?.argv).toEqual(["respawn", "5e6f7a8b"])
+    f.save([])
+    rmSync(join(f.home, "fork"))
+    expect(await wake(reviveRef(forked, f.home, "lane"))).toBe(0)
+    expect(f.calls().at(-1)?.argv).toEqual(["--bg", "--resume", forked, "--name", "lane", expect.any(String), "--mcp-config", record])
+    expect(scpEnv(record).SCP_HARNESS_ORIGIN).toBe(forked)
+    f.save([stoppedEntry({ id: "5e6f7a8b", sessionId: forked, cwd: f.home })])
+    expect(await wake(forked)).toBe(0)
+    expect(f.calls().at(-1)?.argv).toEqual(["respawn", "5e6f7a8b"])
+    expect(scpEnv(record).SCP_HARNESS_ORIGIN).toBeUndefined()
+  })
+
   test("a record whose native swarm an upgrade removed is re-pointed at this CLI's mount, keeping its own variables", async () => {
     const f = fixture()
     const record = f.record()

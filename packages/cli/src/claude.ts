@@ -186,7 +186,8 @@ export type ClaudeDeps = {
 }
 
 const SHORT_ID = /^[0-9a-f]{8}$/
-const BACKGROUNDED = /backgrounded\s*\S\s*([0-9a-f]{8})/
+/** the short id `claude --bg` prints for the session it backgrounded */
+export const BACKGROUNDED = /backgrounded\s*\S\s*([0-9a-f]{8})/
 
 /** claude's live background sessions, from `claude agents --json` */
 function liveAgents(bin: string, env: Env): Agent[] {

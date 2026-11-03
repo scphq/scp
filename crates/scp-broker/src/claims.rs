@@ -696,6 +696,13 @@ impl Core {
             }
         }
         let mut moved_hooks = None;
+        if let Some(found) = &ticketed
+            && let (Some(session), Some(process)) = (fields.session.as_deref(), fields.process.as_deref())
+            && let Some(hooks) = self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND id != ? AND token_hash IS NULL AND named IS NULL AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' LIMIT 1",&[opt(Some(harness)),opt(Some(session)),opt(text(found,"id"))]).await?.into_iter().next()
+            && text(&hooks, "process").is_some_and(|key| same_harness(key, process))
+        {
+            moved_hooks = Some(hooks);
+        }
         let mut back = None;
         if !transient
             && let Some(hooks) = row.clone()
