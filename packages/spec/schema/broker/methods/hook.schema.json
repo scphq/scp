@@ -102,6 +102,9 @@
             "SCP_HARNESS_PID": {
               "type": "string"
             },
+            "SCP_HOOK_DEADLINE_MS": {
+              "type": "string"
+            },
             "SCP_LABELS": {
               "type": "string"
             },
