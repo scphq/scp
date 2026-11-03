@@ -132,7 +132,8 @@ the test. `schemas.test.ts` keeps the schemas inside a portable keyword subset, 
 every Appendix A method has one, and checks that the shared types agree with the TS
 protocol types on field names and optionality.
 
-Hook goldens run the CLI hook command against the target broker and compare its exact
+Hook goldens run the CLI hook command against the target broker, and hand the same runs to the
+broker's renderer over the `hook` method as the native hook client does, and compare the exact
 stdout per harness and event with the files in `src/broker/golden`. Every target builds
 the CLI first. Only empty output from a run lasting at least 3500 ms is retried, since
 a deadline fallback confirms nothing.

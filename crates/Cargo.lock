@@ -1659,6 +1659,7 @@ dependencies = [
  "regex",
  "reqwest",
  "scp-dev-core",
+ "scp-mcp",
  "serde",
  "serde_json",
  "sha2",

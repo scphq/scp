@@ -3,10 +3,12 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::paths::{Paths, account_home};
 use crate::proto::Limits;
+use crate::render::Renderer;
 use crate::server::{Broker, BrokerOptions};
 
 pub const DEFAULT_IDLE_S: f64 = 1800.0;
@@ -49,20 +51,22 @@ fn duration(text: &str) -> Option<f64> {
 pub async fn run(idle: f64, policy: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let path_env = env.clone();
-    let (paths, policy_file) = tokio::task::spawn_blocking(move || {
+    let (paths, policy_file, config_dir) = tokio::task::spawn_blocking(move || {
         let paths = Paths::from_env(&path_env)?;
+        let config_dir = crate::render::config_dir(&path_env)?;
         let home =
             account_home().or_else(|error| path_env.get("HOME").map(PathBuf::from).ok_or(error));
         let policy_file = match policy {
             Some(path) => path,
             None => home?.join(".config/scp/policy.json"),
         };
-        Ok::<_, io::Error>((paths, policy_file))
+        Ok::<_, io::Error>((paths, policy_file, config_dir))
     })
     .await??;
     let limits = Limits::from_env(&env).await.map_err(io::Error::other)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let dir = paths.dir.clone();
     let broker = Broker::start(BrokerOptions {
         paths,
         limits,
@@ -70,7 +74,8 @@ pub async fn run(idle: f64, policy: Option<PathBuf>) -> Result<(), Box<dyn std::
         idle: Duration::from_secs_f64(idle),
         env,
     })
-    .await?;
+    .await?
+    .with_hook(Arc::new(Renderer::new(dir, config_dir)));
     broker
         .run(async move {
             tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }

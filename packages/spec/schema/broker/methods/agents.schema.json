@@ -107,6 +107,17 @@
               "unread": {
                 "type": "boolean"
               },
+              "unread_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "handed_back": {
                 "type": "boolean"
               }
@@ -130,6 +141,7 @@
               "connections",
               "hibernate",
               "unread",
+              "unread_at",
               "handed_back"
             ],
             "additionalProperties": false

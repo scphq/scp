@@ -280,6 +280,7 @@ impl Core {
             },
             "spawn_via" => self.spawn_via(conn, params).await,
             "wake" => self.wake_rpc(conn, params).await,
+            "agents" => self.agents(conn).await,
             "hibernate" => self.hibernate_rpc(conn, params).await,
             "holds" | "hold_show" | "hold_release" | "hold_refuse" => {
                 self.review_hold(conn, method, params).await
