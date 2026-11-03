@@ -1,5 +1,16 @@
 # scp-relay
 
+## 0.4.10
+
+### Patch Changes
+
+- 0f59570: `hibernate` takes `id` with `endpoint`: the endpoint id the caller expects the address to name, refused `not_found` with nothing changed when the address names another endpoint since. `swarm claude prune` and the claude-bg task pass it, so a worker renamed while they ran, whose old handle another endpoint took, never has that endpoint hibernated or cleared in its place.
+- 0f59570: The native broker writes timestamps with milliseconds, as the TypeScript broker does, so `swarm cloud status` shows the same `since`, and it refuses a cloud.json that lists more than 256 mirror selectors like the TypeScript broker.
+- 0f59570: The native broker runs the claude-bg policy that stops and removes idle `swarm claude --bg` workers: every 120 s it starts `swarm claude-bg-task`, one run of the task the TypeScript broker runs in process, on the broker's socket as the human, with what the last run learnt kept in `claude-bg-task.json` in the relay directory. A run still going skips the next one, and its connection does not keep an idle broker running.
+- 0f59570: A native `swarm daemon` started without `SCP_CLI_ARGV`, as `swarm daemon restart` from a shell is, keeps its built-in wakers and the claude-bg task: it reuses the launch the last broker of the relay directory was given (`cli-argv.json`) while its files exist, else runs the `@scp-dev/cli` its native package is installed beside or inside under `node`, else `swarm` from `PATH`.
+- 0f59570: The native broker reads `historic_after_s` (alias `lifecycle.historic_after_s`) from `config.json` and takes durations such as `2h` in `SCP_HISTORIC_AFTER_S`, as the TypeScript daemon does.
+- 0f59570: The native broker without a hub link warns once, like the CLI's broker, when `mesh/mesh.json` in its directory enables the experimental mesh it does not carry, and runs local-only.
+
 ## 0.4.9
 
 ### Patch Changes
