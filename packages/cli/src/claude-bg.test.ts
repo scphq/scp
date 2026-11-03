@@ -16,6 +16,7 @@ import {
   bgConfig,
   claudeBgCommand,
   claudeBgTask,
+  claudeBgTaskCommand,
   claudeWakeCommand,
   historicAfterS,
   idleAfterS,
@@ -29,6 +30,7 @@ import {
   runsCommand,
   runBgTaskFromFile,
   refSession,
+  socketPort,
   reviveRef,
 } from "./claude-bg"
 
@@ -1411,6 +1413,32 @@ describe("broker commands", () => {
     expect(await f.prune(["--dry-run"])).toBe(0)
     expect(f.lines).toContain(`would stop ${id} me/w1`)
     expect(f.calls().map((call) => call.argv)).toEqual([["agents", "--json", "--all"]])
+    expect(f.broker.core.whoami(f.worker.endpoint.id).presence).not.toBe("hibernated")
+  })
+  test("the claude-bg-task command runs the broker's task over the socket and keeps what it learnt", async () => {
+    const f = await brokerFixture()
+    const errors: string[] = []
+    const spy = spyOn(console, "error").mockImplementation((line: string) => void errors.push(line))
+    try {
+      expect(await claudeBgTaskCommand(f.env, f.deps)).toBe(0)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(f.calls().at(-1)?.argv).toEqual(["stop", id])
+    expect(f.broker.core.whoami(f.worker.endpoint.id)).toMatchObject({ presence: "hibernated", wake: "hook:claude-bg", revivable: true })
+    expect(errors).toContain(`swarm claude: stopped ${id} (me/w1)`)
+    const saved = JSON.parse(readFileSync(join(f.env.SCP_DIR, "claude-bg-task.json"), "utf8"))
+    expect(saved).toMatchObject({ listed: true, seen: [id], sessions: [[sessionId, id]] })
+  })
+  test("a socket hibernation refuses an address another endpoint took since the task read it", async () => {
+    const f = await brokerFixture()
+    const { port, close } = await socketPort(f.env)
+    cleanups.push(close)
+    const planned = (await port.agents()).find((agent) => agent.address === "me/w1")!
+    await f.human.client.request("rename", { endpoint: "w1", handle: "w9" })
+    const taker = await f.connect({ claim: { handle: "w1" } })
+    await expect(port.hibernate(planned, "ref")).rejects.toThrow("me/w1 is another endpoint now")
+    expect(f.broker.core.whoami(taker.endpoint.id).presence).not.toBe("hibernated")
     expect(f.broker.core.whoami(f.worker.endpoint.id).presence).not.toBe("hibernated")
   })
   test("prunes a worker into hibernation with its wake hook", async () => {

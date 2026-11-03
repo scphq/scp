@@ -959,7 +959,6 @@ export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): B
   }
 }
 
-/** one run of the claude-bg task on `port`, keeping what it learnt in `state` */
 async function runBgTask(state: BgTaskState, port: BgPort, fallbackLog: (line: string) => void, env: Env, deps: ClaudeBgDeps): Promise<void> {
   const { sessions, seen, stopped } = state
   const records = readRecords(env)
@@ -1102,7 +1101,7 @@ export async function claudeBgTaskCommand(env: Env = process.env, deps: ClaudeBg
 }
 
 /** the broker over its socket as the human: `agents`, and `hibernate` with an endpoint, which also runs a due waker */
-async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
+export async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
   const dir = relayDir(env as NodeJS.ProcessEnv)
   const client = await connectBroker(dir, undefined, { env })
   try {
@@ -1111,12 +1110,17 @@ async function socketPort(env: Env): Promise<{ port: BgPort; close(): void }> {
     client.close()
     throw error
   }
+  const agents = async () => (await client.request<{ agents: AgentFacts[] }>("agents")).agents
+  /** `hibernate` names the endpoint by address, so the address must still be the planned endpoint's, before and after */
   const hibernate = async (agent: AgentFacts, wake: string, ref?: string) => {
-    await client.request("hibernate", { endpoint: agent.address, wake, ...(ref ? { ref } : {}) })
+    const moved = () => new Error(`${agent.address} is another endpoint now`)
+    if ((await agents()).find((one) => one.address === agent.address)?.id !== agent.id) throw moved()
+    const result = await client.request<{ endpoint?: { id?: string } }>("hibernate", { endpoint: agent.address, wake, ...(ref ? { ref } : {}) })
+    if (result.endpoint?.id !== agent.id) throw moved()
   }
   return {
     port: {
-      agents: async () => (await client.request<{ agents: AgentFacts[] }>("agents")).agents,
+      agents,
       hibernate: (agent, ref) => hibernate(agent, CLAUDE_BG_PROVIDER, ref),
       unhibernate: (agent) => hibernate(agent, "none"),
       kick: (agent, ref) => hibernate(agent, CLAUDE_BG_PROVIDER, ref),

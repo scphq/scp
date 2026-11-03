@@ -234,6 +234,7 @@ impl Broker {
         let _ = wakers.await;
         if let Some(tasks) = tasks {
             tasks.abort();
+            let _ = tasks.await;
         }
         let drain = async { while connections.join_next().await.is_some() {} };
         if tokio::time::timeout(Duration::from_secs(2), drain)
