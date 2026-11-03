@@ -25,8 +25,20 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { TOOLS } from "@scp-dev/mcp"
 import { RelayUsage } from "./common"
-import { AGY_HOOK_SET, agyHookSet, BLOCK_STOP, claudeVersionFile, hasOurHooks, hookEntries, mergeHooks, musePlugin, opencodePlugin, shellQuote } from "./hooks"
-import { hooksTarget } from "./install"
+import {
+  AGY_HOOK_SET,
+  agyHookSet,
+  BLOCK_STOP,
+  claudeVersionFile,
+  hasOurHooks,
+  type HookLaunch,
+  hookEntries,
+  mergeHooks,
+  musePlugin,
+  opencodePlugin,
+  shellQuote,
+} from "./hooks"
+import { goneClientLine, goneClients, hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
 import { type Mount, mountVars, mountWith, nativeHook, nativeSwarm } from "./native"
 import { launcher } from "./launcher"
@@ -487,7 +499,7 @@ interface HookTarget {
   kind: Hooked
   file: string
   blockStop: boolean
-  launch?: string[]
+  launch: HookLaunch
 }
 
 interface Plan {
@@ -773,10 +785,12 @@ function planAgyRules(plan: Plan, ctx: Ctx, remove: boolean) {
   })
 }
 
-const launcherPrefixes = (launch?: string[]): string[] => (launch ? [launch.map(shellQuote).join(" ")] : [])
+/** the command starts of hooks of ours a launch may have written, with and without its native client */
+const launcherPrefixes = (launch: HookLaunch): string[] =>
+  launch.launcher ? [launch.launcher, ...(launch.native ? [[launch.native, ...launch.launcher]] : [])].map((words) => words.map(shellQuote).join(" ")) : []
 
-function hookContent(kind: Hooked, existing: string | undefined, blockStop: boolean, launch?: string[]): string {
-  const options = { blockStop, ...(launch ? { launcher: launch } : {}) }
+function hookContent(kind: Hooked, existing: string | undefined, blockStop: boolean, launch: HookLaunch): string {
+  const options = { blockStop, ...launch }
   if (kind === "opencode") return opencodePlugin(options)
   if (kind === "muse") return `${JSON.stringify(musePlugin(options), null, 2)}\n`
   const settings = existing === undefined ? {} : (JSON.parse(existing) as unknown)
@@ -788,7 +802,7 @@ function hookContent(kind: Hooked, existing: string | undefined, blockStop: bool
 }
 
 /** what `hooks install --scope user --write` would write, or undefined when the file already has it */
-function desiredHooks(kind: Hooked, target: string, blockStop: boolean, launch?: string[]): string | undefined {
+function desiredHooks(kind: Hooked, target: string, blockStop: boolean, launch: HookLaunch): string | undefined {
   const file = resolved(target)
   const existing = existsSync(file) ? readFileSync(file, "utf8") : undefined
   const content = hookContent(kind, existing, blockStop, launch)
@@ -813,7 +827,7 @@ function holdsStops(kind: Hooked, target: string): boolean {
 }
 
 /** whether a hooks file already has hooks of ours, whatever their version */
-function hasHooks(kind: Hooked, target: string, launch?: string[]): boolean {
+function hasHooks(kind: Hooked, target: string, launch: HookLaunch): boolean {
   try {
     const file = resolved(target)
     if (!existsSync(file)) return false
@@ -868,6 +882,9 @@ function pluginDir(manifest: string): string {
   return dirname(dirname(manifest))
 }
 
+/** the launch the Claude Code and codex hooks of this setup run */
+const ctxLaunch = (ctx: Ctx): HookLaunch => ({ ...(ctx.hookLaunch ? { launcher: ctx.hookLaunch } : {}), ...(ctx.native ? { native: ctx.native } : {}) })
+
 function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
   const { env, cwd, now, run } = ctx
   let kind: Hooked
@@ -882,8 +899,11 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
   const file = hooksTarget(kind, "user", env, cwd)
   const had = holdsStops(kind, file)
   const blockStop = ctx.blockStop || had
-  const launch = kind === "claude" || kind === "codex" ? ctx.hookLaunch : ctx.native ? [ctx.native, CLI_NAME] : undefined
-  plan.hooks.set(harness, { kind, file, blockStop, ...(launch ? { launch } : {}) })
+  const launch: HookLaunch = {
+    ...((kind === "claude" || kind === "codex") && ctx.hookLaunch ? { launcher: ctx.hookLaunch } : {}),
+    ...(ctx.native ? { native: ctx.native } : {}),
+  }
+  plan.hooks.set(harness, { kind, file, blockStop, launch })
   if (kind === "claude" || kind === "codex") {
     const others =
       kind === "claude" ? [hooksTarget("claude", "local", env, cwd), hooksTarget("claude", "project", env, cwd)] : [hooksTarget("codex", "project", env, cwd)]
@@ -896,6 +916,7 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     problem(plan, harness, `hooks: skipped, ${blocked}`)
     return
   }
+  for (const client of goneClients(kind, resolved(file))) note(plan, harness, `hooks: ${goneClientLine(client)}`)
   let content: string | undefined
   try {
     content = desiredHooks(kind, file, blockStop, launch)
@@ -904,7 +925,7 @@ function planHooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     return
   }
   const held = had && !ctx.blockStop ? ` (it keeps ${BLOCK_STOP}, which the file has)` : ctx.blockStop && !had ? `, with ${BLOCK_STOP}` : ""
-  const manifest = hasHooks(kind, file, ctx.hookLaunch) ? undefined : remember({ harness, kind: "hooks", file })
+  const manifest = hasHooks(kind, file, ctxLaunch(ctx)) ? undefined : remember({ harness, kind: "hooks", file })
   if (kind === "muse") {
     const dir = pluginDir(file)
     const record = museInstalled(env)
@@ -986,7 +1007,7 @@ function planUnhooks(plan: Plan, harness: SetupHarness, ctx: Ctx) {
     }
   }
   if (!items.length) {
-    if (harness !== "grok" && hasHooks(kind, file, ctx.hookLaunch)) note(plan, harness, `hooks: keeps the hooks in ${file}, which setup did not add`)
+    if (harness !== "grok" && hasHooks(kind, file, ctxLaunch(ctx))) note(plan, harness, `hooks: keeps the hooks in ${file}, which setup did not add`)
     return
   }
   for (const path of new Set(items.map((item) => item.file)))
@@ -1077,7 +1098,7 @@ function planUnhook(plan: Plan, harness: SetupHarness, kind: Hooked, file: strin
           return rest
         }
         if (!isObject(config.hooks)) return undefined
-        const merged = mergeHooks(config, {}, launcherPrefixes(ctx.hookLaunch))
+        const merged = mergeHooks(config, {}, launcherPrefixes(ctxLaunch(ctx)))
         return JSON.stringify(merged.hooks) === JSON.stringify(config.hooks) ? undefined : merged
       },
       now,
@@ -1336,10 +1357,11 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
       hooks = false
       unresolved++
     } else if (hooks) {
-      hookLaunch = [...(native ? [native] : []), ...launcher(onPath!, env, which).argv]
-      if (native) out(`native hooks: ${native} (version ${deps.version ?? "0.0.0"}); prefixes each harness hook command`)
+      hookLaunch = launcher(onPath!, env, which).argv
+      if (native)
+        out(`native hooks: ${native} (version ${deps.version ?? "0.0.0"}) runs each hook, and a hook runs the command below without it once that file is gone`)
       out(
-        `hooks run: ${hookLaunch.map(shellWord).join(" ")} for claude and codex, whose desktop apps start them without your PATH; ${native ? `${shellWord(native)} ${CLI_NAME}` : CLI_NAME} from each harness's PATH for the others (${onPath} here${options.bin !== undefined ? ", not --bin" : ""})`,
+        `hooks run: ${hookLaunch.map(shellWord).join(" ")} for claude and codex, whose desktop apps start them without your PATH; ${CLI_NAME} from each harness's PATH for the others (${onPath} here${options.bin !== undefined ? ", not --bin" : ""})`,
       )
     }
   }

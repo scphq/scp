@@ -11,7 +11,8 @@ swarm mcp install --harness codex            # print the command that mounts the
 `swarm setup --engine auto|ts|native` selects the hook client (default `auto`, or `SCP_ENGINE`). Auto uses the optional
 native binary only when it is executable and its version matches the CLI, otherwise it uses Node. `ts` forces Node;
 `native` fails if a matching binary is unavailable. `SCP_HOOK_BIN` overrides the native path for local builds.
-Rerun setup with `--write` after an upgrade to replace old native paths. These options apply to setup's hooks only.
+A hook whose native binary is gone, say after an install that skipped the optional package, runs the CLI through Node instead,
+and `swarm status` warns about it. Rerun setup with `--write` after an upgrade to replace old native paths. These options apply to setup's hooks only.
 
 Every hook runs `swarm hook <harness> [event]` with the harness's JSON payload on stdin and prints only the reply. A hook never fails the harness.
 
