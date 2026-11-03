@@ -131,7 +131,21 @@ fn deadline_math() {
     assert_eq!(hook::hook_ends(true, 100, 200), 1100);
     let env = |value: &str| HashMap::from([("SCP_HOOK_DEADLINE_MS".to_owned(), value.to_owned())]);
     assert_eq!(hook::deadline_override(&env("60000")), Some(60000));
-    for value in ["", "0", "-5", "1.5", "1e4", " 900", "abc"] {
+    assert_eq!(
+        hook::deadline_override(&env("2147483647")),
+        Some(2147483647)
+    );
+    for value in [
+        "",
+        "0",
+        "-5",
+        "1.5",
+        "1e4",
+        " 900",
+        "abc",
+        "2147483648",
+        "99999999999999999999",
+    ] {
         assert_eq!(hook::deadline_override(&env(value)), None, "{value:?}");
     }
     assert_eq!(hook::connect_budget(5000, 1000), 2500);

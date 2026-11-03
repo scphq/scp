@@ -362,9 +362,9 @@ for (const mode of hookModes)
       test("a prompt typed while it waits releases it at once", async () => {
         const { run } = await spawning()
         const deadlines: number[] = []
-        const began = Date.now()
         const stopping = run("Stop", [PUSH_WAIT, "600"], deadlines)
         await waitFor(() => deadlines.length, 10_000, "the stop to start waiting")
+        const began = Date.now()
         expect(await run("UserPromptSubmit")).toBeUndefined()
         expect(await stopping).toBeUndefined()
         expect(Date.now() - began).toBeLessThan(3000)
@@ -373,10 +373,10 @@ for (const mode of hookModes)
 
       test("the hold ends once the spawn process of the worker that never joined is gone", async () => {
         const { run, spawn } = await spawning()
-        const began = Date.now()
         const deadlines: number[] = []
         const stopping = run("Stop", [PUSH_WAIT, "600"], deadlines)
         await waitFor(() => deadlines.length, 10_000, "the stop to start waiting")
+        const began = Date.now()
         spawn.kill()
         await spawn.exited
         expect(await stopping).toBeUndefined()

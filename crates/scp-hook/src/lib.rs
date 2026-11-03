@@ -93,7 +93,7 @@ pub fn deadline_override(env: &HashMap<String, String>) -> Option<u64> {
     env.get("SCP_HOOK_DEADLINE_MS")
         .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|s| s.parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
+        .filter(|ms| (1..=(1 << 31) - 1).contains(ms))
 }
 
 pub fn connect_budget(ends: u64, time: u64) -> u64 {
