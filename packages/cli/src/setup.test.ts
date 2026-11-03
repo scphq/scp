@@ -1431,6 +1431,7 @@ describe("native setup hooks", () => {
       expect(readFileSync(hooks.claude, "utf8")).not.toContain(bin)
       expect(goneHookClients(f.env, join(f.home, "work"))).toEqual([])
     },
+    30_000,
   )
 
   test("a native client's own exit status stands and the fallback does not run after it", () => {

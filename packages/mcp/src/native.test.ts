@@ -284,10 +284,11 @@ for (const broker of brokers) {
           const refused = await s.call("relay_whoami")
           expect([refused.isError, textOf(refused)]).toEqual([true, expect.stringMatching(/^unauthorized: grant refused: /)])
           s.notify("notifications/initialized")
+          const failed = () => s.logged.filter((line) => line.includes("channel poll failed"))
+          for (let i = 0; i < 2500 && !failed().length; i++) await Bun.sleep(10)
           await Bun.sleep(3000)
-          const failed = s.logged.filter((line) => line.includes("channel poll failed"))
-          expect(failed).toHaveLength(1)
-          expect(failed[0]).toContain("grant refused: ")
+          expect(failed()).toHaveLength(1)
+          expect(failed()[0]).toContain("grant refused: ")
         } finally {
           await s.close()
         }

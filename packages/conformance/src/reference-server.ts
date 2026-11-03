@@ -39,7 +39,14 @@ const wake: Partial<HubWakeOptions> = Object.fromEntries(
 if (!values.dir || !process.env.SCP_CONFORMANCE_ADMIN) throw new Error("--dir and SCP_CONFORMANCE_ADMIN are required");
 const dir = values.dir;
 mkdirSync(dir, { recursive: true });
-const credentials = new Database(join(dir, "credentials.db"));
+/** a fixture that needs no crash durability: without fsync, a disk busy with other writes cannot stall a test */
+function open(file: string) {
+  const db = new Database(join(dir, file));
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA synchronous = OFF");
+  return db;
+}
+const credentials = open("credentials.db");
 credentials.exec(
   `CREATE TABLE IF NOT EXISTS tokens (hash TEXT PRIMARY KEY, id TEXT, account TEXT, member TEXT, device INTEGER, name TEXT, role TEXT, revoked INTEGER DEFAULT 0, expires_at INTEGER)`,
 );
@@ -163,7 +170,7 @@ const accounts = new Map<string, Account>();
 function account(name: string): Account {
   const found = accounts.get(name);
   if (found) return found;
-  const db = new Database(join(dir, `${name}.db`));
+  const db = open(`${name}.db`);
   const sql: Sql = { all: <T>(query: string, ...params: SqlValue[]) => db.query(query).all(...params) as T[] };
   const sockets = new Map<ServerWebSocket<Data>, HubSocket>();
   const hub = new RelayHub({

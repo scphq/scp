@@ -19,7 +19,14 @@ const FAKE_SHIM = `
 const { appendFileSync } = require("node:fs")
 const log = process.env.FAKE_LOG
 appendFileSync(log, "start\\n")
-process.on("SIGTERM", () => setTimeout(() => { appendFileSync(log, "exit\\n"); process.exit(0) }, 150))
+let ending = false
+const end = () => {
+  if (ending) return
+  ending = true
+  setTimeout(() => { appendFileSync(log, "exit\\n"); process.exit(0) }, 150)
+}
+process.on("SIGTERM", end)
+process.stdin.on("end", end)
 let buffer = ""
 process.stdin.on("data", (chunk) => {
   buffer += chunk
