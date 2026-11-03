@@ -85,8 +85,10 @@ impl Broker {
         )
         .await
         .map_err(io::Error::other)?;
-        let bridge = crate::bridge::daemon_bridge(&options.env, |line| eprintln!("{line}"))
-            .map(|config| crate::bridge::Bridge::attach(config, &mut core));
+        let bridge = crate::bridge::startup_bridge(&options.env, &options.paths.dir, |line| {
+            eprintln!("{line}")
+        })
+        .map(|config| crate::bridge::Bridge::attach(config, &mut core));
         if let Some(cli) = crate::wake::cli_argv(&options.env) {
             core.wakers
                 .set_builtin(crate::wake::Wakers::builtin_for(&cli));

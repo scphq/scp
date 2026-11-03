@@ -18,7 +18,7 @@ use crate::core::Core;
 use crate::proto::RpcError;
 use crate::state::{ConnectionId, Mode};
 
-pub use config::{BridgeConfig, daemon_bridge};
+pub use config::{BridgeConfig, daemon_bridge, startup_bridge};
 pub use link::{Bridge, relay_socket_url};
 
 /// what this broker knows of the hub's account: its machine name, the account handle and the hub's endpoint rows seen in memory
