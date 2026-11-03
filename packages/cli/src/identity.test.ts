@@ -23,8 +23,9 @@ describe("forkOrigin", () => {
 })
 
 describe("relayIdentity", () => {
-  const claim = (args: string, harnessSession = NEW, env: Record<string, string> = {}) =>
+  const claim = (args: string, harnessSession = NEW, env: Record<string, string> = {}, harnessOrigin?: string) =>
     relayIdentity({
+      ...(harnessOrigin !== undefined ? { harnessOrigin } : {}),
       harness: "claude-code",
       fallbackHarness: "hook",
       cwd: "/work",
@@ -39,6 +40,13 @@ describe("relayIdentity", () => {
 
   test("a forked Claude Code harness claims the session it forks as its origin", () => {
     expect(claim(`claude --fork-session --resume ${OLD}`)).toMatchObject({ harness_session: NEW, harness_origin: OLD })
+  })
+
+  test("a background session its launcher resumed under a new id claims the resumed session as its origin", () => {
+    expect(claim("claude bg-spare", NEW, {}, OLD)).toMatchObject({ harness_session: NEW, harness_origin: OLD })
+    expect(claim("claude bg-spare", OLD, {}, OLD).harness_origin).toBeUndefined()
+    expect(claim("claude bg-spare", NEW, {}, "-bad").harness_origin).toBeUndefined()
+    expect(claim("claude bg-spare", NEW, { SCP_HARNESS_ORIGIN: OLD }).harness_origin).toBeUndefined()
   })
 
   test("a plain resume, or a fork of the session itself, claims no origin", () => {

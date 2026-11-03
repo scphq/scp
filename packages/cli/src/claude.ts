@@ -87,6 +87,7 @@ export const LAUNCHER_IDENTITY = [
   "SCP_HARNESS",
   "SCP_SHIM_BINDING",
   "SCP_SPAWN_RUNNER",
+  "SCP_HARNESS_ORIGIN",
   CHANNELS_ENV,
 ]
 /** where the shim finds the broker and its labels, passed on since a background session's environment is the daemon's */
@@ -99,12 +100,12 @@ export const CLAUDE_MCP = ["--harness", "claude", "--channels"]
 export const bgDir = (env: Env): string => join(relayDir(env as NodeJS.ProcessEnv), "claude-bg")
 
 /**
- * the scp server of a background session: the user's mount with `--channels`, else this CLI's, with the name, parent request and grant in its env. Under
- * SCP_NATIVE=1 it runs the native `swarm mcp` directly, with the user's mount's words when it has `--channels`, as it does through Node when the mount's
- * command is gone. It has the mount's name, so it replaces
- * the mount for that session; the grant is set even when empty, so one in the daemon's environment never applies
+ * the scp server of a background session: the user's mount with `--channels`, else this CLI's, with the name, parent request and grant in its env, and
+ * the session a resume continues as `SCP_HARNESS_ORIGIN`. Under SCP_NATIVE=1 it runs the native `swarm mcp` directly, with the user's mount's words
+ * when it has `--channels`, as it does through Node when the mount's command is gone. It has the mount's name, so it replaces the mount for that
+ * session; the grant is set even when empty, so one in the daemon's environment never applies
  */
-export function bgMount(env: Env, name: string | undefined): Record<string, unknown> {
+export function bgMount(env: Env, name: string | undefined, origin?: string): Record<string, unknown> {
   let entry: Record<string, unknown> | undefined
   try {
     entry = mountedEntry("claude", mcpFile("claude", env))
@@ -126,6 +127,7 @@ export function bgMount(env: Env, name: string | undefined): Record<string, unkn
       ...(name !== undefined ? { SCP_NAME: name } : {}),
       SCP_UNDER: env.SCP_UNDER ?? "",
       SCP_GRANT: env.SCP_GRANT ?? "",
+      ...(origin !== undefined ? { SCP_HARNESS_ORIGIN: origin } : {}),
     },
   }
 }
@@ -228,6 +230,18 @@ export function resumeTarget(args: string[]): string | undefined {
   return undefined
 }
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * the session id `--resume` names, by id or `<id>.jsonl` transcript path: Claude Code may resume a background session under a new id, whose claims
+ * then carry it as their origin
+ */
+export function resumedSession(args: string[]): string | undefined {
+  const target = resumeTarget(args)
+  const id = target === undefined ? undefined : basename(target).replace(/\.jsonl$/, "")
+  return id !== undefined && SESSION_ID.test(id) ? id : undefined
+}
+
 /** runs claude with the terminal passed through; resolves with its exit code */
 async function runClaude(
   bin: string,
@@ -271,7 +285,7 @@ async function backgroundCommand(
   const handle = name ?? (env.SCP_NAME || undefined)
   const dir = privateDir(bgDir(env))
   const file = join(dir, `${randomBytes(8).toString("hex")}.json`)
-  writeFileSync(file, `${JSON.stringify({ mcpServers: { scp: bgMount(env, handle) } }, null, 2)}\n`, { mode: 0o600 })
+  writeFileSync(file, `${JSON.stringify({ mcpServers: { scp: bgMount(env, handle, resumedSession(args)) } }, null, 2)}\n`, { mode: 0o600 })
   const options = optionsOf(args)
   const added = [
     ...(options.includes("--bg") || options.includes("--background") ? [] : ["--bg"]),

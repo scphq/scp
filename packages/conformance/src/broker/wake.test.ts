@@ -232,6 +232,38 @@ brokerSuite(
       expect(await refusal(broker.agent("later", "claude-code", {}, { process: "pid:999994:conformance", session: "later", ticket }))).toBe("unauthorized");
     });
 
+    for (const name of ["w1", "claude-app"])
+      test(`a stopped worker resumed under a new session id that reports its origin takes its revivable name back, its hooks first (${name})`, async () => {
+        const broker = await start({ files: files() });
+        const lead = await broker.agent("lead", "claude-code", {}, { process: key, session: "lead" });
+        const { token } = await lead.request<{ token: string }>("grant", { name, scope: "parent" });
+        const daemon = (pid: number, harness_session: string) => ({
+          process: `pid:${pid}:conformance`,
+          session: `pid:${pid}:conformance`,
+          lineage: [`pid:${pid}:conformance`, "pid:3:conformance"],
+          cwd: "/work",
+          harness_session,
+        });
+        const hook = await broker.hook({ handle: "claude-app", ...daemon(process.ppid, "bg-a") });
+        const w1 = await broker.agent(name, "claude-code", {}, { ...daemon(process.ppid, "bg-a"), grant: token });
+        expect(w1.hello.endpoint).toMatchObject({ address: `me/${name}`, parent: "me/lead" });
+        await hook.request("event", { kind: "tool", session_id: "bg-a" });
+        await lead.request("send", { to: name, body: "while stopped" });
+        const record = JSON.stringify({ via: "vm", harness: "claude-code", session: "bg-a", cwd: "/work", argv: ["claude", "--bg", "--resume", "bg-a"] });
+        expect(await w1.request("hibernate", { wake: "vm", ref: record })).toMatchObject({ endpoint: { revivable: true } });
+        await w1.close();
+        await hook.request("event", { kind: "session_end" });
+        await hook.close();
+        const fork = daemon(1, "bg-b");
+        const fresh = await broker.hook({ handle: "claude-app", ...fork });
+        expect(fresh.hello.endpoint?.id).not.toBe(w1.id);
+        const shim = await broker.agent(name, "claude-code", {}, { ...fork, grant: token, harness_origin: "bg-a" });
+        expect(shim.hello.endpoint).toMatchObject({ id: w1.id, address: `me/${name}`, parent: "me/lead" });
+        expect(await shim.request("whoami")).toMatchObject({ presence: "online", wake: null });
+        expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "while stopped" } }] });
+        expect((await broker.hook({ handle: "claude-app", ...fork })).hello.endpoint).toMatchObject({ id: w1.id, address: `me/${name}` });
+      });
+
     test("broker wake tickets bind the waker and each later delivery runs it again without debounce", async () => {
       const script = `import { appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";

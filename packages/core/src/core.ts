@@ -1369,6 +1369,7 @@ export class RelayCore {
     let moved: number[] = []
     let exactFrom: EndpointRow | undefined
     let returning: string | undefined
+    let back: EndpointRow | undefined
     const open = !row || presenceOf(row, now) === "offline"
     if (row && presenceOf(row, now) === "offline") {
       this.sql.all(`UPDATE endpoints SET session = NULL WHERE id = ?`, row.id)
@@ -1376,17 +1377,14 @@ export class RelayCore {
     } else if (row && !transient && !sameProcess(row, fields.process) && !(row.handle === wanted && reclaims(row, fields.process))) {
       row = undefined
       session = null
-    } else if (
-      row &&
-      !reviving &&
-      !transient &&
-      row.token_hash === null &&
-      row.named === null &&
-      row.handle !== wanted &&
-      !row.handle.startsWith(`${wanted.slice(0, 58)}-`)
-    ) {
+    } else if (row && !reviving && !transient && row.token_hash === null && row.named === null && row.handle !== wanted) {
       const hooks = row
-      let settled = false
+      back = scope.exact ? undefined : this.resumedFor(wanted, harness, scope, fields, now, hooks)
+      let settled = back !== undefined || row.handle.startsWith(`${wanted.slice(0, 58)}-`)
+      if (back) {
+        ;({ moved, stopBlocks } = this.leaveHooks(hooks, back.id))
+        row = undefined
+      }
       for (let n = 1; n < (scope.exact ? 2 : 1000) && !settled; n++) {
         const handle = n === 1 ? wanted : `${wanted.slice(0, 58)}-${n}`
         const held = this.byHandle(handle)
@@ -1422,6 +1420,7 @@ export class RelayCore {
     const resumed =
       ticketed ??
       reviving ??
+      back ??
       (!row && open && !scope.exact && !scope.subagent
         ? ((fields.harness_session ? this.resumable(harness, fields.harness_session, scope, fields, now, transient) : undefined) ??
           (fields.harness_origin ? this.resumable(harness, fields.harness_origin, scope, fields, now, false) : undefined))
@@ -1550,6 +1549,25 @@ export class RelayCore {
     if (scope.grant !== null) this.takePending(row.id)
     if (!transient) this.wakeDone(row.id, "claim")
     return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
+  }
+
+  /**
+   * the row at the wanted handle that rule 6 takes back for a connecting claim's harness session, else its origin, once its hooks' endpoint
+   * `hooks` lets go: a revivable row too, as a resumed session that forked under a new id takes back its stopped worker's name
+   */
+  private resumedFor(
+    wanted: string,
+    harness: string,
+    scope: ClaimScope,
+    fields: { cwd: string | null; process: string | null; harness_session?: string | null; harness_origin?: string | null },
+    now: number,
+    hooks: EndpointRow,
+  ): EndpointRow | undefined {
+    for (const of of [fields.harness_session, fields.harness_origin]) {
+      const row = of ? this.resumable(harness, of, scope, fields, now, false) : undefined
+      if (row && row.id !== hooks.id && row.handle === wanted) return row
+    }
+    return undefined
   }
 
   /**

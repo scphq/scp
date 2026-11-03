@@ -153,6 +153,60 @@ describe("a background session the harness daemon runs", () => {
     expect(local(core)).toEqual(["me/w1"])
   })
 
+  /** `w1` stopped by the claude-bg policy: hibernated with its revive record, then its process gone, with mail since */
+  function stopped() {
+    const ctx = launched()
+    const { core, peer, w1, dead, clock } = ctx
+    const ref = JSON.stringify({ via: "claude-bg", harness: "claude-code", session: S, cwd: CWD, argv: ["claude", "--bg", "--resume", S] })
+    core.brokerHibernate(w1.id, { wake: "claude-bg", ref })
+    core.disconnect(w1.id)
+    dead.add(10)
+    core.send(peer.id, { to: "w1", body: "while stopped" })
+    clock.now += 1000
+    return ctx
+  }
+
+  for (const order of ["hook", "shim"] as const) {
+    test(`stopped and resumed under a new session id that reports its origin, takes its name back awake (${order} first)`, () => {
+      const { core, lead, hook, shim, named, w1 } = stopped()
+      const fork = { harness_session: S2, harness_origin: S }
+      if (order === "hook") expect(hook(13, { harness_session: S2 }).endpoint.id).not.toBe(w1.id)
+      expect(shim(13, { ...named, ...fork }).endpoint.id).toBe(w1.id)
+      expect(hook(13, { harness_session: S2 }).endpoint.id).toBe(w1.id)
+      expect(core.whoami(w1.id)).toMatchObject({ address: "me/w1", parent: lead.address })
+      expect(core.list({ all: true }).find((view) => view.id === w1.id)?.presence).not.toBe("hibernated")
+      expect(core.inbox(w1.id).map((m) => m.body.text)).toEqual(["while stopped"])
+      expect(local(core)).toEqual(["me/lead", "me/w1"])
+    })
+  }
+
+  test("stopped under its default handle, a resume whose hooks walked to a suffix takes the handle back by its origin", () => {
+    const ctx = setup()
+    const { core, lead, hook, shim, tool, peer, dead, clock } = ctx
+    const named = { handle: "claude-app", grant: core.grant(self(lead.id), { name: "claude-app" }).token }
+    hook(10, { harness_session: S })
+    const w1 = shim(10, { ...named, harness_session: S }).endpoint
+    tool(w1.id, 10, S)
+    const ref = JSON.stringify({ via: "claude-bg", harness: "claude-code", session: S, cwd: CWD, argv: ["claude", "--bg", "--resume", S] })
+    core.brokerHibernate(w1.id, { wake: "claude-bg", ref })
+    core.disconnect(w1.id)
+    dead.add(10)
+    core.send(peer.id, { to: "claude-app", body: "while stopped" })
+    clock.now += 1000
+    expect(hook(13, { harness_session: S2, derived: true }).endpoint.address).toBe("me/claude-app-2")
+    expect(shim(13, { ...named, harness_session: S2, harness_origin: S }).endpoint.id).toBe(w1.id)
+    expect(core.whoami(w1.id)).toMatchObject({ address: "me/claude-app", parent: lead.address })
+    expect(core.inbox(w1.id).map((m) => m.body.text)).toEqual(["while stopped"])
+  })
+
+  test("stopped, a resume with no origin is another session and never takes its name", () => {
+    const { core, hook, shim, named, w1 } = stopped()
+    hook(13, { harness_session: S2 })
+    expect(() => shim(13, { ...named, harness_session: S2 })).toThrow("grant refused")
+    expect(core.whoami(w1.id).address).toBe("me/w1")
+    expect(core.list({ all: true }).find((view) => view.id === w1.id)?.presence).toBe("hibernated")
+  })
+
   test("a live holder of the name is never taken: a second session of the same id gets its own endpoint", () => {
     const { core, hook, w1 } = launched()
     const other = hook(14, { harness_session: S }).endpoint

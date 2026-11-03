@@ -131,6 +131,8 @@ describe.skipIf(!nativeBin)("native shim identity", () => {
       true,
     )
     expect(claim).toMatchObject({ harness_origin: "aaaa-bbbb", harness_handoff: true })
+    const resumed = await same({ harness: "claude", env: { CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: SESSION, SCP_HARNESS_ORIGIN: "aaaa-bbbb" } }, true)
+    expect(resumed).toMatchObject({ harness_session: SESSION, harness_origin: "aaaa-bbbb" })
   })
 
   test("names, grants and labels from the environment", async () => {
