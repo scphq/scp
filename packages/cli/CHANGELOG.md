@@ -1,5 +1,17 @@
 # @scp-dev/cli
 
+## 0.21.1
+
+### Patch Changes
+
+- 0f59570: `hibernate` takes `id` with `endpoint`: the endpoint id the caller expects the address to name, refused `not_found` with nothing changed when the address names another endpoint since. `swarm claude prune` and the claude-bg task pass it, so a worker renamed while they ran, whose old handle another endpoint took, never has that endpoint hibernated or cleared in its place.
+- 0f59570: The native broker runs the claude-bg policy that stops and removes idle `swarm claude --bg` workers: every 120 s it starts `swarm claude-bg-task`, one run of the task the TypeScript broker runs in process, on the broker's socket as the human, with what the last run learnt kept in `claude-bg-task.json` in the relay directory. A run still going skips the next one, and its connection does not keep an idle broker running.
+- Updated dependencies [0f59570]
+  - @scp-dev/core@0.18.9
+  - @scp-dev/broker@0.13.9
+  - @scp-dev/hub@0.13.9
+  - @scp-dev/mcp@0.5.18
+
 ## 0.21.0
 
 ### Minor Changes
