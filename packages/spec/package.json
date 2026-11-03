@@ -1,6 +1,6 @@
 {
   "name": "@scp-dev/spec",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "private": true,
   "description": "The Swarm Communication Protocol specification.",
   "license": "Apache-2.0",
