@@ -37,10 +37,7 @@ pub struct Task {
 }
 
 /// runs the task every `every` from one interval after the start; a run still going when the next is due skips it
-pub fn attach(mut task: Task, running: TaskPid) -> tokio::task::JoinHandle<()> {
-    if let Ok(dir) = std::path::absolute(&task.dir) {
-        task.dir = dir;
-    }
+pub fn attach(task: Task, running: TaskPid) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut due = Instant::now() + task.every;
         let mut failure = None;
@@ -67,15 +64,16 @@ async fn run(task: &Task, running: &TaskPid, failure: &mut Option<String>) {
         .env_clear()
         .envs(&task.env)
         .env("SCP_DIR", &task.dir)
-        .current_dir(&task.dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true);
     let (ok, output) = match command.spawn() {
         Err(error) => (false, format!("{program} did not start ({error})")),
         Ok(mut child) => {
             running.set(child.id().unwrap_or(0));
+            let mut group = crate::wake::Group(child.id().and_then(|pid| i32::try_from(pid).ok()));
             let mut stderr = child.stderr.take();
             let read = async {
                 let mut out = Vec::new();
@@ -88,6 +86,9 @@ async fn run(task: &Task, running: &TaskPid, failure: &mut Option<String>) {
             let ran =
                 tokio::time::timeout(RUN_LIMIT, async { tokio::join!(child.wait(), read) }).await;
             running.set(0);
+            if matches!(ran, Ok((Ok(_), _))) {
+                group.0 = None;
+            }
             match ran {
                 Err(_) => {
                     let _ = child.kill().await;
@@ -140,9 +141,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_start_on_the_interval_in_the_relay_directory_and_a_long_run_skips_the_next() {
+    async fn runs_start_on_the_interval_with_the_relay_directory_and_a_long_run_skips_the_next() {
         let dir = scratch("runs");
-        let script = r#"echo "$1 $SCP_DIR $(pwd) $KEPT" >> runs; sleep 0.25"#;
+        let script = r#"echo "$1 $KEPT" >> "$SCP_DIR/runs"; sleep 0.25"#;
         let running = TaskPid::default();
         let started = Instant::now();
         let handle = attach(task(&dir, script, 200), running.clone());
@@ -153,11 +154,9 @@ mod tests {
         let _ = handle.await;
         assert!(started.elapsed() < Duration::from_millis(1300));
         let runs = std::fs::read_to_string(dir.join("runs")).unwrap();
-        let shown = dir.display();
         assert_eq!(runs.lines().count(), 2, "{runs}");
         assert!(
-            runs.lines()
-                .all(|line| line == format!("claude-bg-task {shown} {shown} yes")),
+            runs.lines().all(|line| line == "claude-bg-task yes"),
             "{runs}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -192,13 +191,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_the_runner_stops_the_run() {
+    async fn stopping_the_runner_stops_the_run_and_what_it_started() {
         let dir = scratch("stop");
         let handle = attach(
-            task(&dir, "echo $$ > pid; sleep 30", 50),
+            task(&dir, r#"sleep 30 & echo $! > "$SCP_DIR/pid"; wait"#, 50),
             TaskPid::default(),
         );
+        let deadline = Instant::now() + Duration::from_secs(10);
         let pid = loop {
+            assert!(Instant::now() < deadline, "the run never started");
             tokio::time::sleep(Duration::from_millis(50)).await;
             if let Some(pid) = std::fs::read_to_string(dir.join("pid"))
                 .ok()

@@ -1111,12 +1111,15 @@ export async function socketPort(env: Env): Promise<{ port: BgPort; close(): voi
     throw error
   }
   const agents = async () => (await client.request<{ agents: AgentFacts[] }>("agents")).agents
-  /** `hibernate` names the endpoint by address, so the address must still be the planned endpoint's, before and after */
+  /** the broker refuses the call when the address no longer names the planned endpoint; one that ignores `id` is caught after */
   const hibernate = async (agent: AgentFacts, wake: string, ref?: string) => {
-    const moved = () => new Error(`${agent.address} is another endpoint now`)
-    if ((await agents()).find((one) => one.address === agent.address)?.id !== agent.id) throw moved()
-    const result = await client.request<{ endpoint?: { id?: string } }>("hibernate", { endpoint: agent.address, wake, ...(ref ? { ref } : {}) })
-    if (result.endpoint?.id !== agent.id) throw moved()
+    const result = await client.request<{ endpoint?: { id?: string } }>("hibernate", {
+      endpoint: agent.address,
+      id: agent.id,
+      wake,
+      ...(ref ? { ref } : {}),
+    })
+    if (result.endpoint?.id !== agent.id) throw new Error(`${agent.address} is another endpoint now`)
   }
   return {
     port: {

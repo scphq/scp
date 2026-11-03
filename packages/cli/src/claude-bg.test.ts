@@ -1437,7 +1437,7 @@ describe("broker commands", () => {
     const planned = (await port.agents()).find((agent) => agent.address === "me/w1")!
     await f.human.client.request("rename", { endpoint: "w1", handle: "w9" })
     const taker = await f.connect({ claim: { handle: "w1" } })
-    await expect(port.hibernate(planned, "ref")).rejects.toThrow("me/w1 is another endpoint now")
+    await expect(port.hibernate(planned, "ref")).rejects.toThrow(`me/w1 is not endpoint ${planned.id}`)
     expect(f.broker.core.whoami(taker.endpoint.id).presence).not.toBe("hibernated")
     expect(f.broker.core.whoami(f.worker.endpoint.id).presence).not.toBe("hibernated")
   })
