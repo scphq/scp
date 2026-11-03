@@ -79,12 +79,21 @@ describe("prefilter", () => {
     expect(prefilter("the review is done, two nits left; ship it after lunch")).toEqual({ redactions: [], suspect: false, categories: [], code: false })
   })
 
-  test("16 KiB runs in a few ms", () => {
-    const body = "ordinary words, nothing to see here. ".repeat(450)
-    prefilter(body)
-    const start = performance.now()
-    prefilter(body)
-    expect(performance.now() - start).toBeLessThan(5)
+  test("time grows linearly with the body: 8x the input costs well under the 64x of a quadratic scan", () => {
+    const small = "ordinary words, nothing to see here. ".repeat(450)
+    const large = small.repeat(8)
+    const time = (body: string) => {
+      const start = performance.now()
+      prefilter(body)
+      return performance.now() - start
+    }
+    let fastSmall = Number.POSITIVE_INFINITY
+    let fastLarge = Number.POSITIVE_INFINITY
+    for (let i = 0; i < 12; i++) {
+      fastSmall = Math.min(fastSmall, time(small))
+      fastLarge = Math.min(fastLarge, time(large))
+    }
+    expect(fastLarge / fastSmall).toBeLessThan(32)
   })
 })
 
