@@ -5,7 +5,7 @@ import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, rea
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
 import { BACKGROUNDED, bgDir, CLAUDE_MCP, LAUNCHER_IDENTITY } from "./claude"
 import { RelayUsage, terminalAttached } from "./common"
-import { goneCommand, mcpMount, mcpWords, mountVars } from "./native"
+import { goneCommand, mcpMount, mcpWords, mountVars, pinMode } from "./native"
 import { configDir } from "./relay"
 import { whichOnPath } from "./setup"
 import { claudeTranscripts } from "./spawn"
@@ -1355,8 +1355,8 @@ const decline = (out: (text: string) => void, reason: string): number => {
 
 /**
  * puts the run's wake ticket in the scp server env of a session's MCP config, or takes a stale one out, so the revived session's shim takes
- * its endpoint back with it (SPEC section 6.4 rule 6); a server whose command is gone runs this CLI's mount instead. False when the config
- * cannot be read or written
+ * its endpoint back with it (SPEC section 6.4 rule 6); a server whose command is gone runs this CLI's mount instead, and under SCP_NATIVE=mcp a
+ * saved SCP_NATIVE=1 becomes mcp. False when the config cannot be read or written
  */
 function armTicket(file: string, ticket: string | undefined, env: Env, origin?: string): boolean {
   let temp: string | undefined
@@ -1366,8 +1366,8 @@ function armTicket(file: string, ticket: string | undefined, env: Env, origin?: 
     if (!scp || typeof scp !== "object") return false
     const vars = scp.env && typeof scp.env === "object" ? scp.env : {}
     const stale = goneCommand(scp.command)
-    if (vars.SCP_WAKE_TICKET === ticket && vars.SCP_HARNESS_ORIGIN === origin && !stale) return true
-    const { SCP_WAKE_TICKET: _, SCP_HARNESS_ORIGIN: __, ...rest } = vars
+    if (vars.SCP_WAKE_TICKET === ticket && vars.SCP_HARNESS_ORIGIN === origin && !stale && pinMode(vars, env) === vars) return true
+    const { SCP_WAKE_TICKET: _, SCP_HARNESS_ORIGIN: __, ...rest } = pinMode(vars, env)
     const armed = { ...rest, ...(ticket ? { SCP_WAKE_TICKET: ticket } : {}), ...(origin ? { SCP_HARNESS_ORIGIN: origin } : {}) }
     if (stale) {
       const mount = mcpMount(SELF, mcpWords([String(scp.command), ...(Array.isArray(scp.args) ? scp.args.map(String) : [])], CLAUDE_MCP), env)

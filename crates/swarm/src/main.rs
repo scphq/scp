@@ -70,6 +70,12 @@ fn main() {
 }
 
 fn daemon_command(args: &[String]) -> i32 {
+    if std::env::var("SCP_NATIVE").is_ok_and(|mode| mode == "mcp") {
+        eprintln!(
+            "swarm: SCP_NATIVE=mcp keeps the TypeScript broker, so this native swarm runs no broker; start it with the swarm CLI (swarm daemon), or set SCP_NATIVE=1 for the native one"
+        );
+        return 2;
+    }
     let options = match Daemon::try_parse_from(args) {
         Ok(options) => options,
         Err(error) => {

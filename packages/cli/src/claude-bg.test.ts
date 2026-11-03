@@ -1206,6 +1206,28 @@ describe("wake command", () => {
     expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
     expect(JSON.stringify(JSON.parse(readFileSync(record, "utf8")).mcpServers.scp)).toBe(kept)
   })
+  test("under SCP_NATIVE=mcp a record that runs a native swarm with SCP_NATIVE=1 wakes with mcp, so it never starts the native broker", async () => {
+    const f = fixture()
+    const record = f.record()
+    const bin = join(f.home, "native", "swarm")
+    mkdirSync(join(f.home, "native"), { recursive: true })
+    writeFileSync(bin, "#!/bin/sh\n", { mode: 0o755 })
+    const config = JSON.parse(readFileSync(record, "utf8"))
+    config.mcpServers.scp = {
+      type: "stdio",
+      command: bin,
+      args: ["mcp", "--harness", "claude", "--channels"],
+      env: { ...config.mcpServers.scp.env, SCP_NATIVE: "1", SCP_CLI_ARGV: '["/n","/c.js"]' },
+    }
+    writeFileSync(record, JSON.stringify(config))
+    f.state()
+    expect(await claudeWakeCommand({ ...f.env, SCP_NATIVE: "mcp", SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
+    const scp = JSON.parse(readFileSync(record, "utf8")).mcpServers.scp
+    expect([scp.command, scp.env.SCP_NATIVE, scp.env.SCP_CLI_ARGV, scp.env.SCP_WAKE_TICKET]).toEqual([bin, "mcp", '["/n","/c.js"]', ticket])
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
+    expect(JSON.parse(readFileSync(record, "utf8")).mcpServers.scp.env.SCP_NATIVE).toBe("mcp")
+  })
+
   test("arms and removes tickets for a live entry", async () => {
     const f = fixture()
     const record = f.record()
