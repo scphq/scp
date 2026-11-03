@@ -7,6 +7,7 @@ import { setJoinMode } from "./relay"
 import { CHANNELS_ENV } from "./common"
 import { launchedWithChannels } from "./mcp"
 import { SELF } from "./term"
+import pkg from "../package.json" with { type: "json" }
 
 function fixture(mount?: string[]) {
   const home = mkdtempSync(join(tmpdir(), "scp-claude-"))
@@ -247,4 +248,71 @@ test("explicit parent stays in the background mount and resume arguments stay wi
     args: ["--resume", "session"],
   })
   expect(claudeArgv(["--", "--under", "prompt"])).toEqual({ args: ["--under", "prompt"] })
+})
+
+describe("the background mount under SCP_NATIVE=1", () => {
+  function nativeSwarm(home: string, version = pkg.version): string {
+    const bin = join(home, "native", "swarm")
+    mkdirSync(join(home, "native"), { recursive: true })
+    writeFileSync(bin, `#!/bin/sh\nprintf 'swarm ${version}\\n'\n`, { mode: 0o755 })
+    return bin
+  }
+
+  test("runs the native swarm's mcp directly, with the user mount's words and env, told how this CLI starts", () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels", "--as", "kept"])
+    const bin = nativeSwarm(f.home)
+    const config = JSON.parse(readFileSync(join(f.home, ".claude.json"), "utf8"))
+    config.mcpServers.scp.env = { A: "b", SCP_CLI_ARGV: '["/stale"]' }
+    writeFileSync(join(f.home, ".claude.json"), JSON.stringify(config))
+    const mount = bgMount({ ...f.env, SCP_NATIVE: "1", SCP_SWARM_BIN: bin }, "worker")
+    expect(mount).toMatchObject({ type: "stdio", command: bin, args: ["mcp", "--harness", "claude", "--channels", "--as", "kept"] })
+    expect(mount.env).toEqual({
+      A: "b",
+      SCP_NATIVE: "1",
+      SCP_SWARM_BIN: bin,
+      SCP_CLI_ARGV: JSON.stringify(SELF),
+      SCP_NAME: "worker",
+      SCP_UNDER: "",
+      SCP_GRANT: "",
+    })
+    const bare = bgMount({ HOME: join(f.home, "nowhere"), SCP_NATIVE: "1", SCP_SWARM_BIN: bin }, undefined)
+    expect([bare.command, bare.args]).toEqual([bin, ["mcp", "--harness", "claude", "--channels"]])
+  })
+
+  test("without SCP_NATIVE, or without a matching native swarm, it is the node mount as before", () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const bin = nativeSwarm(f.home, "0.0.1")
+    for (const env of [
+      { ...f.env, SCP_SWARM_BIN: bin },
+      { ...f.env, SCP_NATIVE: "1", SCP_SWARM_BIN: bin },
+    ]) {
+      const mount = bgMount(env, "worker")
+      expect([mount.command, mount.args]).toEqual(["swarm", ["mcp", "--harness", "claude", "--channels"]])
+      expect(Object.keys(mount.env as object)).not.toContain("SCP_CLI_ARGV")
+    }
+    const none = bgMount({ HOME: join(f.home, "nowhere"), SCP_NATIVE: "1", SCP_SWARM_BIN: bin }, undefined)
+    expect([none.command, none.args]).toEqual([SELF[0], [...SELF.slice(1), "mcp", "--harness", "claude", "--channels"]])
+  })
+
+  test("a user mount whose native swarm is gone runs this CLI's mount, without the native variables", () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels", "--as", "kept"])
+    const config = JSON.parse(readFileSync(join(f.home, ".claude.json"), "utf8"))
+    config.mcpServers.scp.command = join(f.home, "removed", "swarm")
+    config.mcpServers.scp.env = { A: "b", SCP_NATIVE: "1", SCP_CLI_ARGV: '["/old"]' }
+    writeFileSync(join(f.home, ".claude.json"), JSON.stringify(config))
+    const mount = bgMount(f.env, "worker")
+    expect([mount.command, mount.args]).toEqual([SELF[0], [...SELF.slice(1), "mcp", "--harness", "claude", "--channels", "--as", "kept"]])
+    expect(mount.env).toEqual({ A: "b", SCP_NAME: "worker", SCP_UNDER: "", SCP_GRANT: "" })
+  })
+
+  test("a mount whose command is gone asks for setup again", () => {
+    const f = fixture(["mcp", "--harness", "claude", "--channels"])
+    const config = JSON.parse(readFileSync(join(f.home, ".claude.json"), "utf8"))
+    config.mcpServers.scp.command = join(f.home, "removed", "swarm")
+    writeFileSync(join(f.home, ".claude.json"), JSON.stringify(config))
+    expect(mountHint(f.env, f.home)).toContain("which is gone (moved by an upgrade?); run swarm setup --write")
+    config.mcpServers.scp.command = nativeSwarm(f.home)
+    writeFileSync(join(f.home, ".claude.json"), JSON.stringify(config))
+    expect(mountHint(f.env, f.home)).toBeUndefined()
+  })
 })

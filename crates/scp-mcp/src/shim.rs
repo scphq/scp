@@ -107,6 +107,8 @@ const BOOLEAN_OPTIONS: [&str; 33] = [
     "gone",
     "clear",
 ];
+/// set on the CLI this shim hands `--help` to, so a native `swarm` found as that CLI prints the usage rather than handing it on again
+const HELP_FORWARDED: &str = "SCP_MCP_HELP_FORWARDED";
 /// the flags `swarm mcp` takes
 const MCP_OPTIONS: [&str; 5] = ["as", "harness", "human", "channels", "cowork-only"];
 
@@ -727,6 +729,12 @@ pub fn main(args: &[String]) -> i32 {
         Err(Usage(message)) => return usage(&message),
     };
     let env = process_env();
+    if values.help && env.contains_key(HELP_FORWARDED) {
+        write_stdout(&format!(
+            "usage: {CLI_NAME} mcp [--as NAME] [--harness H] [--channels] [--cowork-only]   the relay MCP server over stdio\n"
+        ));
+        return 0;
+    }
     if values.help {
         let argv = launcher(&env);
         let mut command = std::process::Command::new(&argv[0]);
@@ -735,7 +743,8 @@ pub fn main(args: &[String]) -> i32 {
             .arg("mcp")
             .args(args)
             .env_remove(SHIM_PPID)
-            .env_remove(crate::spawn::CLI_ARGV);
+            .env_remove(crate::spawn::CLI_ARGV)
+            .env(HELP_FORWARDED, "1");
         return match command.status() {
             Ok(status) => status.code().unwrap_or(FAILED),
             Err(error) => {

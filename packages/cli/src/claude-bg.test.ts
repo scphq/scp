@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { type BrokerTaskContext, RelayClient, startBroker } from "@scp-dev/broker"
 import type { LocalAgent } from "@scp-dev/core"
 import { bgDir } from "./claude"
+import { SELF } from "./term"
 import {
   type BgState,
   type ClaudeEntry,
@@ -1127,6 +1128,27 @@ describe("wake command", () => {
       expect(scpEnv(record)).toEqual({ SCP_NAME: "w1", SCP_GRANT: "" })
     })
   }
+  test("a record whose native swarm an upgrade removed is re-pointed at this CLI's mount, keeping its own variables", async () => {
+    const f = fixture()
+    const record = f.record()
+    const config = JSON.parse(readFileSync(record, "utf8"))
+    config.mcpServers.scp = {
+      type: "stdio",
+      command: join(f.home, "removed", "swarm"),
+      args: ["mcp", "--harness", "claude", "--channels", "--as", "w1"],
+      env: { ...config.mcpServers.scp.env, SCP_NATIVE: "1", SCP_CLI_ARGV: '["/old/node","/old/cli.js"]' },
+    }
+    writeFileSync(record, JSON.stringify(config))
+    f.state()
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
+    const scp = JSON.parse(readFileSync(record, "utf8")).mcpServers.scp
+    expect(scp.command).toBe(SELF[0])
+    expect(scp.args).toEqual([...SELF.slice(1), "mcp", "--harness", "claude", "--channels", "--as", "w1"])
+    expect(scp.env).toEqual({ SCP_NAME: "w1", SCP_GRANT: "", SCP_WAKE_TICKET: ticket })
+    const kept = JSON.stringify(scp)
+    expect(await claudeWakeCommand({ ...f.env, SCP_WAKE_REF: sessionId, SCP_WAKE_TICKET: ticket })).toBe(0)
+    expect(JSON.stringify(JSON.parse(readFileSync(record, "utf8")).mcpServers.scp)).toBe(kept)
+  })
   test("arms and removes tickets for a live entry", async () => {
     const f = fixture()
     const record = f.record()

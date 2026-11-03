@@ -7,6 +7,7 @@ import { CLI_NAME, validHandle } from "@scp-dev/core"
 import { type AttributeDeps, attribute, attributed, validateUnder, underText, type Attribution } from "./attribute"
 import { CHANNELS_ENV, CLAUDE_SESSION_ENV, RelayUsage } from "./common"
 import { deriveHandle } from "./identity"
+import { goneCommand, mcpMount, mcpWords, mountVars } from "./native"
 import { joinMode } from "./relay"
 import { entryArgv, mcpFile, mountedEntry, whichOnPath } from "./setup"
 import { SELF } from "./term"
@@ -92,13 +93,17 @@ export const LAUNCHER_IDENTITY = [
 /** where the shim finds the broker and its labels, passed on since a background session's environment is the daemon's */
 const SHIM_VARS = ["SCP_LABELS", "SCP_DIR", "XDG_STATE_HOME"]
 
+/** the words of Claude Code's `swarm mcp` mount */
+export const CLAUDE_MCP = ["--harness", "claude", "--channels"]
+
 /** the MCP configs `swarm claude --bg` writes, and `<short id>.json` links to the one each session runs with */
 export const bgDir = (env: Env): string => join(relayDir(env as NodeJS.ProcessEnv), "claude-bg")
 
 /**
  * the scp server of a background session: the user's mount with `--channels`, else this CLI's, with the name, parent request and grant in its env, and
- * the session a resume continues as `SCP_HARNESS_ORIGIN`. It has the mount's name, so it replaces the mount for that session; the grant is set even
- * when empty, so one in the daemon's environment never applies
+ * the session a resume continues as `SCP_HARNESS_ORIGIN`. Under SCP_NATIVE=1 it runs the native `swarm mcp` directly, with the user's mount's words
+ * when it has `--channels`, as it does through Node when the mount's command is gone. It has the mount's name, so it replaces the mount for that
+ * session; the grant is set even when empty, so one in the daemon's environment never applies
  */
 export function bgMount(env: Env, name: string | undefined, origin?: string): Record<string, unknown> {
   let entry: Record<string, unknown> | undefined
@@ -106,7 +111,10 @@ export function bgMount(env: Env, name: string | undefined, origin?: string): Re
     entry = mountedEntry("claude", mcpFile("claude", env))
   } catch {}
   const mounted = entry ? entryArgv("claude", entry) : []
-  const argv = mounted.includes("--channels") ? mounted : [...SELF, "mcp", "--harness", "claude", "--channels"]
+  const channels = mounted.includes("--channels")
+  const fresh = mcpMount(SELF, channels ? mcpWords(mounted, CLAUDE_MCP) : CLAUDE_MCP, env)
+  const repaired = channels && goneCommand(mounted[0])
+  const argv = fresh.native || !channels || repaired ? fresh.argv : mounted
   const base = entry?.env && typeof entry.env === "object" ? (entry.env as Record<string, string>) : {}
   const vars = Object.fromEntries(SHIM_VARS.flatMap((key) => (env[key] ? [[key, env[key]]] : [])))
   return {
@@ -114,7 +122,7 @@ export function bgMount(env: Env, name: string | undefined, origin?: string): Re
     command: argv[0],
     args: argv.slice(1),
     env: {
-      ...base,
+      ...(fresh.native || repaired ? mountVars(base, fresh) : base),
       ...vars,
       ...(name !== undefined ? { SCP_NAME: name } : {}),
       SCP_UNDER: env.SCP_UNDER ?? "",
@@ -160,8 +168,10 @@ export function mountHint(env: Env, cwd: string = safeCwd()): string | undefined
     if (entry) entries.push(entry)
   } catch {}
   if (!entries.length) return `${CLI_NAME} claude: Claude Code has no scp MCP mount, so messages cannot wake this session; run ${CLI_NAME} setup --write`
-  if (!entries.some((entry) => entryArgv("claude", entry).includes("--channels")))
-    return `${CLI_NAME} claude: the scp mount lacks --channels, so messages cannot wake this session; run ${CLI_NAME} setup --write`
+  const channels = entries.filter((entry) => entryArgv("claude", entry).includes("--channels"))
+  if (!channels.length) return `${CLI_NAME} claude: the scp mount lacks --channels, so messages cannot wake this session; run ${CLI_NAME} setup --write`
+  if (channels.every((entry) => goneCommand(entry.command)))
+    return `${CLI_NAME} claude: the scp mount runs ${String(channels[0]!.command)}, which is gone (moved by an upgrade?); run ${CLI_NAME} setup --write`
   return undefined
 }
 

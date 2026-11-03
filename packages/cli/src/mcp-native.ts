@@ -1,21 +1,38 @@
 import { spawn } from "node:child_process"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
+import pkg from "../package.json" with { type: "json" }
+import { nativeKey, nativeSwarm } from "./native"
 import { FAILED, note, SELF } from "./term"
 
 type Env = Record<string, string | undefined>
 
-/** the native MCP server binary `swarm mcp` hands its session to: with $SCP_NATIVE=1, $SCP_MCP_BIN when it is an executable file */
-export function nativeMcpBin(env: Env): string | undefined {
+/** the native MCP server `swarm mcp` hands its session to: its binary and the words before the caller's */
+export type NativeMcp = { bin: string; words: string[] }
+
+/**
+ * with $SCP_NATIVE=1, the native MCP server: $SCP_MCP_BIN when set (an executable file, run with the words as is), else the native
+ * `swarm` that matches this CLI (run as `swarm mcp`); undefined, with a note, when there is none
+ */
+export function nativeMcp(env: Env, version = pkg.version): NativeMcp | undefined {
   if (env.SCP_NATIVE !== "1") return undefined
   const bin = env.SCP_MCP_BIN
+  if (bin === undefined) {
+    const swarm = nativeSwarm(env, version)
+    if (swarm) return { bin: swarm, words: ["mcp"] }
+    const key = nativeKey()
+    note(
+      `no usable native MCP server (no native swarm ${version}: ${key ? `install @scp-dev/native-${key}, ` : ""}set SCP_SWARM_BIN or SCP_MCP_BIN); the built-in one serves this session`,
+    )
+    return undefined
+  }
   try {
-    if (bin && isAbsolute(bin) && statSync(bin).isFile()) {
+    if (isAbsolute(bin) && statSync(bin).isFile()) {
       accessSync(bin, constants.X_OK)
-      return bin
+      return { bin, words: [] }
     }
   } catch {}
-  note(`no usable native MCP server (${bin ? `${bin} is not an executable file` : "SCP_MCP_BIN is unset"}); the built-in one serves this session`)
+  note(`no usable native MCP server (${bin} is not an executable file); the built-in one serves this session`)
   return undefined
 }
 

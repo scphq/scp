@@ -1,8 +1,8 @@
-import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { brokerEngine, nativeBroker, nativeDaemonEnv, nativeSwarm } from "./native"
+import { brokerEngine, goneCommand, mcpMount, mcpWords, mountVars, mountWith, nativeBroker, nativeDaemonEnv, nativeSwarm, resetMountNote } from "./native"
 import { SELF } from "./term"
 import { swarmBinary } from "./test-setup"
 import { alive, waitFor } from "./testing/fixtures"
@@ -121,6 +121,63 @@ describe("SCP_NATIVE", () => {
     }
     await child.exited
     expect(await new Response(child.stderr).text()).toMatch(FALLBACK)
+  })
+})
+
+describe("MCP mounts", () => {
+  const launch = ["/opt/node", "/opt/swarm/cli.js"]
+  const words = ["--harness", "claude", "--channels"]
+
+  test("without SCP_NATIVE=1 a mount runs swarm mcp through the launch and checks no binary", () => {
+    const { bin, calls } = fakeSwarm("mount-off", pkg.version)
+    for (const value of [undefined, "", "0", "true"])
+      expect(mcpMount(launch, words, { SCP_NATIVE: value, SCP_SWARM_BIN: bin })).toEqual({ argv: [...launch, "mcp", ...words], env: {}, native: false })
+    expect(existsSync(calls)).toBe(false)
+  })
+
+  test("with SCP_NATIVE=1 and a matching native swarm the mount runs it directly, told the launch", () => {
+    const { bin } = fakeSwarm("mount-on", pkg.version)
+    expect(mcpMount(launch, words, { SCP_NATIVE: "1", SCP_SWARM_BIN: bin })).toEqual({
+      argv: [bin, "mcp", ...words],
+      env: { SCP_NATIVE: "1", SCP_SWARM_BIN: bin, SCP_CLI_ARGV: JSON.stringify(launch) },
+      native: true,
+    })
+    expect(mountWith("/pkg/bin/swarm", launch, words, {}).env).toEqual({ SCP_NATIVE: "1", SCP_CLI_ARGV: JSON.stringify(launch) })
+  })
+
+  test("a missing or mismatched native swarm falls back to the node mount, noted once", () => {
+    const { bin } = fakeSwarm("mount-old", "0.0.1")
+    resetMountNote()
+    const notes: string[] = []
+    const write = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      notes.push(String(chunk))
+      return true
+    })
+    try {
+      for (const env of [
+        { SCP_NATIVE: "1", SCP_SWARM_BIN: bin },
+        { SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "nowhere", "swarm") },
+      ])
+        expect(mcpMount(launch, words, env)).toEqual({ argv: [...launch, "mcp", ...words], env: {}, native: false })
+    } finally {
+      write.mockRestore()
+    }
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toMatch(/^swarm: SCP_NATIVE=1 but no native swarm \S+ binary for \S+ \(.*\); MCP mounts run swarm mcp through Node\n$/)
+  })
+
+  test("a mount's words, its variables and a gone command", () => {
+    expect(mcpWords(["/n", "/c.js", "mcp", "--harness", "codex", "--as", "w"], ["x"])).toEqual(["--harness", "codex", "--as", "w"])
+    expect(mcpWords(["/wrapper.sh"], ["--harness", "codex"])).toEqual(["--harness", "codex"])
+    const native = mountWith("/b/swarm", launch, [], {})
+    expect(mountVars({ A: "1", SCP_NATIVE: "1", SCP_CLI_ARGV: "[]", SCP_SWARM_BIN: "/x" }, mcpMount(launch, [], {}))).toEqual({ A: "1" })
+    expect(mountVars({ A: "1", SCP_CLI_ARGV: "[]" }, native)).toEqual({ A: "1", ...native.env })
+    const { bin } = fakeSwarm("gone", pkg.version)
+    expect(goneCommand(bin)).toBe(false)
+    expect(goneCommand("swarm")).toBe(false)
+    expect(goneCommand(undefined)).toBe(false)
+    expect(goneCommand(join(root, "nowhere", "swarm"))).toBe(true)
+    expect(goneCommand(root)).toBe(true)
   })
 })
 
