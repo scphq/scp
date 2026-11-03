@@ -98,17 +98,19 @@ impl Broker {
             eprintln!("{line}")
         })
         .map(|config| crate::bridge::Bridge::attach(config, &mut core));
-        let cli = crate::wake::cli_argv(&options.env);
+        let cli = crate::launch::cli_launch(&options.env, &options.paths.dir);
         if let Some(cli) = &cli {
             core.wakers
                 .set_builtin(crate::wake::Wakers::builtin_for(cli));
         }
-        let task = cli.map(|cli| crate::tasks::Task {
-            cli,
-            dir: options.paths.dir.clone(),
-            env: options.env.clone(),
-            every: crate::tasks::CLAUDE_BG_EVERY,
-        });
+        let task = cli
+            .or_else(|| crate::launch::path_cli(&options.env))
+            .map(|cli| crate::tasks::Task {
+                cli,
+                dir: options.paths.dir.clone(),
+                env: options.env.clone(),
+                every: crate::tasks::CLAUDE_BG_EVERY,
+            });
         core.federation.env = options.env;
         core.sweep().await.map_err(io::Error::other)?;
         tokio::fs::set_permissions(

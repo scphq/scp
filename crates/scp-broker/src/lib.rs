@@ -11,6 +11,7 @@ pub mod hibernate;
 pub mod hooks;
 pub mod identity;
 pub mod judge;
+pub mod launch;
 pub mod limits;
 pub mod messages;
 pub mod paths;
