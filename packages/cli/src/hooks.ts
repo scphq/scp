@@ -651,7 +651,7 @@ export const HOOK_DEADLINE_MAX_MS = 2 ** 31 - 1
 /** `SCP_HOOK_DEADLINE_MS`: a hook's deadline from process start in place of {@link HOOK_DEADLINE_MS} and agy's, for a machine too loaded to meet them */
 export function hookDeadlineOverride(env: Record<string, string | undefined>): number | undefined {
   const raw = env.SCP_HOOK_DEADLINE_MS
-  const ms = raw && /^\d{1,10}$/.test(raw) ? Number(raw) : 0
+  const ms = raw && /^[0-9]+$/.test(raw) ? Number(raw) : 0
   return ms > 0 && ms <= HOOK_DEADLINE_MAX_MS ? ms : undefined
 }
 

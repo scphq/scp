@@ -135,6 +135,7 @@ fn deadline_math() {
         hook::deadline_override(&env("2147483647")),
         Some(2147483647)
     );
+    assert_eq!(hook::deadline_override(&env("00000060000")), Some(60000));
     for value in [
         "",
         "0",
@@ -145,6 +146,7 @@ fn deadline_math() {
         "abc",
         "2147483648",
         "99999999999999999999",
+        "60000\n",
     ] {
         assert_eq!(hook::deadline_override(&env(value)), None, "{value:?}");
     }
