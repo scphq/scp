@@ -4,7 +4,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, statSy
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { LIMITS, RelayError, type StopNudge } from "@scp-dev/core"
-import { BrokerUnavailable, connectBroker, RelayClient } from "./client"
+import { BrokerUnavailable, connectBroker, RETRY_MAX_MS, RelayClient } from "./client"
 import { BrokerRunning, releaseBrokerLock, takeBrokerLock } from "./lock"
 import { LineReader, LineWriter } from "./ndjson"
 import { privateDir, socketPath } from "./paths"
@@ -253,13 +253,15 @@ describe("broker", () => {
     cleanups.push(() => rmSync(root, { recursive: true, force: true }))
     const dir = join(root, "state")
     let started: Broker | undefined
+    // past connectBroker's longest retry gap (RETRY_MAX_MS, jittered up to 1.5x), so the broker cannot idle out before its starter connects
+    const idleMs = 5 * RETRY_MAX_MS
     const client = await connectBroker(dir, () => {
-      void startBroker({ env: { XDG_CONFIG_HOME: join(root, "config") }, dir, idleMs: 200, policyPath: join(root, "none.json") }).then((b) => (started = b))
+      void startBroker({ env: { XDG_CONFIG_HOME: join(root, "config") }, dir, idleMs, policyPath: join(root, "none.json") }).then((b) => (started = b))
     })
     expect((await client.hello({ human: true })).endpoint!.address).toBe("me/")
     client.close()
-    await Promise.race([started!.stopped, Bun.sleep(3000).then(() => Promise.reject(new Error("broker did not idle out")))])
-  })
+    await Promise.race([started!.stopped, Bun.sleep(idleMs + 8000).then(() => Promise.reject(new Error("broker did not idle out")))])
+  }, 20_000)
 
   test("a socket that refuses connects while the broker lock is held is a busy broker, a sandbox only under a sandbox marker", async () => {
     const root = mkdtempSync(join(tmpdir(), "relay-broker-"))
@@ -540,11 +542,18 @@ async function raw(path: string) {
     },
   })
   cleanups.push(() => void socket.end())
-  const lines = () =>
-    state.text
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as { id?: unknown; method?: string; params?: Record<string, unknown>; error?: { code: number }; result?: unknown })
+  type Line = { id?: unknown; method?: string; params?: Record<string, unknown>; error?: { code: number }; result?: unknown }
+  const parsed: Line[] = []
+  let offset = 0
+  /** the complete lines so far; a line still arriving is left for a later call */
+  const lines = () => {
+    for (let end = state.text.indexOf("\n", offset); end >= 0; end = state.text.indexOf("\n", offset)) {
+      const line = state.text.slice(offset, end)
+      offset = end + 1
+      if (line) parsed.push(JSON.parse(line) as Line)
+    }
+    return parsed
+  }
   const until = async (done: () => boolean, ms = 5000) => {
     for (const deadline = Date.now() + ms; !done() && Date.now() < deadline; ) await Bun.sleep(10)
     return done()
@@ -672,18 +681,25 @@ describe("broker, hardening", () => {
 
 describe("broker, partial lines", () => {
   test("each unfinished line gets its own deadline, not the one before it", async () => {
-    const { broker } = await setup({ partialLineMs: 300 })
+    // each line stays open `open` ms, well inside the deadline even when a loaded event loop runs late, while the two together outlast it
+    const partialLineMs = 2000
+    const open = 1100
+    const { broker } = await setup({ partialLineMs })
     const r = await raw(broker.socket)
     const hello = `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "hello", params: { protocol: "scp/1", observe: true } })}\n`
     const list = `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "list" })}\n`
+    const began = Date.now()
     r.socket.write(hello.slice(0, 10))
-    await Bun.sleep(200)
+    await Bun.sleep(open)
     r.socket.write(hello.slice(10) + list.slice(0, 10))
-    await Bun.sleep(200)
+    await Bun.sleep(open)
+    expect(Date.now() - began).toBeGreaterThan(partialLineMs)
     r.socket.write(list.slice(10))
-    expect(await r.until(() => r.lines().some((line) => line.id === 2))).toBe(true)
+    await r.until(() => r.state.closed || r.lines().some((line) => line.id === 2))
+    expect(r.state.text).not.toContain("not finished in time")
+    expect(r.lines().some((line) => line.id === 2)).toBe(true)
     expect(r.state.closed).toBe(false)
-  })
+  }, 15_000)
 })
 
 describe("broker, hooks", () => {
