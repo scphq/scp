@@ -290,6 +290,13 @@ impl HookCalls {
         let (answer, answered) = oneshot::channel();
         let call = Arc::new(Call {
             calls: self.clone(),
+            starts: Arc::new(
+                params
+                    .procs
+                    .iter()
+                    .filter_map(|proc| Some((u32::try_from(proc.pid).ok()?, proc.start.clone())))
+                    .collect(),
+            ),
             state: Mutex::new(CallState {
                 ends: params.ends,
                 offered: false,
@@ -377,6 +384,7 @@ struct CallState {
 
 struct Call {
     calls: Arc<HookCalls>,
+    starts: crate::procs::Starts,
     state: Mutex<CallState>,
     rearm: Notify,
     done: watch::Sender<bool>,
@@ -454,6 +462,7 @@ impl HookContext {
             core,
             conn,
             open: AtomicBool::new(true),
+            starts: self.call.starts.clone(),
         }
     }
 
@@ -501,6 +510,7 @@ pub struct HookClient {
     core: SharedCore,
     conn: ConnectionId,
     open: AtomicBool,
+    starts: crate::procs::Starts,
 }
 
 impl HookClient {
@@ -529,12 +539,15 @@ impl HookClient {
             ));
         }
         let guard = self.core.clone().lock_owned().await;
-        let mut result = Core::execute(
-            self.core.clone(),
-            guard,
-            self.conn,
-            method.to_owned(),
-            params,
+        let mut result = crate::procs::with_starts(
+            self.starts.clone(),
+            Core::execute(
+                self.core.clone(),
+                guard,
+                self.conn,
+                method.to_owned(),
+                params,
+            ),
         )
         .await;
         if method == "hello"

@@ -137,6 +137,9 @@ impl Procs {
         let Some(expected) = expected else {
             return true;
         };
+        if let Ok(started) = SUPPLIED.try_with(|starts| starts.get(&pid).cloned().flatten()) {
+            return started.is_none_or(|start| start == expected);
+        }
         let Some(mut table) = self.table(None).await else {
             return true;
         };
@@ -169,6 +172,19 @@ impl Procs {
         }
         table.by_pid.get(&pid).is_none_or(|start| start == expected)
     }
+}
+
+/// process start times by pid, as a hook client supplied them
+pub type Starts = Arc<HashMap<u32, Option<String>>>;
+
+tokio::task_local! {
+    static SUPPLIED: Starts;
+}
+
+/// runs `future` with `alive` reading `starts` instead of the process table, as for a hook run's in-process connections: a pid they
+/// leave out, or name without a start time, counts as started when expected
+pub async fn with_starts<F: std::future::Future>(starts: Starts, future: F) -> F::Output {
+    SUPPLIED.scope(starts, future).await
 }
 
 pub fn parse_starts(text: &str) -> HashMap<u32, String> {
@@ -224,6 +240,26 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn supplied_starts_answer_without_the_process_table() {
+        let procs = Procs::new();
+        let pid = std::process::id();
+        let key = format!("pid:{pid}:Thu-Oct-15-10:00:00-2026");
+        let starts: Starts = Arc::new(HashMap::from([(
+            pid,
+            Some("Thu-Oct-15-10:00:00-2026".to_owned()),
+        )]));
+        assert!(with_starts(starts, procs.alive(&key)).await);
+        let other: Starts = Arc::new(HashMap::from([(
+            pid,
+            Some("Fri-Oct-16-10:00:00-2026".to_owned()),
+        )]));
+        assert!(!with_starts(other, procs.alive(&key)).await);
+        assert!(with_starts(Arc::new(HashMap::new()), procs.alive(&key)).await);
+        assert_eq!(procs.spawns.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(!procs.alive(&key).await);
+    }
 
     #[tokio::test]
     async fn batched_and_concurrent_lookups_share_one_spawn() {

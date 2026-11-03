@@ -18,6 +18,7 @@ pub mod peek;
 pub mod policy;
 pub mod procs;
 pub mod proto;
+pub mod render;
 pub mod rules;
 pub mod runners;
 pub mod scrub;

@@ -198,6 +198,37 @@ fn hook_without_broker_is_silent() {
 }
 
 #[test]
+fn hook_renders_against_the_native_broker() {
+    let temp = Temp::new();
+    let start = output(temp.swarm(&["daemon", "restart"]));
+    assert!(start.status.success(), "{}", text(&start.stderr));
+    let mut command = temp.swarm(&["hook", "claude"]);
+    command
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_PID", std::process::id().to_string())
+        .env("SCP_SESSION", "native-hook")
+        .env("SCP_NAME", "subject")
+        .env("SCP_TLDR_EVERY", "0");
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"SessionStart","source":"startup"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let reply: Value = serde_json::from_str(&text(&out.stdout)).unwrap();
+    assert_eq!(reply["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    assert!(
+        reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("relay_set_title")
+    );
+}
+
+#[test]
 fn daemon_stop_and_restart() {
     let temp = Temp::new();
     let stop = output(temp.swarm(&["daemon", "stop"]));
