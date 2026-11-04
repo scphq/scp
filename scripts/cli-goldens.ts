@@ -2,12 +2,15 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { OPTIONS } from "../packages/cli/src/common";
+import { OPTIONS, RelayUsage, type Values } from "../packages/cli/src/common";
 import { hookClient } from "../packages/cli/src/hooks";
 import {
   fleetLine,
+  groupText,
   hoistIdentity,
+  holdsArgs,
   printEndpoints,
+  printScope,
   printSummary,
   printTree,
   type Snapshot,
@@ -23,6 +26,7 @@ const OPTIONS_FILE = join(root, "crates/scp-cli/src/options.json");
 const PARSE_FILE = join(root, "crates/scp-cli/tests/fixtures/parse.json");
 const FLEET_FILE = join(root, "crates/scp-cli/tests/fixtures/fleet.json");
 const CLAUDE_BG_FILE = join(root, "crates/scp-cli/tests/fixtures/claude-bg.json");
+const SCOPE_FILE = join(root, "crates/scp-cli/tests/fixtures/scope.json");
 
 /** whole command lines after `swarm`; each runs through hoisting, util.parseArgs under Node and the verb's allowed flags */
 const CASES: string[][] = [
@@ -88,6 +92,18 @@ const CASES: string[][] = [
   ["whoami", "--cloud", "--json", "--bogus"],
   ["whoami", "--json", "--json"],
   ["whoami", "--as", "a", "--human", "--harness", "h", "--machine=m"],
+  ["rules", "set", "--allow", "a", "--allow=b,c", "--scope", "tree", "--in", "x"],
+  ["rules", "widen", "me/a", "--out"],
+  ["group", "create", "g", "--rules", "a,b", "--json"],
+  ["group", "ls", "--all"],
+  ["admin", "grant", "me/a", "--tree", "me/r", "--group", "g"],
+  ["holds", "refuse", "h", "--reason", "no", "--redacted"],
+  ["holds", "ls", "--all", "--reason="],
+  ["peek", "me/a", "--turns", "2", "--full", "--who"],
+  ["peek", "--turns"],
+  ["set-peek", "on", "--all"],
+  ["spawn-env", "--json"],
+  ["spawn-env", "--title", "a b", "--scope", "tree", "--group", "g", "--ttl", "1h", "--under", "me/x"],
 ];
 
 const NODE_PARSE = `
@@ -330,6 +346,65 @@ function fleetGoldens(): string {
   }
 }
 
+/** what `holdsArgs` returns for `words`, or the usage error it throws */
+function holdsCase(words: string[], values: Values) {
+  try {
+    return { words, values, args: holdsArgs(values, words) };
+  } catch (error) {
+    if (!(error instanceof RelayUsage)) throw error;
+    return { words, values, error: error.message };
+  }
+}
+
+function scopeGoldens(): string {
+  const views = [
+    { address: "me/a", preset: "open", tree: "me/a", parent: null, depth: 0, rules: {}, caps: [], groups: [] },
+    {
+      address: "me/kid",
+      preset: "custom",
+      tree: "me/r",
+      parent: "me/r",
+      depth: 2,
+      rules: { in: [], out: ["ep:b", "*"] },
+      caps: [
+        { id: "cap_1", dir: "in", by: "me/r", sels: [{ sel: "tree:parent" }, { sel: "ep:x", via: "me/r" }] },
+        { id: "group:g:out", dir: "out", by: "group:g", sels: [] },
+      ],
+      groups: ["g", "ünï"],
+    },
+  ].map((view) => ({ view, lines: printed(() => printScope(view as never)).lines }));
+  const groups = [
+    [],
+    [
+      { name: "g", owner: "me/a", members: 1, pinned: true, policy: false },
+      { name: "h", owner: "me/b", members: 0, pinned: false, policy: true, ignored: "no such tree" },
+    ],
+    { name: "g", dropped: true },
+    { name: "g", endpoint: "me/a", member: true },
+    { name: "g", endpoint: "me/a", member: false },
+    { name: "g", owner: "me/a", tree: null, pinned: false, members: [], rules: {} },
+    { name: "g", owner: "me/a", tree: "me/r", pinned: true, members: ["me/a", "me/b"], rules: { in: [{ sel: "ep:a", via: "me/r" }, { sel: "*" }], out: [] } },
+    { z: 1, "2": [true], a: { y: null, b: "é" } },
+    null,
+  ].map((result) => ({ result, text: groupText(result) }));
+  const holds = [
+    [[], {}],
+    [["ls", "h"], {}],
+    [["show"], {}],
+    [["nope", "h"], {}],
+    [["show", "h", "x"], {}],
+    [["show", "h"], { redacted: true }],
+    [["release", "h"], { redacted: true, reason: "x" }],
+    [["release", "h"], { all: true }],
+    [["refuse", "h"], {}],
+    [["refuse", "h"], { reason: " \t\n" }],
+    [["refuse", "h"], { reason: "spam" }],
+    [["ls"], { all: true }],
+    [[""], {}],
+  ].map(([words, values]) => holdsCase(words as string[], values as Values));
+  return `${JSON.stringify({ views, groups, holds }, null, 2)}\n`;
+}
+
 /** the claude-bg goldens, printed under UTC so `ps` start times read the same on every machine */
 function claudeBgGoldens(): string {
   const run = spawnSync(process.execPath, [join(import.meta.dir, "claude-bg-goldens.ts")], {
@@ -348,6 +423,7 @@ for (const [file, text] of [
   [PARSE_FILE, goldens()],
   [FLEET_FILE, fleetGoldens()],
   [CLAUDE_BG_FILE, claudeBgGoldens()],
+  [SCOPE_FILE, scopeGoldens()],
 ] as const) {
   if (!check) writeFileSync(file, text);
   else if (readFileSync(file, "utf8") !== text) {

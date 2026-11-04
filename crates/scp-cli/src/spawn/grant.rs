@@ -48,7 +48,7 @@ fn assign(params: &mut Params, key: &str, value: Value) {
 }
 
 /// `a,b, c` as a selector list; repeated flags add up
-fn selector_list(values: &Parsed, key: &str) -> Option<Vec<String>> {
+pub fn selector_list(values: &Parsed, key: &str) -> Option<Vec<String>> {
     let words = match values.get(key)? {
         Val::Flag(_) => return None,
         Val::Text(text) => std::slice::from_ref(text),
@@ -65,7 +65,8 @@ fn selector_list(values: &Parsed, key: &str) -> Option<Vec<String>> {
     )
 }
 
-fn preset(values: &Parsed) -> Result<Option<String>, Fail> {
+/// the `--scope` preset
+pub fn preset(values: &Parsed) -> Result<Option<String>, Fail> {
     match values.get("scope") {
         None => Ok(None),
         Some(Val::Text(text)) if PRESETS.contains(&text.as_str()) => Ok(Some(text.clone())),

@@ -69,7 +69,7 @@ fn result_of(line: &[u8]) -> Result<Json, Fail> {
 type Asked = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Json, Fail>>>>;
 
 /// a request sent now, its reply's result to come
-fn ask(opened: &Opened, method: &str, params: Vec<(&str, Value)>) -> Asked {
+pub(crate) fn ask(opened: &Opened, method: &str, params: Vec<(&str, Value)>) -> Asked {
     let params: Map<String, Value> = params.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
     let reply = opened.client.request_line(method, Value::Object(params));
     Box::pin(async move { result_of(&reply.await?) })
@@ -102,7 +102,7 @@ fn reading<'j>(value: Option<&'j Json>, name: &str, method: &str) -> Result<&'j 
 }
 
 /// `value.length` where the TypeScript CLI tests it: a list's or a string's, else 0 as `undefined` tests
-fn length(value: Option<&Json>) -> Result<usize, Fail> {
+pub(crate) fn length(value: Option<&Json>) -> Result<usize, Fail> {
     if let Some(fail) = missing(value, "length") {
         return Err(fail);
     }
@@ -114,7 +114,7 @@ fn length(value: Option<&Json>) -> Result<usize, Fail> {
 }
 
 /// what the TypeScript CLI's `for (const x of <name>)` loops over: a list's items or a string's characters
-fn iterating(value: Option<&Json>, name: &str) -> Result<Vec<Json>, Fail> {
+pub(crate) fn iterating(value: Option<&Json>, name: &str) -> Result<Vec<Json>, Fail> {
     match value {
         Some(Json::Arr(items)) => Ok(items.clone()),
         Some(Json::Str(text)) => Ok(text.chars().map(|c| Json::Str(c.into())).collect()),

@@ -1528,7 +1528,7 @@ type GroupResult = {
 }
 
 /** a group result as text: the list, one group, a membership change or a drop */
-function groupText(result: unknown): string {
+export function groupText(result: unknown): string {
   if (Array.isArray(result)) {
     if (!result.length) return "no groups"
     return (result as GroupResult[])
@@ -1552,7 +1552,7 @@ function groupText(result: unknown): string {
   ].join("\n")
 }
 
-function printScope(view: ScopeView): void {
+export function printScope(view: ScopeView): void {
   out(`${view.address}  scope ${view.preset}${view.tree ? `  tree ${view.tree}` : ""}${view.parent ? `  parent ${view.parent}` : ""}  depth ${view.depth}`)
   out(`rules in: ${view.rules.in ? view.rules.in.join(",") || "(none)" : "open"}`)
   out(`rules out: ${view.rules.out ? view.rules.out.join(",") || "(none)" : "open"}`)
@@ -1698,7 +1698,7 @@ type HoldView = {
 }
 
 /** the action and hold id of `swarm holds`, checked before any connection */
-function holdsArgs(values: Values, positionals: string[]): { action: "ls" | "show" | "release" | "refuse"; id: string | undefined } {
+export function holdsArgs(values: Values, positionals: string[]): { action: "ls" | "show" | "release" | "refuse"; id: string | undefined } {
   const [action = "ls", id, ...extra] = positionals
   if (extra.length || !["ls", "show", "release", "refuse"].includes(action) || (action === "ls") === (id !== undefined)) {
     throw new RelayUsage(`${CLI_NAME} holds takes ls [--all], show <id>, release <id> [--redacted] or refuse <id> --reason TEXT`)

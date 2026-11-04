@@ -60,5 +60,17 @@
 {"argv":["inbox","--wait=-1"],"verb":"inbox","values":[["wait","-1"]],"positionals":[]},
 {"argv":["whoami","--cloud","--json","--bogus"],"verb":"whoami","error":"Unknown option '--bogus'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- \"--bogus\""},
 {"argv":["whoami","--json","--json"],"verb":"whoami","values":[["json",true]],"positionals":[]},
-{"argv":["whoami","--as","a","--human","--harness","h","--machine=m"],"verb":"whoami","values":[["as","a"],["human",true],["harness","h"],["machine","m"]],"positionals":[]}
+{"argv":["whoami","--as","a","--human","--harness","h","--machine=m"],"verb":"whoami","values":[["as","a"],["human",true],["harness","h"],["machine","m"]],"positionals":[]},
+{"argv":["rules","set","--allow","a","--allow=b,c","--scope","tree","--in","x"],"verb":"rules","values":[["allow",["a","b,c"]],["scope","tree"],["in","x"]],"positionals":["set"]},
+{"argv":["rules","widen","me/a","--out"],"verb":"rules","error":"Option '--out <value>' argument missing"},
+{"argv":["group","create","g","--rules","a,b","--json"],"verb":"group","values":[["rules","a,b"],["json",true]],"positionals":["create","g"]},
+{"argv":["group","ls","--all"],"verb":"group","error":"swarm group does not take --all"},
+{"argv":["admin","grant","me/a","--tree","me/r","--group","g"],"verb":"admin","values":[["tree","me/r"],["group","g"]],"positionals":["grant","me/a"]},
+{"argv":["holds","refuse","h","--reason","no","--redacted"],"verb":"holds","values":[["reason","no"],["redacted",true]],"positionals":["refuse","h"]},
+{"argv":["holds","ls","--all","--reason="],"verb":"holds","values":[["all",true],["reason",""]],"positionals":["ls"]},
+{"argv":["peek","me/a","--turns","2","--full","--who"],"verb":"peek","values":[["turns","2"],["full",true],["who",true]],"positionals":["me/a"]},
+{"argv":["peek","--turns"],"verb":"peek","error":"Option '--turns <value>' argument missing"},
+{"argv":["set-peek","on","--all"],"verb":"set-peek","error":"swarm set-peek does not take --all"},
+{"argv":["spawn-env","--json"],"verb":"spawn-env","error":"swarm spawn-env does not take --json"},
+{"argv":["spawn-env","--title","a b","--scope","tree","--group","g","--ttl","1h","--under","me/x"],"verb":"spawn-env","values":[["title","a b"],["scope","tree"],["group","g"],["ttl","1h"],["under","me/x"]],"positionals":[]}
 ]
