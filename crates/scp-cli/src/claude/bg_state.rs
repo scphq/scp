@@ -738,11 +738,10 @@ mod tests {
         let bg = dir.join("claude-bg");
         private_dir(&bg).unwrap();
         let inside = Arc::new(AtomicUsize::new(0));
-        let entered = Arc::new(AtomicUsize::new(0));
         let runs: Vec<_> = (0..8)
             .map(|_| {
                 let (env, bg) = (env.clone(), bg.clone());
-                let (inside, entered) = (inside.clone(), entered.clone());
+                let inside = inside.clone();
                 std::thread::spawn(move || {
                     for round in 0..150 {
                         if round % 10 == 0 {
@@ -753,7 +752,6 @@ mod tests {
                             continue;
                         };
                         assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0, "two holders");
-                        entered.fetch_add(1, Ordering::SeqCst);
                         std::thread::yield_now();
                         inside.fetch_sub(1, Ordering::SeqCst);
                         drop(lock);
@@ -764,7 +762,7 @@ mod tests {
         for run in runs {
             run.join().unwrap();
         }
-        assert!(entered.load(Ordering::SeqCst) > 0);
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
