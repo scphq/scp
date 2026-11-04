@@ -512,7 +512,7 @@ const SCENARIOS: Scenario[] = [
   {
     name: "a session another live run holds is left alone",
     ...unit,
-    files: { [`state/claude-bg/${ID}.lock`]: `{"pid":${process.pid}}\n` },
+    files: { [`state/claude-bg/${ID}.lock.1.live`]: `{"pid":${process.pid}}\n` },
     steps: [prune()],
     check: (seen) => {
       expect(seen.outputs[0]!.stdout).toContain("another claude-bg run")
@@ -522,7 +522,7 @@ const SCENARIOS: Scenario[] = [
   {
     name: "a dead run's lock is taken over",
     ...unit,
-    files: { [`state/claude-bg/${ID}.lock`]: '{"pid":2147483646}\n' },
+    files: { [`state/claude-bg/${ID}.lock.1.dead`]: '{"pid":2147483646}\n' },
     steps: [prune()],
     check: (seen) => expect(ran(seen, "stop")).toBe(true),
   },
@@ -756,11 +756,14 @@ describe.skipIf(!swarmBinary)("claude-bg: the native swarm against this CLI", ()
     ["ts", "native"],
   ] as const)
     test(`a ${second} run overlapping a ${first} run on one session leaves it to the first`, async () => {
-      const seen = await run({ ...unit, files: { "slow-stop": "" }, steps: [{ ...prune(), alongside: { argv: ["claude", "prune"], lag: 700 } }] }, first)
+      const seen = await run(
+        { name: "overlap", ...unit, files: { "slow-stop": "" }, steps: [{ ...prune(), alongside: { argv: ["claude", "prune"], lag: 700 } }] },
+        first,
+      )
       expect(argvs(seen).filter((line) => line.startsWith("stop"))).toEqual([`stop ${ID}`])
       expect(argvs(seen).filter((line) => line.startsWith("rm"))).toEqual([`rm ${ID}`])
       expect(seen.outputs.map((one) => one.stdout).join("")).toContain("another claude-bg run is acting on it")
       expect(seen.files[`state/claude-bg/${ID}.state.json`]).toContain("removedAt")
-      expect(Object.keys(seen.files).filter((name) => /\.(tmp|lock|stale)$/.test(name))).toEqual([])
+      expect(Object.keys(seen.files).filter((name) => /\.tmp$|\.lock\./.test(name))).toEqual([])
     }, 60_000)
 })

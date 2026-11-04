@@ -174,25 +174,55 @@ describe("claude-bg-state", () => {
 describe("claude-bg-lock", () => {
   const place = (text: string) => {
     const dir = scratch()
-    put(join(dir, "claude-bg", "1a2b3c4d.lock"), text)
+    put(join(dir, "claude-bg", "1a2b3c4d.lock.48213.held"), text)
     return { SCP_DIR: dir }
   }
 
-  test("a lock this process holds, or one it cannot read, keeps the session", () => {
+  test("a holder this process is, or one it cannot read, keeps the session", () => {
     expect(lockSession(place(`{"pid":${process.pid}}\n`), "1a2b3c4d")).toBeUndefined()
     for (const f of bad("claude-bg-lock")) expect(lockSession(place(f.text), "1a2b3c4d")).toBeUndefined()
   })
 
-  test("a lock whose process is gone is taken over, and the taker's conforms and goes when released", () => {
+  test("a holder whose process is gone is taken over, and the taker's file conforms and goes when released", () => {
     const env = place('{"pid":2147483646}\n')
-    const path = join(env.SCP_DIR, "claude-bg", "1a2b3c4d.lock")
+    const dir = join(env.SCP_DIR, "claude-bg")
     const release = lockSession(env, "1a2b3c4d")!
-    expect(conforms("claude-bg-lock", JSON.parse(readFileSync(path, "utf8")))).toEqual([])
-    expect(fileMode(path)).toBe(0o600)
+    const [mine] = readdirSync(dir)
+    expect(mine).toStartWith(`1a2b3c4d.lock.${process.pid}.`)
+    expect(conforms("claude-bg-lock", JSON.parse(readFileSync(join(dir, mine!), "utf8")))).toEqual([])
+    expect(fileMode(join(dir, mine!))).toBe(0o600)
     expect(lockSession(env, "1a2b3c4d")).toBeUndefined()
+    expect(lockSession(env, "2b3c4d5e")).toBeFunction()
     release()
-    expect(readdirSync(dirname(path))).toEqual([])
+    expect(readdirSync(dir).filter((name) => name.startsWith("1a2b3c4d."))).toEqual([])
   })
+
+  test("runs in several processes racing over stale holders never hold one session together", async () => {
+    const env = { SCP_DIR: scratch() }
+    const dir = join(env.SCP_DIR, "claude-bg")
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const log = join(env.SCP_DIR, "held.log")
+    const script = `
+      import { appendFileSync, writeFileSync } from "node:fs"
+      import { lockSession } from ${JSON.stringify(join(import.meta.dir, "claude-bg.ts"))}
+      const env = { SCP_DIR: ${JSON.stringify(env.SCP_DIR)} }
+      for (let round = 0; round < 60; round++) {
+        if (round % 10 === 0) writeFileSync(${JSON.stringify(dir)} + "/1a2b3c4d.lock.dead" + process.pid + round, '{"pid":2147483646}\\n')
+        const release = lockSession(env, "1a2b3c4d")
+        if (!release) continue
+        appendFileSync(${JSON.stringify(log)}, "in\\n")
+        Bun.sleepSync(1)
+        appendFileSync(${JSON.stringify(log)}, "out\\n")
+        release()
+      }
+    `
+    const runs = Array.from({ length: 4 }, () => Bun.spawn([process.execPath, "-e", script], { stdout: "ignore", stderr: "pipe" }))
+    const codes = await Promise.all(runs.map(async (one) => [await one.exited, await new Response(one.stderr).text()]))
+    expect(codes.map(([code]) => code)).toEqual([0, 0, 0, 0])
+    const lines = readFileSync(log, "utf8").trim().split("\n")
+    expect(lines.length).toBeGreaterThan(0)
+    lines.forEach((line, at) => expect([at, line]).toEqual([at, at % 2 === 0 ? "in" : "out"]))
+  }, 60_000)
 })
 
 describe("claude-bg-task", () => {

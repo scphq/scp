@@ -43,7 +43,7 @@ Variables marked "binding" are fixed by SPEC Appendix E; the others are this imp
 | `SCP_SWARM_BIN` | Overrides the native `swarm` binary path. |
 | `SCP_MCP_BIN` | Under `SCP_NATIVE=1` or `mcp`, the native MCP server binary `swarm mcp` runs instead of the native `swarm`, given the words after `mcp`. |
 | `SCP_HOOK_BIN` | Overrides the native hook client path. |
-| `SCP_CLI_ARGV` | A JSON array of the words that start the CLI, set for the native broker, whose built-in wakers run `<words> spawn-wake`, `codex-wake` and `claude-wake`, and in a native MCP mount's environment, whose server starts the broker and `relay_spawn` runners with it; without it they run `swarm` from `PATH`, except that a native broker first reuses the words the last broker of its relay directory was given (`$SCP_DIR/cli-argv.json`, mode 0600) while every absolute path among them exists, else runs `node <cli>/dist/cli.js` for the `@scp-dev/cli` its native package is installed beside or inside. |
+| `SCP_CLI_ARGV` | A JSON array of the words that start the CLI, set for the native broker, whose built-in wakers run `<words> spawn-wake` and `codex-wake` (`claude-wake` and any other verb the native swarm runs itself need no CLI), and in a native MCP mount's environment, whose server starts the broker and `relay_spawn` runners with it; without it they run `swarm` from `PATH`, except that a native broker first reuses the words the last broker of its relay directory was given (`$SCP_DIR/cli-argv.json`, mode 0600) while every absolute path among them exists, else runs `node <cli>/dist/cli.js` for the `@scp-dev/cli` its native package is installed beside or inside. |
 
 ## Local broker
 

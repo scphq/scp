@@ -32,6 +32,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 const LIST_TIMEOUT_MS: u64 = 15_000;
 pub const ACT_TIMEOUT_MS: u64 = 30_000;
 const OUTPUT_MAX: usize = 4 << 20;
+/// how long a timed out child has to exit after SIGTERM before it gets SIGKILL
+const KILL_GRACE: Duration = Duration::from_secs(5);
+/// how long the output of an exited child is still read once the run is over
+const DRAIN_GRACE: Duration = Duration::from_secs(1);
 const MOUNT_VARS: [&str; 3] = ["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_CLI_ARGV"];
 const CLAUDE_MCP: [&str; 3] = ["--harness", "claude", "--channels"];
 /// a launcher's own identity, which claude's daemon must not keep for the sessions it starts later
@@ -119,7 +123,17 @@ async fn capped<R: AsyncRead + Unpin>(stream: Option<R>, out: &RefCell<Vec<u8>>)
     }
 }
 
-/// runs `bin` with `args`, never through a shell; past `timeout_ms` or 4 MiB of either stream it is stopped and counts as failed
+/// signals the child at `pid`, which the caller has not reaped
+fn signal(pid: Option<i32>, signal: i32) {
+    if let Some(pid) = pid {
+        // SAFETY: the caller has not reaped the child, so its pid is still its own
+        unsafe { libc::kill(pid, signal) };
+    }
+}
+
+/// runs `bin` with `args`, never through a shell, as Node's `execFile` does: its exit code, None for a signal, a failed start or more than
+/// 4 MiB on either stream. Past `timeout_ms` a running child gets SIGTERM, then SIGKILL once `KILL_GRACE` passes; a child that already
+/// exited is never signalled, and its code stands though a process it left behind holds its pipes. It returns only once the child is reaped
 pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Option<&str>) -> Ran {
     let mut command = tokio::process::Command::new(bin);
     command
@@ -128,8 +142,7 @@ pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Opt
         .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -139,46 +152,71 @@ pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Opt
             out: String::new(),
         };
     };
-    let _stdin = child.stdin.take();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdin = child.stdin.take();
     let pid = child.id().and_then(|pid| i32::try_from(pid).ok());
-    let stop = || {
-        if let Some(pid) = pid {
-            // SAFETY: signals the child this call started and has not reaped
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
-    };
     let (out, err) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
-    let read = |stream, into| async move {
-        let whole = capped(stream, into).await;
-        if !whole {
-            stop();
-        }
-        whole
-    };
-    let done = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let streams = async {
         tokio::join!(
-            read(stdout.map(Pipe::Out), &out),
-            read(stderr.map(Pipe::Err), &err),
-            child.wait()
+            capped(stdout.map(Pipe::Out), &out),
+            capped(stderr.map(Pipe::Err), &err)
         )
-    })
-    .await;
-    let code = match done {
-        Ok((true, true, status)) => status.ok().and_then(|status| status.code()),
-        Ok(_) => None,
-        Err(_) => {
-            stop();
-            None
-        }
     };
+    tokio::pin!(streams);
+    let wait = child.wait();
+    tokio::pin!(wait);
+    let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+    tokio::pin!(deadline);
+    let mut status: Option<Option<i32>> = None;
+    let mut drained = false;
+    let mut overflow = false;
+    let mut timed_out = false;
+    while !(drained && status.is_some()) && !(timed_out && status.is_some()) {
+        tokio::select! {
+            biased;
+            exited = &mut wait, if status.is_none() => {
+                status = Some(exited.ok().and_then(|exited| exited.code()));
+            }
+            (whole_out, whole_err) = &mut streams, if !drained => {
+                drained = true;
+                if !(whole_out && whole_err) {
+                    overflow = true;
+                    if status.is_none() {
+                        signal(pid, libc::SIGTERM);
+                    }
+                }
+            }
+            () = &mut deadline, if !timed_out => {
+                timed_out = true;
+                if status.is_some() {
+                    continue;
+                }
+                signal(pid, libc::SIGTERM);
+                let ended = tokio::time::timeout(KILL_GRACE, &mut wait).await;
+                let exited = match ended {
+                    Ok(exited) => exited,
+                    Err(_) => {
+                        signal(pid, libc::SIGKILL);
+                        (&mut wait).await
+                    }
+                };
+                status = Some(exited.ok().and_then(|exited| exited.code()));
+            }
+        }
+    }
+    if !drained {
+        let _ = tokio::time::timeout(DRAIN_GRACE, &mut streams).await;
+    }
+    drop(stdin);
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.borrow()),
         String::from_utf8_lossy(&err.borrow())
     );
-    Ran { code, out: text }
+    Ran {
+        code: status.flatten().filter(|_| !overflow),
+        out: text,
+    }
 }
 
 /// either captured stream of a child
@@ -1104,4 +1142,59 @@ pub fn transcript_gone(env: &Env, session: &str) -> bool {
     !projects
         .flatten()
         .any(|project| project.path().join(format!("{session}.jsonl")).exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(script: &str, timeout_ms: u64) -> (Ran, Duration) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let env: Env = std::env::vars().collect();
+        let started = std::time::Instant::now();
+        let ran = runtime.block_on(exec("/bin/sh", &["-c", script], timeout_ms, &env, None));
+        (ran, started.elapsed())
+    }
+
+    #[test]
+    fn an_exit_stands_while_a_process_it_left_holds_the_pipes() {
+        let (ran, took) = run("echo hi; sleep 2 & exit 0", 300);
+        assert_eq!(ran.code, Some(0));
+        assert!(ran.out.starts_with("hi"));
+        assert!(took < Duration::from_millis(1800), "{took:?}");
+        let (ran, _) = run("exit 3", 5_000);
+        assert_eq!(ran.code, Some(3));
+    }
+
+    #[test]
+    fn a_timed_out_child_finishes_its_term_handler_before_it_is_reaped() {
+        let dir = std::env::temp_dir().join(format!("scp-exec-term-{}", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        let script = format!(
+            "trap 'sleep 0.3; echo done > {}; exit 7' TERM; while :; do sleep 0.05; done",
+            dir.display()
+        );
+        let (ran, took) = run(&script, 300);
+        assert_eq!(std::fs::read_to_string(&dir).unwrap().trim(), "done");
+        assert_eq!(ran.code, Some(7));
+        assert!(took < KILL_GRACE, "{took:?}");
+        std::fs::remove_file(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_child_that_ignores_term_is_killed_after_the_grace() {
+        let (ran, took) = run("trap '' TERM; while :; do sleep 0.05; done", 200);
+        assert_eq!(ran.code, None);
+        assert!(took >= KILL_GRACE && took < KILL_GRACE * 2, "{took:?}");
+    }
+
+    #[test]
+    fn output_past_the_cap_fails_the_run() {
+        let (ran, _) = run("head -c 5000000 /dev/zero", 10_000);
+        assert_eq!(ran.code, None);
+        assert_eq!(ran.out.len(), OUTPUT_MAX);
+    }
 }

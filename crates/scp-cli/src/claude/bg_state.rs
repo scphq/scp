@@ -509,7 +509,14 @@ fn alive(pid: i32) -> bool {
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
-/// whether a lock with `text`, written `age` ago, belongs to no run: its process is gone, or it is older than any run
+#[derive(Debug, PartialEq)]
+enum Holder {
+    Gone,
+    Stale,
+    Held,
+}
+
+/// whether a holder file with `text`, written `age` ago, is stale: its process is gone, or it is older than any run
 fn stale_lock(text: &str, age: Duration) -> bool {
     let pid = Json::parse(text.as_bytes())
         .and_then(|value| value.get("pid").and_then(Json::as_f64))
@@ -517,56 +524,68 @@ fn stale_lock(text: &str, age: Duration) -> bool {
     age > LOCK_MAX_AGE || pid.is_some_and(|pid| !alive(pid as i32))
 }
 
-/// takes a stale lock out of the way by renaming it, so of two runs that saw it stale one removes it; a lock taken since goes back
-fn clear_stale(path: &Path, text: &str) {
-    let aside = beside(path, &format!(".{}.stale", unique()));
-    if std::fs::rename(path, &aside).is_err() {
-        return;
-    }
-    if file_text(&aside).as_deref() == Some(text) {
-        let _ = std::fs::remove_file(&aside);
+/// what the holder file at `path` says, its age and its text read from one open file
+fn holder(path: &Path) -> Holder {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path);
+    let mut file = match file {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Holder::Gone,
+        Err(_) => return Holder::Held,
+    };
+    let age = file
+        .metadata()
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|at| at.elapsed().ok())
+        .unwrap_or_default();
+    let mut text = String::new();
+    let _ = std::io::Read::read_to_string(&mut file, &mut text);
+    if stale_lock(&text, age) {
+        Holder::Stale
     } else {
-        let _ = std::fs::rename(&aside, path);
+        Holder::Held
     }
 }
 
-/// the lock of session `id`, None while another live run holds it; both engines take it around every action on the session
+/// the lock of session `id`, None while another run holds it. Each run creates a holder file of its own, `<id>.lock.<pid>.<random>`, then
+/// holds the session only when no other live holder file is there; one created before its listing is always seen, so two runs never both
+/// hold it, and both may back off. A run deletes its own file and the files of holders that are gone, never another live one
 pub fn lock_session(env: &Env, id: &str) -> Result<Option<SessionLock>, String> {
     let dir = bg_dir(env);
     private_dir(&dir)?;
-    let path = dir.join(format!("{id}.lock"));
-    for _ in 0..2 {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                let lock = SessionLock(path.clone());
-                let pid = Json::object(vec![("pid", Json::Num(f64::from(std::process::id())))]);
-                file.write_all(format!("{}\n", pid.compact()).as_bytes())
-                    .map_err(|error| fs_fail(&error, "write", &path))?;
-                return Ok(Some(lock));
+    let prefix = format!("{id}.lock.");
+    let name = format!("{prefix}{}", unique());
+    let path = dir.join(&name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| fs_fail(&error, "open", &path))?;
+    let lock = SessionLock(path.clone());
+    let pid = Json::object(vec![("pid", Json::Num(f64::from(std::process::id())))]);
+    file.write_all(format!("{}\n", pid.compact()).as_bytes())
+        .map_err(|error| fs_fail(&error, "write", &path))?;
+    drop(file);
+    let others = std::fs::read_dir(&dir).map_err(|error| fs_fail(&error, "scandir", &dir))?;
+    let mut held = true;
+    for other in others.flatten() {
+        let other = other.file_name().to_string_lossy().into_owned();
+        if other == name || !other.starts_with(&prefix) {
+            continue;
+        }
+        match holder(&dir.join(&other)) {
+            Holder::Held => held = false,
+            Holder::Stale => {
+                let _ = std::fs::remove_file(dir.join(&other));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let age = std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(|at| at.elapsed().ok())
-                    .unwrap_or_default();
-                let Some(text) = file_text(&path) else {
-                    continue;
-                };
-                if !stale_lock(&text, age) {
-                    return Ok(None);
-                }
-                clear_stale(&path, &text);
-            }
-            Err(error) => return Err(fs_fail(&error, "open", &path)),
+            Holder::Gone => {}
         }
     }
-    Ok(None)
+    Ok(held.then_some(lock))
 }
 
 #[cfg(test)]
@@ -623,14 +642,61 @@ mod tests {
         assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
         assert!(lock_session(&env, "2b3c4d5e").unwrap().is_some());
         drop(lock);
-        let path = dir.join("claude-bg/1a2b3c4d.lock");
-        assert!(!path.exists());
-        std::fs::write(&path, "{\"pid\":2147483646}\n").unwrap();
+        let bg = dir.join("claude-bg");
+        let held = |bg: &Path| {
+            std::fs::read_dir(bg)
+                .unwrap()
+                .flatten()
+                .filter(|one| one.file_name().to_string_lossy().contains(".lock."))
+                .count()
+        };
+        assert_eq!(held(&bg), 0);
+        std::fs::write(bg.join("1a2b3c4d.lock.dead"), "{\"pid\":2147483646}\n").unwrap();
         let taken = lock_session(&env, "1a2b3c4d").unwrap();
         assert!(taken.is_some());
+        assert_eq!(held(&bg), 1);
         drop(taken);
-        std::fs::write(&path, "{\"pid\":").unwrap();
+        std::fs::write(bg.join("1a2b3c4d.lock.torn"), "{\"pid\":").unwrap();
         assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn racing_runs_over_a_stale_holder_never_hold_one_session_together() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = scratch("race");
+        let env = env_of(&dir);
+        let bg = dir.join("claude-bg");
+        private_dir(&bg).unwrap();
+        let inside = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let runs: Vec<_> = (0..8)
+            .map(|_| {
+                let (env, bg) = (env.clone(), bg.clone());
+                let (inside, entered) = (inside.clone(), entered.clone());
+                std::thread::spawn(move || {
+                    for round in 0..150 {
+                        if round % 10 == 0 {
+                            let dead = bg.join(format!("1a2b3c4d.lock.dead{round}"));
+                            let _ = std::fs::write(dead, "{\"pid\":2147483646}\n");
+                        }
+                        let Some(lock) = lock_session(&env, "1a2b3c4d").unwrap() else {
+                            continue;
+                        };
+                        assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0, "two holders");
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        std::thread::yield_now();
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                        drop(lock);
+                    }
+                })
+            })
+            .collect();
+        for run in runs {
+            run.join().unwrap();
+        }
+        assert!(entered.load(Ordering::SeqCst) > 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -643,5 +709,6 @@ mod tests {
         assert!(stale_lock("{\"pid\":2147483646}", young));
         assert!(!stale_lock("{", young));
         assert!(stale_lock("{", LOCK_MAX_AGE + young));
+        assert_eq!(holder(Path::new("/nonexistent/x.lock.1")), Holder::Gone);
     }
 }

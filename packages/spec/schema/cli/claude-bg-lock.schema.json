@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "claude-bg-lock",
-  "title": "The claude-bg run acting on one session",
-  "description": "$SCP_DIR/claude-bg/<short id>.lock",
+  "title": "A claude-bg run that acts on one session",
+  "description": "$SCP_DIR/claude-bg/<short id>.lock.<pid>.<random>",
   "type": "object",
   "required": ["pid"],
   "properties": {

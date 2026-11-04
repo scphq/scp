@@ -1,5 +1,19 @@
 import { execFile } from "node:child_process"
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { basename, join } from "node:path"
 import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, readOwnedFile, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
@@ -514,69 +528,65 @@ function alive(pid: number): boolean {
   }
 }
 
-/** whether a lock with `text`, written `ageMs` ago, belongs to no run: its process is gone, or it is older than any run */
-function staleLock(text: string, ageMs: number): boolean {
-  if (ageMs > LOCK_MAX_AGE_MS) return true
+/** whether the holder file at `path` still claims its session: gone, stale (its process is gone or it outlived any run) or held */
+function holder(path: string): "gone" | "stale" | "held" {
+  let fd: number
   try {
-    const pid = (JSON.parse(text) as { pid?: unknown } | null)?.pid
-    return typeof pid === "number" && Number.isInteger(pid) && pid > 0 && !alive(pid)
-  } catch {
-    return false
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : "held"
   }
-}
-
-/** takes a stale lock out of the way by renaming it, so of two runs that saw it stale one removes it; a lock taken since goes back */
-function clearStale(path: string, text: string): void {
-  const aside = `${path}.${process.pid}.${crypto.randomUUID()}.stale`
   try {
-    renameSync(path, aside)
+    if (Date.now() - fstatSync(fd).mtimeMs > LOCK_MAX_AGE_MS) return "stale"
+    const pid = (JSON.parse(readFileSync(fd, "utf8")) as { pid?: unknown } | null)?.pid
+    return typeof pid === "number" && Number.isInteger(pid) && pid > 0 && !alive(pid) ? "stale" : "held"
   } catch {
-    return
+    return "held"
+  } finally {
+    closeSync(fd)
   }
-  if (readFileSync(aside, "utf8") === text) unlinkSync(aside)
-  else renameSync(aside, path)
 }
 
 /**
- * the lock of session `id`, held while a run acts on that session: a task and a `claude prune` at once would otherwise each stop it, and the
- * one whose `claude stop` fails would undo the other's hibernation. Returns what releases it, or undefined while another live run holds it
+ * the lock of session `id`, held while a run acts on that session, so a task and a `claude prune` at once never both stop or remove it.
+ * Each run creates a holder file of its own, `<id>.lock.<pid>.<random>`, then holds the session only when no other live holder file is
+ * there; one created before its listing is always seen, so two runs never both hold it, and both may back off. A run deletes its own file
+ * and the files of holders that are gone, never another live one. Returns what releases it, or undefined while another run holds it
  */
 export function lockSession(env: Env, id: string): (() => void) | undefined {
-  privateDir(bgDir(env))
-  const path = join(bgDir(env), `${id}.lock`)
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let fd: number
+  const dir = privateDir(bgDir(env))
+  const prefix = `${id}.lock.`
+  const name = `${prefix}${process.pid}.${crypto.randomUUID()}`
+  const path = join(dir, name)
+  const fd = openSync(path, "wx", 0o600)
+  const release = () => {
     try {
-      fd = openSync(path, "wx", 0o600)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
-      let text: string
-      let ageMs: number
-      try {
-        ageMs = Date.now() - statSync(path).mtimeMs
-        text = readFileSync(path, "utf8")
-      } catch {
-        continue
-      }
-      if (!staleLock(text, ageMs)) return undefined
-      clearStale(path, text)
-      continue
-    }
-    const release = () => {
-      try {
-        unlinkSync(path)
-      } catch {}
-    }
+      unlinkSync(path)
+    } catch {}
+  }
+  try {
     try {
       writeFileSync(fd, `${JSON.stringify({ pid: process.pid })}\n`)
-    } catch (error) {
-      release()
-      throw error
     } finally {
       closeSync(fd)
     }
-    return release
+    let held = true
+    for (const other of readdirSync(dir)) {
+      if (other === name || !other.startsWith(prefix)) continue
+      const seen = holder(join(dir, other))
+      if (seen === "held") held = false
+      else if (seen === "stale") {
+        try {
+          unlinkSync(join(dir, other))
+        } catch {}
+      }
+    }
+    if (held) return release
+  } catch (error) {
+    release()
+    throw error
   }
+  release()
   return undefined
 }
 

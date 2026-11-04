@@ -46,13 +46,14 @@ Keyword limits: map keys are constrained in descriptions only (there is no `prop
 
 ## claude-bg-lock
 
-- Path: `$SCP_DIR/claude-bg/<short id>.lock`, mode 0600.
-- Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) creates it `wx` before it acts on the
-  session and unlinks it after, so two runs never both stop one session. `swarm claude-wake` does not take it: a wake must not wait on a stop,
-  and it writes the state file only for a session the listing no longer shows.
-- Readers: a run that finds it leaves the session for its next pass, unless it is stale: the named process is gone, or the file is older
-  than 15 minutes. A stale lock is renamed aside to `<path>.<pid>.<random>.stale` first, so of two runs that saw it stale one removes it.
-- Invariants: a run holds it only around one action. An unparseable lock counts as held until it is too old.
+- Path: `$SCP_DIR/claude-bg/<short id>.lock.<pid>.<random>`, mode 0600, one file per run that wants the session.
+- Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) creates its own file `wx`
+  before it acts on the session, then lists the directory: it holds the session only when no other holder file of the session is live, and
+  unlinks its own file after the action, or at once when it does not hold. `swarm claude-wake` takes none: a wake must not wait on a stop.
+- Readers: a holder file is stale once its process is gone or it is older than 15 minutes, its age and content read from one open file; a
+  run unlinks stale ones and never another live one. A file it cannot read or parse counts as live until it is too old.
+- Invariants: two runs never hold one session at once, since each lists after it created its file; two at once may both back off, and the
+  session waits for the next pass. Neither engine has `flock` in common (Node has none), so the lock needs only `O_EXCL`, `readdir` and `unlink`.
 
 ## claude-bg-task
 
