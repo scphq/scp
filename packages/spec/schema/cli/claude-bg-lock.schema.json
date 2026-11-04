@@ -6,7 +6,8 @@
   "type": "object",
   "required": ["pid"],
   "properties": {
-    "pid": { "description": "the process of the run holding it", "type": "integer", "minimum": 1 }
+    "pid": { "description": "the process of the run holding it", "type": "integer", "minimum": 1 },
+    "started": { "description": "when that process started, as ps -o lstart= prints it with LC_ALL=C and TZ=UTC; absent when ps could not tell", "type": "string" }
   },
   "additionalProperties": false
 }

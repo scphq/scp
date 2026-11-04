@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process"
+import { execFile, spawnSync } from "node:child_process"
 import {
   closeSync,
   constants,
@@ -41,8 +41,6 @@ const LIST_TIMEOUT_MS = 15_000
 const ACT_TIMEOUT_MS = 30_000
 /** a refused `claude rm` is tried again no sooner than this */
 const RM_RETRY_MS = 86_400_000
-/** a session lock older than this outlived every run that could hold it */
-const LOCK_MAX_AGE_MS = 900_000
 const SHORT_ID = /^[0-9a-f]{8}$/
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** a session name passed back to `claude --name`: never read as an option */
@@ -528,52 +526,87 @@ function alive(pid: number): boolean {
   }
 }
 
-/** whether the holder file at `path` still claims its session: gone, stale (its process is gone or it outlived any run) or held */
-function holder(path: string): "gone" | "stale" | "held" {
-  let fd: number
+/** `ps`, by its path where it has one, so a `ps` on PATH never decides a lock */
+const PS = existsSync("/bin/ps") ? "/bin/ps" : "ps"
+
+/** when process `pid` started, as `ps` prints it in the C locale and UTC; undefined when `ps` cannot tell */
+function startedAt(pid: number): string | undefined {
+  const run = spawnSync(PS, ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+  })
+  const text = run.status === 0 ? run.stdout.trim() : ""
+  return text === "" ? undefined : text
+}
+
+let ownStart: string | undefined | null = null
+
+/** this process's holder record: its pid and, when `ps` can tell, when it started, so a later process with the same pid is told apart */
+function ownHolder(): string {
+  if (ownStart === null) ownStart = startedAt(process.pid)
+  return `${JSON.stringify({ pid: process.pid, ...(ownStart !== undefined ? { started: ownStart } : {}) })}\n`
+}
+
+/**
+ * whether the holder file `name` in `dir` still claims its session: gone, stale (its process is verifiably gone: no such pid, or that pid
+ * started at another time) or held. Age never makes a holder stale, and one that cannot be told is held
+ */
+function holder(dir: string, name: string, prefix: string): "gone" | "stale" | "held" {
+  let text: string
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    text = readFileSync(join(dir, name), { encoding: "utf8", flag: constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK })
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : "held"
   }
+  let record: { pid?: unknown; started?: unknown } | null | undefined
   try {
-    if (Date.now() - fstatSync(fd).mtimeMs > LOCK_MAX_AGE_MS) return "stale"
-    const pid = (JSON.parse(readFileSync(fd, "utf8")) as { pid?: unknown } | null)?.pid
-    return typeof pid === "number" && Number.isInteger(pid) && pid > 0 && !alive(pid) ? "stale" : "held"
+    record = JSON.parse(text) as { pid?: unknown; started?: unknown } | null
   } catch {
-    return "held"
-  } finally {
-    closeSync(fd)
+    record = undefined
   }
+  const named = Number(name.slice(prefix.length).split(".")[0])
+  const pid = typeof record?.pid === "number" ? record.pid : named
+  if (!Number.isInteger(pid) || pid <= 0) return "held"
+  if (!alive(pid)) return "stale"
+  const started = typeof record?.started === "string" ? record.started : undefined
+  const now = started === undefined ? undefined : startedAt(pid)
+  return now !== undefined && now !== started ? "stale" : "held"
 }
 
 /**
  * the lock of session `id`, held while a run acts on that session, so a task and a `claude prune` at once never both stop or remove it.
- * Each run creates a holder file of its own, `<id>.lock.<pid>.<random>`, then holds the session only when no other live holder file is
- * there; one created before its listing is always seen, so two runs never both hold it, and both may back off. A run deletes its own file
- * and the files of holders that are gone, never another live one. Returns what releases it, or undefined while another run holds it
+ * Each run publishes a holder file of its own, `<id>.lock.<pid>.<random>`, then holds the session only when no other live holder file is
+ * there; one published before its listing is always seen, so two runs never both hold it, and both may back off. A run deletes its own
+ * file and the files of holders whose process is verifiably gone, never another live one. Returns what releases it, or undefined while
+ * another run holds it
  */
 export function lockSession(env: Env, id: string): (() => void) | undefined {
   const dir = privateDir(bgDir(env))
   const prefix = `${id}.lock.`
   const name = `${prefix}${process.pid}.${crypto.randomUUID()}`
   const path = join(dir, name)
-  const fd = openSync(path, "wx", 0o600)
+  const temp = join(dir, `.${name}.tmp`)
+  try {
+    writeFileSync(temp, ownHolder(), { flag: "wx", mode: 0o600 })
+    renameSync(temp, path)
+  } catch (error) {
+    try {
+      unlinkSync(temp)
+    } catch {}
+    throw error
+  }
   const release = () => {
     try {
       unlinkSync(path)
     } catch {}
   }
   try {
-    try {
-      writeFileSync(fd, `${JSON.stringify({ pid: process.pid })}\n`)
-    } finally {
-      closeSync(fd)
-    }
     let held = true
     for (const other of readdirSync(dir)) {
       if (other === name || !other.startsWith(prefix)) continue
-      const seen = holder(join(dir, other))
+      const seen = holder(dir, other, prefix)
       if (seen === "held") held = false
       else if (seen === "stale") {
         try {

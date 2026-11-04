@@ -12,12 +12,9 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// the provider a stopped or removed worker is hibernated by; its waker is `swarm claude-wake`
 pub const PROVIDER: &str = "claude-bg";
-/// a lock older than this outlived every run that could hold it
-const LOCK_MAX_AGE: Duration = Duration::from_secs(900);
 
 fn hex_lower(text: &str) -> bool {
     text.bytes()
@@ -516,68 +513,120 @@ enum Holder {
     Held,
 }
 
-/// whether a holder file with `text`, written `age` ago, is stale: its process is gone, or it is older than any run
-fn stale_lock(text: &str, age: Duration) -> bool {
-    let pid = Json::parse(text.as_bytes())
-        .and_then(|value| value.get("pid").and_then(Json::as_f64))
-        .filter(|pid| pid.fract() == 0.0 && *pid > 0.0 && *pid <= f64::from(i32::MAX));
-    age > LOCK_MAX_AGE || pid.is_some_and(|pid| !alive(pid as i32))
+/// when process `pid` started, as `ps` prints it in the C locale and UTC; None when `ps` cannot tell. A `ps` on PATH never decides it
+fn started_at(pid: i32) -> Option<String> {
+    let ps = if Path::new("/bin/ps").exists() {
+        "/bin/ps"
+    } else {
+        "ps"
+    };
+    let run = std::process::Command::new(ps)
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&run.stdout).trim().to_owned();
+    (run.status.success() && !text.is_empty()).then_some(text)
 }
 
-/// what the holder file at `path` says, its age and its text read from one open file
-fn holder(path: &Path) -> Holder {
+/// this process's holder record: its pid and, when `ps` can tell, when it started, so a later process with the same pid is told apart
+fn own_holder() -> String {
+    static STARTED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let pid = std::process::id();
+    let started = STARTED.get_or_init(|| i32::try_from(pid).ok().and_then(started_at));
+    let mut record = vec![("pid", Json::Num(f64::from(pid)))];
+    if let Some(started) = started {
+        record.push(("started", Json::str(started.clone())));
+    }
+    format!("{}\n", Json::object(record).compact())
+}
+
+/// whether a holder that names `pid` and the `started` it wrote is stale: its process is verifiably gone, no such pid or one that
+/// started at another time; age never makes it so, and one that cannot be told is held
+fn stale_holder(
+    pid: Option<f64>,
+    started: Option<&str>,
+    now: impl Fn(i32) -> Option<String>,
+) -> bool {
+    let Some(pid) = pid
+        .filter(|pid| pid.fract() == 0.0 && *pid > 0.0 && *pid <= f64::from(i32::MAX))
+        .map(|pid| pid as i32)
+    else {
+        return false;
+    };
+    if !alive(pid) {
+        return true;
+    }
+    started.is_some_and(|started| now(pid).is_some_and(|now| now != started))
+}
+
+/// what the holder file `name` in `dir` says: its record, else the pid its name gives
+fn holder(dir: &Path, name: &str, prefix: &str) -> Holder {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path);
+        .open(dir.join(name));
     let mut file = match file {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Holder::Gone,
         Err(_) => return Holder::Held,
     };
-    let age = file
-        .metadata()
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|at| at.elapsed().ok())
-        .unwrap_or_default();
     let mut text = String::new();
     let _ = std::io::Read::read_to_string(&mut file, &mut text);
-    if stale_lock(&text, age) {
+    let record = Json::parse(text.as_bytes());
+    let named = name[prefix.len()..]
+        .split('.')
+        .next()
+        .and_then(|pid| pid.parse::<f64>().ok());
+    let pid = record
+        .as_ref()
+        .and_then(|record| record.get("pid").and_then(Json::as_f64))
+        .or(named);
+    let started = record
+        .as_ref()
+        .and_then(|record| record.get("started").and_then(Json::as_str));
+    if stale_holder(pid, started, started_at) {
         Holder::Stale
     } else {
         Holder::Held
     }
 }
 
-/// the lock of session `id`, None while another run holds it. Each run creates a holder file of its own, `<id>.lock.<pid>.<random>`, then
-/// holds the session only when no other live holder file is there; one created before its listing is always seen, so two runs never both
-/// hold it, and both may back off. A run deletes its own file and the files of holders that are gone, never another live one
+/// the lock of session `id`, None while another run holds it. Each run publishes a holder file of its own, `<id>.lock.<pid>.<random>`,
+/// then holds the session only when no other live holder file is there; one published before its listing is always seen, so two runs
+/// never both hold it, and both may back off. A run deletes its own file and the files of holders whose process is verifiably gone,
+/// never another live one
 pub fn lock_session(env: &Env, id: &str) -> Result<Option<SessionLock>, String> {
     let dir = bg_dir(env);
     private_dir(&dir)?;
     let prefix = format!("{id}.lock.");
     let name = format!("{prefix}{}", unique());
     let path = dir.join(&name);
-    let mut file = std::fs::OpenOptions::new()
+    let temp = dir.join(format!(".{name}.tmp"));
+    let published = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&path)
-        .map_err(|error| fs_fail(&error, "open", &path))?;
-    let lock = SessionLock(path.clone());
-    let pid = Json::object(vec![("pid", Json::Num(f64::from(std::process::id())))]);
-    file.write_all(format!("{}\n", pid.compact()).as_bytes())
-        .map_err(|error| fs_fail(&error, "write", &path))?;
-    drop(file);
+        .open(&temp)
+        .and_then(|mut file| file.write_all(own_holder().as_bytes()))
+        .and_then(|()| std::fs::rename(&temp, &path));
+    if let Err(error) = published {
+        let _ = std::fs::remove_file(&temp);
+        return Err(fs_fail(&error, "open", &path));
+    }
+    let lock = SessionLock(path);
     let others = std::fs::read_dir(&dir).map_err(|error| fs_fail(&error, "scandir", &dir))?;
     let mut held = true;
-    for other in others.flatten() {
+    for other in others {
+        let other = other.map_err(|error| fs_fail(&error, "scandir", &dir))?;
         let other = other.file_name().to_string_lossy().into_owned();
         if other == name || !other.starts_with(&prefix) {
             continue;
         }
-        match holder(&dir.join(&other)) {
+        match holder(&dir, &other, &prefix) {
             Holder::Held => held = false,
             Holder::Stale => {
                 let _ = std::fs::remove_file(dir.join(&other));
@@ -647,7 +696,11 @@ mod tests {
             std::fs::read_dir(bg)
                 .unwrap()
                 .flatten()
-                .filter(|one| one.file_name().to_string_lossy().contains(".lock."))
+                .filter(|one| {
+                    one.file_name()
+                        .to_string_lossy()
+                        .starts_with("1a2b3c4d.lock.")
+                })
                 .count()
         };
         assert_eq!(held(&bg), 0);
@@ -656,7 +709,11 @@ mod tests {
         assert!(taken.is_some());
         assert_eq!(held(&bg), 1);
         drop(taken);
-        std::fs::write(bg.join("1a2b3c4d.lock.torn"), "{\"pid\":").unwrap();
+        std::fs::write(
+            bg.join(format!("1a2b3c4d.lock.{}.torn", std::process::id())),
+            "{\"pid\":",
+        )
+        .unwrap();
         assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -701,14 +758,57 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_is_stale_once_its_process_is_gone_or_it_is_too_old() {
-        let own = format!("{{\"pid\":{}}}", std::process::id());
-        let young = Duration::from_secs(1);
-        assert!(!stale_lock(&own, young));
-        assert!(stale_lock(&own, LOCK_MAX_AGE + young));
-        assert!(stale_lock("{\"pid\":2147483646}", young));
-        assert!(!stale_lock("{", young));
-        assert!(stale_lock("{", LOCK_MAX_AGE + young));
-        assert_eq!(holder(Path::new("/nonexistent/x.lock.1")), Holder::Gone);
+    fn a_holder_is_stale_only_once_its_process_is_verifiably_gone() {
+        let own = std::process::id();
+        let started = started_at(own as i32);
+        assert!(started.is_some());
+        let pid = Some(f64::from(own));
+        let same = |_: i32| started.clone();
+        assert!(!stale_holder(pid, started.as_deref(), same));
+        assert!(stale_holder(pid, Some("Thu Jan  1 00:00:00 1970"), same));
+        assert!(!stale_holder(pid, Some("Thu Jan  1 00:00:00 1970"), |_| {
+            None
+        }));
+        assert!(!stale_holder(pid, None, same));
+        assert!(stale_holder(Some(2_147_483_646.0), None, same));
+        assert!(!stale_holder(None, None, same));
+        assert!(!stale_holder(Some(1.5), None, same));
+    }
+
+    #[test]
+    fn a_live_holder_however_old_keeps_the_session_and_a_reused_pid_does_not() {
+        let dir = scratch("old");
+        let env = env_of(&dir);
+        let bg = dir.join("claude-bg");
+        private_dir(&bg).unwrap();
+        let live = bg.join("1a2b3c4d.lock.1.live");
+        std::fs::write(&live, own_holder()).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&live)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
+        assert!(live.exists());
+        let reused = format!(
+            "{{\"pid\":{},\"started\":\"Thu Jan  1 00:00:00 1970\"}}\n",
+            std::process::id()
+        );
+        std::fs::write(&live, reused).unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_some());
+        assert!(!live.exists());
+        std::fs::write(
+            bg.join(format!("1a2b3c4d.lock.{}.torn", std::process::id())),
+            "{",
+        )
+        .unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
+        std::fs::write(bg.join("1a2b3c4d.lock.2147483646.torn"), "{").unwrap();
+        std::fs::remove_file(bg.join(format!("1a2b3c4d.lock.{}.torn", std::process::id())))
+            .unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -18,7 +18,7 @@ use scp_mcp::client::{CallError, Client, connect_broker, relay_dir};
 use scp_mcp::identity::{home_dir, read_owned_file, safe_cwd};
 use scp_mcp::ps::Env;
 use serde_json::{Map, Value, json};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -102,38 +102,55 @@ impl Ran {
     }
 }
 
-/// reads `stream` into `out`; false once it passed the limit
-async fn capped<R: AsyncRead + Unpin>(stream: Option<R>, out: &RefCell<Vec<u8>>) -> bool {
+/// what one run of a child has seen so far
+#[derive(Default)]
+struct Watch {
+    reaped: Cell<bool>,
+    overflow: Cell<bool>,
+}
+
+impl Watch {
+    /// signals the child at `pid` unless it is reaped, when its pid may be another process's
+    fn signal(&self, pid: Option<i32>, signal: i32) {
+        if let (Some(pid), false) = (pid, self.reaped.get()) {
+            // SAFETY: the child is not reaped, so its pid is still its own
+            unsafe { libc::kill(pid, signal) };
+        }
+    }
+}
+
+/// reads `stream` into `out` until it ends; past the limit it marks the run overflowed, stops the child at once and reads no more
+async fn capped<R: AsyncRead + Unpin>(
+    stream: Option<R>,
+    out: &RefCell<Vec<u8>>,
+    watch: &Watch,
+    pid: Option<i32>,
+) {
     let Some(mut stream) = stream else {
-        return true;
+        return;
     };
     let mut chunk = [0; 8192];
     loop {
         match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return true,
+            Ok(0) | Err(_) => return,
             Ok(read) => {
                 let mut out = out.borrow_mut();
                 let room = OUTPUT_MAX - out.len();
                 out.extend_from_slice(&chunk[..read.min(room)]);
                 if read > room {
-                    return false;
+                    watch.overflow.set(true);
+                    watch.signal(pid, libc::SIGTERM);
+                    return;
                 }
             }
         }
     }
 }
 
-/// signals the child at `pid`, which the caller has not reaped
-fn signal(pid: Option<i32>, signal: i32) {
-    if let Some(pid) = pid {
-        // SAFETY: the caller has not reaped the child, so its pid is still its own
-        unsafe { libc::kill(pid, signal) };
-    }
-}
-
 /// runs `bin` with `args`, never through a shell, as Node's `execFile` does: its exit code, None for a signal, a failed start or more than
-/// 4 MiB on either stream. Past `timeout_ms` a running child gets SIGTERM, then SIGKILL once `KILL_GRACE` passes; a child that already
-/// exited is never signalled, and its code stands though a process it left behind holds its pipes. It returns only once the child is reaped
+/// 4 MiB on either stream. Past `timeout_ms` a running child gets SIGTERM, then SIGKILL once `KILL_GRACE` passes, its output read all the
+/// while; a child that already exited is never signalled, and its code stands though a process it left behind holds its pipes. It
+/// returns only once the child is reaped
 pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Option<&str>) -> Ran {
     let mut command = tokio::process::Command::new(bin);
     command
@@ -154,12 +171,13 @@ pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Opt
     };
     let stdin = child.stdin.take();
     let pid = child.id().and_then(|pid| i32::try_from(pid).ok());
+    let watch = Watch::default();
     let (out, err) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let streams = async {
         tokio::join!(
-            capped(stdout.map(Pipe::Out), &out),
-            capped(stderr.map(Pipe::Err), &err)
+            capped(stdout.map(Pipe::Out), &out, &watch, pid),
+            capped(stderr.map(Pipe::Err), &err, &watch, pid)
         )
     };
     tokio::pin!(streams);
@@ -167,40 +185,29 @@ pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Opt
     tokio::pin!(wait);
     let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(deadline);
+    let kill = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
+    tokio::pin!(kill);
     let mut status: Option<Option<i32>> = None;
-    let mut drained = false;
-    let mut overflow = false;
-    let mut timed_out = false;
-    while !(drained && status.is_some()) && !(timed_out && status.is_some()) {
+    let (mut drained, mut timed_out, mut killing) = (false, false, false);
+    while status.is_none() || !(drained || timed_out) {
         tokio::select! {
             biased;
             exited = &mut wait, if status.is_none() => {
+                watch.reaped.set(true);
                 status = Some(exited.ok().and_then(|exited| exited.code()));
             }
-            (whole_out, whole_err) = &mut streams, if !drained => {
-                drained = true;
-                if !(whole_out && whole_err) {
-                    overflow = true;
-                    if status.is_none() {
-                        signal(pid, libc::SIGTERM);
-                    }
-                }
-            }
+            ((), ()) = &mut streams, if !drained => drained = true,
             () = &mut deadline, if !timed_out => {
                 timed_out = true;
-                if status.is_some() {
-                    continue;
+                if status.is_none() {
+                    watch.signal(pid, libc::SIGTERM);
+                    kill.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
+                    killing = true;
                 }
-                signal(pid, libc::SIGTERM);
-                let ended = tokio::time::timeout(KILL_GRACE, &mut wait).await;
-                let exited = match ended {
-                    Ok(exited) => exited,
-                    Err(_) => {
-                        signal(pid, libc::SIGKILL);
-                        (&mut wait).await
-                    }
-                };
-                status = Some(exited.ok().and_then(|exited| exited.code()));
+            }
+            () = &mut kill, if killing => {
+                killing = false;
+                watch.signal(pid, libc::SIGKILL);
             }
         }
     }
@@ -214,7 +221,7 @@ pub async fn exec(bin: &str, args: &[&str], timeout_ms: u64, env: &Env, cwd: Opt
         String::from_utf8_lossy(&err.borrow())
     );
     Ran {
-        code: status.flatten().filter(|_| !overflow),
+        code: status.flatten().filter(|_| !watch.overflow.get()),
         out: text,
     }
 }
@@ -1189,6 +1196,24 @@ mod tests {
         let (ran, took) = run("trap '' TERM; while :; do sleep 0.05; done", 200);
         assert_eq!(ran.code, None);
         assert!(took >= KILL_GRACE && took < KILL_GRACE * 2, "{took:?}");
+    }
+
+    #[test]
+    fn a_term_handler_that_writes_a_lot_still_exits_within_the_grace() {
+        let (ran, took) = run(
+            "trap 'head -c 131072 /dev/zero; exit 7' TERM; while :; do sleep 0.05; done",
+            300,
+        );
+        assert_eq!(ran.code, Some(7));
+        assert!(took < KILL_GRACE, "{took:?}");
+        assert_eq!(ran.out.len(), 131_072);
+    }
+
+    #[test]
+    fn overflow_on_one_stream_fails_the_run_while_the_other_stays_open() {
+        let (ran, _) = run("(sleep 1 >&2 &); head -c 5000000 /dev/zero; exit 0", 10_000);
+        assert_eq!(ran.code, None);
+        assert_eq!(ran.out.len(), OUTPUT_MAX);
     }
 
     #[test]

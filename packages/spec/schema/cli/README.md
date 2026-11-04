@@ -46,14 +46,17 @@ Keyword limits: map keys are constrained in descriptions only (there is no `prop
 
 ## claude-bg-lock
 
-- Path: `$SCP_DIR/claude-bg/<short id>.lock.<pid>.<random>`, mode 0600, one file per run that wants the session.
-- Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) creates its own file `wx`
-  before it acts on the session, then lists the directory: it holds the session only when no other holder file of the session is live, and
-  unlinks its own file after the action, or at once when it does not hold. `swarm claude-wake` takes none: a wake must not wait on a stop.
-- Readers: a holder file is stale once its process is gone or it is older than 15 minutes, its age and content read from one open file; a
-  run unlinks stale ones and never another live one. A file it cannot read or parse counts as live until it is too old.
-- Invariants: two runs never hold one session at once, since each lists after it created its file; two at once may both back off, and the
-  session waits for the next pass. Neither engine has `flock` in common (Node has none), so the lock needs only `O_EXCL`, `readdir` and `unlink`.
+- Path: `$SCP_DIR/claude-bg/<short id>.lock.<pid>.<random>`, mode 0600, one file per run that wants the session, published by rename from
+  `.<name>.tmp` so it is never read half written.
+- Content: the holder's `pid` and, when `ps -o lstart= -p <pid>` (with `LC_ALL=C`, `TZ=UTC`, `/bin/ps` where it exists) could tell, `started`.
+- Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) publishes its own file before
+  it acts on the session, then lists the directory: it holds the session only when no other holder file of the session is live, and unlinks
+  its own file after the action, or at once when it does not hold. `swarm claude-wake` takes none: a wake must not wait on a stop.
+- Readers: a holder is stale only once its process is verifiably gone: no process has its pid, or the one that has it started at another
+  time than `started`. Age never makes it stale. A file it cannot parse takes the pid from its name; one with no usable pid, or whose start
+  `ps` cannot read, counts as live. A run unlinks stale holders and never another live one; a listing error is a failure, never a hold.
+- Invariants: two runs never hold one session at once, since each lists after it published its file; two at once may both back off, and the
+  session waits for the next pass. Node has no `flock`, so the lock needs only `O_EXCL`, `rename`, `readdir` and `unlink`.
 
 ## claude-bg-task
 

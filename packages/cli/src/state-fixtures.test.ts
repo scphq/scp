@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, spyOn, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { parseWakers, type Runner, readSessionMarker, type WakerConfigs, writeSessionMarker } from "@scp-dev/broker"
@@ -172,15 +172,36 @@ describe("claude-bg-state", () => {
 })
 
 describe("claude-bg-lock", () => {
-  const place = (text: string) => {
+  const place = (text: string, pid = 48213) => {
     const dir = scratch()
-    put(join(dir, "claude-bg", "1a2b3c4d.lock.48213.held"), text)
+    put(join(dir, "claude-bg", `1a2b3c4d.lock.${pid}.held`), text)
     return { SCP_DIR: dir }
   }
 
   test("a holder this process is, or one it cannot read, keeps the session", () => {
     expect(lockSession(place(`{"pid":${process.pid}}\n`), "1a2b3c4d")).toBeUndefined()
-    for (const f of bad("claude-bg-lock")) expect(lockSession(place(f.text), "1a2b3c4d")).toBeUndefined()
+    for (const f of bad("claude-bg-lock")) expect(lockSession(place(f.text, process.pid), "1a2b3c4d")).toBeUndefined()
+  })
+
+  test("a live holder however old keeps the session, and one whose pid now names another process does not", () => {
+    const env = place(`{"pid":${process.pid}}\n`)
+    const dir = join(env.SCP_DIR, "claude-bg")
+    const live = join(dir, "1a2b3c4d.lock.48213.held")
+    utimesSync(live, new Date(1000), new Date(1000))
+    expect(lockSession(env, "1a2b3c4d")).toBeUndefined()
+    expect(existsSync(live)).toBe(true)
+    writeFileSync(live, `${JSON.stringify({ pid: process.pid, started: "Thu Jan  1 00:00:00 1970" })}\n`)
+    const release = lockSession(env, "1a2b3c4d")
+    expect(release).toBeFunction()
+    expect(existsSync(live)).toBe(false)
+    const [mine] = readdirSync(dir)
+    expect(JSON.parse(readFileSync(join(dir, mine!), "utf8"))).toEqual({ pid: process.pid, started: expect.stringMatching(/^[A-Z][a-z]{2} [A-Z][a-z]{2} /) })
+    release!()
+    writeFileSync(join(dir, `1a2b3c4d.lock.${process.pid}.torn`), "{")
+    expect(lockSession(env, "1a2b3c4d")).toBeUndefined()
+    rmSync(join(dir, `1a2b3c4d.lock.${process.pid}.torn`))
+    writeFileSync(join(dir, "1a2b3c4d.lock.2147483646.torn"), "{")
+    expect(lockSession(env, "1a2b3c4d")).toBeFunction()
   })
 
   test("a holder whose process is gone is taken over, and the taker's file conforms and goes when released", () => {
