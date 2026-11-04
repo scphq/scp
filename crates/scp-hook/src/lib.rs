@@ -30,6 +30,7 @@ impl Write for Fd {
 }
 
 pub const STDIN_CAP: u64 = 8 * 1024 * 1024;
+const VERSION_PROBE_MS: u64 = 1000;
 pub const LINE_LIMIT: usize = 245760;
 const DAEMON_ENV: &[&str] = &[
     "PATH",
@@ -307,9 +308,75 @@ fn private_dir(path: &Path, create: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn executable_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.mode() & 0o111 != 0)
+}
+
+/// under `SCP_NATIVE=1`, the native `swarm` that runs the broker itself: `$SCP_SWARM_BIN`, else this executable when it is
+/// `swarm`, else the `swarm` next to it in the native package, when its `--version` is this hook's
+pub fn native_broker(env: &HashMap<String, String>, exe: Option<PathBuf>) -> Option<PathBuf> {
+    if env.get("SCP_NATIVE").is_none_or(|mode| mode != "1") {
+        return None;
+    }
+    let bin = match nonempty(env, "SCP_SWARM_BIN") {
+        Some(bin) => std::path::absolute(bin).ok()?,
+        None => {
+            let exe = exe?;
+            if exe.file_name().is_some_and(|name| name == "swarm") {
+                return Some(exe);
+            }
+            exe.parent()?.join("swarm")
+        }
+    };
+    if !executable_file(&bin) {
+        return None;
+    }
+    let mut probe = Command::new(&bin)
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let group = probe.id() as i32;
+    let stop = |probe: &mut std::process::Child| {
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+        let _ = probe.wait();
+    };
+    let mut pipe = probe.stdout.take()?;
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdout = Vec::new();
+        let _ = (&mut pipe).take(256).read_to_end(&mut stdout);
+        let _ = sent.send(stdout);
+    });
+    let until = now() + VERSION_PROBE_MS;
+    let status = loop {
+        match probe.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if now() < until => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                stop(&mut probe);
+                return None;
+            }
+        }
+    };
+    let Ok(stdout) = read.recv_timeout(Duration::from_millis(until.saturating_sub(now()))) else {
+        stop(&mut probe);
+        return None;
+    };
+    (status.success() && stdout == format!("swarm {}\n", env!("SCP_HOOK_VERSION")).as_bytes())
+        .then_some(bin)
+}
+
 fn start_daemon(dir: &Path, launcher: &[String], env: &HashMap<String, String>) -> io::Result<()> {
-    let Some(program) = launcher.first() else {
-        return Err(io::Error::other("no launcher"));
+    let native = native_broker(env, std::env::current_exe().ok());
+    let (program, words) = match (&native, launcher.split_first()) {
+        (Some(bin), _) => (bin.as_os_str().to_owned(), &[][..]),
+        (None, Some((program, words))) => (program.into(), words),
+        (None, None) => return Err(io::Error::other("no launcher")),
     };
     private_dir(dir, true)?;
     let log = OpenOptions::new()
@@ -321,7 +388,7 @@ fn start_daemon(dir: &Path, launcher: &[String], env: &HashMap<String, String>) 
         log.set_len(0)?;
     }
     let mut cmd = Command::new(program);
-    cmd.args(&launcher[1..])
+    cmd.args(words)
         .arg("daemon")
         .env_clear()
         .env("SCP_DIR", dir)
@@ -332,6 +399,13 @@ fn start_daemon(dir: &Path, launcher: &[String], env: &HashMap<String, String>) 
     for key in DAEMON_ENV {
         if let Some(value) = env.get(*key) {
             cmd.env(key, value);
+        }
+    }
+    if native.is_some() {
+        if !launcher.is_empty() {
+            cmd.env("SCP_CLI_ARGV", serde_json::to_string(launcher)?);
+        } else if let Some(words) = env.get("SCP_CLI_ARGV") {
+            cmd.env("SCP_CLI_ARGV", words);
         }
     }
     unsafe {
