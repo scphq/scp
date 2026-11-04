@@ -96,11 +96,20 @@ pub fn kill_error(error: &std::io::Error) -> String {
     }
 }
 
+/// the script of the CLI that runs this command, from `$SCP_CLI_ARGV`, whose brokers run as `<node> <script> daemon`
+pub fn cli_script(env: &scp_mcp::ps::Env) -> Option<String> {
+    scp_mcp::spawn::named_launcher(env).and_then(|words| words.last().cloned())
+}
+
 /// stops the broker of the relay dir with SIGTERM and waits up to 5 s for it: its pid, None when none ran
 fn stop_broker(env: &scp_mcp::ps::Env) -> Result<Option<i32>, Fail> {
     let dir = scp_mcp::client::relay_dir(env);
-    let script = scp_mcp::spawn::named_launcher(env).and_then(|words| words.last().cloned());
-    let Some(pid) = broker_pid(&dir, script.as_deref()) else {
+    stop(&dir, cli_script(env).as_deref()).map_err(|message| Fail::Call(CallError::Io(message)))
+}
+
+/// stops the broker of `dir`, one `script` runs among them, with SIGTERM and waits up to 5 s for it: its pid, None when none ran
+pub fn stop(dir: &std::path::Path, script: Option<&str>) -> Result<Option<i32>, String> {
+    let Some(pid) = broker_pid(dir, script) else {
         return Ok(None);
     };
     // SAFETY: kill(2) on a pid read from the broker lock and checked with ps
@@ -108,15 +117,15 @@ fn stop_broker(env: &scp_mcp::ps::Env) -> Result<Option<i32>, Fail> {
         let error = std::io::Error::last_os_error();
         return match error.raw_os_error() {
             Some(libc::ESRCH) => Ok(None),
-            _ => Err(Fail::Call(CallError::Io(kill_error(&error)))),
+            _ => Err(kill_error(&error)),
         };
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while alive(pid) {
         if std::time::Instant::now() >= deadline {
-            return Err(Fail::Call(CallError::Io(format!(
+            return Err(format!(
                 "the relay broker (pid {pid}) did not stop within 5 s"
-            ))));
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
