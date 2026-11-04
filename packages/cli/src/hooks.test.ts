@@ -1083,7 +1083,7 @@ for (const mode of hookModes)
         expect(subagentSkip(["hook", "claude"], tool)).toBe(false)
         expect(subagentSkip(["send", "x", SUBAGENT], tool)).toBe(false)
         const source = readFileSync(entry, "utf8")
-        expect([...source.matchAll(/^import .* from "(.+)"$/gm)].map((m) => m[1])).toEqual(["./hook-fast", "./warnings"])
+        expect([...source.matchAll(/^import .* from "(.+)"$/gm)].map((m) => m[1])).toEqual(["./route", "./hook-fast", "./warnings"])
         const env = { SCP_DIR: dir, SCP_SESSION: "fast-sub", CLAUDECODE: "1" }
         expect(await hook(["claude", SUBAGENT], { hook_event_name: "PostToolUse", cwd: project, tool_name: "Read", tool_input: {} }, env)).toMatchObject({
           stdout: "",
