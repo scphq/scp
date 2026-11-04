@@ -179,6 +179,9 @@ impl Core {
         }
         let actor = self.actor_of(conn)?;
         let me = self.actor_row(conn).await?;
+        let task = matches!(actor, Actor::Human { .. })
+            && self.state.connections.get(&conn).is_some_and(|c| c.task);
+        let by = (!task).then_some(&me);
         let views = if all {
             if !matches!(actor, Actor::Human { .. }) {
                 return Err(RpcError::new(
@@ -202,7 +205,7 @@ impl Core {
                     session_presence(&row, now) != "offline"
                 };
                 if take {
-                    views.push(self.set_hibernation(Some(&me), &row, &set).await?);
+                    views.push(self.set_hibernation(by, &row, &set).await?);
                 }
             }
             views
@@ -271,7 +274,7 @@ impl Core {
                     "{SPAWN_PROVIDER} hibernates only a durably held worker, with the ref its hold gave"
                 )));
             }
-            vec![self.set_hibernation(Some(&me), &target, &set).await?]
+            vec![self.set_hibernation(by, &target, &set).await?]
         };
         let ids: Vec<String> = views
             .iter()

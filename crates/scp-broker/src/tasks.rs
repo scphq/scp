@@ -83,8 +83,12 @@ async fn run(task: &Task, running: &TaskPid, failure: &mut Option<String>) {
                 }
                 out
             };
-            let ran =
-                tokio::time::timeout(RUN_LIMIT, async { tokio::join!(child.wait(), read) }).await;
+            let exited = async {
+                let status = child.wait().await;
+                running.set(0);
+                status
+            };
+            let ran = tokio::time::timeout(RUN_LIMIT, async { tokio::join!(exited, read) }).await;
             running.set(0);
             if matches!(ran, Ok((Ok(_), _))) {
                 group.0 = None;
@@ -213,6 +217,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         // SAFETY: signal 0 only checks that the process exists
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_pid_is_cleared_when_the_run_exits_while_its_stderr_stays_open() {
+        let dir = scratch("exit");
+        let running = TaskPid::default();
+        let script = r#"echo $$ > "$SCP_DIR/pid"; sleep 2 & exit 0"#;
+        let probe = running.clone();
+        let watch = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            probe.0.load(Ordering::Relaxed)
+        });
+        run(&task(&dir, script, 1), &running, &mut None).await;
+        assert_eq!(watch.await.unwrap(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -43,6 +43,8 @@ pub struct Connection {
     pub ticket: Option<String>,
     /// ended by the broker: the connection closes
     pub ended: bool,
+    /// the broker's own task process, matched by peer pid at accept
+    pub task: bool,
 }
 
 impl Connection {
