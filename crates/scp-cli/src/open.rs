@@ -541,7 +541,7 @@ pub fn with_opened(
         &call.parsed,
         call.env,
         route::shell_pid(),
-        terminal_attached(false),
+        terminal_attached(crate::messages::body_from_stdin(call.verb, &call.parsed)),
     )?;
     let runtime = runtime()?;
     let local = tokio::task::LocalSet::new();
