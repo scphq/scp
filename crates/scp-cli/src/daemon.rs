@@ -88,6 +88,14 @@ fn alive(pid: i32) -> bool {
     found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// a failed kill as Node words it: `kill <ERRNO>`
+pub fn kill_error(error: &std::io::Error) -> String {
+    match crate::open::errno_words(error) {
+        Some((code, _)) => format!("kill {code}"),
+        None => error.to_string(),
+    }
+}
+
 /// stops the broker of the relay dir with SIGTERM and waits up to 5 s for it: its pid, None when none ran
 fn stop_broker(env: &scp_mcp::ps::Env) -> Result<Option<i32>, Fail> {
     let dir = scp_mcp::client::relay_dir(env);
@@ -100,11 +108,7 @@ fn stop_broker(env: &scp_mcp::ps::Env) -> Result<Option<i32>, Fail> {
         let error = std::io::Error::last_os_error();
         return match error.raw_os_error() {
             Some(libc::ESRCH) => Ok(None),
-            _ => Err(Fail::Call(CallError::Io(crate::open::node_fs_error(
-                &error,
-                "kill",
-                &pid.to_string(),
-            )))),
+            _ => Err(Fail::Call(CallError::Io(kill_error(&error)))),
         };
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -197,6 +201,10 @@ mod tests {
         assert_eq!(broker_pid(&dir, Some("/elsewhere/cli.js")), None);
         std::fs::write(dir.join("broker.lock"), "1.5:0").unwrap();
         assert_eq!(broker_pid(&dir, Some(&script)), None);
+        assert_eq!(
+            kill_error(&std::io::Error::from_raw_os_error(libc::EPERM)),
+            "kill EPERM"
+        );
         let _ = child.kill();
         let _ = child.wait();
         std::fs::remove_dir_all(&dir).unwrap();

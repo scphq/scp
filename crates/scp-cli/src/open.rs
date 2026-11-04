@@ -347,22 +347,30 @@ pub fn hidden_harness(pid: i64, table: Option<&PsCommTable>) -> bool {
             .is_some_and(|init| !INITS.contains(&command(&init.args).as_str()))
 }
 
+/// an OS error's code and description as libuv names them
+pub fn errno_words(error: &std::io::Error) -> Option<(&'static str, &'static str)> {
+    Some(match error.raw_os_error()? {
+        libc::EACCES => ("EACCES", "permission denied"),
+        libc::EEXIST => ("EEXIST", "file already exists"),
+        libc::ENOENT => ("ENOENT", "no such file or directory"),
+        libc::ENOTDIR => ("ENOTDIR", "not a directory"),
+        libc::EPERM => ("EPERM", "operation not permitted"),
+        libc::EROFS => ("EROFS", "read-only file system"),
+        libc::ENOSPC => ("ENOSPC", "no space left on device"),
+        libc::EISDIR => ("EISDIR", "illegal operation on a directory"),
+        libc::ELOOP => ("ELOOP", "too many symbolic links encountered"),
+        libc::ENAMETOOLONG => ("ENAMETOOLONG", "name too long"),
+        libc::ESRCH => ("ESRCH", "no such process"),
+        _ => return None,
+    })
+}
+
 /// an fs failure as Node words it: `ENOTDIR: not a directory, mkdir '<path>'`
 pub fn node_fs_error(error: &std::io::Error, syscall: &str, path: &str) -> String {
-    let words = match error.raw_os_error() {
-        Some(libc::EACCES) => ("EACCES", "permission denied"),
-        Some(libc::EEXIST) => ("EEXIST", "file already exists"),
-        Some(libc::ENOENT) => ("ENOENT", "no such file or directory"),
-        Some(libc::ENOTDIR) => ("ENOTDIR", "not a directory"),
-        Some(libc::EPERM) => ("EPERM", "operation not permitted"),
-        Some(libc::EROFS) => ("EROFS", "read-only file system"),
-        Some(libc::ENOSPC) => ("ENOSPC", "no space left on device"),
-        Some(libc::EISDIR) => ("EISDIR", "illegal operation on a directory"),
-        Some(libc::ELOOP) => ("ELOOP", "too many symbolic links encountered"),
-        Some(libc::ENAMETOOLONG) => ("ENAMETOOLONG", "name too long"),
-        _ => return error.to_string(),
-    };
-    format!("{}: {}, {syscall} '{path}'", words.0, words.1)
+    match errno_words(error) {
+        Some((code, words)) => format!("{code}: {words}, {syscall} '{path}'"),
+        None => error.to_string(),
+    }
 }
 
 /// starts the broker for `dir` as `startDaemon` does: its directory made private and its log checked as there, each failure as Node
@@ -387,7 +395,7 @@ pub fn start_broker(dir: &str, env: &Env) -> Result<(), CallError> {
     }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .map_err(fail("chmod", dir))?;
-    let log = format!("{dir}/broker.log");
+    let log = scp_mcp::ps::join(&[dir, "broker.log"]);
     match std::fs::metadata(&log) {
         Ok(meta) if meta.len() > LOG_MAX_BYTES => {
             std::fs::OpenOptions::new()
@@ -594,7 +602,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("broker.log");
         std::os::unix::fs::symlink(&log, &log).unwrap();
-        let dir_text = dir.display().to_string();
+        let dir_text = format!("{}/", dir.display());
         assert_eq!(
             start_broker(&dir_text, &Env::new()),
             Err(CallError::Io(format!(

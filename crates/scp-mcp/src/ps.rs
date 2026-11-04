@@ -112,7 +112,7 @@ pub(crate) fn normalize(path: &str) -> String {
 }
 
 /// `path.join` for POSIX paths
-pub(crate) fn join(parts: &[&str]) -> String {
+pub fn join(parts: &[&str]) -> String {
     normalize(
         &parts
             .iter()
