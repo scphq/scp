@@ -9,6 +9,7 @@ COPY scp-relay ./scp-relay
 COPY scp-hook ./scp-hook
 COPY scp-broker ./scp-broker
 COPY scp-mcp ./scp-mcp
+COPY scp-cli ./scp-cli
 COPY swarm ./swarm
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

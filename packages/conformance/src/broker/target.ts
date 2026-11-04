@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { basename, dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { Subprocess } from "bun";
 import { brokerBinary, brokerNode, selectedBrokerTargets, swarmBinary } from "../environment";
@@ -102,7 +103,7 @@ export class BrokerTarget {
       `${this.name} broker socket`,
       20000,
     );
-    if (this.name === "ts-native" && Number(readFileSync(join(this.dir, "broker.lock"), "utf8").split(":")[0]) === child.pid)
+    if (this.name === "ts-native" && !nativeProcess(Number(readFileSync(join(this.dir, "broker.lock"), "utf8").split(":")[0])))
       throw new Error(`ts-native ran the TypeScript broker: ${this.stderr}`);
   }
   get pid() {
@@ -127,4 +128,10 @@ export class BrokerTarget {
       if (!this.socket.startsWith(this.home)) rmSync(dirname(this.socket), { recursive: true, force: true });
     }
   }
+}
+
+/** whether `pid` runs a native swarm: the CLI's child under the native broker, or the CLI process itself once it handed over by execve */
+function nativeProcess(pid: number): boolean {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+  return basename(result.stdout.trim()) === "swarm";
 }
