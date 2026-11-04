@@ -39,16 +39,30 @@ Keyword limits: map keys are constrained in descriptions only (there is no `prop
 
 - Path: `$SCP_DIR/claude-bg/<short id>.state.json`, mode 0600, in a 0700 directory.
 - Writers: the claude-bg task (before and after `claude stop` or `claude rm`), `swarm claude-wake` (after a resume, `movedTo` when Claude
-  Code resumed under a new short id). Atomic by rename from the fixed name `<path>.tmp`.
+  Code resumed under a new short id). Atomic by rename from `<path>.<pid>.<random>.tmp`, a name of this writer alone, opened `wx`.
 - Readers: `readState`, `readAllStates` (cached by inode, size and mtime). A file without a string `sessionId` and `cwd` reads as none; other
   fields are taken as they are.
 - Invariants: times are epoch milliseconds. A removal clears `rmRefused`; a resume drops `removedAt` and `movedTo`.
+
+## claude-bg-lock
+
+- Path: `$SCP_DIR/claude-bg/<short id>.lock.<pid>.<random>`, mode 0600, one file per run that wants the session, published by rename from
+  `.<name>.tmp` so it is never read half written.
+- Content: the holder's `pid` and, when `ps -o lstart= -p <pid>` (with `LC_ALL=C`, `TZ=UTC`, `/bin/ps` where it exists) could tell, `started`.
+- Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) publishes its own file before
+  it acts on the session, then lists the directory: it holds the session only when no other holder file of the session is live, and unlinks
+  its own file after the action, or at once when it does not hold. `swarm claude-wake` takes none: a wake must not wait on a stop.
+- Readers: a holder is stale only once its process is verifiably gone: no process has its pid, it is a zombie (`ps -o stat=` starts with
+  `Z`), or the one that has it started at another time than `started`. Age never makes it stale. A file it cannot parse takes the pid from its name; one with no usable pid, or whose start
+  `ps` cannot read, counts as live. A run unlinks stale holders and never another live one; a listing error is a failure, never a hold.
+- Invariants: two runs never hold one session at once, since each lists after it published its file; two at once may both back off, and the
+  session waits for the next pass. Node has no `flock`, so the lock needs only `O_EXCL`, `rename`, `readdir` and `unlink`.
 
 ## claude-bg-task
 
 - Path: `$SCP_DIR/claude-bg-task.json`, mode 0600.
 - Writer and reader: `swarm claude-bg-task`, one run per interval that the native broker starts, never two at once. The run reads it first and
-  writes it last, also after a failed run, by rename from `<path>.<pid>.tmp`; a write error is ignored. The TypeScript broker runs the task
+  writes it last, also after a failed run, by rename from `<path>.<pid>.<random>.tmp`; a write error is ignored. The TypeScript broker runs the task
   in process and keeps the same state in memory instead.
 - Reader tolerance: a missing or unparseable file is a fresh state; malformed pairs, non-string ids and a non-boolean `listed` are dropped.
 - Invariants: Maps and Sets are written as arrays of `[key, value]` pairs and of members. `stopped` values are the entries `claude agents

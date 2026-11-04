@@ -89,7 +89,14 @@ pub fn gives(word: &str, flag: &str) -> bool {
 }
 
 /// why `verb` with `words` goes to the TypeScript CLI, if it does: a flag or variable the native verbs do not cover yet
-pub fn declined(_verb: &str, words: &[String], env: &Env) -> Option<String> {
+pub fn declined(verb: &str, words: &[String], env: &Env) -> Option<String> {
+    if crate::claude::BROKER_VERBS.contains(&verb) {
+        return None;
+    }
+    let first = words.first().map(String::as_str).unwrap_or_default();
+    if verb == "claude" && !crate::claude::CLAUDE_WORDS.contains(&first) {
+        return Some("unported".into());
+    }
     for word in words {
         if word == "--" {
             break;

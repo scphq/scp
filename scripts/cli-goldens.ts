@@ -22,6 +22,7 @@ const root = join(import.meta.dir, "..");
 const OPTIONS_FILE = join(root, "crates/scp-cli/src/options.json");
 const PARSE_FILE = join(root, "crates/scp-cli/tests/fixtures/parse.json");
 const FLEET_FILE = join(root, "crates/scp-cli/tests/fixtures/fleet.json");
+const CLAUDE_BG_FILE = join(root, "crates/scp-cli/tests/fixtures/claude-bg.json");
 
 /** whole command lines after `swarm`; each runs through hoisting, util.parseArgs under Node and the verb's allowed flags */
 const CASES: string[][] = [
@@ -329,12 +330,24 @@ function fleetGoldens(): string {
   }
 }
 
+/** the claude-bg goldens, printed under UTC so `ps` start times read the same on every machine */
+function claudeBgGoldens(): string {
+  const run = spawnSync(process.execPath, [join(import.meta.dir, "claude-bg-goldens.ts")], {
+    encoding: "utf8",
+    env: { ...process.env, TZ: "UTC" },
+    maxBuffer: 1 << 26,
+  });
+  if (run.status !== 0) throw new Error(run.stderr);
+  return run.stdout;
+}
+
 const check = process.argv.includes("--check");
 let drifted = false;
 for (const [file, text] of [
   [OPTIONS_FILE, tables()],
   [PARSE_FILE, goldens()],
   [FLEET_FILE, fleetGoldens()],
+  [CLAUDE_BG_FILE, claudeBgGoldens()],
 ] as const) {
   if (!check) writeFileSync(file, text);
   else if (readFileSync(file, "utf8") !== text) {

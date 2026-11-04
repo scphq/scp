@@ -285,6 +285,42 @@ fn builtin_wakers_run_the_named_cli() {
     );
 }
 
+#[test]
+fn a_broker_with_no_cli_runs_the_claude_bg_task_itself() {
+    let temp = Temp::new();
+    let bin = temp.0.join("bin");
+    let log = temp.0.join("claude.log");
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        bin.join("claude"),
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\necho '[]'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    let records = temp.0.join("r/claude-bg");
+    fs::create_dir_all(&records).unwrap();
+    fs::write(records.join("1a2b3c4d.json"), "{}").unwrap();
+    let mut daemon = temp.swarm(&["daemon"]);
+    daemon
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("SCP_CLAUDE_BG_EVERY_S", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = daemon.spawn().unwrap();
+    let mut listed = false;
+    for _ in 0..200 {
+        listed = fs::read_to_string(&log).is_ok_and(|text| text.contains("agents --json --all"));
+        if listed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(listed, "no claude-bg task ran");
+}
+
 fn cold_start(temp: &Temp, mode: &str) -> Option<String> {
     let script = temp.0.join("cli.sh");
     let started = temp.0.join("started");
