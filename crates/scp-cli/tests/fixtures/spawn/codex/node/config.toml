@@ -1,0 +1,3 @@
+[mcp_servers.scp]
+command = "node"
+args = ["/x/cli.js", "mcp", "--harness", "codex"]

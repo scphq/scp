@@ -1,0 +1,6 @@
+[mcp_servers.scp]
+command = "node"
+args = ["cli.js", "mcp", "--harness", "codex"]
+env_vars = ["SCP_GRANT", "OTHER", 5, { a = 1 }]
+default_tools_approval_mode = "prompt"
+env = { SCP_NATIVE = "1" }

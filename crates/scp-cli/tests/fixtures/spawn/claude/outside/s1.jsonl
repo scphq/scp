@@ -1,0 +1,24 @@
+{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"before the prompt"}]}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":"first task"}}
+{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}
+{"type":"assistant","sessionId":"s1","isSidechain":true,"message":{"content":[{"type":"text","text":"sidechain reply"}]}}
+{"type":"assistant","sessionId":"other","message":{"content":[{"type":"text","text":"other session"}]}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","content":"tool output"}]}}
+{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"after a tool"}]}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":"meta note"},"isMeta":true}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":"summary of the conversation"},"isCompactSummary":true}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":"from a tool"},"toolUseResult":null}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":"Stop hook feedback: keep going"}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":"   "}}
+{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"image"},{"type":"text","text":"  "}]}}
+{"type":"assistant","sessionId":"s1","message":{"role":"assistant","content":[{"type":"text","text":"   "}]}}
+{"type":"assistant","sessionId":"s1","message":{"content":"a string reply"}}
+{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"thinking","thinking":"hm"},{"type":"tool_use","name":"x"},"bare string block",{"type":"text","text":"two"},null,5]}}
+not json
+[1,2]
+42
+
+{"type":"assistant","sessionId":"s1","message":["array message"]}
+{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"cut short"}],"stop_reason":"max_tokens"}}
+{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":7}],"stop_reason":"max_tokens"}}
+{"type":"assistant","sessionId":"s1","message":{"content":[{"type":"text","text":"crlf line"}]}}

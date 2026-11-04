@@ -1,0 +1,3 @@
+{"type":"assistant","sessionId":"s3","message":{"content":[{"type":"text","text":"bad ÿþÃ bytes"}]}}
+ÿ
+{"type":"assistant","sessionId":"s3","message":{"role":"assistant","content":[{"type":"text","text":"tail Ã©"}]}}

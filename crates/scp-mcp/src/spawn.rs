@@ -199,7 +199,7 @@ fn assignment(word: &str) -> bool {
 }
 
 /// where the program of a command starts, past `VAR=value` words and the wrappers env, timeout, nohup and nice
-fn program_at(command: &[String]) -> usize {
+pub fn program_at(command: &[String]) -> usize {
     let mut i = 0;
     let skip_flags = |i: &mut usize, valued: &[&str]| {
         while *i < command.len() && command[*i].starts_with('-') && command[*i] != "--" {
@@ -247,7 +247,7 @@ fn config_mode(value: &str) -> String {
     }
 }
 
-fn muse_modes(args: &[String]) -> Vec<Option<String>> {
+pub fn muse_modes(args: &[String]) -> Vec<Option<String>> {
     let end = args.iter().position(|w| w == "--").unwrap_or(args.len());
     let words = &args[..end];
     let mut modes = Vec::new();

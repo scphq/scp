@@ -1,0 +1,5 @@
+[mcp_servers.scp]
+command = 42
+args = [true, 1.5, ["a", "b"], 1e300, -0.0, 1e-7]
+env = "string"
+env_vars = "SCP_GRANT"

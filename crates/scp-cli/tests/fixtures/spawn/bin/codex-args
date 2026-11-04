@@ -1,0 +1,2 @@
+#!/bin/sh
+[ "$1 $2" = "exec --help" ] && [ "$PROBE_ENV" = "yes" ] && echo "--skip-git-repo-check"

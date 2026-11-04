@@ -264,7 +264,7 @@ const MUSE_CONFIG = new Set(["-c", "--config"])
 export const MUSE_MODES_ALLOWED: ReadonlySet<string> = new Set(["off", "on"])
 
 /** where muse's options from `start` end: the index of its subcommand, its prompt or a `--` */
-function museOptionsEnd(args: string[], start = 0): number {
+export function museOptionsEnd(args: string[], start = 0): number {
   let i = start
   while (i < args.length && args[i]!.startsWith("-") && args[i] !== "--") {
     const word = args[i]!
@@ -281,7 +281,7 @@ const MUSE_FIRST_ONLY = new Set(["--prompt-file", "--image", MUSE_SESSION, "-w",
 type MuseOption = { at: number; size: number; flag: string; value?: string }
 
 /** a headless `muse [opts] exec [opts] [prompt]` that logs its session: where exec is, where its options end, them read by arity, the session it names */
-function museExec(args: string[]): { exec: number; end: number; options: MuseOption[]; session?: string } | undefined {
+export function museExec(args: string[]): { exec: number; end: number; options: MuseOption[]; session?: string } | undefined {
   const exec = museOptionsEnd(args)
   if (args[exec] !== "exec") return undefined
   const end = museOptionsEnd(args, exec + 1)
@@ -323,7 +323,7 @@ export function museResumeBase(command: string[], session: string): string[] | u
 }
 
 /** where muse's contributor mode goes: after exec, which takes its own, else right after the program */
-function museModeAt(args: string[]): number {
+export function museModeAt(args: string[]): number {
   const i = museOptionsEnd(args)
   return args[i] === "exec" ? i + 1 : 0
 }
@@ -366,7 +366,7 @@ export function contributorRefusal(command: string[]): string | null {
 }
 
 /** whether `args`, up to a `--`, hold one of `flags`, alone or as `--flag=value` */
-function hasFlag(args: string[], flags: string[]): boolean {
+export function hasFlag(args: string[], flags: string[]): boolean {
   const end = args.indexOf("--")
   return (end < 0 ? args : args.slice(0, end)).some((arg) => flags.some((flag) => arg === flag || (flag.startsWith("--") && arg.startsWith(`${flag}=`))))
 }
@@ -388,7 +388,7 @@ export function codexSkipsGitCheck(program: string, env: Env): boolean {
 }
 
 /** whether `dir` or a directory above it holds a .git, a repository's directory or a worktree's file */
-function inGit(dir: string): boolean {
+export function inGit(dir: string): boolean {
   for (let at = dir; ; at = dirname(at)) {
     if (existsSync(join(at, ".git"))) return true
     if (dirname(at) === at) return false
@@ -396,7 +396,7 @@ function inGit(dir: string): boolean {
 }
 
 /** Locate exec, its subcommand and operands, tracking the last working-directory override. */
-function codexExec(args: string[]): { exec: number; sub?: { name: "resume" | "review"; at: number }; operands: string[]; cd?: string } | undefined {
+export function codexExec(args: string[]): { exec: number; sub?: { name: "resume" | "review"; at: number }; operands: string[]; cd?: string } | undefined {
   let cd: string | undefined
   const options = (from: number, valued: Set<string>) => {
     let i = from
@@ -544,7 +544,7 @@ const CLAUDE_VALUED = new Set([
 const CODEX_EXEC_VALUED = new Set([...CODEX_VALUED, "--output-schema", "--color", "-o", "--output-last-message"])
 
 /** Locate Claude print's last operand or Codex exec's first, skipping flag values and stdin prompts. */
-function promptAt(command: string[]): { at: number; from?: number } | undefined {
+export function promptAt(command: string[]): { at: number; from?: number } | undefined {
   const at = programAt(command)
   const name = command[at] === undefined ? undefined : basename(command[at]!)
   const args = command.slice(at + 1)
@@ -993,7 +993,7 @@ export function spawnDefaults(values: Values, command: string[], random?: () => 
 }
 
 /** `--handback-bytes <n>`: whole bytes, 1 to ${LIMITS.handbackBytes} */
-function handbackBytes(value: string): number {
+export function handbackBytes(value: string): number {
   const bytes = /^\d+$/.test(value) ? Number(value) : 0
   if (bytes < 1 || bytes > LIMITS.handbackBytes) throw new RelayUsage(`--handback-bytes takes whole bytes, 1 to ${LIMITS.handbackBytes}`)
   return bytes
