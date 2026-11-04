@@ -1,5 +1,18 @@
-import { execFile } from "node:child_process"
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import { execFile, spawnSync } from "node:child_process"
+import {
+  closeSync,
+  constants,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { basename, join } from "node:path"
 import { type BrokerTask, type BrokerTaskContext, connectBroker, privateDir, readOwnedFile, relayDir } from "@scp-dev/broker"
 import { CLI_NAME, LIMITS, type LocalAgent, type ReviveRecord, reviveRecord } from "@scp-dev/core"
@@ -479,11 +492,137 @@ export function readAllStates(env: Env): (BgState & { id: string })[] {
   })
 }
 
+/** `text` at `path`, mode 0600, by rename from a temporary file of this writer alone, so two writers never share one */
+function writePrivate(path: string, text: string): void {
+  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`
+  const fd = openSync(temp, "wx", 0o600)
+  try {
+    try {
+      writeFileSync(fd, text)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(temp, path)
+  } catch (error) {
+    try {
+      unlinkSync(temp)
+    } catch {}
+    throw error
+  }
+}
+
 export function writeState(env: Env, id: string, state: BgState): void {
-  const path = statePath(env, id)
   privateDir(bgDir(env))
-  writeFileSync(`${path}.tmp`, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
-  renameSync(`${path}.tmp`, path)
+  writePrivate(statePath(env, id), `${JSON.stringify(state, null, 2)}\n`)
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/** `ps`, by its path where it has one, so a `ps` on PATH never decides a lock */
+const PS = existsSync("/bin/ps") ? "/bin/ps" : "ps"
+
+/** what `ps -o <field>= -p <pid>` prints of process `pid` in the C locale and UTC, trimmed; undefined when `ps` cannot tell */
+function psField(pid: number, field: "lstart" | "stat"): string | undefined {
+  const run = spawnSync(PS, ["-o", `${field}=`, "-p", String(pid)], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+  })
+  const text = run.status === 0 ? run.stdout.trim() : ""
+  return text === "" ? undefined : text
+}
+
+/** when process `pid` started, as `ps` prints it in the C locale and UTC; undefined when `ps` cannot tell */
+const startedAt = (pid: number): string | undefined => psField(pid, "lstart")
+
+let ownStart: string | undefined | null = null
+
+/** this process's holder record: its pid and, when `ps` can tell, when it started, so a later process with the same pid is told apart */
+function ownHolder(): string {
+  if (ownStart === null) ownStart = startedAt(process.pid)
+  return `${JSON.stringify({ pid: process.pid, ...(ownStart !== undefined ? { started: ownStart } : {}) })}\n`
+}
+
+/**
+ * whether the holder file `name` in `dir` still claims its session: gone, stale (its process is verifiably gone: no such pid, a zombie, or
+ * that pid started at another time) or held. Age never makes a holder stale, and one that cannot be told is held
+ */
+function holder(dir: string, name: string, prefix: string): "gone" | "stale" | "held" {
+  let text: string
+  try {
+    text = readFileSync(join(dir, name), { encoding: "utf8", flag: constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK })
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : "held"
+  }
+  let record: { pid?: unknown; started?: unknown } | null | undefined
+  try {
+    record = JSON.parse(text) as { pid?: unknown; started?: unknown } | null
+  } catch {
+    record = undefined
+  }
+  const named = Number(name.slice(prefix.length).split(".")[0])
+  const pid = typeof record?.pid === "number" ? record.pid : named
+  if (!Number.isInteger(pid) || pid <= 0) return "held"
+  if (!alive(pid) || psField(pid, "stat")?.startsWith("Z")) return "stale"
+  const started = typeof record?.started === "string" ? record.started : undefined
+  const now = started === undefined ? undefined : startedAt(pid)
+  return now !== undefined && now !== started ? "stale" : "held"
+}
+
+/**
+ * the lock of session `id`, held while a run acts on that session, so a task and a `claude prune` at once never both stop or remove it.
+ * Each run publishes a holder file of its own, `<id>.lock.<pid>.<random>`, then holds the session only when no other live holder file is
+ * there; one published before its listing is always seen, so two runs never both hold it, and both may back off. A run deletes its own
+ * file and the files of holders whose process is verifiably gone, never another live one. Returns what releases it, or undefined while
+ * another run holds it
+ */
+export function lockSession(env: Env, id: string): (() => void) | undefined {
+  const dir = privateDir(bgDir(env))
+  const prefix = `${id}.lock.`
+  const name = `${prefix}${process.pid}.${crypto.randomUUID()}`
+  const path = join(dir, name)
+  const temp = join(dir, `.${name}.tmp`)
+  try {
+    writeFileSync(temp, ownHolder(), { flag: "wx", mode: 0o600 })
+    renameSync(temp, path)
+  } catch (error) {
+    try {
+      unlinkSync(temp)
+    } catch {}
+    throw error
+  }
+  const release = () => {
+    try {
+      unlinkSync(path)
+    } catch {}
+  }
+  try {
+    let held = true
+    for (const other of readdirSync(dir)) {
+      if (other === name || !other.startsWith(prefix)) continue
+      const seen = holder(dir, other, prefix)
+      if (seen === "held") held = false
+      else if (seen === "stale") {
+        try {
+          unlinkSync(join(dir, other))
+        } catch {}
+      }
+    }
+    if (held) return release
+  } catch (error) {
+    release()
+    throw error
+  }
+  release()
+  return undefined
 }
 
 /** the short ids whose state files a plan reads: the recorded sessions and every listed background session */
@@ -895,14 +1034,19 @@ async function apply(actions: Act[], port: BgPort, run: Run): Promise<Outcome[]>
   const outcomes: Outcome[] = []
   for (const action of actions) {
     let failed: string | null
+    let release: (() => void) | undefined
     try {
-      if (action.kind === "unhibernate") {
+      release = lockSession(run.env, action.id)
+      if (!release) failed = "another claude-bg run is acting on it"
+      else if (action.kind === "unhibernate") {
         await port.unhibernate(action.agent)
         failed = null
       } else if (action.kind === "orphan") failed = await removeOrphan(action, port, run)
       else failed = action.kind === "stop" ? await stopWorker(action, port, run) : await removeWorker(action, port, run)
     } catch (error) {
       failed = error instanceof Error ? error.message : String(error)
+    } finally {
+      release?.()
     }
     outcomes.push({ action, ok: failed === null, note: failed ?? "" })
   }
@@ -1080,8 +1224,7 @@ export function readTaskState(env: Env): BgTaskState {
 export function writeTaskState(env: Env, state: BgTaskState): void {
   const path = taskStatePath(env)
   const value = { sessions: [...state.sessions], seen: [...state.seen], stopped: [...state.stopped], listed: state.listed }
-  writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify(value)}\n`, { mode: 0o600 })
-  renameSync(`${path}.${process.pid}.tmp`, path)
+  writePrivate(path, `${JSON.stringify(value)}\n`)
 }
 
 /** one run of the claude-bg task on `port` with what the last run learnt, kept in `<relay dir>/claude-bg-task.json` */

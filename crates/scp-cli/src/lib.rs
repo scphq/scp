@@ -207,9 +207,11 @@ fn registry(args: &[String]) -> i32 {
                 .collect::<Vec<_>>(),
         );
         let version = Value::from(VERSION);
+        let subverbs = serde_json::json!({ "claude": claude::CLAUDE_WORDS });
         term::json_entries(&[
             ("version", &version),
             ("verbs", &verbs),
+            ("subverbs", &subverbs),
             ("declines", &declines),
             ("decline_env", &env),
         ]);

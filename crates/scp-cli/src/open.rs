@@ -558,7 +558,7 @@ fn unbound(verb: &str, plan: &Plan) -> Fail {
     ))
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, Fail> {
+pub fn runtime() -> Result<tokio::runtime::Runtime, Fail> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

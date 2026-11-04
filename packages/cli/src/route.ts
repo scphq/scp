@@ -9,8 +9,11 @@ import pkg from "../package.json" with { type: "json" }
 
 type Env = Record<string, string | undefined>
 
-/** what the native `swarm` runs, as `swarm __verbs --json` prints it and release packaging keeps beside it as swarm-verbs.json */
-export type Registry = { version: string; verbs: string[]; declines: string[]; decline_env: string[] }
+/**
+ * what the native `swarm` runs, as `swarm __verbs --json` prints it and release packaging keeps beside it as swarm-verbs.json; a verb in
+ * `subverbs` runs natively only with one of those words right after it
+ */
+export type Registry = { version: string; verbs: string[]; subverbs?: Record<string, string[]>; declines: string[]; decline_env: string[] }
 
 export type Decision = { engine: "native"; bin: string; registry: Registry } | { engine: "ts"; reason: string }
 
@@ -73,7 +76,7 @@ function parseRegistry(text: string): Registry | undefined {
   try {
     const value = JSON.parse(text) as Partial<Registry>
     if (typeof value.version !== "string" || !Array.isArray(value.verbs)) return undefined
-    return { version: value.version, verbs: value.verbs, declines: value.declines ?? [], decline_env: value.decline_env ?? [] }
+    return { version: value.version, verbs: value.verbs, subverbs: value.subverbs ?? {}, declines: value.declines ?? [], decline_env: value.decline_env ?? [] }
   } catch {
     return undefined
   }
@@ -102,6 +105,8 @@ export function decide(argv: string[], env: Env, version = pkg.version, locate =
   if (!bin || !registry) return { engine: "ts", reason: "missing" }
   if (registry.version !== version) return { engine: "ts", reason: "version" }
   if (!registry.verbs.includes(verb)) return { engine: "ts", reason: "unported" }
+  const words = registry.subverbs?.[verb]
+  if (words && !words.includes(argv[argv.indexOf(verb) + 1] ?? "")) return { engine: "ts", reason: "unported" }
   if (declined(argv, env, registry)) return { engine: "ts", reason: "decline" }
   return { engine: "native", bin, registry }
 }
