@@ -32,6 +32,7 @@ struct Daemon {
 
 const HOST: scp_cli::Host = scp_cli::Host {
     daemon: daemon_command,
+    daemon_stop: stop_broker,
     beside: beside_cli,
 };
 
@@ -155,6 +156,13 @@ fn foreground(options: Daemon) -> i32 {
             1
         }
     }
+}
+
+/// stops the running broker, returning its pid, None when none ran
+fn stop_broker() -> Result<Option<i32>, String> {
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let paths = Paths::from_env(&env).map_err(|error| error.to_string())?;
+    daemon::stop(&paths.dir).map_err(|error| error.to_string())
 }
 
 fn control(restart: bool) -> Result<String, Box<dyn std::error::Error>> {

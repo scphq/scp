@@ -193,6 +193,23 @@ describe.skipIf(!swarmBinary)("the native swarm", () => {
     expect(logLines(log)).toEqual(["set-title native execve", "set-title native run", "set-title native spawn", "set-title native run", "set-title ts forced"])
   })
 
+  test("a hangup stops a routed foreground broker cleanly, on both hand-offs", async () => {
+    for (const exec of ["execve", "spawn"]) {
+      const dir = mkdtempSync("/tmp/scp-hup-")
+      const child = Bun.spawn([process.execPath, CLI, "daemon", "--idle", "60"], { env: { ...env(), SCP_DIR: dir, SCP_ROUTE_EXEC: exec }, stderr: "ignore" })
+      for (let i = 0; i < 100 && !existsSync(join(dir, "relay.sock")); i++) await Bun.sleep(100)
+      child.kill("SIGHUP")
+      expect(await child.exited).toBe(0)
+      expect(existsSync(join(dir, "relay.sock"))).toBe(false)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a broker that cannot start says why at once", async () => {
+    const run = await cli(["--as", "lane", "whoami"], { ...env(), SCP_DIR: "/dev/null/x" })
+    expect(run).toMatchObject({ code: 125, err: "swarm: ENOTDIR: not a directory, mkdir '/dev/null/x'\n" })
+  })
+
   test("a reader that went away ends the command quietly", async () => {
     const codes = join(root, "codes")
     const script = `( sleep 0.5; "$@" 2>"${codes}.err"; echo $? >"${codes}" ) | true`

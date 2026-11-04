@@ -4,7 +4,7 @@ use crate::args::{Parsed, parse_verb};
 use crate::{Call, Done, Fail, route, term, usage};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::LocalFuture;
-use scp_mcp::client::{CallError, Client, connect_broker, relay_dir};
+use scp_mcp::client::{CallError, Client, Start, connect_or_start, relay_dir};
 use scp_mcp::identity::{
     codex_shell, codex_thread, detect_harness, harness_variant, labels_for, safe_cwd, session_key,
     short_hostname,
@@ -347,20 +347,53 @@ pub fn hidden_harness(pid: i64, table: Option<&PsCommTable>) -> bool {
             .is_some_and(|init| !INITS.contains(&command(&init.args).as_str()))
 }
 
+/// an fs failure as Node words it: `ENOTDIR: not a directory, mkdir '<path>'`
+pub fn node_fs_error(error: &std::io::Error, syscall: &str, path: &str) -> String {
+    let words = match error.raw_os_error() {
+        Some(libc::EACCES) => ("EACCES", "permission denied"),
+        Some(libc::EEXIST) => ("EEXIST", "file already exists"),
+        Some(libc::ENOENT) => ("ENOENT", "no such file or directory"),
+        Some(libc::ENOTDIR) => ("ENOTDIR", "not a directory"),
+        Some(libc::EPERM) => ("EPERM", "operation not permitted"),
+        Some(libc::EROFS) => ("EROFS", "read-only file system"),
+        Some(libc::ENOSPC) => ("ENOSPC", "no space left on device"),
+        Some(libc::EISDIR) => ("EISDIR", "illegal operation on a directory"),
+        Some(libc::ELOOP) => ("ELOOP", "too many symbolic links encountered"),
+        Some(libc::ENAMETOOLONG) => ("ENAMETOOLONG", "name too long"),
+        _ => return error.to_string(),
+    };
+    format!("{}: {}, {syscall} '{path}'", words.0, words.1)
+}
+
+/// starts the broker for `dir` as `startDaemon` does, failing with its error as Node words it
+pub fn start_broker(dir: &str, env: &Env) -> Result<(), CallError> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|error| CallError::Io(node_fs_error(&error, "mkdir", dir)))?;
+    scp_mcp::spawn::start_daemon(dir, env).map_err(|error| {
+        let log = format!("{dir}/broker.log");
+        CallError::Io(match error.raw_os_error() {
+            Some(_) => node_fs_error(&error, "open", &log),
+            None => error.to_string(),
+        })
+    })
+}
+
 const BUSY: &str = "the relay broker is running but did not accept a connection";
 
 /// the broker for `dir`, started when none runs, except from a codex shell, whose sandbox would hold the daemon too
 pub async fn connect_shell(dir: &str, env: &Env, tool: &str) -> Result<Client, Fail> {
     let codex = codex_shell(env);
-    let start: Option<Rc<dyn Fn()>> = if codex {
+    let start: Option<Start> = if codex {
         None
     } else {
         let (dir, env) = (dir.to_owned(), env.clone());
-        Some(Rc::new(move || {
-            let _ = scp_mcp::spawn::start_daemon(&dir, &env);
-        }))
+        Some(Rc::new(move || start_broker(&dir, &env)))
     };
-    match connect_broker(std::path::Path::new(dir), start).await {
+    match connect_or_start(std::path::Path::new(dir), start).await {
         Ok(client) => Ok(client),
         Err(CallError::Io(message)) if codex && !message.starts_with(BUSY) => Err(usage(format!(
             "{message}. In a codex sandbox use {tool} instead: the scp MCP server runs outside the sandbox. Or let the sandbox reach the socket (codex: sandbox_workspace_write.network_access = true)"
