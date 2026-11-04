@@ -1,8 +1,9 @@
 //! What a spawn hands back: the harness's output tail, its stderr tail, the thread a codex run opened and a Claude worker's replies.
 
+use super::argv::home;
 use scp_broker::session::{HANDBACK_CUT, handback_output, keep_last};
 use scp_core::protocol::LIMITS;
-use scp_mcp::ps::basename;
+use scp_mcp::ps::{Env, basename, join};
 use scp_mcp::render::js_space;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -138,6 +139,15 @@ pub fn stderr_output(run: &HarnessRun, bytes: Option<i64>) -> String {
     }
     let from = (from as usize).min(encoded.len());
     format!("{EARLIER_STDERR}\n{}", decode(&encoded[from..]))
+}
+
+/// where Claude Code keeps its transcripts: projects/ under $CLAUDE_CONFIG_DIR, else ~/.claude
+pub fn claude_transcripts(env: &Env) -> String {
+    let base = match env.get("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => dir.clone(),
+        None => join(&[&home(env), ".claude"]),
+    };
+    join(&[&base, "projects"])
 }
 
 /// how much of a transcript's end spawn reads

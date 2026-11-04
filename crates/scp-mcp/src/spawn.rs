@@ -380,7 +380,7 @@ fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 }
 
 /// the first line the runner writes on its handshake fd, or what it wrote before it closed it; empty when it could not start
-async fn handshake(
+pub async fn handshake(
     launch: &[String],
     args: &[String],
     cwd: &Path,

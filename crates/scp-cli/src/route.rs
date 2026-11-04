@@ -16,12 +16,15 @@ pub const DECLINE_ENV: [(&str, &str); 1] = [("SCP_TRANSPORT", "cloud")];
 pub const PARENT: &str = "SCP_CLI_PARENT";
 /// `native` when the router handed this invocation over, `ts` on the TypeScript CLI this hands back to
 pub const ROUTED: &str = "SCP_ROUTED";
+/// the caller's own `SCP_CLI_ARGV`, which the router replaced with its launch words
+pub const GIVEN_ARGV: &str = "SCP_CLI_ARGV_GIVEN";
 /// a file each routing decision is appended to as `verb engine reason`
 pub const LOG: &str = "SCP_ROUTE_LOG";
 
 struct Start {
     parent: Option<String>,
     routed: bool,
+    given: Option<String>,
 }
 
 static START: OnceLock<Start> = OnceLock::new();
@@ -30,17 +33,62 @@ pub fn startup() {
     START.get_or_init(|| {
         let parent = std::env::var(PARENT).ok();
         let routed = std::env::var(ROUTED).is_ok_and(|v| v == "native");
+        let given = std::env::var(GIVEN_ARGV).ok();
         // SAFETY: called first in main, before any other thread starts
         unsafe {
             std::env::remove_var(PARENT);
             std::env::remove_var(ROUTED);
+            std::env::remove_var(GIVEN_ARGV);
         }
-        Start { parent, routed }
+        Start {
+            parent,
+            routed,
+            given,
+        }
     });
 }
 
 pub fn routed() -> bool {
     START.get().is_some_and(|s| s.routed)
+}
+
+/// the router's variables for a process this one starts in its own place, as the router handed them
+pub fn handed_on(env: &mut Env) {
+    if !routed() {
+        return;
+    }
+    env.insert(ROUTED.into(), "native".into());
+    if let Some(given) = START.get().and_then(|s| s.given.clone()) {
+        env.insert(GIVEN_ARGV.into(), given);
+    }
+}
+
+/// `SCP_CLI_ARGV` as the caller had it when a router replaced it: `Some(None)` for a caller without one, `None` when nothing was replaced
+fn callers_argv() -> Option<Option<&'static str>> {
+    START
+        .get()
+        .and_then(|start| replaced(start.routed, start.given.as_deref()))
+}
+
+fn replaced(routed: bool, given: Option<&str>) -> Option<Option<&str>> {
+    routed.then_some(given)
+}
+
+/// `env` with `SCP_CLI_ARGV` as the caller had it, before a router replaced it
+pub fn caller_argv(env: &mut Env) {
+    restore_argv(env, callers_argv());
+}
+
+fn restore_argv(env: &mut Env, callers: Option<Option<&str>>) {
+    match callers {
+        Some(Some(given)) => {
+            env.insert(scp_mcp::spawn::CLI_ARGV.into(), given.into());
+        }
+        Some(None) => {
+            env.remove(scp_mcp::spawn::CLI_ARGV);
+        }
+        None => {}
+    }
 }
 
 /// the pid a `<pid>:<ppid>` pair names as the shell, when its pid is `parent`
@@ -122,11 +170,18 @@ pub fn fallback(args: &[String], verb: &str, reason: &str, env: &Env, host: &Hos
         ));
         return term::FAILED;
     };
-    let error = std::process::Command::new(&launch[0])
-        .args(&launch[1..])
-        .args(args)
-        .env(ROUTED, "ts")
-        .exec();
+    let mut command = std::process::Command::new(&launch[0]);
+    command.args(&launch[1..]).args(args).env(ROUTED, "ts");
+    match callers_argv() {
+        Some(Some(given)) => {
+            command.env(scp_mcp::spawn::CLI_ARGV, given);
+        }
+        Some(None) => {
+            command.env_remove(scp_mcp::spawn::CLI_ARGV);
+        }
+        None => {}
+    }
+    let error = command.exec();
     term::note(&format!(
         "the TypeScript CLI {} did not start: {error}",
         launch[0]
@@ -146,6 +201,22 @@ mod tests {
         assert_eq!(parent_shell(Some("40"), 40), None);
         assert_eq!(parent_shell(Some("40:x"), 40), None);
         assert_eq!(parent_shell(None, 40), None);
+    }
+
+    #[test]
+    fn a_harness_gets_the_callers_argv_not_the_routers() {
+        let routers = Env::from([(
+            scp_mcp::spawn::CLI_ARGV.to_owned(),
+            "[\"router\"]".to_owned(),
+        )]);
+        let mut env = routers.clone();
+        restore_argv(&mut env, replaced(false, Some("[\"caller\"]")));
+        assert_eq!(env, routers);
+        restore_argv(&mut env, replaced(true, None));
+        assert!(env.is_empty());
+        let mut env = routers.clone();
+        restore_argv(&mut env, replaced(true, Some("[\"caller\"]")));
+        assert_eq!(env[scp_mcp::spawn::CLI_ARGV], "[\"caller\"]");
     }
 
     #[test]

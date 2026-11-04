@@ -3,15 +3,16 @@
 use super::muse::{MUSE_MODE, muse_mode_at};
 use crate::args::{js_string, tables};
 use crate::{Fail, usage};
-use scp_core::protocol::LIMITS;
+use scp_core::protocol::{CLI_NAME, LIMITS};
 use scp_mcp::identity::home_dir;
-use scp_mcp::ps::{CODEX_VALUED, Env, basename, dirname, join, resolve};
+use scp_mcp::ps::{CODEX_VALUED, Env, basename, capture, dirname, join, resolve};
 use scp_mcp::render::js_space;
 use scp_mcp::spawn::muse_modes;
 use scp_mcp::tools::js_num;
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use toml::{Table, Value as Toml};
@@ -161,7 +162,7 @@ fn mcp_words(argv: &[String], fallback: &[String]) -> Vec<String> {
 }
 
 /// what `SCP_NATIVE` runs natively: `all` for 1, `mcp` for mcp, else off
-fn native_mode(env: &Env) -> &'static str {
+pub fn native_mode(env: &Env) -> &'static str {
     match env.get("SCP_NATIVE").map(String::as_str) {
         Some("1") => "all",
         Some("mcp") => "mcp",
@@ -209,6 +210,92 @@ pub fn mount_with(bin: Option<&str>, launch: &[String], words: &[String], env: &
         env: vars,
         native: true,
     }
+}
+
+/// whether `path` is an executable file
+pub fn executable(path: &str) -> bool {
+    let Ok(c_path) = std::ffi::CString::new(path.as_bytes()) else {
+        return false;
+    };
+    // SAFETY: access reads a C string that outlives the call
+    let allowed = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 };
+    allowed && std::fs::metadata(path).is_ok_and(|m| m.is_file())
+}
+
+/// `<dir>/<name>` for the first directory of `$PATH` that has it as an executable file
+pub fn which_on_path(name: &str, env: &Env) -> Option<String> {
+    env.get("PATH")?
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| join(&[dir, name]))
+        .find(|path| executable(path))
+}
+
+/// `$SCP_SWARM_BIN`, when it is an executable file whose `--version` prints `swarm <version>`, else this binary
+fn native_swarm(env: &Env) -> Option<String> {
+    let Some(given) = env.get("SCP_SWARM_BIN") else {
+        let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+        return Some(exe.to_string_lossy().into_owned());
+    };
+    let bin = resolve(&scp_mcp::identity::safe_cwd(), given);
+    if !executable(&bin) {
+        return None;
+    }
+    let vars: Vec<(&str, String)> = env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    let printed = capture(
+        &[bin.as_str(), "--version"],
+        Some(vars.as_slice()),
+        Some(VERSION_TIMEOUT_MS),
+        Some(VERSION_MAX_BYTES),
+    )?;
+    (printed == format!("{CLI_NAME} {}\n", crate::VERSION)).then_some(bin)
+}
+
+const VERSION_TIMEOUT_MS: u64 = 10_000;
+const VERSION_MAX_BYTES: usize = 4096;
+
+/// `process.platform`, `process.arch` and the native package this binary's platform has, as the router names them
+fn platform() -> (&'static str, &'static str, Option<String>) {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    let gnu = cfg!(target_env = "gnu");
+    let key = match (os, arch) {
+        ("darwin", "arm64" | "x64") => Some(format!("darwin-{arch}")),
+        ("linux", "x64") => Some(format!("linux-x64-{}", if gnu { "gnu" } else { "musl" })),
+        ("linux", "arm64") if gnu => Some("linux-arm64-gnu".to_owned()),
+        _ => None,
+    };
+    (os, arch, key)
+}
+
+static MOUNT_NOTED: AtomicBool = AtomicBool::new(false);
+
+/// with `SCP_NATIVE=1` or `mcp`, the native `swarm` whose `swarm mcp` a mount runs directly; a missing or mismatched one is noted once and mounts run through Node
+pub fn native_mount_bin(env: &Env) -> Option<String> {
+    if native_mode(env) == "off" {
+        return None;
+    }
+    let bin = native_swarm(env);
+    if bin.is_none() && !MOUNT_NOTED.swap(true, Ordering::Relaxed) {
+        let (os, arch, key) = platform();
+        let fix = match key {
+            Some(key) => format!("install @scp-dev/native-{key} or set SCP_SWARM_BIN"),
+            None => "set SCP_SWARM_BIN".to_owned(),
+        };
+        crate::term::note(&format!(
+            "SCP_NATIVE={} but no native swarm {} binary for {os}-{arch} ({fix}); MCP mounts run swarm mcp through Node",
+            env.get("SCP_NATIVE").map_or("", String::as_str),
+            crate::VERSION
+        ));
+    }
+    bin
 }
 
 /// whether `command` is an absolute path to no executable file, as a mount's native swarm is once an upgrade or uninstall removed it

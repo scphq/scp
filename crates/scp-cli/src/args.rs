@@ -297,12 +297,26 @@ pub fn js_string(text: &str) -> String {
 
 /// `parseArgs({ args, options, allowPositionals: true, strict: true })`, failing with the message Node throws
 pub fn parse(args: &[String], options: &Options) -> Result<Parsed, String> {
+    parse_strict(args, options, true)
+}
+
+/// `parseArgs({ args, options, strict: true })`, which takes no positionals, failing with the message Node throws
+pub fn parse_flags(args: &[String], options: &Options) -> Result<Parsed, String> {
+    parse_strict(args, options, false)
+}
+
+fn parse_strict(args: &[String], options: &Options, positionals: bool) -> Result<Parsed, String> {
     let mut parsed = Parsed::default();
     for token in tokens(args, options) {
         let (name, raw, value, inline) = match token {
-            Token::Positional(value) => {
+            Token::Positional(value) if positionals => {
                 parsed.positionals.push(value);
                 continue;
+            }
+            Token::Positional(value) => {
+                return Err(format!(
+                    "Unexpected argument '{value}'. This command does not take positional arguments"
+                ));
             }
             Token::Option {
                 name,
@@ -312,6 +326,9 @@ pub fn parse(args: &[String], options: &Options) -> Result<Parsed, String> {
             } => (name, raw, value, inline),
         };
         let Some(opt) = options.iter().find(|(n, _)| *n == name).map(|(_, o)| o) else {
+            if !positionals {
+                return Err(format!("Unknown option '{raw}'"));
+            }
             return Err(format!(
                 "Unknown option '{raw}'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- {}",
                 js_string(&raw)

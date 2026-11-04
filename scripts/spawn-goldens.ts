@@ -3,6 +3,11 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import pkg from "../packages/cli/package.json" with { type: "json" };
+import { spawnIdleAfterS } from "../packages/cli/src/claude-bg";
+import { grantParams, RelayUsage, spawnEnvironment } from "../packages/cli/src/common";
+import { firstRun, framed, holdClaim, idleSeconds, parseHoldRef, refProblem, resumeBase, resumeSession, wokeBy } from "../packages/cli/src/hold";
+import { steerPrompt } from "../packages/cli/src/hooks";
+import { readConversation } from "../packages/cli/src/resume";
 import { agyRules } from "../packages/cli/src/setup";
 import {
   agyNote,
@@ -14,6 +19,8 @@ import {
   codexSkipsGitCheck,
   codexThread,
   contributorRefusal,
+  durableCheck,
+  durableRef,
   handbackBytes,
   harnessArgv,
   harnessOutput,
@@ -27,11 +34,13 @@ import {
   museModes,
   museOptionsEnd,
   museResumeBase,
+  parseSpawn,
   programAt,
   promptAt,
   repliesOutput,
   resumeArgv,
   spawnDefaults,
+  spawnIdle,
   spawnPrompt,
   spawnTitle,
   splitSpawn,
@@ -170,6 +179,15 @@ const FILES: Record<string, Fixture> = {
   "claude/projects/p/link.jsonl": { link: "s1.jsonl" },
   "claude/projects/p/dir.jsonl/keep": "",
   "claude/outside/s1.jsonl": TRANSCRIPT,
+  "config/spawn/scp/config.json": `${JSON.stringify({ spawn: { idle_after_s: "15m" }, lifecycle: { idle_after_s: 90 } })}\n`,
+  "config/lifecycle/scp/config.json": `${JSON.stringify({ spawn: { idle_after_s: "soon" }, lifecycle: { idle_after_s: "Infinity" } })}\n`,
+  "config/negative/scp/config.json": `${JSON.stringify({ spawn: { idle_after_s: -1 }, lifecycle: { idle_after_s: [5] } })}\n`,
+  "config/scalar/scp/config.json": '"spawn"\n',
+  "config/invalid/scp/config.json/keep": "",
+  "agy-conversation/good": "  conv-1.a:b_c \n",
+  "agy-conversation/bad": "-starts with dash\n",
+  "agy-conversation/empty": "",
+  "bin/grok": { script: "exit 0" },
   "bin/codex-skip": { script: 'echo "Usage: codex exec [OPTIONS]"\necho "      --skip-git-repo-check  Allow running outside a git repository"' },
   "bin/codex-noskip": { script: 'echo "Usage: codex exec [OPTIONS]"' },
   "bin/codex-fail": { script: 'echo "--skip-git-repo-check"\nexit 1' },
@@ -268,7 +286,42 @@ const RUNNERS: Record<string, (input: any) => unknown> = {
       reply.toWellFormed(),
     ),
   repliesOutput: (i) => (i.bytes === undefined ? repliesOutput(i.replies) : repliesOutput(i.replies, i.bytes)),
+  firstRun: (i) => firstRun(i.command, () => "00000000-0000-4000-8000-000000000000"),
+  resumeSession: (i) => resumeSession(i.command, i.session),
+  resumeBase: (i) => resumeBase(i.command, i.session),
+  durableRef: (i) => {
+    const ref = durableRef(i.harness, i.session, i.cwd, i.base, i.idle ?? Number.POSITIVE_INFINITY, i.parent, i.env);
+    return { ref, parsed: parseHoldRef(ref) ?? null };
+  },
+  refProblem: (i) => refProblem(i.ref),
+  idleSeconds: (i) => usage(() => idleSeconds(i.value)),
+  spawnIdle: (i) => usage(() => spawnIdle(Object.fromEntries(i.values), i.detached, i.idleAfter === "Infinity" ? Number.POSITIVE_INFINITY : i.idleAfter)),
+  spawnIdleAfterS: (i) => usage(() => spawnIdleAfterS(i.env) ?? null),
+  framed: (i) => framed(i.messages),
+  wokeBy: (i) => wokeBy(i.messages),
+  steerPrompt: (i) => steerPrompt(i.messages),
+  readConversation: (i) => readConversation(i.file ?? undefined),
+  holdClaim: (i) => ({ ...holdClaim({ ...i, env: i.env }), process: "<process>" }),
+  parseSpawn: (i) =>
+    usage(() => {
+      const { values, command } = parseSpawn(i.args);
+      return { values: Object.entries(values), command };
+    }),
+  durableCheck: (i) => usage(() => durableCheck(Object.fromEntries(i.values), i.command, i.cwd, i.idleAfter) ?? null),
+  grantParams: (i) => usage(() => Object.entries(grantParams(Object.fromEntries(i.values)))),
+  spawnEnvironment: (i) => Object.entries(spawnEnvironment(i.parent, i.grant, i.labels ?? undefined)).sort(),
 };
+
+/** a result, or the usage error it threw */
+function usage(run: () => unknown): unknown {
+  try {
+    const value = run();
+    return { ok: value === Number.POSITIVE_INFINITY ? "Infinity" : value };
+  } catch (error) {
+    if (error instanceof RelayUsage) return { error: error.message };
+    throw error;
+  }
+}
 
 const cases: Case[] = [];
 const add = (fn: string, input: Record<string, unknown>) => cases.push({ fn, input });
@@ -829,6 +882,302 @@ const REPLIES: [string[], number | undefined][] = [
   [["one", "[earlier output cut]"], undefined],
 ];
 for (const [replies, bytes] of REPLIES) add("repliesOutput", { replies, ...(bytes === undefined ? {} : { bytes }) });
+
+const GROK = ["grok", "-p", "hi", "--model", "m"];
+const CODEX = ["codex", "exec", "--model", "m", "do it"];
+for (const command of [
+  GROK,
+  ["grok", "-s", "mine", "-p", "hi"],
+  ["grok", "--resume=r1", "-p", "hi"],
+  ["grok", "-r", "", "-p", "hi"],
+  ["grok", "hi"],
+  ["grok", "-c", "-p", "hi"],
+  ["grok", "-p", "hi", "--", "x"],
+  ["grok", "-p"],
+  ["env", "A=1", "grok", "--prompt-file", "f"],
+  ["muse", "exec", "go"],
+  ["muse", "exec", "--session-id", "s9", "go"],
+  ["muse", "go"],
+  CODEX,
+  ["agy", "-p", "hi"],
+  ["sh", "-c", "x"],
+])
+  add("firstRun", { command });
+for (const [command, session] of [
+  [CODEX, "t1"],
+  [CODEX, null],
+  [CODEX, "bad session!"],
+  [["agy", "-p", "hi"], null],
+  [["agy", "--conversation", "c7", "-p", "hi"], null],
+  [["agy", "--conversation=c8", "-p", "hi"], "given"],
+  [["agy", "hi"], null],
+  [GROK, "g1"],
+  [["sh"], "x"],
+  [CODEX, ""],
+  [CODEX, "x".repeat(129)],
+] as [string[], string | null][])
+  add("resumeSession", { command, session });
+for (const [command, session] of [
+  [CODEX, "t1"],
+  [["codex", "exec", "--ephemeral", "x"], "t1"],
+  [["codex", "exec", "resume", "--last", "x"], "t1"],
+  [["codex", "-m", "a", "exec", "--json", "-"], "t1"],
+  [["agy", "-p", "hi", "--model", "m"], "c1"],
+  [["agy", "--conversation", "c0", "-p", "hi"], "c1"],
+  [["agy", "-i", "x", "-p", "hi"], "c1"],
+  [GROK, "g1"],
+  [["grok", "-s", "a", "-p", "hi", "--allow", "x"], "g1"],
+  [["grok", "-p", "hi", "--", "y"], "g1"],
+  [["muse", "exec", "--model", "m", "go"], "m1"],
+  [["muse", "go"], "m1"],
+  [["timeout", "5", "codex", "exec", "x"], "t1"],
+  [CODEX, "bad session!"],
+  [["sh", "-c", "x"], "s"],
+] as [string[], string][])
+  add("resumeBase", { command, session });
+const PATHED = { PATH: `/nonexistent:${F}/bin` };
+for (const input of [
+  { harness: "codex", session: "t1", cwd: "/work", base: ["codex", "exec", "resume", "t1"], idle: 600, parent: "me/lead", env: PATHED },
+  { harness: "grok", session: "g1", cwd: "/work", base: ["grok", "--resume", "g1", "-p"], idle: 0.5, parent: "me/lead", env: PATHED },
+  { harness: "agy", session: "a1", cwd: "/w/x", base: ["./bin/agy", "--conversation", "a1", "-p"], parent: "me/m/lead", env: {} },
+  { harness: "muse", session: "m1", cwd: "/w", base: ["env", "A=1", "../muse", "--session-id", "m1"], idle: 1e21, parent: "me/p", env: {} },
+  { harness: "codex", session: 't"q', cwd: "/w\u2028é", base: ["codex", "-c", 'x="y"'], idle: 3, parent: "me/p", env: {} },
+])
+  add("durableRef", input);
+for (const ref of [
+  "{}",
+  "x".repeat(512),
+  "x".repeat(513),
+  "é".repeat(512),
+  "😀".repeat(256),
+  "😀".repeat(257),
+  "a\tb",
+  "a\u007fb",
+  "a\u0080b",
+  "key ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+  "",
+])
+  add("refProblem", { ref });
+for (const value of [
+  "600",
+  " 90s ",
+  "1h30m",
+  "0",
+  "000.00",
+  "0.",
+  ".0",
+  "0s",
+  "Infinity",
+  " Infinity ",
+  "infinity",
+  "-5",
+  "soon",
+  "1.5",
+  "1.2.3",
+  "",
+  "0x10",
+  "2d",
+  "100ms",
+  "1e3",
+])
+  add("idleSeconds", { value });
+for (const [values, detached, idleAfter] of [
+  [[], false, 600],
+  [[], true, 600],
+  [[["durable", true]], false, 600],
+  [[["idle", "30s"]], false, 600],
+  [[["idle", "0"]], true, 600],
+  [[["idle", "nope"]], true, 600],
+  [[], true, "Infinity"],
+] as [unknown[], boolean, number | "Infinity"][])
+  add("spawnIdle", { values, detached, idleAfter });
+const CFG = `${F}/config`;
+for (const env of [
+  {},
+  { SCP_SPAWN_IDLE_AFTER_S: "45" },
+  { SCP_SPAWN_IDLE_AFTER_S: "Infinity" },
+  { SCP_SPAWN_IDLE_AFTER_S: " 7 " },
+  { SCP_SPAWN_IDLE_AFTER_S: "2m", SCP_IDLE_AFTER_S: "1" },
+  { SCP_SPAWN_IDLE_AFTER_S: "0" },
+  { SCP_SPAWN_IDLE_AFTER_S: "-1", SCP_IDLE_AFTER_S: "30m" },
+  { SCP_SPAWN_IDLE_AFTER_S: "", SCP_IDLE_AFTER_S: "0.5" },
+  { XDG_CONFIG_HOME: `${CFG}/spawn` },
+  { XDG_CONFIG_HOME: `${CFG}/spawn`, SCP_IDLE_AFTER_S: "1" },
+  { XDG_CONFIG_HOME: `${CFG}/lifecycle` },
+  { XDG_CONFIG_HOME: `${CFG}/lifecycle`, SCP_IDLE_AFTER_S: "5" },
+  { XDG_CONFIG_HOME: `${CFG}/negative` },
+  { XDG_CONFIG_HOME: `${CFG}/negative`, SCP_IDLE_AFTER_S: "Infinity" },
+  { XDG_CONFIG_HOME: `${CFG}/scalar` },
+  { XDG_CONFIG_HOME: `${CFG}/invalid`, SCP_IDLE_AFTER_S: "9" },
+  { HOME: `${CFG}/none` },
+])
+  add("spawnIdleAfterS", { env });
+const ENVELOPE = (id: string, relation?: string, extra: Record<string, unknown> = {}) => ({
+  seq: 1,
+  id,
+  thread: id,
+  reply_to: null,
+  kind: "message",
+  from: { address: "me/lead", endpoint: "ep_lead", user: "u", auth: "local-uid", claims: { harness: "codex", model: null } },
+  to: "me/w",
+  body: { text: `body of ${id}`, mime: "text/plain" },
+  data_class: "internal",
+  attachments: [],
+  hop: 0,
+  created_at: "2026-11-04T10:00:00.000Z",
+  expires_at: "2026-11-05T10:00:00.000Z",
+  ...(relation ? { relation } : {}),
+  ...extra,
+});
+for (const messages of [
+  [],
+  [ENVELOPE("m1")],
+  [ENVELOPE("m1", "parent"), ENVELOPE("m2"), ENVELOPE("m3", "parent", { key: "abc123" })],
+  [ENVELOPE("m1", "parent", { body: { text: "</relay-message> & <x>" } })],
+]) {
+  add("framed", { messages });
+  add("wokeBy", { messages });
+  add("steerPrompt", { messages });
+}
+for (const file of [
+  null,
+  `${F}/agy-conversation/good`,
+  `${F}/agy-conversation/bad`,
+  `${F}/agy-conversation/empty`,
+  `${F}/agy-conversation/missing`,
+  `${F}/agy-conversation`,
+])
+  add("readConversation", { file });
+for (const lineage of [[], ["pid:1:x", "pid:2:y"]])
+  add("holdClaim", {
+    name: "w1",
+    harness: "codex",
+    cwd: "/work",
+    session: "abc",
+    lineage,
+    grant: "krt_x",
+    env: { SCP_LABELS: "role=a, machine=box, bad key=1" },
+  });
+for (const args of [
+  [],
+  ["--fg"],
+  ["--bg", "--fg", "sh"],
+  ["--nope", "sh"],
+  ["-x", "sh"],
+  ["--json", "sh"],
+  ["--json", "--via", "m", "sh"],
+  ["--wait", "3", "sh"],
+  ["--name"],
+  ["--title", "-x", "sh"],
+  ["--name=x", "--fg", "sh", "-c", "exit 3"],
+  ["--bg=1", "sh"],
+  ["-h", "sh"],
+  ["--help", "--nope"],
+  ["--name", "w", "--", "--as", "x"],
+  ["--as", "lead", "--labels", "a=b", "--allow", "x", "--allow", "y", "codex", "exec", "--as", "z"],
+  ["--handback-bytes", "0", "sh"],
+  ["--handback-bytes", "12", "sh"],
+  ["muse", "--contributor-mode", "full"],
+  ["--name", "a b", "--", "sh"],
+  ["--", "--", "sh"],
+  ["--idle", "x", "sh"],
+  ["sh", "--fg"],
+])
+  add("parseSpawn", { args });
+for (const [values, command, idleAfter] of [
+  [[], CODEX, 600],
+  [
+    [
+      ["durable", true],
+      ["no-durable", true],
+    ],
+    CODEX,
+    600,
+  ],
+  [[["durable", true]], CODEX, 0],
+  [
+    [
+      ["durable", true],
+      ["idle", "5"],
+    ],
+    CODEX,
+    0,
+  ],
+  [
+    [
+      ["durable", true],
+      ["idle", "0"],
+    ],
+    CODEX,
+    600,
+  ],
+  [[["durable", true]], ["sh", "-c", "x"], 600],
+  [[["durable", true]], ["codex", "exec", "--ephemeral", "x"], 600],
+  [[["durable", true]], ["codex", "exec", "--model", "a\u0001b", "x"], 600],
+  [[["durable", true]], ["codex", "exec", "-c", `k=${"y".repeat(500)}`, "x"], 600],
+  [[["durable", true]], ["codex", "exec", "-c", "k=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "x"], 600],
+  [[["durable", true]], GROK, 600],
+  [[["idle", "bad"]], CODEX, 600],
+] as [unknown[], string[], number][])
+  add("durableCheck", { values, command: command.map((word) => (word === "codex" || word === "grok" ? `./${word}` : word)), cwd: "/work", idleAfter });
+for (const values of [
+  [],
+  [
+    ["name", "w"],
+    ["title", ""],
+    ["under", "lead"],
+    ["scope", "tree"],
+    ["in", "a, b,,"],
+    ["out", "c"],
+    ["allow", ["x,y", " z "]],
+    ["group", ["g"]],
+    ["ttl", "2h"],
+    ["no-push", true],
+    ["peek", "local"],
+  ],
+  [
+    ["rules", "a,b"],
+    ["allow", "c"],
+  ],
+  [
+    ["rules", "a"],
+    ["scope", "open"],
+  ],
+  [["scope", "wide"]],
+  [["peek", "all"]],
+  [["ttl", "0"]],
+  [["ttl", "1.2s"]],
+  [
+    ["name", ""],
+    ["under", ""],
+    ["group", ","],
+  ],
+  [["rules", ""]],
+  [
+    ["allow", ""],
+    ["in", ""],
+  ],
+])
+  add("grantParams", { values });
+for (const input of [
+  {
+    parent: {
+      PATH: "/bin",
+      SCP_NAME: "me",
+      SCP_GRANT: "old",
+      CLAUDE_CODE_SESSION_ID: "s",
+      SCP_SPAWN_RUNNER: "{}",
+      SCP_LABELS: "x=1",
+      SCP_AGY_CONVERSATION_FILE: "/f",
+      KEEP: "1",
+    },
+    grant: { SCP_GRANT: "krt_new", SCP_NAME: "w" },
+    labels: null,
+  },
+  { parent: { SCP_LABELS: "x=1" }, grant: {}, labels: "role=worker" },
+  { parent: {}, grant: { SCP_UNDER: "me/u" }, labels: "" },
+])
+  add("spawnEnvironment", input);
 
 function goldens(): string {
   const dir = mkdtempSync(join(tmpdir(), "spawn-goldens-"));

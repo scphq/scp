@@ -1,6 +1,10 @@
 //! A muse spawn's words: where its options end, the session its exec logs, and the contributor mode it runs with.
 
 use super::argv::program_at;
+use crate::args::js_string;
+use scp_mcp::identity::{MuseLaunch, private_dir, read_owned_file, relay_dir};
+use scp_mcp::ps::{Env, join};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub use scp_mcp::spawn::{contributor_refusal, muse_modes};
 
@@ -193,4 +197,71 @@ pub fn muse_mode_at(args: &[String]) -> usize {
     } else {
         0
     }
+}
+
+/// `^pid:([1-9][0-9]*):[A-Za-z0-9:-]{1,64}$`: the pid of a process key with its start time
+fn binding_pid(key: &str) -> Option<&str> {
+    let (pid, start) = key.strip_prefix("pid:")?.split_once(':')?;
+    let shaped = pid.bytes().all(|b| b.is_ascii_digit())
+        && !pid.starts_with('0')
+        && !pid.is_empty()
+        && (1..=64).contains(&start.len())
+        && start
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'-');
+    shaped.then_some(pid)
+}
+
+/// a launch file `write_muse_launch` left, removed while it still holds what was written
+pub struct LaunchFile {
+    path: String,
+    text: String,
+}
+
+impl LaunchFile {
+    pub fn remove(self) {
+        if read_owned_file(&self.path).is_ok_and(|text| text == self.text) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// `launch` as `JSON.stringify({ process: key, ...launch })` writes it
+pub fn launch_text(key: &str, launch: &MuseLaunch) -> String {
+    let fields = [
+        ("name", &launch.name),
+        ("grant", &launch.grant),
+        ("under", &launch.under),
+        ("session", &launch.session),
+        ("launcher", &launch.launcher),
+    ];
+    let mut parts = vec![format!("\"process\":{}", js_string(key))];
+    for (field, value) in fields {
+        if let Some(value) = value {
+            parts.push(format!("\"{field}\":{}", js_string(value)));
+        }
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+/// leaves `launch` for the muse process `key`, whose shim and hooks Muse starts without SCP_* variables
+pub fn write_muse_launch(key: &str, launch: &MuseLaunch, env: &Env) -> std::io::Result<LaunchFile> {
+    let Some(pid) = binding_pid(key) else {
+        return Err(std::io::Error::other(format!(
+            "muse serve has no process key ({key})"
+        )));
+    };
+    let dir = join(&[&relay_dir(env), "launch"]);
+    private_dir(&dir)?;
+    let path = join(&[&dir, &format!("muse-{pid}.json")]);
+    let text = launch_text(key, launch);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(LaunchFile { path, text })
 }

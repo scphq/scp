@@ -1230,7 +1230,7 @@ export function durableRef(
 }
 
 /** `--durable`: a command spawn can resume whose resume fits a hibernation ref, and an idle timeout that holds it at all */
-function durableCheck(values: Values, command: string[], cwd: string, idleAfter: number): void {
+export function durableCheck(values: Values, command: string[], cwd: string, idleAfter: number): void {
   const idle = typeof values.idle === "string" ? idleSeconds(values.idle) : idleAfter
   if (values.durable === true && values["no-durable"] === true) throw new RelayUsage("--durable and --no-durable conflict")
   if (values.durable !== true) return
@@ -1249,7 +1249,7 @@ function durableCheck(values: Values, command: string[], cwd: string, idleAfter:
 }
 
 /** Validate spawn flags and the harness command before starting a runner. */
-function parseSpawn(args: string[]): { values: Values; command: string[] } {
+export function parseSpawn(args: string[]): { values: Values; command: string[] } {
   const split = splitSpawn(args)
   let values: Values
   try {

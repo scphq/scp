@@ -7,6 +7,11 @@ use scp_cli::spawn::argv::{
     codex_skips_git_check, handback_bytes, harness_argv, has_flag, in_git, messaging_allow,
     program_at, prompt_at, resume_argv, spawn_prompt, split_spawn, steer_argv, toml,
 };
+use scp_cli::spawn::grant::{grant_params, spawn_environment};
+use scp_cli::spawn::hold::{
+    HoldClaim, durable_ref, first_run, framed, hold_claim, idle_seconds, read_conversation,
+    ref_problem, resume_base, resume_session, woke_by,
+};
 use scp_cli::spawn::muse::{
     contributor_refusal, muse_exec, muse_first_run, muse_mode_at, muse_modes, muse_options_end,
     muse_resume_base,
@@ -15,7 +20,9 @@ use scp_cli::spawn::output::{
     HarnessRun, Head, TRANSCRIPT_BYTES, codex_thread, harness_output, replies_output,
     stderr_output, transcript_replies,
 };
-use scp_cli::spawn::text::{agy_note, spawn_defaults, spawn_title, worker_name};
+use scp_cli::spawn::run::{durable_check, parse_spawn, spawn_idle};
+use scp_cli::spawn::settings::{config_file, idle_setting};
+use scp_cli::spawn::text::{agy_note, spawn_defaults, spawn_title, steer_prompt, worker_name};
 use scp_mcp::ps::Env;
 use serde_json::{Value, json};
 use toml::Value as Toml;
@@ -81,6 +88,45 @@ fn prompt_json(found: Option<Prompt>) -> Value {
             at,
             from: Some(from),
         }) => json!({ "at": at, "from": from }),
+    }
+}
+
+fn parsed_of(value: &Value) -> Parsed {
+    let mut values = Parsed::default();
+    for entry in value.as_array().unwrap() {
+        let value = match &entry[1] {
+            Value::Bool(on) => Val::Flag(*on),
+            Value::Array(_) => Val::List(strings(&entry[1])),
+            other => Val::Text(text(other).to_owned()),
+        };
+        values.values.push((text(&entry[0]).to_owned(), value));
+    }
+    values
+}
+
+fn seconds(n: f64) -> Value {
+    if n.is_infinite() {
+        json!("Infinity")
+    } else if n.fract() == 0.0 {
+        json!(n as i64)
+    } else {
+        json!(n)
+    }
+}
+
+/// `{ ok }` or the usage error's `{ error }`, as the goldens write them
+fn usage<T>(result: Result<T, Fail>, ok: impl FnOnce(T) -> Value) -> Value {
+    match result {
+        Ok(value) => json!({ "ok": ok(value) }),
+        Err(Fail::Usage(message)) => json!({ "error": message }),
+        Err(other) => panic!("{other:?}"),
+    }
+}
+
+fn number(value: &Value) -> f64 {
+    match value {
+        Value::String(text) if text == "Infinity" => f64::INFINITY,
+        other => other.as_f64().unwrap(),
     }
 }
 
@@ -265,6 +311,101 @@ fn replay(name: &str, i: &Value) -> Value {
             &strings(&i["replies"]),
             i.get("bytes").and_then(opt_num)
         )),
+        "firstRun" => {
+            let (command, session) = first_run(&strings(&i["command"]), || {
+                "00000000-0000-4000-8000-000000000000".to_owned()
+            });
+            match session {
+                Some(session) => json!({ "command": command, "session": session }),
+                None => json!({ "command": command }),
+            }
+        }
+        "resumeSession" => optional(resume_session(
+            &strings(&i["command"]),
+            i["session"].as_str(),
+        )),
+        "resumeBase" => optional(resume_base(&strings(&i["command"]), text(&i["session"]))),
+        "durableRef" => json!({ "ref": durable_ref(
+            text(&i["harness"]),
+            text(&i["session"]),
+            text(&i["cwd"]),
+            &strings(&i["base"]),
+            i.get("idle").map_or(f64::INFINITY, number),
+            text(&i["parent"]),
+            &env_of(&i["env"]),
+        ) }),
+        "refProblem" => optional(ref_problem(text(&i["ref"]))),
+        "idleSeconds" => usage(idle_seconds(text(&i["value"])), seconds),
+        "spawnIdle" => usage(
+            spawn_idle(
+                &parsed_of(&i["values"]),
+                i["detached"].as_bool().unwrap(),
+                number(&i["idleAfter"]),
+            ),
+            seconds,
+        ),
+        "spawnIdleAfterS" => {
+            let env = env_of(&i["env"]);
+            let found = idle_setting(&env, &config_file(&env), "SCP_SPAWN_IDLE_AFTER_S", "spawn");
+            json!({ "ok": found.map_or(Value::Null, seconds) })
+        }
+        "framed" => json!(framed(i["messages"].as_array().unwrap())),
+        "wokeBy" => optional(woke_by(i["messages"].as_array().unwrap())),
+        "steerPrompt" => json!(steer_prompt(i["messages"].as_array().unwrap())),
+        "readConversation" => optional(read_conversation(i["file"].as_str())),
+        "holdClaim" => {
+            let lineage = strings(&i["lineage"]);
+            let env = env_of(&i["env"]);
+            Value::Object(hold_claim(&HoldClaim {
+                name: text(&i["name"]),
+                harness: text(&i["harness"]),
+                cwd: text(&i["cwd"]),
+                session: text(&i["session"]),
+                lineage: &lineage,
+                grant: text(&i["grant"]),
+                process: "<process>",
+                env: &env,
+            }))
+        }
+        "parseSpawn" => usage(parse_spawn(&strings(&i["args"])), |(values, command)| {
+            let values: Vec<Value> = values
+                .values
+                .iter()
+                .map(|(k, v)| json!([k, v.to_json()]))
+                .collect();
+            json!({ "values": values, "command": command })
+        }),
+        "durableCheck" => usage(
+            durable_check(
+                &parsed_of(&i["values"]),
+                &strings(&i["command"]),
+                text(&i["cwd"]),
+                number(&i["idleAfter"]),
+                &Env::new(),
+            ),
+            |()| Value::Null,
+        ),
+        "grantParams" => usage(grant_params(&parsed_of(&i["values"])), |params| {
+            Value::from(
+                params
+                    .into_iter()
+                    .map(|(k, v)| json!([k, v]))
+                    .collect::<Vec<_>>(),
+            )
+        }),
+        "spawnEnvironment" => {
+            let grant = i["grant"].as_object().unwrap();
+            let mut env: Vec<(String, String)> =
+                spawn_environment(&env_of(&i["parent"]), grant, i["labels"].as_str())
+                    .into_iter()
+                    .collect();
+            env.sort();
+            Value::from(
+                env.into_iter()
+                    .map(|(k, v)| json!([k, v]))
+                    .collect::<Vec<_>>(),
+            )
+        }
         other => panic!("no replay for {other}"),
     }
 }
@@ -279,7 +420,11 @@ fn spawn_matches_the_typescript_cli() {
     for row in &rows {
         let name = row["fn"].as_str().unwrap();
         let got = replay(name, &row["input"]);
-        if got != row["output"] {
+        let want = match name {
+            "durableRef" => json!({ "ref": row["output"]["ref"] }),
+            _ => row["output"].clone(),
+        };
+        if got != want {
             failed.push(format!(
                 "{name} {}\n  got      {got}\n  expected {}",
                 row["input"], row["output"]

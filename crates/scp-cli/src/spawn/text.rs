@@ -3,10 +3,11 @@
 use super::argv::{has_flag, home, program_at, spawn_prompt};
 use super::output::well_formed;
 use crate::args::{Parsed, Val};
+use scp_broker::render::text::{DIRECTIVE_CLOSE, PARENT_EXCEPTION};
 use scp_broker::scrub::{find_secret, redact_secrets};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::ps::{Env, basename, join};
-use scp_mcp::render::{js_space, strip_control};
+use scp_mcp::render::{PREAMBLE, js_space, strip_control, wrap_message};
 use serde_json::Value;
 
 /// the title cap the broker enforces, in UTF-16 units
@@ -51,20 +52,48 @@ pub fn spawn_title(command: &[String]) -> Option<String> {
 
 const NAME_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
-/// five random characters of the handle alphabet
-pub fn name_suffix() -> String {
-    let mut bytes = [0u8; 5];
+/// `N` random bytes
+pub fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
     if std::fs::File::open("/dev/urandom")
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
         .is_err()
     {
         use std::hash::{BuildHasher, Hasher};
-        let seed = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        bytes.copy_from_slice(&seed.to_le_bytes()[..5]);
+        for chunk in bytes.chunks_mut(8) {
+            let seed = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            chunk.copy_from_slice(&seed.to_le_bytes()[..chunk.len()]);
+        }
     }
     bytes
+}
+
+/// `bytes` as lowercase hex
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// a random version 4 UUID, as `crypto.randomUUID` gives one
+pub fn random_uuid() -> String {
+    let mut bytes = random_bytes::<16>();
+    bytes[6] = bytes[6] & 0x0f | 0x40;
+    bytes[8] = bytes[8] & 0x3f | 0x80;
+    let text = hex(&bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &text[..8],
+        &text[8..12],
+        &text[12..16],
+        &text[16..20],
+        &text[20..]
+    )
+}
+
+/// five random characters of the handle alphabet
+pub fn name_suffix() -> String {
+    random_bytes::<5>()
         .iter()
         .map(|b| NAME_ALPHABET[*b as usize % NAME_ALPHABET.len()] as char)
         .collect()
@@ -115,6 +144,20 @@ pub fn spawn_defaults(
             .push(("name".into(), Val::Text(worker_name(command, random))));
     }
     out
+}
+
+/// Frames late parent messages for a resumed Codex worker, which has no stop hook.
+pub fn steer_prompt(messages: &[Value]) -> String {
+    let parent = messages
+        .iter()
+        .any(|m| m.get("relation").and_then(Value::as_str) == Some("parent"));
+    let mut parts = vec![PREAMBLE.to_owned()];
+    if parent {
+        parts.push(PARENT_EXCEPTION.to_owned());
+    }
+    parts.extend(messages.iter().map(wrap_message));
+    parts.push(DIRECTIVE_CLOSE.to_owned());
+    parts.join("\n\n")
 }
 
 /// agy's CLI settings, which hold the permission rules setup writes
