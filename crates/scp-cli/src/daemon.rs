@@ -24,7 +24,7 @@ fn daemon(call: &Call) -> Done {
                 "{CLI_NAME} daemon takes stop or restart, or --idle and --policy to run in the foreground"
             )));
         }
-        let stopped = (call.host.daemon_stop)().map_err(|e| Fail::Call(CallError::Io(e)))?;
+        let stopped = stop_broker(call.env)?;
         if action == "stop" {
             term::out(&match stopped {
                 None => "no relay broker runs".into(),
@@ -55,6 +55,68 @@ fn daemon(call: &Call) -> Done {
     }
     hangup_stops();
     Ok((call.host.daemon)(&words))
+}
+
+/// the pid in the broker lock of `dir` when that process runs a broker: a `daemon` command of scp, swarm or this CLI's script
+pub fn broker_pid(dir: &std::path::Path, script: Option<&str>) -> Option<i32> {
+    let text = std::fs::read_to_string(dir.join("broker.lock")).ok()?;
+    let pid: f64 = text.split(':').next()?.trim().parse().ok()?;
+    if pid.fract() != 0.0 || pid <= 0.0 || pid > f64::from(i32::MAX) {
+        return None;
+    }
+    let pid = pid as i32;
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success());
+    let command = output.map_or(String::new(), |out| {
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    });
+    let daemon = command.split_whitespace().any(|word| word == "daemon");
+    let ours = command.contains("scp")
+        || command.contains("swarm")
+        || script.is_some_and(|script| command.contains(script));
+    (daemon && ours).then_some(pid)
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// stops the broker of the relay dir with SIGTERM and waits up to 5 s for it: its pid, None when none ran
+fn stop_broker(env: &scp_mcp::ps::Env) -> Result<Option<i32>, Fail> {
+    let dir = scp_mcp::client::relay_dir(env);
+    let script = scp_mcp::spawn::named_launcher(env).and_then(|words| words.last().cloned());
+    let Some(pid) = broker_pid(&dir, script.as_deref()) else {
+        return Ok(None);
+    };
+    // SAFETY: kill(2) on a pid read from the broker lock and checked with ps
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(Fail::Call(CallError::Io(crate::open::node_fs_error(
+                &error,
+                "kill",
+                &pid.to_string(),
+            )))),
+        };
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while alive(pid) {
+        if std::time::Instant::now() >= deadline {
+            return Err(Fail::Call(CallError::Io(format!(
+                "the relay broker (pid {pid}) did not stop within 5 s"
+            ))));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(Some(pid))
 }
 
 /// the pid of the broker a connection starts, as `daemon restart` reports it
@@ -106,5 +168,37 @@ fn hangup_stops() {
             libc::SIGHUP,
             hangup as extern "C" fn(libc::c_int) as libc::sighandler_t,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broker_runs_as_scp_swarm_or_this_clis_script() {
+        let dir = std::env::temp_dir().join(format!("cli-daemon-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("tool/cli.js").display().to_string();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30; :", &script, "daemon"])
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("broker.lock"), format!("{}:0", child.id())).unwrap();
+        let pid = i32::try_from(child.id()).ok();
+        for _ in 0..50 {
+            if broker_pid(&dir, Some(&script)).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(broker_pid(&dir, Some(&script)), pid);
+        assert_eq!(broker_pid(&dir, None), None);
+        assert_eq!(broker_pid(&dir, Some("/elsewhere/cli.js")), None);
+        std::fs::write(dir.join("broker.lock"), "1.5:0").unwrap();
+        assert_eq!(broker_pid(&dir, Some(&script)), None);
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

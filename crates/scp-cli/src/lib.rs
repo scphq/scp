@@ -34,8 +34,6 @@ pub const VERSION: &str = env!("SWARM_VERSION");
 pub struct Host {
     /// `swarm daemon <args>` as the native binary runs it, for the broker in the foreground
     pub daemon: fn(&[String]) -> i32,
-    /// stops the running broker: its pid, None when none ran
-    pub daemon_stop: fn() -> Result<Option<i32>, String>,
     /// the TypeScript CLI beside this executable's native package, as the words that start it
     pub beside: fn(&Env) -> Option<Vec<String>>,
 }

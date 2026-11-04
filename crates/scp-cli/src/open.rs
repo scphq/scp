@@ -365,22 +365,52 @@ pub fn node_fs_error(error: &std::io::Error, syscall: &str, path: &str) -> Strin
     format!("{}: {}, {syscall} '{path}'", words.0, words.1)
 }
 
-/// starts the broker for `dir` as `startDaemon` does, failing with its error as Node words it
+/// starts the broker for `dir` as `startDaemon` does: its directory made private and its log checked as there, each failure as Node
+/// words it; a broker that does not start is then the connection's to report
 pub fn start_broker(dir: &str, env: &Env) -> Result<(), CallError> {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    let fail = |syscall: &str, path: &str| {
+        let (syscall, path) = (syscall.to_owned(), path.to_owned());
+        move |error: std::io::Error| CallError::Io(node_fs_error(&error, &syscall, &path))
+    };
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
-        .map_err(|error| CallError::Io(node_fs_error(&error, "mkdir", dir)))?;
-    scp_mcp::spawn::start_daemon(dir, env).map_err(|error| {
-        let log = format!("{dir}/broker.log");
-        CallError::Io(match error.raw_os_error() {
-            Some(_) => node_fs_error(&error, "open", &log),
-            None => error.to_string(),
-        })
-    })
+        .map_err(fail("mkdir", dir))?;
+    let meta = std::fs::symlink_metadata(dir).map_err(fail("lstat", dir))?;
+    // SAFETY: getuid cannot fail
+    if !meta.is_dir() || meta.uid() != unsafe { libc::getuid() } {
+        return Err(CallError::Io(format!(
+            "{dir} is not a directory this user owns"
+        )));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(fail("chmod", dir))?;
+    let log = format!("{dir}/broker.log");
+    match std::fs::metadata(&log) {
+        Ok(meta) if meta.len() > LOG_MAX_BYTES => {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&log)
+                .and_then(|file| file.set_len(0))
+                .map_err(fail("open", &log))?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(fail("stat", &log)(error)),
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log)
+        .map_err(fail("open", &log))?;
+    let _ = scp_mcp::spawn::start_daemon(dir, env);
+    Ok(())
 }
+
+const LOG_MAX_BYTES: u64 = 1024 * 1024;
 
 const BUSY: &str = "the relay broker is running but did not accept a connection";
 
@@ -550,5 +580,37 @@ pub fn probe(args: &[String]) -> i32 {
             0
         }
         Err(fail) => crate::report(fail),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broker_start_fails_at_the_step_and_path_node_names() {
+        let dir = std::env::temp_dir().join(format!("cli-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("broker.log");
+        std::os::unix::fs::symlink(&log, &log).unwrap();
+        let dir_text = dir.display().to_string();
+        assert_eq!(
+            start_broker(&dir_text, &Env::new()),
+            Err(CallError::Io(format!(
+                "ELOOP: too many symbolic links encountered, stat '{}'",
+                log.display()
+            )))
+        );
+        let file = dir.join("file");
+        std::fs::write(&file, "").unwrap();
+        let nested = file.join("x").display().to_string();
+        assert_eq!(
+            start_broker(&nested, &Env::new()),
+            Err(CallError::Io(format!(
+                "ENOTDIR: not a directory, mkdir '{nested}'"
+            )))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
