@@ -108,8 +108,8 @@ impl Broker {
             .map(|cli| crate::tasks::Task {
                 cli,
                 dir: options.paths.dir.clone(),
+                every: crate::tasks::claude_bg_every(&options.env),
                 env: options.env.clone(),
-                every: crate::tasks::CLAUDE_BG_EVERY,
             });
         core.federation.env = options.env;
         core.sweep().await.map_err(io::Error::other)?;

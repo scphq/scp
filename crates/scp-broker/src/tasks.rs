@@ -11,8 +11,33 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
 pub const CLAUDE_BG_EVERY: Duration = Duration::from_secs(120);
+pub const CLAUDE_BG_EVERY_ENV: &str = "SCP_CLAUDE_BG_EVERY_S";
+const CLAUDE_BG_EVERY_MAX_S: f64 = 2_147_483.0;
 const RUN_LIMIT: Duration = Duration::from_secs(600);
 const OUTPUT_MAX: u64 = 64 * 1024;
+
+/// how often the claude-bg task runs: `$SCP_CLAUDE_BG_EVERY_S` (seconds or a duration, more than zero, rounded up to whole
+/// seconds, at most 2147483 s as the TypeScript broker's timers allow), else 120 s; a value it cannot read is noted and the default kept
+pub fn claude_bg_every(env: &BTreeMap<String, String>) -> Duration {
+    let Some(raw) = env
+        .get(CLAUDE_BG_EVERY_ENV)
+        .filter(|raw| !raw.trim().is_empty())
+    else {
+        return CLAUDE_BG_EVERY;
+    };
+    match crate::daemon::idle_seconds(raw) {
+        Ok(seconds) if seconds > 0.0 && seconds.ceil() <= CLAUDE_BG_EVERY_MAX_S => {
+            Duration::from_secs(seconds.ceil().max(1.0) as u64)
+        }
+        _ => {
+            eprintln!(
+                "relay broker: {CLAUDE_BG_EVERY_ENV}={raw} is not a positive number of seconds or a duration up to {CLAUDE_BG_EVERY_MAX_S} s; the claude-bg task runs every {} s",
+                CLAUDE_BG_EVERY.as_secs()
+            );
+            CLAUDE_BG_EVERY
+        }
+    }
+}
 
 /// the pid of the task process that runs now, 0 when none: its connections do not keep the broker from going idle
 #[derive(Clone, Default)]
@@ -233,6 +258,24 @@ mod tests {
         run(&task(&dir, script, 1), &running, &mut None).await;
         assert_eq!(watch.await.unwrap(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_interval_override_reads_seconds_and_durations() {
+        let every = |raw: &str| {
+            claude_bg_every(&BTreeMap::from([(
+                CLAUDE_BG_EVERY_ENV.to_owned(),
+                raw.to_owned(),
+            )]))
+        };
+        assert_eq!(claude_bg_every(&BTreeMap::new()), CLAUDE_BG_EVERY);
+        assert_eq!(every("1"), Duration::from_secs(1));
+        assert_eq!(every("0.2"), Duration::from_secs(1));
+        assert_eq!(every("1m30s"), Duration::from_secs(90));
+        assert_eq!(every("2147483"), Duration::from_secs(2_147_483));
+        for bad in ["0", "-1", "soon", " ", "30d"] {
+            assert_eq!(every(bad), CLAUDE_BG_EVERY, "{bad}");
+        }
     }
 
     #[test]
