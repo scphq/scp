@@ -1,0 +1,6 @@
+[
+  "/Users/dev/.bun/bin/bun",
+  "--no-env-file",
+  "--config=/dev/null",
+  "/Users/dev/src/scp/packages/cli/src/cli.ts"
+]

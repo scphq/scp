@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "scp": {
+      "type": "stdio",
+      "command": "/usr/local/bin/node",
+      "args": [
+        "/Users/dev/.npm-global/lib/node_modules/@scp-dev/cli/dist/cli.js",
+        "mcp",
+        "--harness",
+        "claude",
+        "--channels"
+      ],
+      "env": {
+        "SCP_DIR": "/Users/dev/.local/state/scp",
+        "SCP_UNDER": "",
+        "SCP_GRANT": ""
+      }
+    }
+  }
+}

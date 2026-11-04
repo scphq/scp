@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cli-argv",
+  "title": "The words that start the CLI, as the last native broker of the relay directory was given them",
+  "description": "$SCP_DIR/cli-argv.json: $SCP_CLI_ARGV as the broker parsed it, one JSON array and a newline",
+  "$ref": "common.schema.json#/$defs/Argv"
+}

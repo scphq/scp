@@ -1214,7 +1214,7 @@ async function holdWorker(options: {
 }
 
 /** a durable spawn's hibernation ref ({@link HoldRef}), its program found on PATH so the broker's waker runs the same binary */
-function durableRef(
+export function durableRef(
   harness: Resumable,
   session: string,
   cwd: string,

@@ -1,0 +1,7 @@
+{
+  "bridge": true,
+  "machine": "laptop",
+  "mirror": [
+    "group:acme/ops"
+  ]
+}

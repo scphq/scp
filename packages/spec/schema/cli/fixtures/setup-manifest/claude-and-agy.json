@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "added": [
+    {
+      "harness": "claude",
+      "kind": "mcp",
+      "file": "/Users/dev/.claude.json"
+    },
+    {
+      "harness": "claude",
+      "kind": "hooks",
+      "file": "/Users/dev/.claude/settings.json"
+    },
+    {
+      "harness": "agy",
+      "kind": "rules",
+      "file": "/Users/dev/.gemini/antigravity-cli/settings.json",
+      "rules": [
+        "mcp(scp/relay_inbox)",
+        "mcp(scp/relay_send)"
+      ]
+    }
+  ]
+}

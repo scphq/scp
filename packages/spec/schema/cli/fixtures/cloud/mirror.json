@@ -1,0 +1,12 @@
+{
+  "bridge": true,
+  "machine": "build-box",
+  "url": "https://relay.example.com",
+  "mirror": [
+    "harness:codex",
+    "label:team=core"
+  ],
+  "redact": true,
+  "private_ok": false,
+  "mirror_local": false
+}

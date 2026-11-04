@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claude-bg-mcp-config",
+  "title": "The MCP config of a swarm claude --bg session",
+  "description": "$SCP_DIR/claude-bg/<16 hex>.json, linked from <short id>.json. Claude Code reads it through --mcp-config; keys other than mcpServers.scp belong to Claude Code and are kept on rewrite",
+  "type": "object",
+  "required": ["mcpServers"],
+  "properties": {
+    "mcpServers": {
+      "type": "object",
+      "required": ["scp"],
+      "properties": {
+        "scp": { "$ref": "#/$defs/Server" }
+      }
+    }
+  },
+  "$defs": {
+    "Server": {
+      "type": "object",
+      "required": ["command", "args", "env"],
+      "properties": {
+        "type": { "const": "stdio" },
+        "command": { "type": "string", "minLength": 1 },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "env": { "$ref": "#/$defs/Env" }
+      }
+    },
+    "Env": {
+      "type": "object",
+      "properties": {
+        "SCP_NAME": { "$ref": "common.schema.json#/$defs/Handle" },
+        "SCP_UNDER": { "description": "the parent the session asked for; the writer always sets it, empty for none", "type": "string" },
+        "SCP_GRANT": { "description": "the spawn grant; the writer always sets it, empty for none, so a grant in the daemon's environment never applies", "type": "string" },
+        "SCP_HARNESS_ORIGIN": { "description": "the session a resume continues", "type": "string", "minLength": 1 },
+        "SCP_WAKE_TICKET": { "description": "the ticket of the wake run that revived the session", "type": "string", "pattern": "^kwt_[0-9a-f]{64}$" },
+        "SCP_NATIVE": { "enum": ["1", "mcp"] },
+        "SCP_CLI_ARGV": { "description": "JSON text of the words that start the CLI", "type": "string", "minLength": 2 }
+      },
+      "additionalProperties": { "type": "string" }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "sessions": [
+    [
+      "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "1a2b3c4d"
+    ],
+    [
+      "9f8e7d6c-0000-4000-8000-000000000002",
+      "9f8e7d6c"
+    ]
+  ],
+  "seen": [
+    "1a2b3c4d"
+  ],
+  "stopped": [
+    [
+      "1a2b3c4d",
+      {
+        "id": "1a2b3c4d",
+        "cwd": "/Users/dev/src/app",
+        "kind": "background",
+        "sessionId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "name": "review auth",
+        "state": "stopped",
+        "status": "idle"
+      }
+    ]
+  ],
+  "listed": true
+}

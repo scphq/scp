@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-thread-lock",
+  "title": "The name of a Codex thread's writer lock",
+  "description": "$CODEX_HOME/thread-writer-locks/<thread id>.lock, created and held open by Codex; the CLI reads only whether it exists and which processes hold it, never its content. This schema describes the file name",
+  "type": "string",
+  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.lock$"
+}

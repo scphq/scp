@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "session-marker",
+  "title": "What the broker last decided about a harness session",
+  "description": "$SCP_DIR/sessions/<first 32 hex digits of sha256(session key)>.json",
+  "type": "object",
+  "required": ["joined"],
+  "properties": {
+    "joined": { "type": "boolean" },
+    "handle": { "$ref": "common.schema.json#/$defs/Handle" }
+  },
+  "additionalProperties": false
+}

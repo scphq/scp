@@ -477,7 +477,7 @@ export interface Added {
   rules?: string[]
 }
 
-function readManifest(env: Env): Added[] {
+export function readManifest(env: Env): Added[] {
   const config = readJson(manifestFile(env))
   if (config === undefined) return []
   if (!Array.isArray(config.added)) throw new Error("its added key is not a list")
@@ -488,7 +488,7 @@ function readManifest(env: Env): Added[] {
 
 const sameItem = (a: Added, b: Added) => a.harness === b.harness && a.kind === b.kind && a.file === b.file
 
-function writeManifest(env: Env, now: Date, change: (added: Added[]) => Added[]) {
+export function writeManifest(env: Env, now: Date, change: (added: Added[]) => Added[]) {
   const file = manifestFile(env)
   const next = change(readManifest(env))
   if (next.length) writeFile(file, `${JSON.stringify({ version: 1, added: next }, null, 2)}\n`, now, { keep: false })
@@ -1516,7 +1516,7 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
 }
 
 /** keeps `claude --version` where the hooks read it ({@link claudeVersionFile}), so a stop of an older Claude Code blocks; a failure keeps the last one */
-function cacheClaudeVersion(cli: string, env: Env, run: (argv: string[]) => RunResult): void {
+export function cacheClaudeVersion(cli: string, env: Env, run: (argv: string[]) => RunResult): void {
   const result = run([cli, "--version"])
   const version = /\d+\.\d+\.\d+/.exec(result.output)?.[0]
   if (result.code !== 0 || !version) return

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cloud",
+  "title": "The broker's bridge to the account hub",
+  "description": "$XDG_CONFIG_HOME/scp/cloud.json (else ~/.config/scp/cloud.json). Unknown keys are ignored",
+  "type": "object",
+  "required": ["bridge", "machine"],
+  "properties": {
+    "bridge": { "const": true },
+    "machine": { "description": "not me", "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+    "url": { "description": "the relay origin; absent for the active relay", "type": "string", "pattern": "^https?://" },
+    "mirror": { "description": "policy match selectors by handle, harness, kind and label; never a group:, fleet:, tree:, machine: or org: scope", "type": "array", "maxItems": 256, "items": { "type": "string" } },
+    "redact": { "type": "boolean" },
+    "private_ok": { "type": "boolean" },
+    "mirror_local": { "type": "boolean" }
+  }
+}

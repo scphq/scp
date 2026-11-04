@@ -1,0 +1,15 @@
+{
+  "vm": {
+    "command": [
+      "/opt/scp/bin/vm-wake"
+    ],
+    "timeout_s": 300
+  },
+  "claude-bg": {
+    "command": [
+      "/usr/local/bin/swarm",
+      "claude-wake"
+    ],
+    "comment": "ignored"
+  }
+}

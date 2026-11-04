@@ -1,0 +1,12 @@
+{
+  "via": "claude-bg",
+  "harness": "claude-code",
+  "session": "review-auth",
+  "cwd": "/Users/dev/src/app",
+  "argv": [
+    "claude",
+    "--bg",
+    "--resume",
+    "review-auth"
+  ]
+}

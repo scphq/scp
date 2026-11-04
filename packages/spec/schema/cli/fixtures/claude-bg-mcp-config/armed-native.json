@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "scp": {
+      "type": "stdio",
+      "command": "/usr/local/lib/node_modules/@scp-dev/native-darwin-arm64/bin/swarm",
+      "args": [
+        "mcp",
+        "--harness",
+        "claude",
+        "--channels"
+      ],
+      "env": {
+        "SCP_NATIVE": "1",
+        "SCP_CLI_ARGV": "[\"/usr/local/bin/node\", \"/Users/dev/.npm-global/lib/node_modules/@scp-dev/cli/dist/cli.js\"]",
+        "SCP_NAME": "builder",
+        "SCP_UNDER": "",
+        "SCP_GRANT": "krt_0a1b2c3d4e5f6071",
+        "SCP_WAKE_TICKET": "kwt_3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e",
+        "SCP_HARNESS_ORIGIN": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+      }
+    }
+  }
+}

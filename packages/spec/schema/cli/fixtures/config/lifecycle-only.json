@@ -1,0 +1,6 @@
+{
+  "lifecycle": {
+    "idle_after_s": "Infinity",
+    "historic_after_s": 86400
+  }
+}

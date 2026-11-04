@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common",
+  "title": "Shared shapes of the CLI state files",
+  "$defs": {
+    "ProcessKey": {
+      "description": "a harness process key, pid:<pid>:<start>, the start as ps -o lstart= prints it in the C locale with spaces as -",
+      "type": "string",
+      "pattern": "^pid:[1-9][0-9]*:[A-Za-z0-9:-]{1,64}$"
+    },
+    "Handle": {
+      "description": "an agent handle; user, me and relay are reserved",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"
+    },
+    "Harness": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    },
+    "ShortId": {
+      "description": "a Claude Code background session's short id",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$"
+    },
+    "ClaudeSessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "LaunchSession": {
+      "description": "a harness session id as spawn and launch files carry it",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "AbsolutePath": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "Argv": {
+      "description": "a command's words, run without a shell",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "Words": {
+      "description": "a command's words, which may be empty strings",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "Seconds": {
+      "description": "seconds as a number, a numeric string, a duration such as 10m or 2h, or Infinity",
+      "anyOf": [
+        { "type": "number", "minimum": 0 },
+        { "type": "string", "minLength": 1 }
+      ]
+    }
+  }
+}

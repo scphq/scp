@@ -23,4 +23,5 @@ export type { HookParams, HookProc, HookResult, HookContext, HookHandler } from 
 export { openOwnedFile, readOwnedFile } from "./owned-file"
 
 export { parseRunnerConfig, type Runner } from "./runners"
+export { parseWakers, type WakerConfigs } from "./wakers"
 export { runRunner } from "./runner-exec"

@@ -1,0 +1,13 @@
+{
+  "harness": "muse",
+  "session": "ms_7f3a9c",
+  "cwd": "/Users/dev/src/app",
+  "argv": [
+    "/usr/local/bin/muse",
+    "exec",
+    "--session-id",
+    "ms_7f3a9c"
+  ],
+  "idle_s": 1800.5,
+  "parent": "me/mac/lead"
+}

@@ -1,0 +1,9 @@
+{
+  "box": {
+    "command": [
+      "ssh",
+      "box.local"
+    ],
+    "status_timeout_s": null
+  }
+}

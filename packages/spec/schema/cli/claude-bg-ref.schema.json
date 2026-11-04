@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claude-bg-ref",
+  "title": "The hibernation ref of a worker the claude-bg policy stopped",
+  "description": "the wake ref (SPEC 19.1 revive record, as JSON text of at most 512 characters) the broker keeps and hands claude-wake as SCP_WAKE_REF; a record over 512 characters is replaced by the bare session id",
+  "anyOf": [
+    { "$ref": "common.schema.json#/$defs/ClaudeSessionId" },
+    { "$ref": "#/$defs/Record" }
+  ],
+  "$defs": {
+    "Record": {
+      "type": "object",
+      "required": ["via", "harness", "session", "cwd", "argv"],
+      "properties": {
+        "via": { "const": "claude-bg" },
+        "harness": { "const": "claude-code" },
+        "session": { "$ref": "common.schema.json#/$defs/ClaudeSessionId" },
+        "cwd": { "$ref": "common.schema.json#/$defs/AbsolutePath" },
+        "argv": { "$ref": "common.schema.json#/$defs/Words" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

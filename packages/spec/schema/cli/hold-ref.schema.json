@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hold-ref",
+  "title": "A durable spawn's hibernation ref",
+  "description": "the wake ref, as JSON text of at most 512 characters without control characters or credentials, that swarm spawn --durable gives the broker and the spawn waker reads back from the wake request",
+  "type": "object",
+  "required": ["harness", "session", "cwd", "argv", "idle_s", "parent"],
+  "properties": {
+    "harness": { "enum": ["codex", "agy", "grok", "muse"] },
+    "session": { "$ref": "common.schema.json#/$defs/LaunchSession" },
+    "cwd": { "$ref": "common.schema.json#/$defs/AbsolutePath" },
+    "argv": { "description": "the resumed run's words before its prompt; the program's basename is the harness", "$ref": "common.schema.json#/$defs/Words" },
+    "idle_s": { "description": "seconds the held worker waits for a message, above 0; null for no limit", "type": ["number", "null"], "minimum": 0 },
+    "parent": { "description": "the address the worker sits under", "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}
