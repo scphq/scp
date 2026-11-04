@@ -513,15 +513,16 @@ enum Holder {
     Held,
 }
 
-/// when process `pid` started, as `ps` prints it in the C locale and UTC; None when `ps` cannot tell. A `ps` on PATH never decides it
-fn started_at(pid: i32) -> Option<String> {
+/// what `ps -o <field>= -p <pid>` prints of process `pid` in the C locale and UTC, trimmed; None when `ps` cannot tell. A `ps` on PATH
+/// never decides it
+fn ps_field(pid: i32, field: &str) -> Option<String> {
     let ps = if Path::new("/bin/ps").exists() {
         "/bin/ps"
     } else {
         "ps"
     };
     let run = std::process::Command::new(ps)
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
         .stdin(std::process::Stdio::null())
@@ -530,6 +531,16 @@ fn started_at(pid: i32) -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&run.stdout).trim().to_owned();
     (run.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// when process `pid` started, as `ps` prints it; None when `ps` cannot tell
+fn started_at(pid: i32) -> Option<String> {
+    ps_field(pid, "lstart")
+}
+
+/// whether process `pid` is a zombie: it exited, and only its parent has not reaped it
+fn zombie(pid: i32) -> bool {
+    ps_field(pid, "stat").is_some_and(|stat| stat.starts_with('Z'))
 }
 
 /// this process's holder record: its pid and, when `ps` can tell, when it started, so a later process with the same pid is told apart
@@ -544,8 +555,8 @@ fn own_holder() -> String {
     format!("{}\n", Json::object(record).compact())
 }
 
-/// whether a holder that names `pid` and the `started` it wrote is stale: its process is verifiably gone, no such pid or one that
-/// started at another time; age never makes it so, and one that cannot be told is held
+/// whether a holder that names `pid` and the `started` it wrote is stale: its process is verifiably gone, no such pid, a zombie, or one
+/// that started at another time; age never makes it so, and one that cannot be told is held
 fn stale_holder(
     pid: Option<f64>,
     started: Option<&str>,
@@ -557,7 +568,7 @@ fn stale_holder(
     else {
         return false;
     };
-    if !alive(pid) {
+    if !alive(pid) || zombie(pid) {
         return true;
     }
     started.is_some_and(|started| now(pid).is_some_and(|now| now != started))
@@ -754,6 +765,61 @@ mod tests {
             run.join().unwrap();
         }
         assert!(entered.load(Ordering::SeqCst) > 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// a process that has exited and that its parent, which this test started, never reaps; the parent goes when dropped
+    struct Zombie {
+        parent: std::process::Child,
+        pid: i32,
+    }
+
+    impl Zombie {
+        fn new() -> Zombie {
+            let mut parent = std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 0.2 & echo $!; exec sleep 30"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufRead::read_line(
+                &mut std::io::BufReader::new(parent.stdout.take().unwrap()),
+                &mut line,
+            )
+            .unwrap();
+            let held = Zombie {
+                pid: line.trim().parse().unwrap_or(0),
+                parent,
+            };
+            for _ in 0..100 {
+                if zombie(held.pid) {
+                    return held;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("{} never became a zombie", held.pid);
+        }
+    }
+
+    impl Drop for Zombie {
+        fn drop(&mut self) {
+            let _ = self.parent.kill();
+            let _ = self.parent.wait();
+        }
+    }
+
+    #[test]
+    fn a_holder_that_exited_unreaped_frees_its_session() {
+        let zombie = Zombie::new();
+        assert!(alive(zombie.pid));
+        let dir = scratch("zombie");
+        let env = env_of(&dir);
+        let bg = dir.join("claude-bg");
+        private_dir(&bg).unwrap();
+        let held = bg.join(format!("1a2b3c4d.lock.{}.held", zombie.pid));
+        std::fs::write(&held, format!("{{\"pid\":{}}}\n", zombie.pid)).unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_some());
+        assert!(!held.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

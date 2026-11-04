@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import { afterAll, describe, expect, spyOn, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
@@ -202,6 +203,29 @@ describe("claude-bg-lock", () => {
     rmSync(join(dir, `1a2b3c4d.lock.${process.pid}.torn`))
     writeFileSync(join(dir, "1a2b3c4d.lock.2147483646.torn"), "{")
     expect(lockSession(env, "1a2b3c4d")).toBeFunction()
+  })
+
+  test("a holder that exited and that its parent never reaped frees its session", async () => {
+    const parent = Bun.spawn(["/bin/sh", "-c", "sleep 0.2 & echo $!; exec sleep 30"], { stdout: "pipe", stderr: "ignore" })
+    try {
+      const reader = parent.stdout.getReader()
+      let printed = ""
+      while (!printed.includes("\n")) printed += new TextDecoder().decode((await reader.read()).value)
+      const pid = Number(printed.trim())
+      const stat = () => spawnSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()
+      for (let tries = 0; !stat().startsWith("Z"); tries++) {
+        expect(tries).toBeLessThan(100)
+        await Bun.sleep(50)
+      }
+      const env = place(`{"pid":${pid}}\n`, pid)
+      const release = lockSession(env, "1a2b3c4d")
+      expect(release).toBeFunction()
+      expect(existsSync(join(env.SCP_DIR, "claude-bg", `1a2b3c4d.lock.${pid}.held`))).toBe(false)
+      release!()
+    } finally {
+      parent.kill()
+      await parent.exited
+    }
   })
 
   test("a holder whose process is gone is taken over, and the taker's file conforms and goes when released", () => {

@@ -529,9 +529,9 @@ function alive(pid: number): boolean {
 /** `ps`, by its path where it has one, so a `ps` on PATH never decides a lock */
 const PS = existsSync("/bin/ps") ? "/bin/ps" : "ps"
 
-/** when process `pid` started, as `ps` prints it in the C locale and UTC; undefined when `ps` cannot tell */
-function startedAt(pid: number): string | undefined {
-  const run = spawnSync(PS, ["-o", "lstart=", "-p", String(pid)], {
+/** what `ps -o <field>= -p <pid>` prints of process `pid` in the C locale and UTC, trimmed; undefined when `ps` cannot tell */
+function psField(pid: number, field: "lstart" | "stat"): string | undefined {
+  const run = spawnSync(PS, ["-o", `${field}=`, "-p", String(pid)], {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
     stdio: ["ignore", "pipe", "ignore"],
@@ -540,6 +540,9 @@ function startedAt(pid: number): string | undefined {
   const text = run.status === 0 ? run.stdout.trim() : ""
   return text === "" ? undefined : text
 }
+
+/** when process `pid` started, as `ps` prints it in the C locale and UTC; undefined when `ps` cannot tell */
+const startedAt = (pid: number): string | undefined => psField(pid, "lstart")
 
 let ownStart: string | undefined | null = null
 
@@ -550,8 +553,8 @@ function ownHolder(): string {
 }
 
 /**
- * whether the holder file `name` in `dir` still claims its session: gone, stale (its process is verifiably gone: no such pid, or that pid
- * started at another time) or held. Age never makes a holder stale, and one that cannot be told is held
+ * whether the holder file `name` in `dir` still claims its session: gone, stale (its process is verifiably gone: no such pid, a zombie, or
+ * that pid started at another time) or held. Age never makes a holder stale, and one that cannot be told is held
  */
 function holder(dir: string, name: string, prefix: string): "gone" | "stale" | "held" {
   let text: string
@@ -569,7 +572,7 @@ function holder(dir: string, name: string, prefix: string): "gone" | "stale" | "
   const named = Number(name.slice(prefix.length).split(".")[0])
   const pid = typeof record?.pid === "number" ? record.pid : named
   if (!Number.isInteger(pid) || pid <= 0) return "held"
-  if (!alive(pid)) return "stale"
+  if (!alive(pid) || psField(pid, "stat")?.startsWith("Z")) return "stale"
   const started = typeof record?.started === "string" ? record.started : undefined
   const now = started === undefined ? undefined : startedAt(pid)
   return now !== undefined && now !== started ? "stale" : "held"

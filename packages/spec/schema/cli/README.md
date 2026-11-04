@@ -52,8 +52,8 @@ Keyword limits: map keys are constrained in descriptions only (there is no `prop
 - Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) publishes its own file before
   it acts on the session, then lists the directory: it holds the session only when no other holder file of the session is live, and unlinks
   its own file after the action, or at once when it does not hold. `swarm claude-wake` takes none: a wake must not wait on a stop.
-- Readers: a holder is stale only once its process is verifiably gone: no process has its pid, or the one that has it started at another
-  time than `started`. Age never makes it stale. A file it cannot parse takes the pid from its name; one with no usable pid, or whose start
+- Readers: a holder is stale only once its process is verifiably gone: no process has its pid, it is a zombie (`ps -o stat=` starts with
+  `Z`), or the one that has it started at another time than `started`. Age never makes it stale. A file it cannot parse takes the pid from its name; one with no usable pid, or whose start
   `ps` cannot read, counts as live. A run unlinks stale holders and never another live one; a listing error is a failure, never a hold.
 - Invariants: two runs never hold one session at once, since each lists after it published its file; two at once may both back off, and the
   session waits for the next pass. Node has no `flock`, so the lock needs only `O_EXCL`, `rename`, `readdir` and `unlink`.
