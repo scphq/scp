@@ -266,7 +266,7 @@ describe("claude-bg-lock", () => {
     expect(codes.map(([code]) => code)).toEqual([0, 0, 0, 0])
     const lines = readFileSync(log, "utf8").trim().split("\n")
     expect(lines.length).toBeGreaterThan(0)
-    lines.forEach((line, at) => expect([at, line]).toEqual([at, at % 2 === 0 ? "in" : "out"]))
+    expect(lines).toEqual(lines.map((_, at) => (at % 2 === 0 ? "in" : "out")))
   }, 60_000)
 })
 

@@ -3,7 +3,6 @@ import {
   closeSync,
   constants,
   existsSync,
-  fstatSync,
   openSync,
   readdirSync,
   readFileSync,
