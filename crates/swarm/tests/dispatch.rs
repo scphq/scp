@@ -89,6 +89,31 @@ fn version_usage_and_errors() {
 }
 
 #[test]
+fn hook_as_a_later_word_runs_the_cli_not_the_hook() {
+    let temp = Temp::new();
+    for args in [
+        &["frobnicate", "x", "hook"][..],
+        &["send", "x", "hook", "--help"],
+    ] {
+        let mut command = temp.swarm(args);
+        command.env(
+            "SCP_CLI_ARGV",
+            r#"["/bin/sh","-c","echo \"$SCP_ROUTED $*\"","sh"]"#,
+        );
+        let handed = output(command);
+        assert_eq!(text(&handed.stdout), format!("ts {}\n", args.join(" ")));
+    }
+    for args in [
+        &["swarm", "hook", "claude"][..],
+        &["/usr/bin/node", "/x/cli.js", "hook", "claude"],
+    ] {
+        let hook = output(temp.swarm(args));
+        assert_eq!(hook.status.code(), Some(0), "{args:?}");
+        assert_eq!(text(&hook.stdout), "", "{args:?}");
+    }
+}
+
+#[test]
 fn mcp_serves_stdio_in_process() {
     let temp = Temp::new();
     let mut command = temp.swarm(&["mcp", "--harness", "claude"]);

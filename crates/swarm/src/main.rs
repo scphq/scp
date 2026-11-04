@@ -66,7 +66,7 @@ fn main() {
             scp_mcp::main(&args[1..])
         }
         Some("spawn") => scp_cli::main(&args, &HOST),
-        _ if args.iter().any(|arg| arg == "hook") => {
+        _ if runs_hook(&args) => {
             scp_hook::entry(origin, &args);
             0
         }
@@ -77,6 +77,16 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// whether `args` run a hook: `hook` as the verb, or after the launcher a hook command names, one or two words that are `swarm` or
+/// paths (the CLI's binary, or node and its script)
+fn runs_hook(args: &[String]) -> bool {
+    let launcher = |word: &String| word == scp_core::protocol::CLI_NAME || word.contains('/');
+    match args.iter().position(|arg| arg == "hook") {
+        Some(at) if at <= 2 => args[..at].iter().all(launcher),
+        _ => false,
+    }
 }
 
 fn daemon_command(args: &[String]) -> i32 {
@@ -217,5 +227,36 @@ fn start_detached(paths: &Paths) -> Result<i32, Box<dyn std::error::Error>> {
             .into());
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runs_hook;
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn a_hook_runs_only_as_the_verb_or_after_a_launcher() {
+        for hook in [
+            &["hook", "claude"][..],
+            &["swarm", "hook", "claude"],
+            &["/opt/bin/swarm", "hook", "codex", "--cowork-only"],
+            &["/usr/bin/node", "/opt/cli/dist/cli.js", "hook", "agy"],
+        ] {
+            assert!(runs_hook(&words(hook)), "{hook:?}");
+        }
+        for verb in [
+            &["send", "x", "hook"][..],
+            &["send", "hook"],
+            &["list", "--as", "hook"],
+            &["swarm", "send", "hook"],
+            &["/opt/bin/swarm", "/opt/cli.js", "/x", "hook"],
+            &["set-now", "fixing", "the", "hook"],
+        ] {
+            assert!(!runs_hook(&words(verb)), "{verb:?}");
+        }
     }
 }
