@@ -443,8 +443,7 @@ fn local_parts(at: i64) -> Option<libc::tm> {
     (!done.is_null()).then_some(tm)
 }
 
-/// a time, as ms or ISO, as `HH:MM:SS` in local time
-pub fn clock(at: &Value) -> String {
+fn local_time(at: &Value) -> Option<libc::tm> {
     let seconds = match at {
         Value::Number(n) => n
             .as_f64()
@@ -453,8 +452,29 @@ pub fn clock(at: &Value) -> String {
         Value::String(s) => parse_iso(s),
         _ => None,
     };
-    match seconds.and_then(local_parts) {
+    seconds.and_then(local_parts)
+}
+
+/// a time, as ms or ISO, as `HH:MM:SS` in local time
+pub fn clock(at: &Value) -> String {
+    match local_time(at) {
         Some(tm) => format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec),
+        None => js(Some(at)),
+    }
+}
+
+/// a time, as ms or ISO, as `YYYY-MM-DD HH:MM:SS` in local time
+pub fn stamp(at: &Value) -> String {
+    match local_time(at) {
+        Some(tm) => format!(
+            "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+            i64::from(tm.tm_year) + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        ),
         None => js(Some(at)),
     }
 }
