@@ -1,5 +1,12 @@
 # @scp-dev/cli
 
+## 1.2.0
+
+### Minor Changes
+
+- ec71857: Under `SCP_NATIVE=1` the native `swarm` also runs `claude ls`, `claude prune`, `claude-bg-task` and `claude-wake`, so the native broker no longer starts a Node process for its claude-bg task or wakes, and it runs that task with no CLI installed at all. Both engines now write `claude-bg` state through a temporary file of their own and take a per-session lock, so a task and a `claude prune` that overlap no longer undo each other.
+- 2df08f3: Under `SCP_NATIVE=1` the CLI also hands `spawn` to the native `swarm`, in the foreground and with `--bg`: a detached worker's runner, its holds and an MCP `relay_spawn` no longer keep a Node process per worker. `--via` and `--under` an agent on another machine stay on the TypeScript CLI.
+
 ## 1.1.0
 
 ### Minor Changes

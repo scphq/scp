@@ -64,7 +64,7 @@
     },
     "packages/cli": {
       "name": "@scp-dev/cli",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "bin": {
         "swarm": "./dist/cli.js",
       },
@@ -82,11 +82,11 @@
         "tsup": "^8.5.1",
       },
       "optionalDependencies": {
-        "@scp-dev/native-darwin-arm64": "1.1.0",
-        "@scp-dev/native-darwin-x64": "1.1.0",
-        "@scp-dev/native-linux-arm64-gnu": "1.1.0",
-        "@scp-dev/native-linux-x64-gnu": "1.1.0",
-        "@scp-dev/native-linux-x64-musl": "1.1.0",
+        "@scp-dev/native-darwin-arm64": "1.2.0",
+        "@scp-dev/native-darwin-x64": "1.2.0",
+        "@scp-dev/native-linux-arm64-gnu": "1.2.0",
+        "@scp-dev/native-linux-x64-gnu": "1.2.0",
+        "@scp-dev/native-linux-x64-musl": "1.2.0",
       },
     },
     "packages/conformance": {
