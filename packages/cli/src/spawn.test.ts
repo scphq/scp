@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import { Database } from "bun:sqlite"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
@@ -34,11 +34,26 @@ import { grantParams } from "./common"
 import { RELAY_HELP, verbHelp } from "./main"
 import { SPAWN_HELP } from "./help-spawn"
 import { alive, waitFor } from "./testing/fixtures"
+import { nativeCli, swarmBinary } from "./test-setup"
 
 setDefaultTimeout(30_000)
 
 const entry = join(import.meta.dir, "cli.ts")
 const SELF = [process.execPath, "--no-env-file", entry]
+
+/** the overrides that mount the native swarm's mcp in a codex worker under SCP_NATIVE=1, told the router's launch words; none without it */
+function nativeMount(): string[] {
+  if (!nativeCli) return []
+  const bin = JSON.stringify(resolve(swarmBinary!))
+  const launch = [process.execPath, "--no-env-file", "--config=/dev/null", entry]
+  return Object.entries({
+    command: bin,
+    args: '["mcp", "--harness", "codex"]',
+    "env.SCP_NATIVE": '"1"',
+    "env.SCP_SWARM_BIN": bin,
+    "env.SCP_CLI_ARGV": JSON.stringify(JSON.stringify(launch)),
+  }).flatMap(([field, value]) => ["-c", `mcp_servers.scp.${field}=${value}`])
+}
 
 /** Codex fixture: applies config overrides, starts the shim, reports hooks and simulates output and late steers. */
 const FAKE_CODEX = `
@@ -183,8 +198,13 @@ describe("swarm spawn", () => {
   const dir = join(root, "relay")
   const bin = join(root, "bin")
   const record = join(root, "record.jsonl")
-  // the mounts these tests check are the ones a CLI without SCP_NATIVE writes
-  const env = (extra: Record<string, string> = {}) => ({ SCP_DIR: dir, PATH: `${bin}:${process.env.PATH}`, FAKE_RECORD: record, SCP_NATIVE: "", ...extra })
+  const env = (extra: Record<string, string> = {}) => ({
+    SCP_DIR: dir,
+    PATH: `${bin}:${process.env.PATH}`,
+    FAKE_RECORD: record,
+    SCP_NATIVE: nativeCli ? "1" : "",
+    ...extra,
+  })
   const codexHome = (mounted: boolean) => {
     const home = mkdtempSync(join(root, "codex-"))
     if (mounted)
@@ -240,12 +260,14 @@ describe("swarm spawn", () => {
     expect(spawned.code).toBe(7)
     expect(`${spawned.stdout}${spawned.stderr}`).not.toContain("krt_")
     const [call, shim] = take()
-    const overrides = ["-c", call!.argv![1]!, "-c", "mcp_servers.scp.enabled=true", "-c", 'mcp_servers.scp.default_tools_approval_mode="approve"']
+    const mount = nativeMount()
+    const vars = call!.argv![mount.length + 1]!
+    const overrides = [...mount, "-c", vars, "-c", "mcp_servers.scp.enabled=true", "-c", 'mcp_servers.scp.default_tools_approval_mode="approve"']
     const steered = /^send one message\n\n\[swarm spawn: me\/lead, .* key="([0-9a-z]{6})"> blocks: .*\]$/s.exec(call!.argv!.at(-1)!)
     expect(call!.argv).toEqual([...overrides, "exec", ...overrides, `send one message${steerNote("me/lead", steered![1]!)}`])
     expect(call!.argv!.join(" ")).not.toContain("krt_")
     expect(Object.values(call!.env!).join("\n")).not.toContain(steered![1]!)
-    const [key, value] = [call!.argv![1]!.slice(0, call!.argv![1]!.indexOf("=")), call!.argv![1]!.slice(call!.argv![1]!.indexOf("=") + 1)]
+    const [key, value] = [vars.slice(0, vars.indexOf("=")), vars.slice(vars.indexOf("=") + 1)]
     expect(key).toBe("mcp_servers.scp.env_vars")
     expect((Bun.TOML.parse(`v = ${value}`) as { v: string[] }).v.sort()).toEqual(["SCP_DIR", "SCP_GRANT", "SCP_NAME", "XDG_STATE_HOME"])
     expect(call!.env!.SCP_GRANT).toMatch(/^krt_[0-9a-f]{64}$/)
@@ -342,12 +364,16 @@ describe("swarm spawn", () => {
     )
     expect(spawned.code).toBe(0)
     const [call, shim] = take()
-    expect(call!.argv!.slice(0, 4)).toEqual([
-      "-c",
-      `mcp_servers.scp.command=${JSON.stringify(process.execPath)}`,
-      "-c",
-      `mcp_servers.scp.args=${JSON.stringify(["--no-env-file", "--config=/dev/null", entry, "mcp", "--harness", "codex"]).replaceAll(",", ", ")}`,
-    ])
+    expect(call!.argv!.slice(0, 4)).toEqual(
+      nativeCli
+        ? nativeMount().slice(0, 4)
+        : [
+            "-c",
+            `mcp_servers.scp.command=${JSON.stringify(process.execPath)}`,
+            "-c",
+            `mcp_servers.scp.args=${JSON.stringify(["--no-env-file", "--config=/dev/null", entry, "mcp", "--harness", "codex"]).replaceAll(",", ", ")}`,
+          ],
+    )
     expect(shim!.shim!.result!.isError).toBeFalsy()
     expect((await inbox()).map((m) => m.from.address)).toEqual(["me/w2", "me/w2"])
     expect((await lead.rules("w2")).parent).toBe("me/lead")
