@@ -65,6 +65,7 @@ fn main() {
             }
             scp_mcp::main(&args[1..])
         }
+        Some("spawn") => scp_cli::main(&args, &HOST),
         _ if args.iter().any(|arg| arg == "hook") => {
             scp_hook::entry(origin, &args);
             0

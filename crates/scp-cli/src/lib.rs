@@ -74,10 +74,10 @@ pub struct Call<'a> {
 pub enum Run {
     /// on its parsed words
     Parsed(fn(&Call) -> Done),
-    /// on the words after the verb, as they came
-    Words(fn(&[String], &Env, &Host) -> Done),
     /// on its parsed words and a connection opened as the caller
     Opened(for<'a> fn(&'a Call<'a>, &'a open::Opened) -> LocalFuture<'a, Done>),
+    /// on its words as given, which it parses itself: `Call::parsed` is empty
+    Words(fn(&Call, &[String]) -> Done),
 }
 
 pub struct Verb {
@@ -147,12 +147,11 @@ pub fn main(args: &[String], host: &Host) -> i32 {
     }
     route::log(name, "native", "run");
     let parsed = match &spec.run {
-        Run::Words(_) => Ok(Parsed::default()),
-        _ => args::parse_verb(name, rest),
-    };
-    let parsed = match parsed {
-        Ok(parsed) => parsed,
-        Err(message) => return report(Fail::Usage(message)),
+        Run::Words(_) => Parsed::default(),
+        _ => match args::parse_verb(name, rest) {
+            Ok(parsed) => parsed,
+            Err(message) => return report(Fail::Usage(message)),
+        },
     };
     let call = Call {
         verb: name,
@@ -163,7 +162,7 @@ pub fn main(args: &[String], host: &Host) -> i32 {
     let done = match &spec.run {
         Run::Parsed(run) => run(&call),
         Run::Opened(run) => open::with_opened(&call, *run),
-        Run::Words(run) => run(rest, &env, host),
+        Run::Words(run) => run(&call, rest),
     };
     match done {
         Ok(code) => code,

@@ -99,7 +99,7 @@ writeFileSync(
   `#!/bin/sh
 if [ "$1" = "__verbs" ]; then printf '{"version":"%s","verbs":["whoami"],"declines":["--help"],"decline_env":[]}' "$FAKE_VERSION"; exit 0; fi
 if [ -n "$FAKE_SLEEP" ]; then exec sleep 30; fi
-printf 'args=%s ppid=%s parent=%s routed=%s argv=%s\\n' "$*" "$PPID" "$SCP_CLI_PARENT" "$SCP_ROUTED" "$SCP_CLI_ARGV"
+printf 'args=%s ppid=%s parent=%s routed=%s given=%s argv=%s\\n' "$*" "$PPID" "$SCP_CLI_PARENT" "$SCP_ROUTED" "$SCP_CLI_ARGV_GIVEN" "$SCP_CLI_ARGV"
 exit 7
 `,
 )
@@ -130,6 +130,17 @@ describe("the hand-off", () => {
     expect(run.out).toContain(`args=--as x whoami --json ppid=${process.pid} parent= routed=native`)
     expect(JSON.parse(run.out.split("argv=")[1]!)).toEqual([process.execPath, "--no-env-file", "--config=/dev/null", CLI])
     expect(logLines(log)).toEqual(["whoami native execve"])
+  })
+
+  test("a caller's own SCP_CLI_ARGV travels beside the launch words that replace it", async () => {
+    const plain = await cli(["whoami"], fake())
+    expect(plain.out).toContain("routed=native given= argv=")
+    const own = JSON.stringify(["/opt/node", "/old/cli.js"])
+    const run = await cli(["whoami"], fake({ SCP_CLI_ARGV: own }))
+    expect(run.out).toContain(`routed=native given=${own} argv=`)
+    expect(JSON.parse(run.out.split("argv=")[1]!)).toEqual([process.execPath, "--no-env-file", "--config=/dev/null", CLI])
+    const stale = await cli(["whoami"], fake({ SCP_CLI_ARGV_GIVEN: own }))
+    expect(stale.out).toContain("routed=native given= argv=")
   })
 
   test("the spawn path names the router and the shell, and mirrors the exit code", async () => {
@@ -203,6 +214,21 @@ describe.skipIf(!swarmBinary)("the native swarm", () => {
       expect(existsSync(join(dir, "relay.sock"))).toBe(false)
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  test("a declined verb reaches the TypeScript CLI with the caller's SCP_CLI_ARGV, or none, not the router's", async () => {
+    const ts = join(root, "fake-ts-cli")
+    writeFileSync(ts, `#!/bin/sh\nprintf 'routed=%s argv=%s given=%s\\n' "$SCP_ROUTED" "\${SCP_CLI_ARGV-unset}" "\${SCP_CLI_ARGV_GIVEN-unset}"\n`)
+    chmodSync(ts, 0o755)
+    const declined = async (extra: Record<string, string>) => {
+      const child = Bun.spawn([swarmBinary!, "whoami", "--help"], {
+        env: { ...env(), SCP_ROUTED: "native", SCP_CLI_ARGV: JSON.stringify([ts]), ...extra },
+        stdout: "pipe",
+      })
+      return (await new Response(child.stdout).text()).trim()
+    }
+    expect(await declined({})).toBe("routed=ts argv=unset given=unset")
+    expect(await declined({ SCP_CLI_ARGV_GIVEN: '["/opt/node","/old/cli.js"]' })).toBe('routed=ts argv=["/opt/node","/old/cli.js"] given=unset')
   })
 
   test("a broker that cannot start says why at once", async () => {

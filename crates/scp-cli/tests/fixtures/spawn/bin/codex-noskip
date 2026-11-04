@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "Usage: codex exec [OPTIONS]"

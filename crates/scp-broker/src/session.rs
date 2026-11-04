@@ -312,7 +312,7 @@ impl Core {
 }
 
 mod push;
-pub use push::{LiveWorkers, handback_output, wakes};
+pub use push::{HANDBACK_CUT, LiveWorkers, handback_output, keep_last, wakes};
 
 const GONE_PREFIX: &str = "_gone_";
 

@@ -1,0 +1,3 @@
+[mcp_servers.scp]
+command = "/nonexistent/swarm"
+args = ["mcp", "--harness", "codex", "--extra"]

@@ -1,0 +1,4 @@
+[mcp_servers.scp]
+command = "node"
+[other]
+big = 9007199254740993

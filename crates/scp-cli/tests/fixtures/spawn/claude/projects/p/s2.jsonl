@@ -1,0 +1,5 @@
+{"type":"assistant","sessionId":"s2","message":{"role":"assistant","content":[{"type":"text","text":"old"}]}}
+{"type":"user","sessionId":"s2","message":{"role":"user","content":[{"type":"text","text":"new prompt"},{"type":"tool_result"}]}}
+{"type":"assistant","sessionId":"s2","message":{"role":"assistant","content":[{"type":"text","text":"kept after tool_result block"}]}}
+{"type":"user","sessionId":"s2","message":{"role":"user","content":"real prompt"}}
+{"type":"assistant","sessionId":"s2","message":{"role":"assistant","content":[{"type":"text","text":"final"}]}}

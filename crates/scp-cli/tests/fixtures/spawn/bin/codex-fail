@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "--skip-git-repo-check"
+exit 1

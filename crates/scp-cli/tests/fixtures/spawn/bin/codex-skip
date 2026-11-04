@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "Usage: codex exec [OPTIONS]"
+echo "      --skip-git-repo-check  Allow running outside a git repository"
