@@ -1,6 +1,8 @@
 //! Acting as the caller: the identity a command claims or binds to, and the broker connection that carries it (`common.ts::open`).
 
 use crate::args::{Parsed, parse_verb};
+use crate::fleet::json::Json;
+use crate::fleet::result_of;
 use crate::{Call, Done, Fail, route, term, usage};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::LocalFuture;
@@ -82,6 +84,8 @@ pub struct Opened {
     pub client: Client,
     /// the caller's endpoint, null when it acts as no one
     pub me: Value,
+    /// `me` as the broker wrote it, its keys in that order
+    pub endpoint: Json,
     pub broker: Value,
     pub bound: Bound,
     pub harness_pid: Option<i64>,
@@ -481,8 +485,14 @@ pub async fn connect_shell(dir: &str, env: &Env, tool: &str) -> Result<Client, F
 pub async fn open(verb: &str, plan: Plan, env: &Env) -> Result<Opened, Fail> {
     let dir = relay_dir(env).to_string_lossy().into_owned();
     let client = connect_shell(&dir, env, "the scp MCP tools (relay_*)").await?;
-    let hello = match client.hello(plan.hello.clone()).await {
-        Ok(hello) => hello,
+    let hello = match client.hello_line(plan.hello.clone()).await {
+        Ok(line) => match result_of(&line) {
+            Ok(hello) => hello,
+            Err(fail) => {
+                client.close();
+                return Err(fail);
+            }
+        },
         Err(CallError::Relay {
             code,
             message,
@@ -500,6 +510,8 @@ pub async fn open(verb: &str, plan: Plan, env: &Env) -> Result<Opened, Fail> {
             return Err(error.into());
         }
     };
+    let endpoint = hello.get("endpoint").cloned().unwrap_or(Json::Null);
+    let hello = hello.to_value();
     let me = get(&hello, "endpoint").cloned().unwrap_or(Value::Null);
     let bound = match plan.mode {
         Mode::As => Some("as"),
@@ -532,6 +544,7 @@ pub async fn open(verb: &str, plan: Plan, env: &Env) -> Result<Opened, Fail> {
         client,
         broker: get(&hello, "broker").cloned().unwrap_or(Value::Null),
         me,
+        endpoint,
         bound,
         harness_pid: plan.harness_pid,
     })

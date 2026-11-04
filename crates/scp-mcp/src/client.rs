@@ -249,17 +249,29 @@ impl Client {
 
     /// `hello` with the protocol and no capabilities, then `fields`
     pub async fn hello(&self, fields: Map<String, Value>) -> Result<Value, CallError> {
-        let mut params = Map::new();
-        params.insert("protocol".into(), PROTOCOL.into());
-        params.insert("capabilities".into(), json!([]));
-        params.extend(fields);
-        self.request("hello", Value::Object(params)).await
+        self.request("hello", hello_params(fields)).await
+    }
+
+    /// `hello`, answered with the whole reply line as the broker wrote it
+    pub fn hello_line(
+        &self,
+        fields: Map<String, Value>,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, CallError>> + 'static {
+        self.request_line("hello", hello_params(fields))
     }
 
     /// ends the connection once what was written is flushed
     pub fn close(&self) {
         self.inner.writer.borrow_mut().take();
     }
+}
+
+fn hello_params(fields: Map<String, Value>) -> Value {
+    let mut params = Map::new();
+    params.insert("protocol".into(), PROTOCOL.into());
+    params.insert("capabilities".into(), json!([]));
+    params.extend(fields);
+    Value::Object(params)
 }
 
 impl Drop for Client {

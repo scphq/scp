@@ -1,95 +1,9 @@
-//! What the messaging verbs print: a message as `printMessage` writes it, a send's outcome, and JSON whose own keys keep their order.
+//! What the messaging verbs print: a message as `printMessage` writes it, and a send's outcome.
 
-use crate::term::pretty;
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::render::{clock, delivery_text, list_of, reach_lines, short_id, wrap_message};
 use scp_mcp::tools::{get, held_text, js, redacted_text, truthy};
 use serde_json::Value;
-
-/// JSON as `JSON.stringify(v, null, 2)` writes an object literal the CLI builds: its keys in the order written
-pub enum Json<'a> {
-    Value(&'a Value),
-    Object(Vec<(&'a str, Json<'a>)>),
-    Array(Vec<Json<'a>>),
-}
-
-impl<'a> Json<'a> {
-    /// `{ ...first, ...object, ...last }`: a later key takes an earlier one's value where it stands
-    pub fn spread(
-        first: &[(&'a str, Json<'a>)],
-        object: &'a Value,
-        last: Vec<(&'a str, Json<'a>)>,
-    ) -> Json<'a> {
-        let mut entries: Vec<(&str, Json)> = first.iter().map(|(k, v)| (*k, v.shallow())).collect();
-        let middle = object
-            .as_object()
-            .into_iter()
-            .flat_map(|m| m.iter().map(|(k, v)| (k.as_str(), Json::Value(v))));
-        for (key, value) in middle.chain(last) {
-            match entries.iter_mut().find(|(k, _)| *k == key) {
-                Some(slot) => slot.1 = value,
-                None => entries.push((key, value)),
-            }
-        }
-        Json::Object(entries)
-    }
-
-    fn shallow(&self) -> Json<'a> {
-        match self {
-            Json::Value(v) => Json::Value(v),
-            Json::Object(entries) => {
-                Json::Object(entries.iter().map(|(k, v)| (*k, v.shallow())).collect())
-            }
-            Json::Array(items) => Json::Array(items.iter().map(Json::shallow).collect()),
-        }
-    }
-
-    pub fn text(&self) -> String {
-        let mut text = String::new();
-        self.write(&mut text, 0);
-        text
-    }
-
-    fn write(&self, text: &mut String, depth: usize) {
-        let newline = |text: &mut String, depth: usize| {
-            text.push('\n');
-            text.push_str(&"  ".repeat(depth));
-        };
-        match self {
-            Json::Value(value) => {
-                text.push_str(&pretty(value).replace('\n', &format!("\n{}", "  ".repeat(depth))))
-            }
-            Json::Object(entries) if entries.is_empty() => text.push_str("{}"),
-            Json::Array(items) if items.is_empty() => text.push_str("[]"),
-            Json::Object(entries) => {
-                text.push('{');
-                for (at, (key, value)) in entries.iter().enumerate() {
-                    if at > 0 {
-                        text.push(',');
-                    }
-                    newline(text, depth + 1);
-                    text.push_str(&crate::args::js_string(key));
-                    text.push_str(": ");
-                    value.write(text, depth + 1);
-                }
-                newline(text, depth);
-                text.push('}');
-            }
-            Json::Array(items) => {
-                text.push('[');
-                for (at, item) in items.iter().enumerate() {
-                    if at > 0 {
-                        text.push(',');
-                    }
-                    newline(text, depth + 1);
-                    item.write(text, depth + 1);
-                }
-                newline(text, depth);
-                text.push(']');
-            }
-        }
-    }
-}
 
 fn time(value: Option<&Value>) -> String {
     value.map_or_else(|| "undefined".into(), clock)
@@ -186,34 +100,6 @@ pub fn sent_lines(result: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn spread_keys_keep_their_place_and_later_ones_append() {
-        let result = json!({"b": 1, "a": {"y": [1], "x": null}});
-        let preamble = json!("p");
-        let printed = Json::spread(&[("preamble", Json::Value(&preamble))], &result, vec![]).text();
-        assert_eq!(
-            printed,
-            "{\n  \"preamble\": \"p\",\n  \"a\": {\n    \"x\": null,\n    \"y\": [\n      1\n    ]\n  },\n  \"b\": 1\n}"
-        );
-        let (id, short) = (json!("msg_1"), json!("1"));
-        let answered = Json::Object(vec![
-            ("id", Json::Value(&id)),
-            ("short", Json::Value(&short)),
-        ]);
-        let printed = Json::spread(
-            &[],
-            &json!({"z": 0, "reply_to": 1}),
-            vec![("reply_to", answered)],
-        )
-        .text();
-        assert_eq!(
-            printed,
-            "{\n  \"reply_to\": {\n    \"id\": \"msg_1\",\n    \"short\": \"1\"\n  },\n  \"z\": 0\n}"
-        );
-        assert_eq!(Json::Array(vec![]).text(), "[]");
-        assert_eq!(Json::Object(vec![]).text(), "{}");
-    }
 
     #[test]
     fn a_send_reads_as_the_cli_writes_it() {

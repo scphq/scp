@@ -39,15 +39,6 @@ pub fn turns_arg(value: Option<&Val>) -> Result<Option<u32>, Fail> {
     )))
 }
 
-/// `{ preamble: PREAMBLE, ...result }`
-fn with_preamble(result: &Json) -> Json {
-    let mut object = Json::object(vec![("preamble", Json::str(PREAMBLE))]);
-    for (key, value) in result.entries() {
-        object.set(key, value.clone());
-    }
-    object
-}
-
 pub fn peek<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
         let flags = &call.parsed;
@@ -93,7 +84,7 @@ pub fn peek<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done>
         }
         let result = ask(opened, "peek", params).await?;
         if json {
-            out(&with_preamble(&result).pretty());
+            out(&Json::spread(vec![("preamble", Json::str(PREAMBLE))], &result, vec![]).pretty());
         } else {
             out(&format!("{PREAMBLE}\n\n{}", wrap_peek(&result.to_value())));
         }
@@ -171,14 +162,5 @@ mod tests {
                 Err(usage("swarm set-peek takes on|off [endpoint]"))
             );
         }
-    }
-
-    #[test]
-    fn the_preamble_comes_first_and_keeps_its_place() {
-        let result = Json::parse(br#"{"z":1,"preamble":"x","2":true}"#).unwrap();
-        assert_eq!(
-            with_preamble(&result).compact(),
-            r#"{"2":true,"preamble":"x","z":1}"#
-        );
     }
 }

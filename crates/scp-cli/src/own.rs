@@ -1,7 +1,9 @@
 //! The caller's own line: whoami, set-status, set-now, set-title and event.
 
+use crate::fleet::json::Json;
+use crate::fleet::{result_of, view};
 use crate::open::Opened;
-use crate::term::{json, json_entries, out};
+use crate::term::out;
 use crate::{Call, Done, Run, Verb, usage};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::LocalFuture;
@@ -90,14 +92,6 @@ fn depth_text(e: &Value) -> String {
     }
 }
 
-/// `object[key] = value`, which keeps a key where it was
-fn assign<'v>(entries: &mut Vec<(&'v str, &'v Value)>, key: &'v str, value: &'v Value) {
-    match entries.iter_mut().find(|(k, _)| *k == key) {
-        Some(slot) => slot.1 = value,
-        None => entries.push((key, value)),
-    }
-}
-
 fn whoami<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
         let me = &opened.me;
@@ -108,29 +102,25 @@ fn whoami<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         }
         let kind = get(me, "kind").and_then(Value::as_str);
         let pending = if kind == Some("agent") && get(me, "parent") == Some(&Value::Null) {
-            opened
-                .client
-                .request("whoami", Value::Object(Map::new()))
+            request(opened, "whoami", Map::new())
                 .await
                 .ok()
-                .and_then(|reply| get(&reply, "link_pending").cloned())
-                .filter(|p| truthy(Some(p)))
+                .and_then(|reply| reply.get("link_pending").cloned())
+                .filter(|p| view::truthy(Some(p)))
         } else {
             None
         };
-        let bound = opened.bound.map_or(Value::Null, Value::from);
         if call.parsed.on("json") {
-            let mut entries: Vec<(&str, &Value)> = me
-                .as_object()
-                .map(|m| m.iter().map(|(k, v)| (k.as_str(), v)).collect())
-                .unwrap_or_default();
+            let bound = opened.bound.map_or(Json::Null, Json::str);
+            let mut last = Vec::new();
             if let Some(pending) = &pending {
-                assign(&mut entries, "link_pending", pending);
+                last.push(("link_pending", pending.clone()));
             }
-            assign(&mut entries, "bound", &bound);
-            json_entries(&entries);
+            last.push(("bound", bound));
+            out(&Json::spread(vec![], &opened.endpoint, last).pretty());
             return Ok(0);
         }
+        let pending = pending.map(|p| p.to_value());
         let harness = get(me, "harness");
         let harness = if truthy(harness) {
             format!(", {}", js(harness))
@@ -190,12 +180,17 @@ fn whoami<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     })
 }
 
+/// a reply's result, its keys in the order the broker wrote them
 async fn request(
     opened: &Opened,
     method: &str,
     params: Map<String, Value>,
-) -> Result<Value, crate::Fail> {
-    Ok(opened.client.request(method, Value::Object(params)).await?)
+) -> Result<Json, crate::Fail> {
+    let line = opened
+        .client
+        .request_line(method, Value::Object(params))
+        .await?;
+    result_of(&line)
 }
 
 fn set_status<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
@@ -211,8 +206,9 @@ fn set_status<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Don
         );
         let view = request(opened, "status", params).await?;
         if call.parsed.on("json") {
-            json(&view);
+            out(&view.pretty());
         } else {
+            let view = view.to_value();
             let status = get(&view, "status").filter(|s| !s.is_null());
             let state = status.map_or("undefined".into(), |s| field(s, "state"));
             let note = status
@@ -237,8 +233,9 @@ fn set_now<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> 
         params.insert("note".into(), Value::from(words.join(" ")));
         let view = request(opened, "status", params).await?;
         if call.parsed.on("json") {
-            json(&view);
+            out(&view.pretty());
         } else {
+            let view = view.to_value();
             let status = get(&view, "status").filter(|s| truthy(Some(s)));
             let text = status.map_or("-".into(), status_text);
             out(&format!("{}: {text}", field(&view, "address")));
@@ -259,8 +256,9 @@ fn set_title<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done
         params.insert("text".into(), Value::from(words.join(" ")));
         let view = request(opened, "title", params).await?;
         if call.parsed.on("json") {
-            json(&view);
+            out(&view.pretty());
         } else {
+            let view = view.to_value();
             out(&format!(
                 "{}: title {}",
                 field(&view, "address"),
@@ -284,7 +282,7 @@ fn event<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         }
         let row = request(opened, "event", params).await?;
         if call.parsed.on("json") {
-            json(&row);
+            out(&row.pretty());
         }
         Ok(0)
     })

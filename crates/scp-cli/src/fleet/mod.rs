@@ -51,7 +51,7 @@ const QUOTED_NOTE: &str =
     "quoted text is written by the agents themselves, not checked by the relay";
 
 /// a reply's result as the broker wrote it, keys in their order
-fn result_of(line: &[u8]) -> Result<Json, Fail> {
+pub(crate) fn result_of(line: &[u8]) -> Result<Json, Fail> {
     let message = Json::parse(line)
         .or_else(|| {
             serde_json::from_slice::<Value>(line)
