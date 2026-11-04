@@ -491,14 +491,6 @@ export class RelayHub {
   /** idempotent: migrates and records the account handle (the address user part, e.g. "ada"); call before handling each request */
   init(account: { user: string }): void {
     if (this.core && this.account === account.user) return
-    for (const statement of HUB_MIGRATION) this.deps.sql.all(statement)
-    const columns = this.deps.sql.all<{ name: string }>(`PRAGMA table_info(machines)`).map((c) => c.name)
-    if (!columns.includes("user_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN user_id TEXT`)
-    if (!columns.includes("actor_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN actor_id TEXT`)
-    if (!columns.includes("wake_url")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_url TEXT`)
-    if (!columns.includes("wake_secret")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_secret TEXT`)
-    const wakeColumns = this.deps.sql.all<{ name: string }>(`PRAGMA table_info(machine_wakes)`).map((c) => c.name)
-    if (!wakeColumns.includes("retry_at")) this.deps.sql.all(`ALTER TABLE machine_wakes ADD COLUMN retry_at INTEGER`)
     const core = new FederatedCore(this.deps.sql, {
       user: account.user,
       limits: this.limits,
@@ -513,7 +505,17 @@ export class RelayHub {
       endpointRetireS: Number.POSITIVE_INFINITY,
       historicAfterS: this.limits.historicAfterS,
     })
-    core.migrate()
+    this.tx(() => {
+      for (const statement of HUB_MIGRATION) this.deps.sql.all(statement)
+      const columns = this.deps.sql.all<{ name: string }>(`PRAGMA table_info(machines)`).map((c) => c.name)
+      if (!columns.includes("user_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN user_id TEXT`)
+      if (!columns.includes("actor_id")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN actor_id TEXT`)
+      if (!columns.includes("wake_url")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_url TEXT`)
+      if (!columns.includes("wake_secret")) this.deps.sql.all(`ALTER TABLE machines ADD COLUMN wake_secret TEXT`)
+      const wakeColumns = this.deps.sql.all<{ name: string }>(`PRAGMA table_info(machine_wakes)`).map((c) => c.name)
+      if (!wakeColumns.includes("retry_at")) this.deps.sql.all(`ALTER TABLE machine_wakes ADD COLUMN retry_at INTEGER`)
+      core.migrate()
+    })
     this.core = core
     this.gate = null
     this.account = account.user

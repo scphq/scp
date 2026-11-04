@@ -300,8 +300,8 @@ export class FederatedCore extends RelayCore {
     this.xinbox = options.xinbox === true
   }
 
-  override migrate(): void {
-    super.migrate()
+  protected override migrateSchema(): void {
+    super.migrateSchema()
     const columns = this.sql.all<{ name: string }>(`PRAGMA table_info(endpoints)`).map((c) => c.name)
     if (!columns.includes("remote")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN remote TEXT`)
     if (!columns.includes("auth")) this.sql.all(`ALTER TABLE endpoints ADD COLUMN auth TEXT`)

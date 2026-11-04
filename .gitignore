@@ -6,4 +6,5 @@ dist
 .DS_Store
 *.log
 crates/target
+crates/*/target
 .cargo-target*

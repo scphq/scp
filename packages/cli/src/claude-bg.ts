@@ -19,6 +19,8 @@ export const CLAUDE_BG_PROVIDER = "claude-bg"
 export const CLAUDE_WAKE_TIMEOUT_S = 90
 /** how often the broker looks for workers to stop or remove */
 export const CLAUDE_BG_EVERY_MS = 120_000
+/** the longest interval a timer holds, 2^31 - 1 ms */
+const CLAUDE_BG_EVERY_MAX_S = 2_147_483
 const STOP_AFTER_S = 120
 const IDLE_AFTER_S = 600
 const LIST_TIMEOUT_MS = 15_000
@@ -949,12 +951,26 @@ export interface BgTaskState {
 
 const newTaskState = (): BgTaskState => ({ sessions: new Map(), seen: new Set(), stopped: new Map(), listed: false })
 
+/** how often the broker runs the claude-bg task: `$SCP_CLAUDE_BG_EVERY_S` (seconds or a duration, more than zero, at most 2147483 s), else 120 s; a value it cannot read is noted */
+export function claudeBgEveryMs(env: Env): number {
+  const raw = env.SCP_CLAUDE_BG_EVERY_S
+  if (raw === undefined || raw.trim() === "") return CLAUDE_BG_EVERY_MS
+  try {
+    const seconds = parseSeconds(raw, "SCP_CLAUDE_BG_EVERY_S")
+    if (seconds <= CLAUDE_BG_EVERY_MAX_S) return seconds * 1000
+  } catch {}
+  note(
+    `SCP_CLAUDE_BG_EVERY_S=${raw} is not a positive number of seconds or a duration up to ${CLAUDE_BG_EVERY_MAX_S} s; the claude-bg task runs every ${CLAUDE_BG_EVERY_MS / 1000} s`,
+  )
+  return CLAUDE_BG_EVERY_MS
+}
+
 /** the broker's task: stops and removes idle workers by the configured policy, read again on each run */
 export function claudeBgTask(env: Env = process.env, deps: ClaudeBgDeps = {}): BrokerTask {
   const state = newTaskState()
   return {
     name: "claude-bg",
-    everyMs: CLAUDE_BG_EVERY_MS,
+    everyMs: claudeBgEveryMs(env),
     run: (context) => runBgTask(state, taskPort(context), context.log, env, deps),
   }
 }

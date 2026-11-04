@@ -15,6 +15,7 @@ import {
   attachTargets,
   bgConfig,
   claudeBgCommand,
+  claudeBgEveryMs,
   claudeBgTask,
   claudeBgTaskCommand,
   claudeWakeCommand,
@@ -33,6 +34,15 @@ import {
   socketPort,
   reviveRef,
 } from "./claude-bg"
+
+test("SCP_CLAUDE_BG_EVERY_S sets the task's interval in seconds or a duration, else 120 s", () => {
+  expect(claudeBgEveryMs({})).toBe(120_000)
+  expect(claudeBgEveryMs({ SCP_CLAUDE_BG_EVERY_S: "1" })).toBe(1000)
+  expect(claudeBgEveryMs({ SCP_CLAUDE_BG_EVERY_S: "1m30s" })).toBe(90_000)
+  expect(claudeBgTask({ SCP_CLAUDE_BG_EVERY_S: "2" }).everyMs).toBe(2000)
+  expect(claudeBgEveryMs({ SCP_CLAUDE_BG_EVERY_S: "2147483" })).toBe(2_147_483_000)
+  for (const bad of ["0", "-1", "soon", "30d"]) expect(claudeBgEveryMs({ SCP_CLAUDE_BG_EVERY_S: bad })).toBe(120_000)
+})
 
 const id = "1a2b3c4d"
 const sessionId = `${id}-0000-4000-8000-000000000001`

@@ -108,8 +108,8 @@ impl Broker {
             .map(|cli| crate::tasks::Task {
                 cli,
                 dir: options.paths.dir.clone(),
+                every: crate::tasks::claude_bg_every(&options.env),
                 env: options.env.clone(),
-                every: crate::tasks::CLAUDE_BG_EVERY,
             });
         core.federation.env = options.env;
         core.sweep().await.map_err(io::Error::other)?;
@@ -214,7 +214,7 @@ impl Broker {
                         let core = self.core.clone();
                         let stopping = stopping.clone();
                         let hook = self.hook.clone();
-                        let handle = connections.spawn(async move { serve_connection(stream, core, stopping, hook).await; });
+                        let handle = connections.spawn(async move { serve_connection(stream, core, stopping, hook, task).await; });
                         if task { task_connections.insert(handle.id()); }
                     }
                     Err(error) => break Err(error),
@@ -378,11 +378,13 @@ impl Output {
     }
 }
 
+/// serves one connection; `task` marks the broker's own task process, whose human-scoped changes are the broker's
 pub(crate) async fn serve_connection(
     stream: UnixStream,
     core: SharedCore,
     mut stopping: watch::Receiver<bool>,
     hook: Option<Arc<dyn HookHandler>>,
+    task: bool,
 ) {
     let (events, mut fleet) = mpsc::unbounded_channel::<Value>();
     let (conn, closed) = {
@@ -391,6 +393,7 @@ pub(crate) async fn serve_connection(
         let connection = core.state.connections.get_mut(&conn);
         let closed = connection.map(|c| {
             c.events = Some(events);
+            c.task = task;
             c.closed.clone()
         });
         (conn, closed.unwrap_or_default())
@@ -568,6 +571,116 @@ mod tests {
         }
     }
 
+    async fn call(client: &mut UnixStream, id: u64, method: &str, params: Value) -> Value {
+        use tokio::io::AsyncBufReadExt;
+        let frame = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        client
+            .write_all(format!("{frame}\n").as_bytes())
+            .await
+            .expect("write");
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::BufReader::new(&mut *client).read_line(&mut line),
+        )
+        .await
+        .expect("response in time")
+        .expect("read");
+        serde_json::from_str(&line).expect("response JSON")
+    }
+
+    #[tokio::test]
+    async fn the_task_connection_hibernates_as_the_broker_and_the_human_as_itself() {
+        let dir = std::env::temp_dir().join(format!("scp-task-by-{:032x}", rand::random::<u128>()));
+        tokio::fs::create_dir(&dir).await.expect("directory");
+        let paths = Paths::new(dir.clone());
+        let store = Arc::new(SqliteStore::open(&paths.database).expect("store"));
+        let mut core = Core::new(
+            store.clone(),
+            Limits::default(),
+            paths,
+            dir.join("policy.json"),
+        )
+        .await
+        .expect("core");
+        core.wakers
+            .set_builtin(crate::wake::Wakers::builtin_for(&["/usr/bin/true".into()]));
+        let core = Arc::new(Mutex::new(core));
+        let (_stop, stopping) = watch::channel(false);
+        let open = |task: bool| {
+            let (server, client) = UnixStream::pair().expect("socket pair");
+            tokio::spawn(serve_connection(
+                server,
+                core.clone(),
+                stopping.clone(),
+                None,
+                task,
+            ));
+            client
+        };
+        let mut agent = open(false);
+        let hello = call(
+            &mut agent,
+            1,
+            "hello",
+            json!({"protocol":"scp/1","claim":{"handle":"worker"}}),
+        )
+        .await;
+        assert_eq!(
+            hello["result"]["endpoint"]["address"], "me/worker",
+            "{hello}"
+        );
+        let mut by = Vec::new();
+        for (task, id) in [(false, 10), (true, 20)] {
+            let mut human = open(task);
+            let hello = call(
+                &mut human,
+                id,
+                "hello",
+                json!({"protocol":"scp/1","human":true}),
+            )
+            .await;
+            assert!(hello.get("result").is_some(), "{hello}");
+            for (step, wake) in [(1, "claude-bg"), (2, "none")] {
+                let done = call(
+                    &mut human,
+                    id + step,
+                    "hibernate",
+                    json!({"endpoint":"me/worker","wake":wake}),
+                )
+                .await;
+                assert!(done.get("result").is_some(), "{done}");
+            }
+            let rows = store
+                .read("SELECT event, detail FROM audit WHERE event IN ('hibernate','unhibernate') ORDER BY id", &[])
+                .await
+                .expect("audit");
+            by = rows
+                .iter()
+                .map(|row| {
+                    let detail: Value =
+                        serde_json::from_str(crate::core::text(row, "detail").unwrap_or("{}"))
+                            .expect("detail");
+                    format!(
+                        "{} {}",
+                        crate::core::text(row, "event").unwrap_or(""),
+                        detail["by"].as_str().unwrap_or("")
+                    )
+                })
+                .collect();
+        }
+        assert_eq!(
+            by,
+            [
+                "hibernate me/",
+                "unhibernate me/",
+                "hibernate broker",
+                "unhibernate broker"
+            ]
+        );
+        tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
     #[tokio::test]
     async fn disconnect_mid_hello_finishes_and_next_hello_persists() {
         let dir =
@@ -598,6 +711,7 @@ mod tests {
             core.clone(),
             stopping.clone(),
             None,
+            false,
         ));
         client.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"first\"}}}\n").await.expect("hello");
         tokio::time::timeout(Duration::from_secs(2), paused.written.notified())
@@ -616,7 +730,13 @@ mod tests {
             .expect("connection task");
 
         let (server, mut client) = UnixStream::pair().expect("socket pair");
-        let connection = tokio::spawn(serve_connection(server, core.clone(), stopping, None));
+        let connection = tokio::spawn(serve_connection(
+            server,
+            core.clone(),
+            stopping,
+            None,
+            false,
+        ));
         client.write_all(b"{\"id\":2,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"second\"}}}\n").await.expect("next hello");
         let mut response = String::new();
         use tokio::io::AsyncBufReadExt;

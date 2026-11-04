@@ -746,7 +746,12 @@ export class RelayCore {
     return changed
   }
 
+  /** creates or upgrades the schema in one transaction, so a cold start commits once */
   migrate(): void {
+    this.tx(() => this.migrateSchema())
+  }
+
+  protected migrateSchema(): void {
     for (const statement of MIGRATION) this.sql.all(statement)
     const columns = this.sql.all<{ name: string }>(`PRAGMA table_info(idempotency)`).map((c) => c.name)
     if (!columns.includes("payload_hash")) this.sql.all(`ALTER TABLE idempotency ADD COLUMN payload_hash TEXT NOT NULL DEFAULT ''`)

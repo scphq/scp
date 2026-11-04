@@ -657,6 +657,7 @@ mod tests {
                 self.core.clone(),
                 self.stopping.clone(),
                 hook,
+                false,
             ));
             let (reader, writer) = client.into_split();
             (
