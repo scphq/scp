@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
-import { accessSync, appendFileSync, constants, readFileSync, statSync } from "node:fs"
+import { accessSync, appendFileSync, constants, fstatSync, readFileSync, statSync } from "node:fs"
 import { createRequire } from "node:module"
 import { constants as osConstants } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -124,6 +124,9 @@ function launch(): string[] {
   return [process.execPath, ...(process.versions.bun ? ["--no-env-file", "--config=/dev/null"] : []), process.argv[1]!]
 }
 
+/** the caller's own `SCP_CLI_ARGV`, which the router replaces with its launch words; the native swarm hands it on to a harness */
+export const GIVEN_ARGV = "SCP_CLI_ARGV_GIVEN"
+
 const FORWARDED = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2"] as const
 
 /** runs `bin` as a child with this process's stdio, forwarding signals; leaves with its exit code, or dies of its signal */
@@ -149,6 +152,31 @@ function handOver(bin: string, argv: string[], env: Env): Promise<never> {
   })
 }
 
+/** whether `fd` is open */
+function open(fd: number): boolean {
+  try {
+    fstatSync(fd)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * a detached spawn's runner: Node and Bun mark fd 3, its handshake pipe, close-on-exec as they start, so neither execve nor {@link handOver}
+ * carries it. The native swarm starts as a child in its own session with fd 3 passed on, and this process leaves, so no router stays resident
+ */
+function handOff(bin: string, argv: string[], env: Env): Promise<never> {
+  const child = spawn(bin, argv, { stdio: ["inherit", "inherit", "inherit", 3], detached: true, env: env as NodeJS.ProcessEnv })
+  return new Promise<never>(() => {
+    child.once("error", () => process.exit(125))
+    child.once("spawn", () => {
+      child.unref()
+      process.exit(0)
+    })
+  })
+}
+
 /**
  * under `SCP_NATIVE=1`, hands a verb the native swarm registers to it: in place of this process (`process.execve`) where the runtime has
  * it, else as a child; returns when this CLI runs the command. `SCP_ROUTE_EXEC=spawn` takes the child path where execve exists too.
@@ -162,7 +190,17 @@ export async function route(argv: string[] = process.argv.slice(2), env: Env = p
     if (decision.reason !== "off") routeLog(env, verb, "ts", decision.reason)
     return
   }
-  const handed = { ...env, SCP_CLI_ARGV: JSON.stringify(launch()), SCP_ROUTED: "native" }
+  const { [GIVEN_ARGV]: _stale, ...rest } = env
+  const handed = {
+    ...rest,
+    ...(env.SCP_CLI_ARGV !== undefined ? { [GIVEN_ARGV]: env.SCP_CLI_ARGV } : {}),
+    SCP_CLI_ARGV: JSON.stringify(launch()),
+    SCP_ROUTED: "native",
+  }
+  if (verb === "spawn" && env.SCP_SPAWN_RUNNER !== undefined && open(3)) {
+    routeLog(env, verb, "native", "handoff")
+    await handOff(decision.bin, argv, handed)
+  }
   const execve = (process as { execve?: (file: string, args: string[], env: Env) => never }).execve
   if (typeof execve === "function" && env.SCP_ROUTE_EXEC !== "spawn") {
     routeLog(env, verb, "native", "execve")

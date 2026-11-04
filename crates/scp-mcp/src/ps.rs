@@ -45,7 +45,7 @@ pub(crate) fn js_trim(text: &str) -> &str {
 }
 
 /// `path.basename` for POSIX paths
-pub(crate) fn basename(path: &str) -> &str {
+pub fn basename(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
     match trimmed.rfind('/') {
         Some(at) => &trimmed[at + 1..],
@@ -54,7 +54,7 @@ pub(crate) fn basename(path: &str) -> &str {
 }
 
 /// `path.dirname` for POSIX paths
-pub(crate) fn dirname(path: &str) -> String {
+pub fn dirname(path: &str) -> String {
     if path.is_empty() {
         return ".".into();
     }
@@ -124,7 +124,7 @@ pub fn join(parts: &[&str]) -> String {
 }
 
 /// `path.resolve(cwd, path)` with an absolute `cwd`
-pub(crate) fn resolve(cwd: &str, path: &str) -> String {
+pub fn resolve(cwd: &str, path: &str) -> String {
     let full = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -889,7 +889,7 @@ pub fn t3_hosted(env: &Env, pid: i64, table: &dyn Fn() -> Table) -> bool {
 }
 
 /// codex's top-level options that take a value
-const CODEX_VALUED: [&str; 20] = [
+pub const CODEX_VALUED: [&str; 20] = [
     "-c",
     "--config",
     "--enable",

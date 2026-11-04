@@ -54,6 +54,9 @@ jobs:
       - name: Check the native CLI goldens
         run: bun scripts/cli-goldens.ts --check
 
+      - name: Check the native spawn goldens
+        run: bun scripts/spawn-goldens.ts --check
+
       - name: Type check
         run: bun run typecheck
 

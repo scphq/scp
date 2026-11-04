@@ -20,7 +20,7 @@ use crate::views::{address, not_found, presence};
 const STOP_RECHECK: Duration = Duration::from_millis(1000);
 const SYSTEM_HANDLE: &str = "_relay";
 const SPAWN_PROVIDER: &str = "spawn";
-const HANDBACK_CUT: &str = "[earlier output cut]";
+pub const HANDBACK_CUT: &str = "[earlier output cut]";
 const STEER_CLIP: usize = 120;
 
 /// an endpoint's live spawned workers, those not joined yet, and the paced and unjoined ones

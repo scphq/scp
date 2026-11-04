@@ -123,6 +123,7 @@ fn nonempty<'a>(env: &'a Env, key: &str) -> Option<&'a str> {
 }
 
 /// this shell's process walk, as `walkNow` reads it
+#[derive(Debug, Clone)]
 pub struct Walk {
     pub keys: Vec<String>,
     pub own: Vec<String>,
@@ -131,25 +132,31 @@ pub struct Walk {
 }
 
 pub fn walk(env: &Env, shell: i64, table: Table) -> Walk {
-    let walk = scp_mcp::spawn::walk_now(env, shell, table);
-    let strings = |key: &str| -> Vec<String> {
-        get(&walk, key)
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    Walk {
-        keys: strings("keys"),
-        own: strings("self"),
-        harness: get(&walk, "harness")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        unread: truthy(get(&walk, "unread")),
+    Walk::from_json(&scp_mcp::spawn::walk_now(env, shell, table))
+}
+
+impl Walk {
+    /// a walk as `walkNow` writes it to JSON
+    pub fn from_json(walk: &Value) -> Walk {
+        let strings = |key: &str| -> Vec<String> {
+            get(walk, key)
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Walk {
+            keys: strings("keys"),
+            own: strings("self"),
+            harness: get(walk, "harness")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            unread: truthy(get(walk, "unread")),
+        }
     }
 }
 
@@ -191,6 +198,29 @@ pub fn claim_harness(parsed: &Parsed, env: &Env, walk: &Walk, shell: i64) -> Str
 
 /// the hello `verb` sends for `parsed` and `env` from the process `shell`
 pub fn plan(verb: &str, parsed: &Parsed, env: &Env, shell: i64, tty: bool) -> Result<Plan, Fail> {
+    plan_from(verb, parsed, env, shell, tty, None)
+}
+
+/// [`plan`] with a walk given from outside, as `open(..., walk)` takes it
+pub fn plan_walked(
+    verb: &str,
+    parsed: &Parsed,
+    env: &Env,
+    shell: i64,
+    tty: bool,
+    here: &Walk,
+) -> Result<Plan, Fail> {
+    plan_from(verb, parsed, env, shell, tty, Some(here))
+}
+
+fn plan_from(
+    verb: &str,
+    parsed: &Parsed,
+    env: &Env,
+    shell: i64,
+    tty: bool,
+    given: Option<&Walk>,
+) -> Result<Plan, Fail> {
     let named = parsed
         .text("as")
         .or_else(|| env.get("SCP_NAME").map(String::as_str));
@@ -230,7 +260,14 @@ pub fn plan(verb: &str, parsed: &Parsed, env: &Env, shell: i64, tty: bool) -> Re
             "--machine names the machine of the cloud transport: add --cloud",
         ));
     }
-    let here = walk(env, shell, read_ps_table(SHELL_PS_TIMEOUT_MS).map(Rc::new));
+    let read;
+    let here = match given {
+        Some(here) => here,
+        None => {
+            read = walk(env, shell, read_ps_table(SHELL_PS_TIMEOUT_MS).map(Rc::new));
+            &read
+        }
+    };
     let joined = match (
         parsed.text("as").filter(|a| !a.is_empty()),
         named,
@@ -267,7 +304,7 @@ pub fn plan(verb: &str, parsed: &Parsed, env: &Env, shell: i64, tty: bool) -> Re
         claim.insert("exact".into(), Value::Bool(true));
         claim.insert(
             "harness".into(),
-            Value::from(claim_harness(parsed, env, &here, shell)),
+            Value::from(claim_harness(parsed, env, here, shell)),
         );
         claim.insert("cwd".into(), cwd);
         if let Some(parent) = nonempty(env, "SCP_PARENT") {
@@ -526,6 +563,16 @@ pub fn runtime() -> Result<tokio::runtime::Runtime, Fail> {
         .enable_all()
         .build()
         .map_err(|error| Fail::Call(CallError::Io(error.to_string())))
+}
+
+/// runs `future` to its end on a single-threaded runtime with a LocalSet, as a verb's connections need
+pub fn block_on<F: Future>(future: F) -> Result<F::Output, Fail> {
+    let runtime = runtime()?;
+    let local = tokio::task::LocalSet::new();
+    let out = local.block_on(&runtime, future);
+    drop(local);
+    runtime.shutdown_background();
+    Ok(out)
 }
 
 /// opens as the caller, then runs `run` on the connection, which it closes after

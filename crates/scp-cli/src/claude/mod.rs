@@ -10,15 +10,15 @@ use crate::{Run, Verb};
 pub const VERBS: &[Verb] = &[
     Verb {
         name: "claude",
-        run: Run::Words(bg_cmd::claude),
+        run: Run::Words(|call, words| bg_cmd::claude(words, call.env, call.host)),
     },
     Verb {
         name: "claude-bg-task",
-        run: Run::Words(bg_cmd::task),
+        run: Run::Words(|call, words| bg_cmd::task(words, call.env, call.host)),
     },
     Verb {
         name: "claude-wake",
-        run: Run::Words(bg_cmd::wake),
+        run: Run::Words(|call, words| bg_cmd::wake(words, call.env, call.host)),
     },
 ];
 

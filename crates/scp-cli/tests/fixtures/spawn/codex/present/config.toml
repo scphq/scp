@@ -1,0 +1,3 @@
+[mcp_servers.scp]
+command = "/bin/sh"
+args = ["mcp"]

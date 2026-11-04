@@ -35,7 +35,12 @@ fn write_all(fd: i32, mut bytes: &[u8]) -> std::io::Result<()> {
 
 /// `text` on stdout as is
 pub fn print(text: &str) {
-    match write_all(1, text.as_bytes()) {
+    print_bytes(text.as_bytes());
+}
+
+/// `bytes` on stdout as is
+pub fn print_bytes(bytes: &[u8]) {
+    match write_all(1, bytes) {
         Ok(()) => {}
         Err(error) if error.raw_os_error() == Some(libc::EPIPE) => std::process::exit(0),
         Err(error) => {
@@ -52,6 +57,11 @@ pub fn out(line: &str) {
 
 fn eprint_raw(text: &str) {
     let _ = write_all(2, text.as_bytes());
+}
+
+/// `bytes` on stderr as is
+pub fn eprint_bytes(bytes: &[u8]) {
+    let _ = write_all(2, bytes);
 }
 
 /// one line on stderr, as is

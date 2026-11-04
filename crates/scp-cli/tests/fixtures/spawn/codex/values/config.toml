@@ -1,0 +1,16 @@
+[mcp_servers.scp]
+s = "quote \" back \\ tab\t nl\n cr\r bell\u0007 esc\u001b del\u007f c1\u0085 emoji 😀 nbsp\u00a0 ls\u2028 ps\u2029 bom\ufeff"
+lit = 'C:\path\x'
+arr = [[1, 2], ["a"], [], [true, false]]
+tbl = { b = 1, a = "x", "10" = 2, "9" = 3, "01" = 4, "4294967295" = 5, "4294967294" = 6, nested = { z = [true, 1.5] } }
+f = 1.5e300
+small = 1e-7
+frac = 0.1
+neg = -0.0
+big = 9007199254740991
+nan = nan
+inf = -inf
+dt = 1979-05-27T07:32:00Z
+d = 1979-05-27
+empty = ""
+on = true

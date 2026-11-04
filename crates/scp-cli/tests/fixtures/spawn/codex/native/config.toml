@@ -1,0 +1,4 @@
+[mcp_servers.scp]
+command = "/bin/sh"
+args = ["mcp", "--harness", "codex"]
+env = { SCP_NATIVE = "1", SCP_CLI_ARGV = "[]" }

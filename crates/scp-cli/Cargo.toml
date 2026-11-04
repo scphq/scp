@@ -14,9 +14,10 @@ name = "scp_cli"
 [dependencies]
 indexmap.workspace = true
 libc.workspace = true
+scp-broker = { path = "../scp-broker" }
 scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.10" }
 scp-mcp = { path = "../scp-mcp" }
 serde_json.workspace = true
 tokio = { version = "=1.47.1", features = ["rt", "net", "io-util", "time", "macros", "sync", "process"] }
-toml.workspace = true
+toml = { workspace = true, features = ["preserve_order"] }
 zip.workspace = true
