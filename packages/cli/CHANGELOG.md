@@ -1,5 +1,21 @@
 # @scp-dev/cli
 
+## 1.0.1
+
+### Patch Changes
+
+- b1c14b5: `SCP_CLAUDE_BG_EVERY_S` sets how often the broker runs its claude-bg task, in place of 120 s, in the TypeScript and the native broker alike. A test of the native broker now runs the task every second and checks that an idle broker still stops.
+- b1c14b5: `core.migrate()`, the hub's `init()` and the native broker's schema migration each run in one transaction, so a cold start commits once instead of about 110 times (126 for the hub), each with its own fsync under Node's default `synchronous=FULL`. With full fsync, the core migration's median went from 55 ms to 6 ms, the hub's from 79 ms to 7 ms, and the native broker's from 482 ms to 25 ms.
+- b1c14b5: Under `SCP_NATIVE=1` the native hook client starts the native broker directly (`$SCP_SWARM_BIN`, or the `swarm` in the native package, when its version matches), told its launcher in `SCP_CLI_ARGV`, instead of through the CLI's `daemon`, so no Node process stays resident above it. `SCP_NATIVE=mcp` keeps the TypeScript broker.
+- b1c14b5: Under `SCP_NATIVE=1` or `mcp`, `swarm setup --cowork` and `swarm setup claude-desktop` build launchers that run the native `swarm mcp` by its absolute path while it is there, else the Node one as before, so local Cowork sessions and desktop chat keep no Node process resident. Cloud Cowork sessions still run the pinned CLI through npx.
+- b1c14b5: The native broker's join (`hello {transient, claim, join}`) marks the row seen now, also right after a leave, and audits `join {handle}`, as SPEC section 6.12 and the TypeScript broker do. A session without a session key that left and joined again showed offline, so the next claim of its handle by any sessionless client took the row and its mail.
+- b1c14b5: The native broker audits the hibernations its claude-bg task makes over the socket `{by: "broker"}`, as the TypeScript broker's in-process task does, instead of as the human's. It knows the task's connection by its peer pid.
+- Updated dependencies [b1c14b5]
+  - @scp-dev/core@0.18.10
+  - @scp-dev/hub@0.13.10
+  - @scp-dev/broker@0.13.10
+  - @scp-dev/mcp@0.5.19
+
 ## 1.0.0
 
 ### Major Changes
