@@ -25,12 +25,17 @@ test("native packages stay pinned to the CLI version", () => {
     const swarm = join(root, "swarm");
     writeFileSync(hook, "hook fixture");
     writeFileSync(swarm, "swarm fixture");
+    const verbs = join(root, "swarm-verbs.json");
+    writeFileSync(verbs, JSON.stringify({ version: nativeVersion(), verbs: ["whoami"] }));
     const out = join(root, "pkg");
-    nativePackage("linux-x64-gnu", { hook, swarm }, out);
+    nativePackage("linux-x64-gnu", { hook, swarm, verbs }, out);
     const pkg = JSON.parse(readFileSync(join(out, "package.json"), "utf8"));
     expect(pkg).toMatchObject({ name: "@scp-dev/native-linux-x64-gnu", version: nativeVersion(), os: ["linux"], cpu: ["x64"], libc: ["glibc"] });
     expect(readFileSync(join(out, "bin/scp-hook"), "utf8")).toBe("hook fixture");
     expect(readFileSync(join(out, "bin/swarm"), "utf8")).toBe("swarm fixture");
+    expect(JSON.parse(readFileSync(join(out, "bin/swarm-verbs.json"), "utf8")).verbs).toEqual(["whoami"]);
+    writeFileSync(verbs, JSON.stringify({ version: "0.0.1", verbs: [] }));
+    expect(() => nativePackage("linux-x64-gnu", { hook, swarm, verbs }, out)).toThrow("registers no verbs");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

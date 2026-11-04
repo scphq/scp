@@ -6,10 +6,13 @@ import { RelayClient, socketPath } from "@scp-dev/broker";
 import type { EndpointView, Envelope, SendResult } from "@scp-dev/core";
 import type { Subprocess } from "bun";
 import { ensureBuilt } from "../../cli/src/testing/fixtures";
-import { brokerBinary, machineBrokers, mcpBinary, swarmBinary } from "./environment";
+import { brokerBinary, machineBrokers, machineProgram, mcpBinary, routeLog, swarmBinary } from "./environment";
 import { command, type Target, terminate, waitFor } from "./targets";
 
 export const cli = join(import.meta.dir, "../../cli/dist/cli.js");
+/** the CLI routes its native verbs to SCP_SWARM_BIN, under Node so the hand-off is an execve */
+const routed = machineProgram === "native" && swarmBinary !== undefined;
+const defaultProgram: readonly string[] = routed ? ["node", cli] : [process.execPath, "--no-env-file", cli];
 export { ensureBuilt };
 let machinesMade = 0;
 /** whether the next machine fixture runs the native broker, per SCP_MACHINE_BROKERS */
@@ -30,7 +33,7 @@ export class Machine {
     readonly name: string,
     readonly target: Target,
     token: string,
-    readonly program: readonly string[] = [process.execPath, "--no-env-file", cli],
+    readonly program: readonly string[] = defaultProgram,
   ) {
     this.env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("SCP_")));
     Object.assign(this.env, {
@@ -49,6 +52,7 @@ export class Machine {
       GEMINI_CLI_HOME: this.root,
       ...(mcpBinary ? { SCP_NATIVE: "1", SCP_MCP_BIN: mcpBinary } : {}),
       ...(this.native && swarmBinary ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary } : {}),
+      ...(routed ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary, ...(routeLog ? { SCP_ROUTE_LOG: routeLog } : {}) } : {}),
     });
     this.assertIsolated();
     mkdirSync(this.env.SCP_DIR!, { recursive: true });

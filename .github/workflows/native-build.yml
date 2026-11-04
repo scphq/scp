@@ -54,6 +54,7 @@ jobs:
         run: |
           python scripts/relay-archive.py pack "$TARGET" artifacts scp-hook
           python scripts/relay-archive.py pack "$TARGET" artifacts swarm
+          "$CARGO_TARGET_DIR/$TARGET/release/swarm" __verbs --json > "artifacts/swarm-verbs-$TARGET.json"
       - uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.target }}
