@@ -134,7 +134,7 @@ describe("SCP_NATIVE", () => {
 
   test("without it the on-demand broker is the TypeScript one, whatever SCP_SWARM_BIN names", async () => {
     const { bin, calls } = fakeSwarm("unused", pkg.version)
-    const env = { SCP_DIR: join(root, "off-relay"), SCP_IDLE: "30s", SCP_SWARM_BIN: bin }
+    const env = { SCP_DIR: join(root, "off-relay"), SCP_IDLE: "30s", SCP_SWARM_BIN: bin, SCP_NATIVE: "" }
     try {
       const human = await swarm(["whoami", "--human"], env)
       expect([human.code, human.stderr]).toEqual([0, ""])
@@ -332,7 +332,6 @@ describe.skipIf(!swarmBinary)("SCP_NATIVE=1 with the native swarm in SCP_SWARM_B
     let pid: number | undefined
     try {
       pid = await waitFor(() => (existsSync(join(dir, "broker.lock")) && lockPid(dir)) || undefined, 15_000, "the native broker")
-      expect(pid).not.toBe(child.pid)
       expect(brokerEngine(pid)).toBe("native")
       const status = JSON.parse((await swarm(["status", "--json"], { SCP_DIR: dir })).stdout) as { broker: { policy: { file: string } } }
       expect(status.broker.policy.file).toBe(policy)

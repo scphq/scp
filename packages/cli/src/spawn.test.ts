@@ -183,7 +183,8 @@ describe("swarm spawn", () => {
   const dir = join(root, "relay")
   const bin = join(root, "bin")
   const record = join(root, "record.jsonl")
-  const env = (extra: Record<string, string> = {}) => ({ SCP_DIR: dir, PATH: `${bin}:${process.env.PATH}`, FAKE_RECORD: record, ...extra })
+  // the mounts these tests check are the ones a CLI without SCP_NATIVE writes
+  const env = (extra: Record<string, string> = {}) => ({ SCP_DIR: dir, PATH: `${bin}:${process.env.PATH}`, FAKE_RECORD: record, SCP_NATIVE: "", ...extra })
   const codexHome = (mounted: boolean) => {
     const home = mkdtempSync(join(root, "codex-"))
     if (mounted)
