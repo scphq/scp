@@ -446,13 +446,13 @@ export function verbHelp(verb: string): string | undefined {
 }
 
 /** flags that mean something else for one verb: log --scope is a switch, admin --tree names a root */
-const VERB_OPTIONS: Record<string, Record<string, { type: "string" | "boolean" }>> = {
+export const VERB_OPTIONS: Record<string, Record<string, { type: "string" | "boolean" }>> = {
   log: { scope: { type: "boolean" }, peek: { type: "boolean" } },
   admin: { tree: { type: "string" } },
 }
 
-const IDENTITY: Option[] = ["as", "harness", "human", "json", "cloud", "machine"]
-const VERBS: Record<string, Option[]> = {
+export const IDENTITY: Option[] = ["as", "harness", "human", "json", "cloud", "machine"]
+export const VERBS: Record<string, Option[]> = {
   list: [...IDENTITY, "all", "tree", "roots", "contacts"],
   send: [...IDENTITY, "reply-to", "thread", "private", "attach", "live"],
   join: ["harness", "json", "under"],

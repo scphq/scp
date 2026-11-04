@@ -82,7 +82,8 @@ fn daemon_argv(env: &Env, native: Option<&Path>) -> io::Result<Vec<String>> {
     }
 }
 
-fn named_launcher(env: &Env) -> Option<Vec<String>> {
+/// `$SCP_CLI_ARGV` when it names a program
+pub fn named_launcher(env: &Env) -> Option<Vec<String>> {
     env.get(CLI_ARGV)
         .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
         .filter(|words| !words.is_empty() && !words[0].is_empty())

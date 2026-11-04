@@ -280,7 +280,8 @@ fn connect_error(error: &io::Error, path: &Path) -> String {
     }
 }
 
-fn normalize(path: &Path) -> PathBuf {
+/// `path` with `.` and `..` resolved lexically, as `path.resolve` does
+pub fn normalize(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for part in path.components() {
         match part {

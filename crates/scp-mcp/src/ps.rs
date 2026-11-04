@@ -569,7 +569,7 @@ pub(crate) fn js_words(text: &str) -> Vec<&str> {
 }
 
 /// the executable's name from a ps command line, lowercased, without a login shell's `-`
-fn command(args: &str) -> String {
+pub fn command(args: &str) -> String {
     let first = js_words(args)[0];
     basename(first.strip_prefix('-').unwrap_or(first)).to_lowercase()
 }

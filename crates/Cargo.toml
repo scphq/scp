@@ -1,5 +1,5 @@
 [workspace]
-members = ["scp-core", "scp-relay-store", "scp-relay", "scp-hook", "scp-broker", "scp-mcp", "swarm"]
+members = ["scp-core", "scp-relay-store", "scp-relay", "scp-hook", "scp-broker", "scp-mcp", "scp-cli", "swarm"]
 resolver = "3"
 
 [workspace.package]
@@ -26,3 +26,7 @@ futures-util = "=0.3.31"
 time = { version = "=0.3.41", features = ["formatting", "parsing"] }
 reqwest = { version = "=0.12.23", default-features = false, features = ["json"] }
 tokio-tungstenite = "=0.26.2"
+libc = "=0.2.191"
+toml = "=0.8.23"
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
+indexmap = "=2.14.2"

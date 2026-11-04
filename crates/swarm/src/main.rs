@@ -16,6 +16,7 @@ const USAGE: &str = "usage:
   swarm daemon stop|restart                        stop the running broker, or replace it with a fresh one
   swarm hook <harness> [args]                      run a harness hook (also [launcher...] hook <args>)
   swarm mcp                                        the MCP server
+  swarm __verbs [--json]                           the CLI verbs this binary runs; any other goes to the swarm CLI
   swarm --version";
 
 #[derive(Parser)]
@@ -29,13 +30,26 @@ struct Daemon {
     policy: Option<PathBuf>,
 }
 
+const HOST: scp_cli::Host = scp_cli::Host {
+    daemon: daemon_command,
+    beside: beside_cli,
+};
+
+fn beside_cli(env: &std::collections::HashMap<String, String>) -> Option<Vec<String>> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let env: BTreeMap<String, String> = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    scp_broker::launch::beside_package(&exe, &env)
+}
+
 fn main() {
+    scp_cli::startup();
     let origin = scp_hook::now();
     let args: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let code = match args.first().map(String::as_str) {
+        Some(_) if scp_cli::routed() => scp_cli::main(&args, &HOST),
         Some("--version" | "-V") => {
             let _ = writeln!(std::io::stdout(), "swarm {VERSION}");
             0
@@ -55,12 +69,7 @@ fn main() {
             scp_hook::entry(origin, &args);
             0
         }
-        Some(other) => {
-            eprintln!(
-                "swarm: {other} is not native yet; this binary runs daemon, hook and mcp\n{USAGE}"
-            );
-            2
-        }
+        Some(_) => scp_cli::main(&args, &HOST),
         None => {
             eprintln!("{USAGE}");
             2
@@ -132,6 +141,9 @@ fn foreground(options: Daemon) -> i32 {
             return 1;
         }
     };
+    if let Ok(exe) = std::env::current_exe() {
+        scp_broker::launch::set_native_verbs(exe, scp_cli::native_verbs());
+    }
     match runtime.block_on(daemon::run(idle, options.policy)) {
         Ok(()) => 0,
         Err(error) if daemon::already_runs(error.as_ref()) => {
