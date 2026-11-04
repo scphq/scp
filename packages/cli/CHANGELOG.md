@@ -1,5 +1,13 @@
 # @scp-dev/cli
 
+## 1.1.0
+
+### Minor Changes
+
+- f3cbd39: Under `SCP_NATIVE=1` the native `swarm` also runs list, status, peers, watch, log, policy and why, with the TypeScript CLI's output: `--json` keeps the key order the broker wrote, and the tables count widths as JavaScript does.
+- a15d2d1: Under `SCP_NATIVE=1` the CLI also hands send, ask, ask-wait, reply, inbox, ack and show to the native `swarm`.
+- 5685a48: Under `SCP_NATIVE=1` the CLI hands whoami, set-now, set-status, set-title, event and daemon to the native `swarm`, in place of the Node process where the runtime has `process.execve`. `SCP_NATIVE_TS=<verbs|*>` keeps verbs on the TypeScript CLI.
+
 ## 1.0.1
 
 ### Patch Changes
