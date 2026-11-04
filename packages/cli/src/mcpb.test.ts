@@ -67,6 +67,36 @@ describe("Claude desktop extension", () => {
     expect(result.stdout.split("\n").filter(Boolean)).toEqual([script, "mcp", "--harness", CHAT_HARNESS])
   })
 
+  test("under SCP_NATIVE the extension runs the native swarm mcp while it is there, else the launcher", () => {
+    const dir = home()
+    const node = join(dir, "node")
+    const cli = join(dir, "cli.js")
+    const swarm = join(dir, "native's", "swarm")
+    put(node, '#!/bin/sh\necho node "$@"\n')
+    put(cli, "#!/usr/bin/env node\n")
+    put(swarm, '#!/bin/sh\n[ "$1" = --version ] && { echo "swarm 0.12.0"; exit 0; }\necho "native $SCP_NATIVE $SCP_CLI_ARGV $*"\n')
+    for (const mode of ["1", "mcp"]) {
+      const file = join(dir, `scp-${mode}.mcpb`)
+      const lines: string[] = []
+      const env = { HOME: dir, SCP_NATIVE: mode, SCP_SWARM_BIN: swarm, PATH: "/usr/bin:/bin" }
+      expect(claudeDesktopSetup({ out: file, bin: cli }, { env, out: (line) => lines.push(line), version: "0.12.0", which: () => node })).toBe(0)
+      const launcher = join(dir, `server-${mode}`)
+      put(launcher, unzip(readFileSync(file)).get("server/scp")!.data.toString("utf8"))
+      const run = () => spawnSync("/bin/sh", [launcher], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).stdout.trim()
+      expect(run()).toBe(`native ${mode} ${JSON.stringify([node, cli])} mcp --harness ${CHAT_HARNESS}`)
+      expect(lines.join("\n")).toContain(`(SCP_NATIVE=${mode}), while it is there`)
+      chmodSync(swarm, 0o644)
+      expect(run()).toBe(`node ${cli} mcp --harness ${CHAT_HARNESS}`)
+      chmodSync(swarm, 0o755)
+    }
+    const lines: string[] = []
+    const env = { HOME: dir, SCP_NATIVE: "1", SCP_SWARM_BIN: join(dir, "missing") }
+    const file = join(dir, "none.mcpb")
+    expect(claudeDesktopSetup({ out: file, bin: cli }, { env, out: (line) => lines.push(line), version: "0.12.0", which: () => node })).toBe(0)
+    expect(unzip(readFileSync(file)).get("server/scp")!.data.toString("utf8")).toBe(mcpbLauncher([node, cli]))
+    expect(lines.join("\n")).toContain("no native swarm 0.12.0")
+  })
+
   test("setup claude-desktop builds the extension in the config dir by absolute paths, never touches the app config, and opens it on --open", () => {
     const dir = home()
     const env = { HOME: dir, XDG_CONFIG_HOME: join(dir, ".config"), PATH: "/usr/bin:/bin" }
