@@ -1,0 +1,1581 @@
+{
+  "tables": [
+    {
+      "rows": [
+        [
+          "A",
+          "B",
+          ""
+        ],
+        [
+          "😀x",
+          "é",
+          ""
+        ]
+      ],
+      "lines": [
+        "A    B",
+        "😀x  é"
+      ]
+    },
+    {
+      "rows": [
+        [
+          "X",
+          "Y"
+        ],
+        [
+          "a ",
+          "b "
+        ],
+        [
+          "",
+          ""
+        ]
+      ],
+      "lines": [
+        "X   Y",
+        "a   b",
+        ""
+      ]
+    }
+  ],
+  "views": [
+    {
+      "fleet": [
+        {
+          "id": "ep_me",
+          "address": "me/",
+          "kind": "human",
+          "harness": "human",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "offline",
+          "status": null
+        },
+        {
+          "id": "ep_me/lead",
+          "address": "me/lead",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": "/home/u/src/app",
+          "labels": {
+            "10": "x",
+            "role": "lead",
+            "machine": "laptop",
+            "a": "b"
+          },
+          "title": "Lead — ünïcode 😀",
+          "presence": "online",
+          "status": {
+            "state": "working",
+            "note": "fix \"it\" \\ now"
+          },
+          "parent": null,
+          "wake": "spawn"
+        },
+        {
+          "id": "ep_me/kid",
+          "address": "me/kid",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": "/home/u",
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": {
+            "state": "blocked",
+            "note": "ci red"
+          },
+          "parent": "me/lead",
+          "wake": null,
+          "scope": "tree",
+          "runner": {
+            "name": "tmux",
+            "attach": "tmux attach -t kid"
+          }
+        },
+        {
+          "id": "ep_me/grandkid",
+          "address": "me/grandkid",
+          "kind": "agent",
+          "harness": "claude-code",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "idle",
+          "status": {
+            "state": "waiting",
+            "note": ""
+          },
+          "parent": "me/kid",
+          "wake": null,
+          "peekable": "local"
+        },
+        {
+          "id": "ep_me/w_1",
+          "address": "me/w_1",
+          "kind": "agent",
+          "harness": "claude-code",
+          "cwd": null,
+          "labels": {
+            "lane": "a"
+          },
+          "title": "日本語",
+          "presence": "online",
+          "status": {
+            "state": "waiting",
+            "note": "review"
+          },
+          "parent": null,
+          "wake": null
+        },
+        {
+          "id": "ep_me/w-2",
+          "address": "me/w-2",
+          "kind": "agent",
+          "harness": "claude-code",
+          "cwd": "/elsewhere",
+          "labels": {},
+          "title": null,
+          "presence": "hibernated",
+          "status": null,
+          "parent": null,
+          "wake": null
+        },
+        {
+          "id": "ep_me/Zed",
+          "address": "me/Zed",
+          "kind": "agent",
+          "harness": "grok",
+          "cwd": null,
+          "labels": {
+            "machine": "desk"
+          },
+          "title": null,
+          "presence": "offline",
+          "status": {
+            "state": "done",
+            "note": "x"
+          },
+          "parent": null,
+          "wake": null
+        },
+        {
+          "id": "ep_me/old",
+          "address": "me/old",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "offline",
+          "status": null,
+          "parent": null,
+          "wake": null,
+          "historic": true
+        },
+        {
+          "id": "ep_me/far",
+          "address": "me/far",
+          "kind": "agent",
+          "harness": "pi",
+          "cwd": null,
+          "labels": {
+            "machine": "Apex"
+          },
+          "title": null,
+          "presence": "online",
+          "status": null,
+          "parent": "me/far",
+          "wake": null
+        },
+        {
+          "id": "ep_me/loop-a",
+          "address": "me/loop-a",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": null,
+          "parent": "me/loop-b",
+          "wake": null
+        },
+        {
+          "id": "ep_me/loop-b",
+          "address": "me/loop-b",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": null,
+          "parent": "me/loop-a",
+          "wake": null
+        }
+      ],
+      "me": null,
+      "endpoints": [
+        "ADDRESS          TITLE              PRESENCE               WAKE   STATUS                        LABELS              CWD         PEEK   RUNNER",
+        "me/                                 offline                -",
+        "laptop",
+        "  claude-code",
+        "    me/grandkid                     idle (next turn)       turn   waiting                                                       local",
+        "    me/w_1       日本語                online                 turn   waiting: \"review\"             lane=a",
+        "    me/w-2                          hibernated (wakeable)  turn   -                                                 /elsewhere",
+        "  codex",
+        "    me/lead      Lead — ünïcode 😀  online                 spawn  working: \"fix \\\"it\\\" \\\\ now\"  10=x,role=lead,a=b  ~/src/app",
+        "    me/kid                          online                 turn   blocked: \"ci red\"                                 ~                  tmux  attach: tmux attach -t kid",
+        "    me/old                          offline                turn   -",
+        "    me/loop-a                       online                 turn   -",
+        "    me/loop-b                       online                 turn   -",
+        "Apex",
+        "  pi",
+        "    me/far                          online                 turn   -",
+        "desk",
+        "  grok",
+        "    me/Zed                          offline                turn   done: \"x\""
+      ],
+      "tree": [
+        "ADDRESS          SCOPE  TITLE              PRESENCE               WAKE   STATUS                        LABELS              CWD         RUNNER",
+        "me/                                        offline                -",
+        "me/lead          open   Lead — ünïcode 😀  online                 spawn  working: \"fix \\\"it\\\" \\\\ now\"  10=x,role=lead,a=b  ~/src/app",
+        "  me/kid         tree                      online                 turn   blocked: \"ci red\"                                 ~           tmux  attach: tmux attach -t kid",
+        "    me/grandkid  open                      idle (next turn)       turn   waiting",
+        "me/w_1           open   日本語                online                 turn   waiting: \"review\"             lane=a",
+        "me/w-2           open                      hibernated (wakeable)  turn   -                                                 /elsewhere",
+        "me/Zed           open                      offline                turn   done: \"x\"",
+        "me/old           open                      offline                turn   -",
+        "me/far           open                      online                 turn   -"
+      ],
+      "unlisted": {
+        "shown": [
+          "me/",
+          "me/lead",
+          "me/kid",
+          "me/grandkid",
+          "me/w_1",
+          "me/w-2",
+          "me/far",
+          "me/loop-a",
+          "me/loop-b"
+        ],
+        "hidden": 1,
+        "historic": 1
+      },
+      "unspawned": [
+        "me/Zed",
+        "me/old",
+        "me/w-2",
+        "me/w_1"
+      ]
+    },
+    {
+      "fleet": [
+        {
+          "id": "ep_me",
+          "address": "me/",
+          "kind": "human",
+          "harness": "human",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "offline",
+          "status": null
+        },
+        {
+          "id": "ep_me/lead",
+          "address": "me/lead",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": "/home/u/src/app",
+          "labels": {
+            "10": "x",
+            "role": "lead",
+            "machine": "laptop",
+            "a": "b"
+          },
+          "title": "Lead — ünïcode 😀",
+          "presence": "online",
+          "status": {
+            "state": "working",
+            "note": "fix \"it\" \\ now"
+          },
+          "parent": null,
+          "wake": "spawn"
+        },
+        {
+          "id": "ep_me/kid",
+          "address": "me/kid",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": "/home/u",
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": {
+            "state": "blocked",
+            "note": "ci red"
+          },
+          "parent": "me/lead",
+          "wake": null,
+          "scope": "tree",
+          "runner": {
+            "name": "tmux",
+            "attach": "tmux attach -t kid"
+          }
+        },
+        {
+          "id": "ep_me/grandkid",
+          "address": "me/grandkid",
+          "kind": "agent",
+          "harness": "claude-code",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "idle",
+          "status": {
+            "state": "waiting",
+            "note": ""
+          },
+          "parent": "me/kid",
+          "wake": null,
+          "peekable": "local"
+        },
+        {
+          "id": "ep_me/w_1",
+          "address": "me/w_1",
+          "kind": "agent",
+          "harness": "claude-code",
+          "cwd": null,
+          "labels": {
+            "lane": "a"
+          },
+          "title": "日本語",
+          "presence": "online",
+          "status": {
+            "state": "waiting",
+            "note": "review"
+          },
+          "parent": null,
+          "wake": null
+        },
+        {
+          "id": "ep_me/w-2",
+          "address": "me/w-2",
+          "kind": "agent",
+          "harness": "claude-code",
+          "cwd": "/elsewhere",
+          "labels": {},
+          "title": null,
+          "presence": "hibernated",
+          "status": null,
+          "parent": null,
+          "wake": null
+        },
+        {
+          "id": "ep_me/Zed",
+          "address": "me/Zed",
+          "kind": "agent",
+          "harness": "grok",
+          "cwd": null,
+          "labels": {
+            "machine": "desk"
+          },
+          "title": null,
+          "presence": "offline",
+          "status": {
+            "state": "done",
+            "note": "x"
+          },
+          "parent": null,
+          "wake": null
+        },
+        {
+          "id": "ep_me/old",
+          "address": "me/old",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "offline",
+          "status": null,
+          "parent": null,
+          "wake": null,
+          "historic": true
+        },
+        {
+          "id": "ep_me/far",
+          "address": "me/far",
+          "kind": "agent",
+          "harness": "pi",
+          "cwd": null,
+          "labels": {
+            "machine": "Apex"
+          },
+          "title": null,
+          "presence": "online",
+          "status": null,
+          "parent": "me/far",
+          "wake": null
+        },
+        {
+          "id": "ep_me/loop-a",
+          "address": "me/loop-a",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": null,
+          "parent": "me/loop-b",
+          "wake": null
+        },
+        {
+          "id": "ep_me/loop-b",
+          "address": "me/loop-b",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": null,
+          "parent": "me/loop-a",
+          "wake": null
+        }
+      ],
+      "me": {
+        "id": "ep_me/kid",
+        "address": "me/kid",
+        "kind": "agent",
+        "harness": "codex",
+        "cwd": "/home/u",
+        "labels": {},
+        "title": null,
+        "presence": "online",
+        "status": {
+          "state": "blocked",
+          "note": "ci red"
+        },
+        "parent": "me/lead",
+        "wake": null,
+        "scope": "tree",
+        "runner": {
+          "name": "tmux",
+          "attach": "tmux attach -t kid"
+        }
+      },
+      "endpoints": [
+        "ADDRESS           TITLE              PRESENCE               WAKE   STATUS                        LABELS              CWD         PEEK   RUNNER",
+        "me/                                  offline                -",
+        "laptop",
+        "  claude-code",
+        "    me/grandkid                      idle (next turn)       turn   waiting                                                       local",
+        "    me/w_1        日本語                online                 turn   waiting: \"review\"             lane=a",
+        "    me/w-2                           hibernated (wakeable)  turn   -                                                 /elsewhere",
+        "  codex",
+        "    me/lead       Lead — ünïcode 😀  online                 spawn  working: \"fix \\\"it\\\" \\\\ now\"  10=x,role=lead,a=b  ~/src/app",
+        "    me/kid (you)                     online                 turn   blocked: \"ci red\"                                 ~                  tmux  attach: tmux attach -t kid",
+        "    me/old                           offline                turn   -",
+        "    me/loop-a                        online                 turn   -",
+        "    me/loop-b                        online                 turn   -",
+        "Apex",
+        "  pi",
+        "    me/far                           online                 turn   -",
+        "desk",
+        "  grok",
+        "    me/Zed                           offline                turn   done: \"x\""
+      ],
+      "tree": [
+        "ADDRESS          SCOPE  TITLE              PRESENCE               WAKE   STATUS                        LABELS              CWD         RUNNER",
+        "me/                                        offline                -",
+        "me/lead          open   Lead — ünïcode 😀  online                 spawn  working: \"fix \\\"it\\\" \\\\ now\"  10=x,role=lead,a=b  ~/src/app",
+        "  me/kid (you)   tree                      online                 turn   blocked: \"ci red\"                                 ~           tmux  attach: tmux attach -t kid",
+        "    me/grandkid  open                      idle (next turn)       turn   waiting",
+        "me/w_1           open   日本語                online                 turn   waiting: \"review\"             lane=a",
+        "me/w-2           open                      hibernated (wakeable)  turn   -                                                 /elsewhere",
+        "me/Zed           open                      offline                turn   done: \"x\"",
+        "me/old           open                      offline                turn   -",
+        "me/far           open                      online                 turn   -"
+      ],
+      "unlisted": {
+        "shown": [
+          "me/",
+          "me/lead",
+          "me/kid",
+          "me/grandkid",
+          "me/w_1",
+          "me/w-2",
+          "me/far",
+          "me/loop-a",
+          "me/loop-b"
+        ],
+        "hidden": 1,
+        "historic": 1
+      },
+      "unspawned": [
+        "me/Zed",
+        "me/old",
+        "me/w-2",
+        "me/w_1"
+      ]
+    },
+    {
+      "fleet": [
+        {
+          "id": "ep_me",
+          "address": "me/",
+          "kind": "human",
+          "harness": "human",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "offline",
+          "status": null
+        },
+        {
+          "id": "ep_me/lead",
+          "address": "me/lead",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": "/home/u/src/app",
+          "labels": {
+            "10": "x",
+            "role": "lead",
+            "machine": "laptop",
+            "a": "b"
+          },
+          "title": "Lead — ünïcode 😀",
+          "presence": "online",
+          "status": {
+            "state": "working",
+            "note": "fix \"it\" \\ now"
+          },
+          "parent": null,
+          "wake": "spawn"
+        },
+        {
+          "id": "ep_me/kid",
+          "address": "me/kid",
+          "kind": "agent",
+          "harness": "codex",
+          "cwd": "/home/u",
+          "labels": {},
+          "title": null,
+          "presence": "online",
+          "status": {
+            "state": "blocked",
+            "note": "ci red"
+          },
+          "parent": "me/lead",
+          "wake": null,
+          "scope": "tree",
+          "runner": {
+            "name": "tmux",
+            "attach": "tmux attach -t kid"
+          }
+        }
+      ],
+      "me": {
+        "id": "ep_me",
+        "address": "me/",
+        "kind": "human",
+        "harness": "human",
+        "cwd": null,
+        "labels": {},
+        "title": null,
+        "presence": "offline",
+        "status": null
+      },
+      "endpoints": [
+        "ADDRESS      TITLE              PRESENCE  WAKE   STATUS                        LABELS              CWD        RUNNER",
+        "me/ (you)                       offline   -",
+        "laptop",
+        "  codex",
+        "    me/lead  Lead — ünïcode 😀  online    spawn  working: \"fix \\\"it\\\" \\\\ now\"  10=x,role=lead,a=b  ~/src/app",
+        "    me/kid                      online    turn   blocked: \"ci red\"                                 ~          tmux  attach: tmux attach -t kid"
+      ],
+      "tree": [
+        "ADDRESS    SCOPE  TITLE              PRESENCE  WAKE   STATUS                        LABELS              CWD        RUNNER",
+        "me/ (you)                            offline   -",
+        "me/lead    open   Lead — ünïcode 😀  online    spawn  working: \"fix \\\"it\\\" \\\\ now\"  10=x,role=lead,a=b  ~/src/app",
+        "  me/kid   tree                      online    turn   blocked: \"ci red\"                                 ~          tmux  attach: tmux attach -t kid"
+      ],
+      "unlisted": {
+        "shown": [
+          "me/",
+          "me/lead",
+          "me/kid"
+        ],
+        "hidden": 0,
+        "historic": 0
+      },
+      "unspawned": []
+    },
+    {
+      "fleet": [
+        {
+          "id": "ep_me",
+          "address": "me/",
+          "kind": "human",
+          "harness": "human",
+          "cwd": null,
+          "labels": {},
+          "title": null,
+          "presence": "offline",
+          "status": null
+        }
+      ],
+      "me": null,
+      "endpoints": [
+        "ADDRESS  TITLE  PRESENCE  WAKE  STATUS  LABELS  CWD",
+        "me/             offline   -"
+      ],
+      "tree": [
+        "ADDRESS  SCOPE  TITLE  PRESENCE  WAKE  STATUS  LABELS  CWD",
+        "me/                    offline   -"
+      ],
+      "unlisted": {
+        "shown": [
+          "me/"
+        ],
+        "hidden": 0,
+        "historic": 0
+      },
+      "unspawned": []
+    }
+  ],
+  "summaries": [
+    {
+      "snapshot": {
+        "endpoints": [
+          {
+            "id": "ep_me",
+            "address": "me/",
+            "kind": "human",
+            "harness": "human",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null
+          },
+          {
+            "id": "ep_me/lead",
+            "address": "me/lead",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": "/home/u/src/app",
+            "labels": {
+              "10": "x",
+              "role": "lead",
+              "machine": "laptop",
+              "a": "b"
+            },
+            "title": "Lead — ünïcode 😀",
+            "presence": "online",
+            "status": {
+              "state": "working",
+              "note": "fix \"it\" \\ now"
+            },
+            "parent": null,
+            "wake": "spawn"
+          },
+          {
+            "id": "ep_me/kid",
+            "address": "me/kid",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": "/home/u",
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": {
+              "state": "blocked",
+              "note": "ci red"
+            },
+            "parent": "me/lead",
+            "wake": null,
+            "scope": "tree",
+            "runner": {
+              "name": "tmux",
+              "attach": "tmux attach -t kid"
+            }
+          },
+          {
+            "id": "ep_me/grandkid",
+            "address": "me/grandkid",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "idle",
+            "status": {
+              "state": "waiting",
+              "note": ""
+            },
+            "parent": "me/kid",
+            "wake": null,
+            "peekable": "local"
+          },
+          {
+            "id": "ep_me/w_1",
+            "address": "me/w_1",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": null,
+            "labels": {
+              "lane": "a"
+            },
+            "title": "日本語",
+            "presence": "online",
+            "status": {
+              "state": "waiting",
+              "note": "review"
+            },
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/w-2",
+            "address": "me/w-2",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": "/elsewhere",
+            "labels": {},
+            "title": null,
+            "presence": "hibernated",
+            "status": null,
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/Zed",
+            "address": "me/Zed",
+            "kind": "agent",
+            "harness": "grok",
+            "cwd": null,
+            "labels": {
+              "machine": "desk"
+            },
+            "title": null,
+            "presence": "offline",
+            "status": {
+              "state": "done",
+              "note": "x"
+            },
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/old",
+            "address": "me/old",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null,
+            "parent": null,
+            "wake": null,
+            "historic": true
+          },
+          {
+            "id": "ep_me/far",
+            "address": "me/far",
+            "kind": "agent",
+            "harness": "pi",
+            "cwd": null,
+            "labels": {
+              "machine": "Apex"
+            },
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/far",
+            "wake": null
+          },
+          {
+            "id": "ep_me/loop-a",
+            "address": "me/loop-a",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/loop-b",
+            "wake": null
+          },
+          {
+            "id": "ep_me/loop-b",
+            "address": "me/loop-b",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/loop-a",
+            "wake": null
+          }
+        ],
+        "activity": [],
+        "unread": {
+          "10": 1,
+          "me/w-2": 2,
+          "me/kid": 0,
+          "me/Zed": 1,
+          "me/a_b": 3
+        }
+      },
+      "me": null,
+      "all": false,
+      "lines": [
+        "",
+        "agents: 6 online, 1 idle, 1 hibernated, 2 offline",
+        "  claude-code: 2 waiting, 1 no status",
+        "  codex: 1 working, 1 blocked, 2 no status",
+        "  pi: 1 no status",
+        "",
+        "waiting or blocked:",
+        "  me/grandkid waiting",
+        "  me/kid blocked: \"ci red\"",
+        "  me/w_1 waiting: \"review\"",
+        "",
+        "unread: 10 1, me/a_b 3, me/w-2 2, me/Zed 1"
+      ],
+      "quotes": true
+    },
+    {
+      "snapshot": {
+        "endpoints": [
+          {
+            "id": "ep_me",
+            "address": "me/",
+            "kind": "human",
+            "harness": "human",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null
+          },
+          {
+            "id": "ep_me/lead",
+            "address": "me/lead",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": "/home/u/src/app",
+            "labels": {
+              "10": "x",
+              "role": "lead",
+              "machine": "laptop",
+              "a": "b"
+            },
+            "title": "Lead — ünïcode 😀",
+            "presence": "online",
+            "status": {
+              "state": "working",
+              "note": "fix \"it\" \\ now"
+            },
+            "parent": null,
+            "wake": "spawn"
+          },
+          {
+            "id": "ep_me/kid",
+            "address": "me/kid",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": "/home/u",
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": {
+              "state": "blocked",
+              "note": "ci red"
+            },
+            "parent": "me/lead",
+            "wake": null,
+            "scope": "tree",
+            "runner": {
+              "name": "tmux",
+              "attach": "tmux attach -t kid"
+            }
+          },
+          {
+            "id": "ep_me/grandkid",
+            "address": "me/grandkid",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "idle",
+            "status": {
+              "state": "waiting",
+              "note": ""
+            },
+            "parent": "me/kid",
+            "wake": null,
+            "peekable": "local"
+          },
+          {
+            "id": "ep_me/w_1",
+            "address": "me/w_1",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": null,
+            "labels": {
+              "lane": "a"
+            },
+            "title": "日本語",
+            "presence": "online",
+            "status": {
+              "state": "waiting",
+              "note": "review"
+            },
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/w-2",
+            "address": "me/w-2",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": "/elsewhere",
+            "labels": {},
+            "title": null,
+            "presence": "hibernated",
+            "status": null,
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/Zed",
+            "address": "me/Zed",
+            "kind": "agent",
+            "harness": "grok",
+            "cwd": null,
+            "labels": {
+              "machine": "desk"
+            },
+            "title": null,
+            "presence": "offline",
+            "status": {
+              "state": "done",
+              "note": "x"
+            },
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/old",
+            "address": "me/old",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null,
+            "parent": null,
+            "wake": null,
+            "historic": true
+          },
+          {
+            "id": "ep_me/far",
+            "address": "me/far",
+            "kind": "agent",
+            "harness": "pi",
+            "cwd": null,
+            "labels": {
+              "machine": "Apex"
+            },
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/far",
+            "wake": null
+          },
+          {
+            "id": "ep_me/loop-a",
+            "address": "me/loop-a",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/loop-b",
+            "wake": null
+          },
+          {
+            "id": "ep_me/loop-b",
+            "address": "me/loop-b",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/loop-a",
+            "wake": null
+          }
+        ],
+        "activity": []
+      },
+      "me": {
+        "id": "ep_me/kid",
+        "address": "me/kid",
+        "kind": "agent",
+        "harness": "codex",
+        "cwd": "/home/u",
+        "labels": {},
+        "title": null,
+        "presence": "online",
+        "status": {
+          "state": "blocked",
+          "note": "ci red"
+        },
+        "parent": "me/lead",
+        "wake": null,
+        "scope": "tree",
+        "runner": {
+          "name": "tmux",
+          "attach": "tmux attach -t kid"
+        }
+      },
+      "all": true,
+      "lines": [
+        "you: me/kid (agent, codex) online, status blocked: \"ci red\"",
+        "",
+        "agents: 6 online, 1 idle, 1 hibernated, 2 offline",
+        "  claude-code: 2 waiting, 1 no status",
+        "  codex: 1 working, 1 blocked, 3 no status",
+        "  grok: 1 done",
+        "  pi: 1 no status",
+        "",
+        "waiting or blocked:",
+        "  me/grandkid waiting",
+        "  me/kid blocked: \"ci red\"",
+        "  me/w_1 waiting: \"review\""
+      ],
+      "quotes": true
+    },
+    {
+      "snapshot": {
+        "endpoints": [
+          {
+            "id": "ep_me",
+            "address": "me/",
+            "kind": "human",
+            "harness": "human",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null
+          }
+        ],
+        "activity": []
+      },
+      "me": {
+        "id": "ep_me",
+        "address": "me/",
+        "kind": "human",
+        "harness": "human",
+        "cwd": null,
+        "labels": {},
+        "title": null,
+        "presence": "offline",
+        "status": null
+      },
+      "all": false,
+      "lines": [
+        "you: me/ (human, human) offline",
+        "",
+        "agents: 0 online, 0 idle, 0 offline"
+      ],
+      "quotes": false
+    },
+    {
+      "snapshot": {
+        "endpoints": [
+          {
+            "id": "ep_me",
+            "address": "me/",
+            "kind": "human",
+            "harness": "human",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null
+          },
+          {
+            "id": "ep_me/lead",
+            "address": "me/lead",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": "/home/u/src/app",
+            "labels": {
+              "10": "x",
+              "role": "lead",
+              "machine": "laptop",
+              "a": "b"
+            },
+            "title": "Lead — ünïcode 😀",
+            "presence": "online",
+            "status": {
+              "state": "working",
+              "note": "fix \"it\" \\ now"
+            },
+            "parent": null,
+            "wake": "spawn"
+          },
+          {
+            "id": "ep_me/kid",
+            "address": "me/kid",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": "/home/u",
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": {
+              "state": "blocked",
+              "note": "ci red"
+            },
+            "parent": "me/lead",
+            "wake": null,
+            "scope": "tree",
+            "runner": {
+              "name": "tmux",
+              "attach": "tmux attach -t kid"
+            }
+          },
+          {
+            "id": "ep_me/grandkid",
+            "address": "me/grandkid",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "idle",
+            "status": {
+              "state": "waiting",
+              "note": ""
+            },
+            "parent": "me/kid",
+            "wake": null,
+            "peekable": "local"
+          },
+          {
+            "id": "ep_me/w_1",
+            "address": "me/w_1",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": null,
+            "labels": {
+              "lane": "a"
+            },
+            "title": "日本語",
+            "presence": "online",
+            "status": {
+              "state": "waiting",
+              "note": "review"
+            },
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/w-2",
+            "address": "me/w-2",
+            "kind": "agent",
+            "harness": "claude-code",
+            "cwd": "/elsewhere",
+            "labels": {},
+            "title": null,
+            "presence": "hibernated",
+            "status": null,
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/Zed",
+            "address": "me/Zed",
+            "kind": "agent",
+            "harness": "grok",
+            "cwd": null,
+            "labels": {
+              "machine": "desk"
+            },
+            "title": null,
+            "presence": "offline",
+            "status": {
+              "state": "done",
+              "note": "x"
+            },
+            "parent": null,
+            "wake": null
+          },
+          {
+            "id": "ep_me/old",
+            "address": "me/old",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "offline",
+            "status": null,
+            "parent": null,
+            "wake": null,
+            "historic": true
+          },
+          {
+            "id": "ep_me/far",
+            "address": "me/far",
+            "kind": "agent",
+            "harness": "pi",
+            "cwd": null,
+            "labels": {
+              "machine": "Apex"
+            },
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/far",
+            "wake": null
+          },
+          {
+            "id": "ep_me/loop-a",
+            "address": "me/loop-a",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/loop-b",
+            "wake": null
+          },
+          {
+            "id": "ep_me/loop-b",
+            "address": "me/loop-b",
+            "kind": "agent",
+            "harness": "codex",
+            "cwd": null,
+            "labels": {},
+            "title": null,
+            "presence": "online",
+            "status": null,
+            "parent": "me/loop-a",
+            "wake": null
+          }
+        ],
+        "activity": []
+      },
+      "me": {
+        "id": "ep_me/kid",
+        "address": "me/kid",
+        "kind": "agent",
+        "harness": null,
+        "cwd": "/home/u",
+        "labels": {},
+        "title": "say \"hi\"",
+        "presence": "online",
+        "status": {
+          "state": "blocked",
+          "note": "ci red"
+        },
+        "parent": "me/lead",
+        "wake": null,
+        "scope": "tree",
+        "runner": {
+          "name": "tmux",
+          "attach": "tmux attach -t kid"
+        }
+      },
+      "all": false,
+      "lines": [
+        "you: me/kid (agent) online \"say \\\"hi\\\"\", status blocked: \"ci red\"",
+        "",
+        "agents: 6 online, 1 idle, 1 hibernated, 2 offline",
+        "  claude-code: 2 waiting, 1 no status",
+        "  codex: 1 working, 1 blocked, 2 no status",
+        "  pi: 1 no status",
+        "",
+        "waiting or blocked:",
+        "  me/grandkid waiting",
+        "  me/kid blocked: \"ci red\"",
+        "  me/w_1 waiting: \"review\""
+      ],
+      "quotes": true
+    }
+  ],
+  "events": [
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "presence",
+        "endpoint": "me/a",
+        "presence": "online",
+        "harness": "pi"
+      },
+      "line": "a while ago me/a is online (pi)"
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "presence",
+        "endpoint": "me/a",
+        "presence": "offline"
+      },
+      "line": "a while ago me/a is offline"
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "message",
+        "from": "me/a",
+        "to": [
+          "me/b",
+          "me/c"
+        ],
+        "kind": "ask",
+        "id": "msg_1",
+        "hop": 2
+      },
+      "line": "a while ago me/a -> me/b, me/c ask msg_1 hop 2"
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "message",
+        "from": "me/a",
+        "to": [
+          "me/b"
+        ],
+        "kind": "message",
+        "id": "msg_2",
+        "hop": 0
+      },
+      "line": "a while ago me/a -> me/b message msg_2"
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "status",
+        "endpoint": "me/a",
+        "status": {
+          "state": "waiting",
+          "note": "on \"x\""
+        }
+      },
+      "line": "a while ago me/a status waiting: \"on \\\"x\\\"\""
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "status",
+        "endpoint": "me/a",
+        "status": null
+      },
+      "line": "a while ago me/a status cleared"
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "activity",
+        "endpoint": "me/a",
+        "agent": "Plan 9a",
+        "kind": "tool",
+        "tool": "Edit",
+        "summary": "did \\ it"
+      },
+      "line": "a while ago me/a [Plan 9a] tool Edit: \"did \\\\ it\""
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "activity",
+        "endpoint": "me/a",
+        "agent": null,
+        "kind": "turn",
+        "tool": null,
+        "summary": ""
+      },
+      "line": "a while ago me/a turn"
+    },
+    {
+      "event": {
+        "at": "a while ago",
+        "type": "lagged",
+        "z": {
+          "2": 1,
+          "b": [
+            1.5,
+            null
+          ]
+        }
+      },
+      "line": "a while ago {\"at\":\"a while ago\",\"type\":\"lagged\",\"z\":{\"2\":1,\"b\":[1.5,null]}}"
+    }
+  ],
+  "sorted": [
+    " x",
+    "~",
+    "$",
+    "a",
+    "A",
+    "å",
+    "Å",
+    "ä",
+    "a_b",
+    "a-b",
+    "a.b",
+    "a1",
+    "ab",
+    "aB",
+    "Ab",
+    "ae",
+    "AE",
+    "aé",
+    "aÉ",
+    "aë",
+    "áe",
+    "æ",
+    "Æ",
+    "æa",
+    "aeb",
+    "Ærø",
+    "aez",
+    "b",
+    "B",
+    "ç",
+    "é",
+    "É",
+    "è",
+    "ê",
+    "ë",
+    "ecl",
+    "eclair",
+    "éclair",
+    "Éclair",
+    "ìo",
+    "me-x",
+    "me/10",
+    "me/9",
+    "me/a-b",
+    "me/a/b",
+    "me/x",
+    "me/X",
+    "ñ",
+    "Ñu",
+    "ö",
+    "õ",
+    "ø",
+    "Óz",
+    "ss",
+    "SS",
+    "ß",
+    "ssa",
+    "ßa",
+    "sß",
+    "st",
+    "ü",
+    "x y",
+    "ÿ",
+    "zulu"
+  ],
+  "hooks": [
+    {
+      "command": "[ -x '/opt/scp-hook' ] && exec '/opt/scp-hook' swarm hook claude || exec swarm hook claude",
+      "client": {
+        "bin": "/opt/scp-hook",
+        "guarded": true
+      }
+    },
+    {
+      "command": "[ -x '/opt/scp-hook' ] && exec '/opt/scp-hook' swarm hook claude || exec swarm hook codex",
+      "client": null
+    },
+    {
+      "command": "/opt/bin/scp-hook swarm hook codex",
+      "client": {
+        "bin": "/opt/bin/scp-hook",
+        "guarded": false
+      }
+    },
+    {
+      "command": "/opt/bin/scp-hook/ node cli.js hook codex",
+      "client": {
+        "bin": "/opt/bin/scp-hook/",
+        "guarded": false
+      }
+    },
+    {
+      "command": "swarm hook claude",
+      "client": null
+    },
+    {
+      "command": "'open",
+      "client": null
+    },
+    {
+      "command": [
+        "/bin/sh",
+        "-c",
+        "[ -x \"$0\" ] && exec \"$0\" \"$@\"; exec \"$@\"",
+        "/opt/scp-hook",
+        "swarm",
+        "hook",
+        "agy"
+      ],
+      "client": {
+        "bin": "/opt/scp-hook",
+        "guarded": true
+      }
+    },
+    {
+      "command": [
+        "/opt/scp-hook",
+        "swarm",
+        "hook"
+      ],
+      "client": {
+        "bin": "/opt/scp-hook",
+        "guarded": false
+      }
+    },
+    {
+      "command": [
+        "/opt/scp-hook",
+        1,
+        "hook"
+      ],
+      "client": null
+    },
+    {
+      "command": 42,
+      "client": null
+    }
+  ]
+}

@@ -3,11 +3,25 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OPTIONS } from "../packages/cli/src/common";
-import { hoistIdentity, VERB_OPTIONS, VERBS } from "../packages/cli/src/main";
+import { hookClient } from "../packages/cli/src/hooks";
+import {
+  fleetLine,
+  hoistIdentity,
+  printEndpoints,
+  printSummary,
+  printTree,
+  type Snapshot,
+  unlisted,
+  unspawned,
+  VERB_OPTIONS,
+  VERBS,
+} from "../packages/cli/src/main";
+import { printTable } from "../packages/cli/src/term";
 
 const root = join(import.meta.dir, "..");
 const OPTIONS_FILE = join(root, "crates/scp-cli/src/options.json");
 const PARSE_FILE = join(root, "crates/scp-cli/tests/fixtures/parse.json");
+const FLEET_FILE = join(root, "crates/scp-cli/tests/fixtures/fleet.json");
 
 /** whole command lines after `swarm`; each runs through hoisting, util.parseArgs under Node and the verb's allowed flags */
 const CASES: string[][] = [
@@ -119,11 +133,208 @@ function tables(): string {
   return `${JSON.stringify({ options: OPTIONS, verb_options: VERB_OPTIONS, verbs: VERBS }, null, 2)}\n`;
 }
 
+/** the lines `run` prints, through console.log or stdout */
+function printed(run: () => unknown): { lines: string[]; result: unknown } {
+  const lines: string[] = [];
+  const log = console.log;
+  const write = process.stdout.write;
+  console.log = (line: string) => lines.push(`${line}\n`);
+  process.stdout.write = ((chunk: string) => lines.push(chunk)) as typeof process.stdout.write;
+  try {
+    const result = run();
+    return { lines: lines.join("").split("\n").slice(0, -1), result };
+  } finally {
+    console.log = log;
+    process.stdout.write = write;
+  }
+}
+
+const HOME = "/home/u";
+const at = "a while ago";
+const agent = (address: string, extra: Record<string, unknown> = {}) => ({
+  id: `ep_${address}`,
+  address,
+  kind: "agent",
+  harness: "codex",
+  cwd: null,
+  labels: {},
+  title: null,
+  presence: "online",
+  status: null,
+  parent: null,
+  wake: null,
+  ...extra,
+});
+const human = { id: "ep_me", address: "me/", kind: "human", harness: "human", cwd: null, labels: {}, title: null, presence: "offline", status: null };
+const FLEET = [
+  human,
+  agent("me/lead", {
+    title: "Lead — ünïcode 😀",
+    labels: { role: "lead", "10": "x", machine: "laptop", a: "b" },
+    status: { state: "working", note: 'fix "it" \\ now' },
+    cwd: `${HOME}/src/app`,
+    wake: "spawn",
+  }),
+  agent("me/kid", {
+    parent: "me/lead",
+    status: { state: "blocked", note: "ci red" },
+    cwd: HOME,
+    scope: "tree",
+    runner: { name: "tmux", attach: "tmux attach -t kid" },
+  }),
+  agent("me/grandkid", { parent: "me/kid", harness: "claude-code", presence: "idle", status: { state: "waiting", note: "" }, peekable: "local" }),
+  agent("me/w_1", { harness: "claude-code", title: "日本語", labels: { lane: "a" }, status: { state: "waiting", note: "review" } }),
+  agent("me/w-2", { harness: "claude-code", presence: "hibernated", cwd: "/elsewhere" }),
+  agent("me/Zed", { harness: "grok", presence: "offline", status: { state: "done", note: "x" }, labels: { machine: "desk" } }),
+  agent("me/old", { presence: "offline", historic: true }),
+  agent("me/far", { labels: { machine: "Apex" }, harness: "pi", parent: "me/far" }),
+  agent("me/loop-a", { parent: "me/loop-b" }),
+  agent("me/loop-b", { parent: "me/loop-a" }),
+];
+const ME = FLEET[2];
+
+function fleetGoldens(): string {
+  const saved = process.env.HOME;
+  process.env.HOME = HOME;
+  try {
+    const tables = [
+      [
+        ["A", "B", ""],
+        ["😀x", "é", ""],
+      ],
+      [
+        ["X", "Y"],
+        ["a ", "b "],
+        ["", ""],
+      ],
+    ].map((rows) => ({ rows, lines: printed(() => printTable(rows)).lines }));
+    const views = [
+      { fleet: FLEET, me: null },
+      { fleet: FLEET, me: ME },
+      { fleet: FLEET.slice(0, 3), me: human },
+      { fleet: [human], me: null },
+    ].map(({ fleet, me }) => {
+      const { shown, hidden, historic } = unlisted(fleet as never[], false);
+      return {
+        fleet,
+        me,
+        endpoints: printed(() => printEndpoints(fleet as never[], me as never, "laptop")).lines,
+        tree: printed(() => printTree(fleet as never[], me as never)).lines,
+        unlisted: { shown: (shown as { address: string }[]).map((e) => e.address), hidden, historic },
+        unspawned: [...unspawned(fleet as never[], me as never)].sort(),
+      };
+    });
+    const summaries = [
+      { snapshot: { endpoints: FLEET, activity: [], unread: { "me/w-2": 2, "me/kid": 0, "me/Zed": 1, "me/a_b": 3, "10": 1 } }, me: null, all: false },
+      { snapshot: { endpoints: FLEET, activity: [] }, me: ME, all: true },
+      { snapshot: { endpoints: [human], activity: [] }, me: human, all: false },
+      { snapshot: { endpoints: FLEET, activity: [] }, me: { ...ME, title: 'say "hi"', harness: null }, all: false },
+    ].map(({ snapshot, me, all }) => {
+      const { lines, result } = printed(() => printSummary(snapshot as unknown as Snapshot, me as never, all));
+      return { snapshot, me, all, lines, quotes: result };
+    });
+    const events = [
+      { at, type: "presence", endpoint: "me/a", presence: "online", harness: "pi" },
+      { at, type: "presence", endpoint: "me/a", presence: "offline" },
+      { at, type: "message", from: "me/a", to: ["me/b", "me/c"], kind: "ask", id: "msg_1", hop: 2 },
+      { at, type: "message", from: "me/a", to: ["me/b"], kind: "message", id: "msg_2", hop: 0 },
+      { at, type: "status", endpoint: "me/a", status: { state: "waiting", note: 'on "x"' } },
+      { at, type: "status", endpoint: "me/a", status: null },
+      { at, type: "activity", endpoint: "me/a", agent: "Plan 9a", kind: "tool", tool: "Edit", summary: "did \\ it" },
+      { at, type: "activity", endpoint: "me/a", agent: null, kind: "turn", tool: null, summary: "" },
+      { at, type: "lagged", z: { "2": 1, b: [1.5, null] } },
+    ].map((event) => ({ event, line: fleetLine(event) }));
+    const words = [
+      "b",
+      "B",
+      "a-b",
+      "ab",
+      "a_b",
+      "aB",
+      "Ab",
+      "a1",
+      "a.b",
+      "me/x",
+      "me/X",
+      "me-x",
+      "a",
+      "A",
+      "me/a/b",
+      "me/a-b",
+      "~",
+      "$",
+      " x",
+      "x y",
+      "me/10",
+      "aé",
+      "áe",
+      "aë",
+      "AE",
+      "aÉ",
+      "aez",
+      "æa",
+      "aeb",
+      "Æ",
+      "SS",
+      "ssa",
+      "ßa",
+      "sß",
+      "st",
+      "me/9",
+      "é",
+      "è",
+      "ê",
+      "ë",
+      "É",
+      "ecl",
+      "éclair",
+      "eclair",
+      "Éclair",
+      "zulu",
+      "ä",
+      "ñ",
+      "ö",
+      "ø",
+      "ß",
+      "ss",
+      "ü",
+      "ç",
+      "ÿ",
+      "Å",
+      "å",
+      "æ",
+      "ae",
+      "Ærø",
+      "Ñu",
+      "ìo",
+      "Óz",
+      "õ",
+    ];
+    const sorted = [...words].sort((a, b) => a.localeCompare(b));
+    const hooks = [
+      "[ -x '/opt/scp-hook' ] && exec '/opt/scp-hook' swarm hook claude || exec swarm hook claude",
+      "[ -x '/opt/scp-hook' ] && exec '/opt/scp-hook' swarm hook claude || exec swarm hook codex",
+      "/opt/bin/scp-hook swarm hook codex",
+      "/opt/bin/scp-hook/ node cli.js hook codex",
+      "swarm hook claude",
+      "'open",
+      ["/bin/sh", "-c", '[ -x "$0" ] && exec "$0" "$@"; exec "$@"', "/opt/scp-hook", "swarm", "hook", "agy"],
+      ["/opt/scp-hook", "swarm", "hook"],
+      ["/opt/scp-hook", 1, "hook"],
+      42,
+    ].map((command) => ({ command, client: hookClient(command) ?? null }));
+    return `${JSON.stringify({ tables, views, summaries, events, sorted, hooks }, null, 2)}\n`;
+  } finally {
+    process.env.HOME = saved;
+  }
+}
+
 const check = process.argv.includes("--check");
 let drifted = false;
 for (const [file, text] of [
   [OPTIONS_FILE, tables()],
   [PARSE_FILE, goldens()],
+  [FLEET_FILE, fleetGoldens()],
 ] as const) {
   if (!check) writeFileSync(file, text);
   else if (readFileSync(file, "utf8") !== text) {

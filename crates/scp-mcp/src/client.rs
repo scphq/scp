@@ -56,29 +56,50 @@ const READ_CAP: usize = 64 * 1024 * 1024;
 const CLOSED: &str = "the relay broker closed the connection";
 
 type Reply = oneshot::Sender<Result<Value, CallError>>;
+type LineReply = oneshot::Sender<Result<Vec<u8>, CallError>>;
+
+enum Pending {
+    Value(Reply),
+    Line(LineReply),
+}
+
+impl Pending {
+    fn fail(self, error: CallError) {
+        match self {
+            Pending::Value(reply) => {
+                let _ = reply.send(Err(error));
+            }
+            Pending::Line(reply) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+}
 
 struct Inner {
     next_id: Cell<u64>,
-    pending: RefCell<HashMap<u64, Reply>>,
+    pending: RefCell<HashMap<u64, Pending>>,
     closed: RefCell<Option<String>>,
     writer: RefCell<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    notifications: RefCell<Option<mpsc::UnboundedSender<Vec<u8>>>>,
 }
 
 impl Inner {
     fn fail(&self, error: &str) {
         self.writer.borrow_mut().take();
+        self.notifications.borrow_mut().take();
         if self.closed.borrow().is_some() {
             return;
         }
         *self.closed.borrow_mut() = Some(error.to_string());
-        let pending: Vec<Reply> = self
+        let pending: Vec<Pending> = self
             .pending
             .borrow_mut()
             .drain()
             .map(|(_, reply)| reply)
             .collect();
         for reply in pending {
-            let _ = reply.send(Err(CallError::Io(error.to_string())));
+            reply.fail(CallError::Io(error.to_string()));
         }
     }
 
@@ -86,6 +107,9 @@ impl Inner {
         let message: Value = serde_json::from_slice(line)
             .map_err(|_| "the relay broker sent a line that is not JSON")?;
         if crate::tools::truthy(get(&message, "method")) {
+            if let Some(sink) = self.notifications.borrow().as_ref() {
+                let _ = sink.send(line.to_vec());
+            }
             return Ok(());
         }
         let Some(id) = get(&message, "id").and_then(Value::as_u64) else {
@@ -94,14 +118,14 @@ impl Inner {
         let Some(reply) = self.pending.borrow_mut().remove(&id) else {
             return Ok(());
         };
-        let result = match get(&message, "error").filter(|e| crate::tools::truthy(Some(e))) {
+        let failed = match get(&message, "error").filter(|e| crate::tools::truthy(Some(e))) {
             Some(error) => {
                 let data = get(error, "data");
                 let code = match data.and_then(|d| get(d, "code")) {
                     None | Some(Value::Null) => "invalid_params".to_string(),
                     code => js(code),
                 };
-                Err(CallError::Relay {
+                Some(CallError::Relay {
                     code,
                     message: js(get(error, "message")),
                     retry_after_s: data
@@ -109,9 +133,17 @@ impl Inner {
                         .and_then(Value::as_f64),
                 })
             }
-            None => Ok(get(&message, "result").cloned().unwrap_or(Value::Null)),
+            None => None,
         };
-        let _ = reply.send(result);
+        match (reply, failed) {
+            (reply, Some(error)) => reply.fail(error),
+            (Pending::Value(reply), None) => {
+                let _ = reply.send(Ok(get(&message, "result").cloned().unwrap_or(Value::Null)));
+            }
+            (Pending::Line(reply), None) => {
+                let _ = reply.send(Ok(line.to_vec()));
+            }
+        }
         Ok(())
     }
 }
@@ -138,6 +170,7 @@ impl Client {
             pending: RefCell::new(HashMap::new()),
             closed: RefCell::new(None),
             writer: RefCell::new(Some(tx)),
+            notifications: RefCell::new(None),
         });
         tokio::task::spawn_local(read_loop(inner.clone(), read));
         tokio::task::spawn_local(write_loop(inner.clone(), write, rx));
@@ -150,6 +183,37 @@ impl Client {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, CallError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(method, params, Pending::Value(tx))?;
+        rx.await
+            .unwrap_or_else(|_| Err(CallError::Io(CLOSED.into())))
+    }
+
+    /// `request`, sent at once and answered with the whole reply line as the broker wrote it, for a caller that keeps its key order
+    pub fn request_line(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, CallError>> + 'static {
+        let (tx, rx) = oneshot::channel();
+        let sent = self.send(method, params, Pending::Line(tx));
+        async move {
+            sent?;
+            rx.await
+                .unwrap_or_else(|_| Err(CallError::Io(CLOSED.into())))
+        }
+    }
+
+    /// the notification lines the broker sends from now on, as it wrote them; the stream ends when the connection does
+    pub fn notifications(&self) -> mpsc::UnboundedReceiver<Vec<u8>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        if self.inner.closed.borrow().is_none() {
+            *self.inner.notifications.borrow_mut() = Some(tx);
+        }
+        rx
+    }
+
+    fn send(&self, method: &str, params: Value, reply: Pending) -> Result<(), CallError> {
         if let Some(error) = self.inner.closed.borrow().clone() {
             return Err(CallError::Io(error));
         }
@@ -167,8 +231,7 @@ impl Client {
             ));
         }
         line.push('\n');
-        let (tx, rx) = oneshot::channel();
-        self.inner.pending.borrow_mut().insert(id, tx);
+        self.inner.pending.borrow_mut().insert(id, reply);
         let sent = self
             .inner
             .writer
@@ -181,8 +244,7 @@ impl Client {
                 "the connection to the relay broker is closed".into(),
             ));
         }
-        rx.await
-            .unwrap_or_else(|_| Err(CallError::Io(CLOSED.into())))
+        Ok(())
     }
 
     /// `hello` with the protocol and no capabilities, then `fields`
@@ -540,9 +602,10 @@ mod tests {
             pending: RefCell::new(HashMap::new()),
             closed: RefCell::new(None),
             writer: RefCell::new(None),
+            notifications: RefCell::new(None),
         };
         let (tx, mut rx) = oneshot::channel();
-        inner.pending.borrow_mut().insert(3, tx);
+        inner.pending.borrow_mut().insert(3, Pending::Value(tx));
         let line = br#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"slow down","data":{"code":"rate_limited","retry_after":2}}}"#;
         assert_eq!(inner.dispatch(line), Ok(()));
         assert_eq!(
@@ -554,5 +617,27 @@ mod tests {
             }))
         );
         assert!(inner.dispatch(b"nope").is_err());
+    }
+
+    #[test]
+    fn a_line_reply_and_a_notification_come_as_the_broker_wrote_them() {
+        let (sink, mut events) = mpsc::unbounded_channel();
+        let inner = Inner {
+            next_id: Cell::new(1),
+            pending: RefCell::new(HashMap::new()),
+            closed: RefCell::new(None),
+            writer: RefCell::new(None),
+            notifications: RefCell::new(Some(sink)),
+        };
+        let (tx, mut rx) = oneshot::channel();
+        inner.pending.borrow_mut().insert(4, Pending::Line(tx));
+        let event = br#"{"jsonrpc":"2.0","method":"fleet","params":{"z":1,"a":2}}"#;
+        let reply = br#"{"jsonrpc":"2.0","id":4,"result":{"z":1,"a":2}}"#;
+        assert_eq!(inner.dispatch(event), Ok(()));
+        assert_eq!(inner.dispatch(reply), Ok(()));
+        assert_eq!(rx.try_recv().ok(), Some(Ok(reply.to_vec())));
+        assert_eq!(events.try_recv().ok(), Some(event.to_vec()));
+        inner.fail("gone");
+        assert!(events.try_recv().is_err());
     }
 }

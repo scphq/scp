@@ -630,7 +630,7 @@ function activityLine(row: ActivityRow): string {
   return `${time(row.at)} ${row.endpoint}${row.agent ? ` [${row.agent}]` : ""} ${row.kind}${row.tool ? ` ${row.tool}` : ""}${row.summary ? `: ${quoted(row.summary)}` : ""}`
 }
 
-function fleetLine(event: Record<string, unknown>): string {
+export function fleetLine(event: Record<string, unknown>): string {
   const at = time(String(event.at))
   switch (event.type) {
     case "presence":
@@ -1564,7 +1564,10 @@ function printScope(view: ScopeView): void {
 }
 
 /** what list and peers show without --all: no historic agents, and no offline rows but the human; with the counts left out */
-function unlisted<T extends { kind: string; presence: string; historic?: true }>(rows: T[], all: boolean): { shown: T[]; hidden: number; historic: number } {
+export function unlisted<T extends { kind: string; presence: string; historic?: true }>(
+  rows: T[],
+  all: boolean,
+): { shown: T[]; hidden: number; historic: number } {
   if (all) return { shown: rows, hidden: 0, historic: 0 }
   const shown = rows.filter((row) => !row.historic && (row.kind === "human" || row.presence !== "offline"))
   const historic = rows.filter((row) => row.historic).length
@@ -1577,7 +1580,7 @@ function hiddenNotes(offline: number, historic: number): void {
 }
 
 /** the agents nobody spawned that spawned nobody, the caller aside: list and peers fold them into one line */
-function unspawned(endpoints: EndpointView[], me: EndpointView | null): Set<string> {
+export function unspawned(endpoints: EndpointView[], me: EndpointView | null): Set<string> {
   const parents = new Set(endpoints.map((e) => e.parent))
   return new Set(endpoints.filter((e) => e.kind === "agent" && !e.parent && !parents.has(e.address) && e.id !== me?.id).map((e) => e.address))
 }
@@ -1622,7 +1625,7 @@ export function printTree(endpoints: EndpointView[], me?: EndpointView | null): 
   printTable(rows)
 }
 
-type Snapshot = { endpoints: EndpointView[]; activity: ActivityRow[]; broker: BrokerInfo; unread?: Record<string, number> }
+export type Snapshot = { endpoints: EndpointView[]; activity: ActivityRow[]; broker: BrokerInfo; unread?: Record<string, number> }
 
 const STATES = ["working", "waiting", "blocked", "done"] as const
 
@@ -1630,7 +1633,7 @@ const STATES = ["working", "waiting", "blocked", "done"] as const
  * you, the agents by presence and, per harness, by status; who waits or is blocked; unread counts. Offline agents count by status only with
  * `all`. Whether it showed an agent's own words
  */
-function printSummary(snapshot: Snapshot, me: EndpointView | null, all: boolean): boolean {
+export function printSummary(snapshot: Snapshot, me: EndpointView | null, all: boolean): boolean {
   if (me)
     out(
       `you: ${me.address} (${me.kind}${me.harness ? `, ${me.harness}` : ""}) ${presenceText(me)}${me.title ? ` ${quoted(me.title)}` : ""}${me.kind === "human" ? "" : `, status ${me.status ? statusText(me.status) : "-"}`}`,
