@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "muse-launch",
+  "title": "What a launcher hands a muse serve process's shim and hooks",
+  "description": "$SCP_DIR/launch/muse-<pid>.json, <pid> the pid of process",
+  "type": "object",
+  "required": ["process"],
+  "properties": {
+    "process": { "$ref": "common.schema.json#/$defs/ProcessKey" },
+    "name": { "$ref": "common.schema.json#/$defs/Handle" },
+    "grant": { "type": "string", "minLength": 1 },
+    "under": { "type": "string", "minLength": 1 },
+    "session": { "$ref": "common.schema.json#/$defs/LaunchSession" },
+    "launcher": { "$ref": "common.schema.json#/$defs/ProcessKey" }
+  },
+  "additionalProperties": false
+}

@@ -280,7 +280,8 @@ fn connect_error(error: &io::Error, path: &Path) -> String {
     }
 }
 
-fn normalize(path: &Path) -> PathBuf {
+/// `path` with `.` and `..` resolved lexically, as `path.resolve` does
+pub fn normalize(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for part in path.components() {
         match part {
@@ -421,8 +422,22 @@ pub fn retry_delay(attempt: u32, left: f64, random: f64) -> f64 {
         .max(0.0)
 }
 
+/// starts the broker, or says why it could not
+pub type Start = Rc<dyn Fn() -> Result<(), CallError>>;
+
 /// a connection to the broker for `dir`, starting it once with `start` when it is not running
 pub async fn connect_broker(dir: &Path, start: Option<Rc<dyn Fn()>>) -> Result<Client, CallError> {
+    let start = start.map(|start| -> Start {
+        Rc::new(move || {
+            start();
+            Ok(())
+        })
+    });
+    connect_or_start(dir, start).await
+}
+
+/// [`connect_broker`] with a start that can fail, which ends the connect with its error
+pub async fn connect_or_start(dir: &Path, start: Option<Start>) -> Result<Client, CallError> {
     let budget = CONNECT_BUDGET_MS;
     let path = socket_path(dir);
     let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -468,7 +483,7 @@ pub async fn connect_broker(dir: &Path, start: Option<Rc<dyn Fn()>>) -> Result<C
                     path.display()
                 )));
             };
-            start();
+            start()?;
             started = true;
         }
         let left = deadline

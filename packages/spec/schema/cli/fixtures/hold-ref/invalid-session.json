@@ -1,0 +1,13 @@
+{
+  "harness": "codex",
+  "session": "-x",
+  "cwd": "/Users/dev/src/app",
+  "argv": [
+    "/usr/local/bin/codex",
+    "exec",
+    "resume",
+    "-x"
+  ],
+  "idle_s": 600,
+  "parent": "me/lead"
+}

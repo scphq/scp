@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "runners",
+  "title": "The runners spawn --via hands work to",
+  "description": "$SCP_RUNNERS_FILE, else runners.json beside the broker's policy file. Keys are runner names, ^[a-z0-9][a-z0-9-]{0,31}$",
+  "type": "object",
+  "additionalProperties": { "$ref": "#/$defs/Runner" },
+  "$defs": {
+    "Runner": {
+      "description": "other fields are ignored",
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": { "$ref": "common.schema.json#/$defs/Argv" },
+        "timeout_s": { "description": "default 60", "type": ["integer", "null"], "minimum": 1, "maximum": 3600 },
+        "stop": { "$ref": "common.schema.json#/$defs/Argv" },
+        "status": { "$ref": "common.schema.json#/$defs/Argv" },
+        "status_timeout_s": { "description": "default 5", "type": "integer", "minimum": 1, "maximum": 60 }
+      }
+    }
+  }
+}

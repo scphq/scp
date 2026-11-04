@@ -16,3 +16,7 @@ export const compatConformance = process.env.SCP_CONFORMANCE_COMPAT === "1";
 export const compatDirectory = process.env.SCP_COMPAT_DIR;
 /** `rust` runs every machine fixture's broker on SCP_BROKER_BIN, `mixed` every other one, so native and ts brokers bridge together */
 export const machineBrokers = process.env.SCP_MACHINE_BROKERS;
+/** `native` runs every machine fixture's CLI under Node with SCP_NATIVE=1 and SCP_SWARM_BIN, so its verbs route to the native swarm */
+export const machineProgram = process.env.SCP_MACHINE_PROGRAM;
+/** where the routed CLI logs each routing decision */
+export const routeLog = process.env.SCP_ROUTE_LOG;

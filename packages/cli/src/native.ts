@@ -4,21 +4,12 @@ import { createRequire } from "node:module"
 import { constants as osConstants } from "node:os"
 import { basename, isAbsolute, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
+import { nativeKey } from "./route"
 import { capture, note, SELF } from "./term"
 
 const require = createRequire(import.meta.url)
 
-export function nativeKey(platform = process.platform, arch = process.arch, glibc = linuxGlibc()): string | undefined {
-  if (platform === "darwin" && (arch === "arm64" || arch === "x64")) return `darwin-${arch}`
-  if (platform === "linux" && (arch === "x64" || (arch === "arm64" && glibc))) return `linux-${arch}-${glibc ? "gnu" : "musl"}`
-  return undefined
-}
-
-function linuxGlibc(): boolean {
-  if (process.platform !== "linux") return false
-  const header = (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
-  return Boolean(header?.glibcVersionRuntime)
-}
+export { nativeKey } from "./route"
 
 /** `override`, else `name` from this platform's native package, when it is an executable file whose `--version` prints `<name> <version>` */
 function nativeBinary(

@@ -1,0 +1,5 @@
+{
+  "vm": {
+    "command": "/opt/scp/bin/vm-wake"
+  }
+}

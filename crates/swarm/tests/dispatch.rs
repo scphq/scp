@@ -72,7 +72,15 @@ fn version_usage_and_errors() {
     assert_eq!(mcp.status.code(), Some(125));
     assert!(text(&mcp.stderr).contains("mcp takes no arguments"));
     let unknown = output(temp.swarm(&["frobnicate"]));
-    assert_eq!(unknown.status.code(), Some(2));
+    assert_eq!(unknown.status.code(), Some(125));
+    assert!(text(&unknown.stderr).contains("frobnicate is not native in this swarm"));
+    let mut handed = temp.swarm(&["--as", "x", "frobnicate", "a"]);
+    handed.env(
+        "SCP_CLI_ARGV",
+        r#"["/bin/sh","-c","echo \"$SCP_ROUTED $*\"","sh"]"#,
+    );
+    let handed = output(handed);
+    assert_eq!(text(&handed.stdout), "ts --as x frobnicate a\n");
     assert_eq!(output(temp.swarm(&[])).status.code(), Some(2));
     let bad = output(temp.swarm(&["daemon", "start"]));
     assert_eq!(bad.status.code(), Some(2));

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "shim-binding",
+  "title": "A codex shim's harness key for shells whose sandbox hides its process",
+  "description": "$SCP_DIR/bindings/pid-<pid>.json, and key-<$SCP_SHIM_BINDING>.json when that is 1 to 128 lowercase hex digits; a pid- file names the pid of its own process key",
+  "type": "object",
+  "required": ["process", "handle", "harness"],
+  "properties": {
+    "process": { "$ref": "common.schema.json#/$defs/ProcessKey" },
+    "handle": { "$ref": "common.schema.json#/$defs/Handle" },
+    "harness": { "enum": ["codex", "codex-desktop", "t3code"] }
+  },
+  "additionalProperties": false
+}

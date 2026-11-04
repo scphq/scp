@@ -118,7 +118,7 @@ impl Wakers {
             (
                 provider.to_owned(),
                 WakerConfig {
-                    command: cli.iter().cloned().chain([command.into()]).collect(),
+                    command: crate::launch::verb_command(cli, command),
                     timeout_s,
                 },
             )

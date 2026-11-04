@@ -16,6 +16,7 @@ path = "src/main.rs"
 clap.workspace = true
 libc = "=0.2.191"
 scp-broker = { path = "../scp-broker" }
+scp-cli = { path = "../scp-cli" }
 scp-hook = { path = "../scp-hook" }
 scp-mcp = { path = "../scp-mcp" }
 tokio.workspace = true

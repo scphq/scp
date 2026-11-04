@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wakers",
+  "title": "The wake hooks the broker runs for hibernated endpoints",
+  "description": "wakers.json beside the broker's policy file. Keys are wake providers, ^[a-z0-9][a-z0-9-]{0,31}$; an entry overrides the built-in waker of its provider",
+  "type": "object",
+  "additionalProperties": { "$ref": "#/$defs/Waker" },
+  "$defs": {
+    "Waker": {
+      "description": "other fields are ignored",
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": { "$ref": "common.schema.json#/$defs/Argv" },
+        "timeout_s": { "description": "default 60", "type": ["integer", "null"], "minimum": 1, "maximum": 3600 }
+      }
+    }
+  }
+}

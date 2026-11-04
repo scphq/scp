@@ -479,7 +479,7 @@ export function readAllStates(env: Env): (BgState & { id: string })[] {
   })
 }
 
-function writeState(env: Env, id: string, state: BgState): void {
+export function writeState(env: Env, id: string, state: BgState): void {
   const path = statePath(env, id)
   privateDir(bgDir(env))
   writeFileSync(`${path}.tmp`, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
@@ -1063,7 +1063,7 @@ function pairs<T>(value: unknown, valid: (one: unknown) => one is T): [string, T
   return value.filter((pair): pair is [string, T] => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string" && valid(pair[1]))
 }
 
-function readTaskState(env: Env): BgTaskState {
+export function readTaskState(env: Env): BgTaskState {
   try {
     const raw = JSON.parse(readFileSync(taskStatePath(env), "utf8")) as Record<string, unknown> | null
     return {
@@ -1077,7 +1077,7 @@ function readTaskState(env: Env): BgTaskState {
   }
 }
 
-function writeTaskState(env: Env, state: BgTaskState): void {
+export function writeTaskState(env: Env, state: BgTaskState): void {
   const path = taskStatePath(env)
   const value = { sessions: [...state.sessions], seen: [...state.seen], stopped: [...state.stopped], listed: state.listed }
   writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify(value)}\n`, { mode: 0o600 })

@@ -1,8 +1,9 @@
 //! The words that start the CLI, which the broker's built-in wakers and tasks run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -10,6 +11,30 @@ use crate::wake::cli_argv;
 
 /// the file in the relay directory that keeps the last launch a broker was given
 pub const RECORD_FILE: &str = "cli-argv.json";
+
+/// this executable and the CLI verbs it runs natively
+pub type NativeVerbs = (PathBuf, BTreeSet<String>);
+
+static NATIVE_VERBS: OnceLock<NativeVerbs> = OnceLock::new();
+
+/// names this executable and the CLI verbs it runs, so built-in wakers and tasks run those on it, with no CLI process per run
+pub fn set_native_verbs<S: Into<String>>(exe: PathBuf, verbs: impl IntoIterator<Item = S>) {
+    let _ = NATIVE_VERBS.set((exe, verbs.into_iter().map(Into::into).collect()));
+}
+
+/// the command that runs CLI `verb`: this executable when it runs the verb, else `cli` followed by it
+pub fn verb_command(cli: &[String], verb: &str) -> Vec<String> {
+    command_for(NATIVE_VERBS.get(), cli, verb)
+}
+
+fn command_for(native: Option<&NativeVerbs>, cli: &[String], verb: &str) -> Vec<String> {
+    match native {
+        Some((exe, verbs)) if verbs.contains(verb) => {
+            vec![exe.to_string_lossy().into_owned(), verb.to_owned()]
+        }
+        _ => cli.iter().cloned().chain([verb.to_owned()]).collect(),
+    }
+}
 
 /// `$SCP_CLI_ARGV`, else the launch the last broker of `dir` was given while its files still exist, else the CLI installed beside
 /// this executable's native package; None leaves `swarm` on PATH
@@ -135,6 +160,36 @@ mod tests {
             0o644,
         );
         file(&dir.join("dist/cli.js"), "", 0o755);
+    }
+
+    #[test]
+    fn a_verb_this_executable_runs_skips_the_cli() {
+        let cli = vec!["node".to_owned(), "/cli.js".to_owned()];
+        let native: NativeVerbs = (
+            "/bin/swarm".into(),
+            BTreeSet::from(["dummy-wake".to_owned()]),
+        );
+        assert_eq!(
+            command_for(Some(&native), &cli, "dummy-wake"),
+            vec!["/bin/swarm", "dummy-wake"]
+        );
+        assert_eq!(
+            command_for(Some(&native), &cli, "spawn-wake"),
+            vec!["node", "/cli.js", "spawn-wake"]
+        );
+        assert_eq!(
+            command_for(None, &cli, "dummy-wake"),
+            vec!["node", "/cli.js", "dummy-wake"]
+        );
+        set_native_verbs("/bin/swarm".into(), ["__test-verb"]);
+        assert_eq!(
+            verb_command(&cli, "__test-verb"),
+            vec!["/bin/swarm", "__test-verb"]
+        );
+        assert_eq!(
+            crate::wake::Wakers::builtin_for(&cli)["codex-queue"].command,
+            vec!["node", "/cli.js", "codex-wake"]
+        );
     }
 
     #[test]

@@ -1,0 +1,30 @@
+{
+  "box": {
+    "command": [
+      "ssh",
+      "box.local",
+      "swarm",
+      "spawn-remote"
+    ],
+    "timeout_s": 120,
+    "stop": [
+      "ssh",
+      "box.local",
+      "swarm",
+      "stop-remote"
+    ],
+    "status": [
+      "ssh",
+      "box.local",
+      "swarm",
+      "status-remote"
+    ],
+    "status_timeout_s": 10
+  },
+  "vm-2": {
+    "command": [
+      "/opt/scp/bin/vm-runner"
+    ],
+    "note": "ignored"
+  }
+}

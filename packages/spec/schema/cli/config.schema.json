@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "config",
+  "title": "The relay configuration",
+  "description": "$XDG_CONFIG_HOME/scp/config.json (else ~/.config/scp/config.json). The CLI writes relay and join; the user writes the rest. Unknown keys are kept and ignored",
+  "type": "object",
+  "properties": {
+    "relay": { "description": "the relay origin swarm relay use saved", "type": "string", "pattern": "^https?://" },
+    "join": { "description": "manual joins hooked sessions only on swarm join; anything else is auto", "enum": ["auto", "manual"] },
+    "historic_after_s": { "$ref": "common.schema.json#/$defs/Seconds" },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "idle_after_s": { "$ref": "common.schema.json#/$defs/Seconds" },
+        "historic_after_s": { "$ref": "common.schema.json#/$defs/Seconds" }
+      }
+    },
+    "spawn": {
+      "type": "object",
+      "properties": {
+        "idle_after_s": { "$ref": "common.schema.json#/$defs/Seconds" }
+      }
+    },
+    "claude_bg": {
+      "type": "object",
+      "properties": {
+        "stop_after_s": { "$ref": "common.schema.json#/$defs/Seconds" },
+        "idle_after_s": { "$ref": "common.schema.json#/$defs/Seconds" },
+        "remove": { "enum": ["on_stop", "historic", true, false, "1", "0", "true", "false"] }
+      }
+    },
+    "limits": {
+      "description": "broker rate limits by RATE_LIMITS key; null or 0 lifts a count limit",
+      "type": "object",
+      "additionalProperties": { "type": ["integer", "null"], "minimum": 0 }
+    }
+  }
+}

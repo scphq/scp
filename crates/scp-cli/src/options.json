@@ -1,0 +1,666 @@
+{
+  "options": {
+    "cloud": {
+      "type": "boolean"
+    },
+    "machine": {
+      "type": "string"
+    },
+    "token": {
+      "type": "string"
+    },
+    "label": {
+      "type": "string"
+    },
+    "no-browser": {
+      "type": "boolean"
+    },
+    "json": {
+      "type": "boolean"
+    },
+    "channels": {
+      "type": "boolean"
+    },
+    "cowork-only": {
+      "type": "boolean"
+    },
+    "write": {
+      "type": "boolean"
+    },
+    "print": {
+      "type": "boolean"
+    },
+    "block-stop-on-unread": {
+      "type": "boolean"
+    },
+    "push-wait": {
+      "type": "string"
+    },
+    "all": {
+      "type": "boolean"
+    },
+    "as": {
+      "type": "string"
+    },
+    "harness": {
+      "type": "string"
+    },
+    "wait": {
+      "type": "string"
+    },
+    "ack": {
+      "type": "boolean"
+    },
+    "keep": {
+      "type": "boolean"
+    },
+    "reply-to": {
+      "type": "string"
+    },
+    "require-reply": {
+      "type": "boolean"
+    },
+    "thread": {
+      "type": "string"
+    },
+    "private": {
+      "type": "boolean"
+    },
+    "attach": {
+      "type": "string",
+      "multiple": true
+    },
+    "tool": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "since": {
+      "type": "string"
+    },
+    "limit": {
+      "type": "string"
+    },
+    "idle": {
+      "type": "string"
+    },
+    "policy": {
+      "type": "string"
+    },
+    "human": {
+      "type": "boolean"
+    },
+    "help": {
+      "type": "boolean",
+      "short": "h"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "tree": {
+      "type": "boolean"
+    },
+    "roots": {
+      "type": "boolean"
+    },
+    "contacts": {
+      "type": "boolean"
+    },
+    "activity": {
+      "type": "boolean"
+    },
+    "in": {
+      "type": "string"
+    },
+    "out": {
+      "type": "string"
+    },
+    "allow": {
+      "type": "string",
+      "multiple": true
+    },
+    "rules": {
+      "type": "string"
+    },
+    "group": {
+      "type": "string"
+    },
+    "under": {
+      "type": "string"
+    },
+    "ttl": {
+      "type": "string"
+    },
+    "labels": {
+      "type": "string"
+    },
+    "handback-bytes": {
+      "type": "string"
+    },
+    "no-push": {
+      "type": "boolean"
+    },
+    "durable": {
+      "type": "boolean"
+    },
+    "no-durable": {
+      "type": "boolean"
+    },
+    "bg": {
+      "type": "boolean"
+    },
+    "fg": {
+      "type": "boolean"
+    },
+    "name": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "judge": {
+      "type": "boolean"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "turns": {
+      "type": "string"
+    },
+    "full": {
+      "type": "boolean"
+    },
+    "who": {
+      "type": "boolean"
+    },
+    "peek": {
+      "type": "string"
+    },
+    "endpoint": {
+      "type": "string"
+    },
+    "take-over": {
+      "type": "boolean"
+    },
+    "dry-run": {
+      "type": "boolean"
+    },
+    "live": {
+      "type": "boolean"
+    },
+    "check": {
+      "type": "boolean"
+    },
+    "parent": {
+      "type": "string"
+    },
+    "via": {
+      "type": "string"
+    },
+    "wake": {
+      "type": "string"
+    },
+    "eta": {
+      "type": "string"
+    },
+    "ref": {
+      "type": "string"
+    },
+    "gone": {
+      "type": "boolean"
+    },
+    "secret-env": {
+      "type": "string"
+    },
+    "clear": {
+      "type": "boolean"
+    }
+  },
+  "verb_options": {
+    "log": {
+      "scope": {
+        "type": "boolean"
+      },
+      "peek": {
+        "type": "boolean"
+      }
+    },
+    "admin": {
+      "tree": {
+        "type": "string"
+      }
+    }
+  },
+  "verbs": {
+    "list": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "all",
+      "tree",
+      "roots",
+      "contacts"
+    ],
+    "send": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "reply-to",
+      "thread",
+      "private",
+      "attach",
+      "live"
+    ],
+    "join": [
+      "harness",
+      "json",
+      "under"
+    ],
+    "adopt": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "parent"
+    ],
+    "link": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "unlink": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "leave": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "endpoint"
+    ],
+    "hibernate": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "wake",
+      "ref",
+      "gone",
+      "all",
+      "eta"
+    ],
+    "end": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "machine": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "secret-env",
+      "clear"
+    ],
+    "name": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "endpoint",
+      "take-over"
+    ],
+    "relink": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "dry-run",
+      "live",
+      "check"
+    ],
+    "inbox": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "wait",
+      "ack",
+      "keep"
+    ],
+    "reply": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "ack": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "all"
+    ],
+    "show": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "ask": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "wait",
+      "require-reply",
+      "thread",
+      "private",
+      "attach"
+    ],
+    "ask-wait": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "wait"
+    ],
+    "status": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "all",
+      "activity"
+    ],
+    "watch": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "set-status": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "set-title": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "set-now": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "event": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "tool",
+      "summary"
+    ],
+    "log": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "since",
+      "limit",
+      "scope",
+      "judge",
+      "peek"
+    ],
+    "holds": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "all",
+      "redacted",
+      "reason"
+    ],
+    "policy": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "whoami": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "rules": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "in",
+      "out",
+      "scope",
+      "allow"
+    ],
+    "group": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "rules",
+      "in",
+      "out"
+    ],
+    "admin": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "tree",
+      "group"
+    ],
+    "spawn-env": [
+      "as",
+      "harness",
+      "human",
+      "name",
+      "title",
+      "scope",
+      "rules",
+      "in",
+      "out",
+      "allow",
+      "group",
+      "under",
+      "ttl",
+      "peek"
+    ],
+    "spawn": [
+      "as",
+      "harness",
+      "human",
+      "name",
+      "title",
+      "scope",
+      "rules",
+      "in",
+      "out",
+      "allow",
+      "group",
+      "under",
+      "ttl",
+      "labels",
+      "peek",
+      "handback-bytes",
+      "no-push",
+      "bg",
+      "fg",
+      "via",
+      "idle",
+      "durable",
+      "no-durable"
+    ],
+    "peers": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "all",
+      "roots"
+    ],
+    "peek": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine",
+      "turns",
+      "full",
+      "who"
+    ],
+    "set-peek": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "why": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ],
+    "daemon": [
+      "idle",
+      "policy"
+    ],
+    "mcp": [
+      "as",
+      "harness",
+      "human",
+      "channels",
+      "cowork-only"
+    ],
+    "hooks": [
+      "harness",
+      "scope",
+      "write",
+      "print",
+      "block-stop-on-unread",
+      "push-wait"
+    ],
+    "relay": [
+      "json"
+    ],
+    "login": [
+      "json",
+      "token",
+      "label",
+      "no-browser"
+    ],
+    "up": [
+      "token",
+      "label",
+      "machine",
+      "no-browser"
+    ],
+    "logout": [
+      "json"
+    ],
+    "cloud": [
+      "machine",
+      "json"
+    ],
+    "machines": [
+      "as",
+      "harness",
+      "human",
+      "json",
+      "cloud",
+      "machine"
+    ]
+  }
+}

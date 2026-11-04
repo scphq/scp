@@ -79,13 +79,13 @@ pub fn attach(task: Task, running: TaskPid) -> tokio::task::JoinHandle<()> {
 
 /// one run; its stderr goes to the broker's, except a failure the same as the last one
 async fn run(task: &Task, running: &TaskPid, failure: &mut Option<String>) {
-    let Some((program, args)) = task.cli.split_first() else {
+    let words = crate::launch::verb_command(&task.cli, "claude-bg-task");
+    let Some((program, args)) = words.split_first() else {
         return;
     };
     let mut command = tokio::process::Command::new(program);
     command
         .args(args)
-        .arg("claude-bg-task")
         .env_clear()
         .envs(&task.env)
         .env("SCP_DIR", &task.dir)

@@ -1,0 +1,11 @@
+{
+  "box": {
+    "command": [
+      "ssh",
+      "box.local",
+      "swarm",
+      "spawn-remote"
+    ],
+    "timeout_s": null
+  }
+}

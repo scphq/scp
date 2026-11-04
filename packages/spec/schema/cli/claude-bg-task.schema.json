@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claude-bg-task",
+  "title": "What one claude-bg task run hands the next",
+  "description": "$SCP_DIR/claude-bg-task.json",
+  "type": "object",
+  "required": ["sessions", "seen", "stopped", "listed"],
+  "properties": {
+    "sessions": {
+      "description": "[session id, short id] pairs of the background sessions in the last listing",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": { "type": "string" }
+      }
+    },
+    "seen": {
+      "description": "the short ids of the records the last listing covered",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "stopped": {
+      "description": "[short id, entry] pairs of recorded sessions the last listing showed stopped",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": { "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/ClaudeEntry" }] }
+      }
+    },
+    "listed": { "type": "boolean" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ClaudeEntry": {
+      "description": "one entry of claude agents --json --all, as Claude Code printed it",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "kind": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "name": { "type": "string" },
+        "state": { "type": "string" },
+        "pid": { "type": "integer" },
+        "status": { "type": "string" }
+      }
+    }
+  }
+}

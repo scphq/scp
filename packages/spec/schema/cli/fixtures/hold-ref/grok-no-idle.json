@@ -1,0 +1,13 @@
+{
+  "harness": "grok",
+  "session": "5b0c9d3e-2f41-4a8b-9c7d-6e5f4a3b2c1d",
+  "cwd": "/Users/dev/src/app",
+  "argv": [
+    "/usr/local/bin/grok",
+    "--resume",
+    "5b0c9d3e-2f41-4a8b-9c7d-6e5f4a3b2c1d",
+    "-p"
+  ],
+  "idle_s": null,
+  "parent": "me/lead"
+}

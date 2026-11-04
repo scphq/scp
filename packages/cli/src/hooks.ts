@@ -451,7 +451,7 @@ export function stopContinues(version: string | undefined): boolean {
 }
 
 /** the Claude Code version a hook runs under: its payload's, else the one setup cached */
-function claudeVersion(payload: Json, env: Env, home?: () => string): string | undefined {
+export function claudeVersion(payload: Json, env: Env, home?: () => string): string | undefined {
   const named = asString(field(payload, "version", "claude_code_version"))
   if (named) return named
   try {

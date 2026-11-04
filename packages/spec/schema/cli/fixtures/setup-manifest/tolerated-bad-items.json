@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "added": [
+    {
+      "harness": "codex",
+      "kind": "mcp",
+      "file": "/Users/dev/.codex/config.toml"
+    },
+    {
+      "harness": "claude",
+      "kind": "mcp"
+    },
+    {
+      "harness": "grok",
+      "kind": 5,
+      "file": "/Users/dev/.grok/config.toml"
+    },
+    "codex"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "setup-manifest",
+  "title": "What swarm setup added, so --undo removes only that",
+  "description": "$XDG_CONFIG_HOME/scp/setup.json (else ~/.config/scp/setup.json); removed when nothing is left in it",
+  "type": "object",
+  "required": ["version", "added"],
+  "properties": {
+    "version": { "const": 1 },
+    "added": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Added" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Added": {
+      "type": "object",
+      "required": ["harness", "kind", "file"],
+      "properties": {
+        "harness": { "enum": ["claude", "codex", "opencode", "grok", "muse", "agy"] },
+        "kind": { "enum": ["mcp", "rules", "hooks"] },
+        "file": { "$ref": "common.schema.json#/$defs/AbsolutePath" },
+        "rules": { "description": "the agy permission rules setup added, kind rules only", "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"mcpServers": {"scp": {"type": "stdio", "command": "/usr/local/bin/node", "args": [

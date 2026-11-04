@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claude-bg-state",
+  "title": "What the claude-bg policy keeps of a worker it stopped or removed",
+  "description": "$SCP_DIR/claude-bg/<short id>.state.json",
+  "type": "object",
+  "required": ["sessionId", "cwd"],
+  "properties": {
+    "sessionId": { "$ref": "common.schema.json#/$defs/ClaudeSessionId" },
+    "cwd": { "$ref": "common.schema.json#/$defs/AbsolutePath" },
+    "name": { "description": "the Claude Code session name; a resume passes it on only when it matches ^[\\w.@+ ][\\w.@+ -]{0,99}$", "type": "string" },
+    "handle": { "$ref": "common.schema.json#/$defs/Handle" },
+    "stoppedAt": { "description": "epoch milliseconds", "type": "integer", "minimum": 0 },
+    "removedAt": { "description": "epoch milliseconds", "type": "integer", "minimum": 0 },
+    "rmRefused": {
+      "type": "object",
+      "required": ["at", "reason"],
+      "properties": {
+        "at": { "description": "epoch milliseconds", "type": "integer", "minimum": 0 },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "movedTo": { "$ref": "common.schema.json#/$defs/ShortId" }
+  },
+  "additionalProperties": false
+}

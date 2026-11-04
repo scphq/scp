@@ -1,0 +1,8 @@
+{
+  "Box": {
+    "command": [
+      "ssh",
+      "box.local"
+    ]
+  }
+}

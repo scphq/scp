@@ -1,0 +1,8 @@
+{
+  "vm": {
+    "command": [
+      "/opt/scp/bin/vm-wake"
+    ],
+    "timeout_s": 1.5
+  }
+}

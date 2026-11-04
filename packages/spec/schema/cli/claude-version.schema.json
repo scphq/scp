@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claude-version",
+  "title": "The Claude Code version setup last saw",
+  "description": "$XDG_CONFIG_HOME/scp/claude-version (else ~/.config/scp/claude-version), plain text: the x.y.z of claude --version and a newline",
+  "type": "string",
+  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+\\n$"
+}
