@@ -642,6 +642,166 @@ fn session_start_daemon_environment() {
 }
 
 #[test]
+fn native_broker_starts_directly() {
+    let temp = Temp::new();
+    let launcher = temp.0.join("launcher.sh");
+    fs::write(&launcher, "printf '%s\\n' \"launcher $*\"\n").unwrap();
+    let swarm = temp.0.join("swarm");
+    fs::write(
+        &swarm,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'swarm {}'; exit 0; }}\nprintf '%s\\n' \"native $*\" \"$SCP_CLI_ARGV\" \"$SCP_NATIVE\" \"$SCP_SWARM_BIN\"\n",
+            env!("SCP_HOOK_VERSION")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&swarm, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    let bin = swarm.to_str().unwrap();
+    assert_eq!(
+        hook::native_broker(&env(&[("SCP_NATIVE", "1"), ("SCP_SWARM_BIN", bin)]), None),
+        Some(swarm.clone())
+    );
+    assert_eq!(
+        hook::native_broker(&env(&[("SCP_NATIVE", "1")]), Some(temp.0.join("scp-hook"))),
+        Some(swarm.clone())
+    );
+    let own = temp.0.join("elsewhere").join("swarm");
+    assert_eq!(
+        hook::native_broker(&env(&[("SCP_NATIVE", "1")]), Some(own.clone())),
+        Some(own)
+    );
+    for pairs in [
+        vec![("SCP_NATIVE", "mcp"), ("SCP_SWARM_BIN", bin)],
+        vec![("SCP_SWARM_BIN", bin)],
+        vec![
+            ("SCP_NATIVE", "1"),
+            ("SCP_SWARM_BIN", launcher.to_str().unwrap()),
+        ],
+    ] {
+        assert_eq!(hook::native_broker(&env(&pairs), None), None, "{pairs:?}");
+    }
+    let held = temp.0.join("held");
+    fs::write(
+        &held,
+        format!(
+            "#!/bin/sh\necho 'swarm {}'\nsleep 5 &\nexit 0\n",
+            env!("SCP_HOOK_VERSION")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&held, fs::Permissions::from_mode(0o755)).unwrap();
+    let began = Instant::now();
+    assert_eq!(
+        hook::native_broker(
+            &env(&[
+                ("SCP_NATIVE", "1"),
+                ("SCP_SWARM_BIN", held.to_str().unwrap())
+            ]),
+            None
+        ),
+        None
+    );
+    assert!(began.elapsed() < Duration::from_secs(3));
+    let slow = temp.0.join("slow");
+    fs::write(&slow, "#!/bin/sh\nsleep 5\n").unwrap();
+    fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
+    let began = Instant::now();
+    assert_eq!(
+        hook::native_broker(
+            &env(&[
+                ("SCP_NATIVE", "1"),
+                ("SCP_SWARM_BIN", slow.to_str().unwrap())
+            ]),
+            None
+        ),
+        None
+    );
+    assert!(began.elapsed() < Duration::from_secs(3));
+    let up = std::env::current_dir().unwrap().components().count() - 1;
+    let relative =
+        std::path::PathBuf::from("../".repeat(up)).join(swarm.strip_prefix("/").unwrap());
+    let absolute = hook::native_broker(
+        &env(&[
+            ("SCP_NATIVE", "1"),
+            ("SCP_SWARM_BIN", relative.to_str().unwrap()),
+        ]),
+        None,
+    );
+    let absolute = absolute.expect("a relative SCP_SWARM_BIN resolves");
+    assert!(absolute.is_absolute(), "{absolute:?}");
+    assert_eq!(
+        fs::canonicalize(&absolute).unwrap(),
+        fs::canonicalize(&swarm).unwrap()
+    );
+    let stale = temp.0.join("stale");
+    fs::write(&stale, "#!/bin/sh\necho 'swarm 0.0.0-other'\n").unwrap();
+    fs::set_permissions(&stale, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        hook::native_broker(
+            &env(&[
+                ("SCP_NATIVE", "1"),
+                ("SCP_SWARM_BIN", stale.to_str().unwrap())
+            ]),
+            None
+        ),
+        None
+    );
+    for (mode, first) in [("1", "native daemon"), ("mcp", "launcher prefix daemon")] {
+        let _ = fs::remove_file(temp.0.join("broker.log"));
+        let _ = fs::remove_file(temp.0.join("relay.sock"));
+        let dir = temp.0.clone();
+        let server = std::thread::spawn(move || {
+            let began = Instant::now();
+            while !fs::read_to_string(dir.join("broker.log"))
+                .unwrap_or_default()
+                .starts_with(&format!("{first}\n"))
+            {
+                assert!(began.elapsed() < Duration::from_secs(4), "{first}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut reader = handshake(UnixListener::bind(dir.join("relay.sock")).unwrap());
+            line(&mut reader);
+            send(
+                &mut reader,
+                json!({"id":2,"result":{"stdout":"started","exit":0}}),
+            );
+        });
+        let mut command = Command::new(env!("CARGO_BIN_EXE_scp-hook"));
+        command
+            .args([
+                "/bin/sh",
+                launcher.to_str().unwrap(),
+                "prefix",
+                "hook",
+                "claude",
+                "SessionStart",
+            ])
+            .env_clear()
+            .env("SCP_DIR", &temp.0)
+            .env("SCP_NATIVE", mode)
+            .env("SCP_SWARM_BIN", &swarm)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        assert_eq!(finish(command, b"{}").stdout, b"started\n");
+        server.join().unwrap();
+        if mode == "1" {
+            let log = fs::read_to_string(temp.0.join("broker.log")).unwrap();
+            let lines: Vec<_> = log.lines().collect();
+            let argv: Vec<String> = serde_json::from_str(lines[1]).unwrap();
+            assert_eq!(argv, ["/bin/sh", launcher.to_str().unwrap(), "prefix"]);
+            assert_eq!(&lines[2..4], ["1", bin]);
+        }
+    }
+}
+
+#[test]
 fn session_start_mapping() {
     let env = HashMap::new();
     let args = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { Readable } from "node:stream"
 import pkg from "../package.json" with { type: "json" }
@@ -240,6 +240,51 @@ test("setup builds only the plugin and root zip entries with absolute launch pat
   expect(existsSync(join(plugin, "stale"))).toBe(false)
   expect(lines.join("\n")).toContain("Customize, Plugins, Add, Upload plugin")
   expect(() => relaySetup({ cowork: true, undo: true }, deps)).toThrow()
+})
+
+test("under SCP_NATIVE the plugin mounts the native swarm mcp while it is there, and its hooks keep the launcher", async () => {
+  const root = realpathSync(mkdtempSync(join(process.env.HOME!, "scp-cowork-native-")))
+  const bin = join(root, "cli", "cli.js")
+  const node = join(root, "node")
+  const swarm = join(root, "native bin", "swarm")
+  mkdirSync(dirname(bin), { recursive: true })
+  mkdirSync(dirname(swarm), { recursive: true })
+  writeFileSync(bin, "#!/usr/bin/env node\n", { mode: 0o755 })
+  writeFileSync(node, '#!/bin/sh\necho node "$@"\n', { mode: 0o755 })
+  writeFileSync(swarm, '#!/bin/sh\n[ "$1" = --version ] && { echo "swarm 1.2.3"; exit 0; }\necho "native $SCP_NATIVE $SCP_CLI_ARGV $*"\n', { mode: 0o755 })
+  for (const mode of ["1", "mcp"]) {
+    const state = join(root, `state-${mode}`)
+    const lines: string[] = []
+    const deps = {
+      env: { HOME: join(root, "home"), SCP_DIR: state, SCP_NATIVE: mode, SCP_SWARM_BIN: swarm, PATH: "/usr/bin:/bin" },
+      cwd: root,
+      version: "1.2.3",
+      out: (line: string) => lines.push(line),
+      which: (name: string) => (name === "swarm" ? bin : name === "node" ? node : undefined),
+    }
+    expect(relaySetup({ cowork: true, bin }, deps)).toBe(0)
+    const read = (path: string) => JSON.parse(readFileSync(join(state, "cowork-plugin", path), "utf8"))
+    const { command, args } = read(".mcp.json").mcpServers.scp
+    const run = async (argv: string[]) => {
+      const child = Bun.spawn(argv, { env: { PATH: "/usr/bin:/bin" }, stdout: "pipe" })
+      expect(await child.exited).toBe(0)
+      return (await new Response(child.stdout).text()).trim()
+    }
+    expect(await run([command, ...args])).toBe(`native ${mode} ${JSON.stringify([node, bin])} mcp --harness claude --channels --cowork-only`)
+    expect(read("hooks/hooks.json")).toEqual({ hooks: hookEntries("claude", { launcher: pluginLauncher([node, bin]), cowork: true }) })
+    expect(lines.join("\n")).toContain(`the native ${swarm} mcp (SCP_NATIVE=${mode})`)
+    if (mode === "mcp") {
+      chmodSync(swarm, 0o644)
+      expect(await run([command, ...args])).toBe(`node ${bin} mcp --harness claude --channels --cowork-only`)
+      chmodSync(swarm, 0o755)
+    }
+  }
+  const lines: string[] = []
+  const env = { HOME: join(root, "home"), SCP_DIR: join(root, "state-none"), SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "missing") }
+  expect(relaySetup({ cowork: true, bin }, { env, cwd: root, version: "1.2.3", out: (line) => lines.push(line), which: () => node })).toBe(0)
+  const mount = JSON.parse(readFileSync(join(root, "state-none", "cowork-plugin", ".mcp.json"), "utf8")).mcpServers.scp
+  expect(mount.args[1]).toBe(pluginLauncher([node, bin])[2])
+  expect(lines.join("\n")).toContain("no native swarm 1.2.3")
 })
 
 test("the CLI fast path exits zero without output or reading stdin outside Cowork", async () => {

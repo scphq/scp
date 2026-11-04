@@ -272,7 +272,21 @@ async fn add_columns(
     Ok(())
 }
 
+/// creates or upgrades the schema in one transaction, so a cold start commits once
 pub async fn migrate(store: &dyn Storage, now_ms: i64) -> StoreResult<()> {
+    store.all("BEGIN IMMEDIATE", &[]).await?;
+    if let Err(error) = migrate_schema(store, now_ms).await {
+        let _ = store.all("ROLLBACK", &[]).await;
+        return Err(error);
+    }
+    if let Err(error) = store.all("COMMIT", &[]).await {
+        let _ = store.all("ROLLBACK", &[]).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn migrate_schema(store: &dyn Storage, now_ms: i64) -> StoreResult<()> {
     for statement in MIGRATION {
         store.all(statement, &[]).await?;
     }
@@ -486,17 +500,7 @@ async fn migrate_tree_preset(store: &dyn Storage, now_ms: i64) -> StoreResult<()
     {
         return Ok(());
     }
-    store.all("BEGIN IMMEDIATE", &[]).await?;
-    let result = rewrite_tree_preset(store, now_ms).await;
-    if let Err(error) = result {
-        let _ = store.all("ROLLBACK", &[]).await;
-        return Err(error);
-    }
-    if let Err(error) = store.all("COMMIT", &[]).await {
-        let _ = store.all("ROLLBACK", &[]).await;
-        return Err(error);
-    }
-    Ok(())
+    rewrite_tree_preset(store, now_ms).await
 }
 
 async fn rewrite_tree_preset(store: &dyn Storage, now_ms: i64) -> StoreResult<()> {

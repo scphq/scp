@@ -71,6 +71,28 @@ brokerSuite("broker identity", (start) => {
     expect(await back.request("inbox")).toMatchObject({ messages: [{ body: { text: "kept" } }] });
   });
 
+  test("a sessionless leave and join takes the row back seen now, and a sessionless claim after it does not take it by handle", async () => {
+    const broker = await start();
+    const a = await broker.agent("app");
+    const peer = await broker.agent("peer");
+    await peer.request("send", { to: "app", body: "kept" });
+    const human = await broker.human();
+    const presence = async (id: string) => (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === id)?.presence;
+    await a.request("leave");
+    await a.close();
+    await waitFor(async () => (await presence(a.id)) === "offline", "app offline");
+    const join = await broker.wire();
+    const joined = (await join.hello({ transient: true, claim: { handle: "app", harness: "claude-code" }, join: {} })).endpoint!;
+    await join.close();
+    expect(joined).toMatchObject({ id: a.id, address: "me/app" });
+    expect(await presence(a.id)).not.toBe("offline");
+    const log = await human.request<{ rows: { event: string; endpoint: string | null; detail: Record<string, unknown> }[] }>("log");
+    expect(log.rows.filter((row) => row.event === "join").map((row) => row.detail)).toEqual([{ handle: "app" }]);
+    const fresh = await broker.agent("app");
+    expect(fresh.address).toBe("me/app-2");
+    expect(await fresh.request("inbox")).toMatchObject({ messages: [] });
+  });
+
   test("a transient join names the session and a refused join creates no endpoint", async () => {
     const broker = await start();
     await broker.agent("peer");

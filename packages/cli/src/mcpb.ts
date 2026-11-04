@@ -8,6 +8,7 @@ import { TOOLS } from "@scp-dev/mcp"
 import { RelayUsage } from "./common"
 import { shellQuote } from "./hooks"
 import { launcher } from "./launcher"
+import { type Mount, mountWith, nativeMode, nativeSwarm } from "./native"
 
 type Env = Record<string, string | undefined>
 
@@ -19,7 +20,8 @@ export const CLAUDE_DESKTOP_HELP = `${CLI_NAME} setup claude-desktop [--out FILE
   builds scp.mcpb, a Claude desktop extension that mounts the relay MCP shim in the app's chat (harness ${CHAT_HARNESS}),
   at ~/.config/scp/scp.mcpb or --out. It runs the ${CLI_NAME} PATH finds (or --bin) by absolute paths, a node script by
   absolute node and its real path, since the app does not start it with your shell's PATH; rebuild it after moving or
-  upgrading either. Install it by opening the file (double-click, or --open). Chat is pull only: the model reads new
+  upgrading either. With SCP_NATIVE=1 or mcp it runs the native ${CLI_NAME} mcp while that binary is there, as the setup mounts
+  do. Install it by opening the file (double-click, or --open). Chat is pull only: the model reads new
   messages when it calls relay_inbox; nothing wakes it. The app's Code tab is Claude Code and uses ${CLI_NAME} setup.
   claude_desktop_config.json is never edited.`
 
@@ -55,9 +57,18 @@ export function mcpbManifest(version: string): Record<string, unknown> {
   }
 }
 
-/** the launcher script the manifest runs: the shim by absolute paths, so the app's PATH does not matter */
-export function mcpbLauncher(launch: string[]): string {
-  return `#!/bin/sh\nexec ${[...launch, "mcp", "--harness", CHAT_HARNESS].map(shellQuote).join(" ")}\n`
+/** a shell line that execs the native `swarm` of `mount` with its variables and `rest` while the binary is executable, else nothing */
+export function nativeExecLine(mount: Mount | undefined, rest: string): string {
+  if (!mount?.native) return ""
+  const bin = shellQuote(mount.argv[0]!)
+  const vars = Object.entries(mount.env).map(([key, value]) => `${key}=${shellQuote(value)}`)
+  return `if [ -x ${bin} ]; then ${vars.length ? `export ${vars.join(" ")}; ` : ""}exec ${bin} ${rest}; fi\n`
+}
+
+/** the launcher script the manifest runs: the shim by absolute paths, so the app's PATH does not matter; the native server first when `native` names one */
+export function mcpbLauncher(launch: string[], native?: Mount): string {
+  const words = ["mcp", "--harness", CHAT_HARNESS].map(shellQuote).join(" ")
+  return `#!/bin/sh\n${nativeExecLine(native, words)}exec ${launch.map(shellQuote).join(" ")} ${words}\n`
 }
 
 const CRC_TABLE = (() => {
@@ -130,11 +141,11 @@ export function zip(entries: ZipEntry[]): Buffer {
   return Buffer.concat([...locals, directory, end])
 }
 
-/** the .mcpb bytes for a shim run by `launch` */
-export function mcpbBundle(launch: string[], version: string): Buffer {
+/** the .mcpb bytes for a shim run by `launch`, or by the native server `native` names while it is there */
+export function mcpbBundle(launch: string[], version: string, native?: Mount): Buffer {
   return zip([
     { path: "manifest.json", data: Buffer.from(`${JSON.stringify(mcpbManifest(version), null, 2)}\n`), mode: 0o644 },
-    { path: ENTRY, data: Buffer.from(mcpbLauncher(launch)), mode: 0o755 },
+    { path: ENTRY, data: Buffer.from(mcpbLauncher(launch, native)), mode: 0o755 },
   ])
 }
 
@@ -167,12 +178,14 @@ export function claudeDesktopSetup(options: ClaudeDesktopOptions, deps: ClaudeDe
   if (!isAbsolute(file) || !file.endsWith(".mcpb")) throw new RelayUsage("--out takes an absolute path ending in .mcpb")
   const launch = launcher(bin, env, deps.which)
   if (launch.problem) out(`! ${launch.problem}: the extension may not start`)
+  const native = nativeServerMount(launch.argv, ["--harness", CHAT_HARNESS], env, deps.version, out)
   mkdirSync(dirname(file), { recursive: true })
   const temp = `${file}.tmp-${process.pid}`
-  writeFileSync(temp, mcpbBundle(launch.argv, deps.version), { mode: 0o644 })
+  writeFileSync(temp, mcpbBundle(launch.argv, deps.version, native), { mode: 0o644 })
   renameSync(temp, file)
   out(`wrote ${file}`)
-  out(`  runs: ${[...launch.argv, "mcp", "--harness", CHAT_HARNESS].map(shellQuote).join(" ")}`)
+  if (native) out(`  runs: ${native.argv.map(shellQuote).join(" ")} (SCP_NATIVE=${native.env.SCP_NATIVE}), while it is there`)
+  out(`  ${native ? "else " : ""}runs: ${[...launch.argv, "mcp", "--harness", CHAT_HARNESS].map(shellQuote).join(" ")}`)
   out("  chat is pull only: the model reads new relay messages when it calls relay_inbox")
   if (options.open) {
     const code = (deps.run ?? ((argv) => spawnSync(argv[0]!, argv.slice(1), { stdio: "ignore" }).status ?? 1))(["open", file])
@@ -186,6 +199,19 @@ export function claudeDesktopSetup(options: ClaudeDesktopOptions, deps: ClaudeDe
   out(`install: double-click it in Finder, or run open ${shellQuote(file)} (or ${CLI_NAME} setup claude-desktop --open)`)
   out("rebuild it after moving or upgrading node or swarm")
   return 0
+}
+
+/** under `SCP_NATIVE=1` or `mcp`, the native mount of `swarm mcp <words>` a host-path launcher runs; a missing native `swarm` is noted and undefined */
+export function nativeServerMount(launch: string[], words: string[], env: Env, version: string, out: (line: string) => void): Mount | undefined {
+  if (nativeMode(env) === "off") return undefined
+  const bin = nativeSwarm(env, version)
+  if (!bin) {
+    out(
+      `! SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): it runs ${CLI_NAME} mcp through node`,
+    )
+    return undefined
+  }
+  return mountWith(bin, launch, words, env)
 }
 
 export function parseClaudeDesktopArgs(args: string[]): ClaudeDesktopOptions | "help" {
