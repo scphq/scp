@@ -22,6 +22,13 @@ pub fn set_native_verbs<S: Into<String>>(exe: PathBuf, verbs: impl IntoIterator<
     let _ = NATIVE_VERBS.set((exe, verbs.into_iter().map(Into::into).collect()));
 }
 
+/// whether this executable runs CLI `verb` itself, which needs no CLI at all
+pub fn runs_natively(verb: &str) -> bool {
+    NATIVE_VERBS
+        .get()
+        .is_some_and(|(_, verbs)| verbs.contains(verb))
+}
+
 /// the command that runs CLI `verb`: this executable when it runs the verb, else `cli` followed by it
 pub fn verb_command(cli: &[String], verb: &str) -> Vec<String> {
     command_for(NATIVE_VERBS.get(), cli, verb)

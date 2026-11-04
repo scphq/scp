@@ -39,16 +39,26 @@ Keyword limits: map keys are constrained in descriptions only (there is no `prop
 
 - Path: `$SCP_DIR/claude-bg/<short id>.state.json`, mode 0600, in a 0700 directory.
 - Writers: the claude-bg task (before and after `claude stop` or `claude rm`), `swarm claude-wake` (after a resume, `movedTo` when Claude
-  Code resumed under a new short id). Atomic by rename from the fixed name `<path>.tmp`.
+  Code resumed under a new short id). Atomic by rename from `<path>.<pid>.<random>.tmp`, a name of this writer alone, opened `wx`.
 - Readers: `readState`, `readAllStates` (cached by inode, size and mtime). A file without a string `sessionId` and `cwd` reads as none; other
   fields are taken as they are.
 - Invariants: times are epoch milliseconds. A removal clears `rmRefused`; a resume drops `removedAt` and `movedTo`.
+
+## claude-bg-lock
+
+- Path: `$SCP_DIR/claude-bg/<short id>.lock`, mode 0600.
+- Writers: every claude-bg run (the broker's task, `swarm claude-bg-task`, `swarm claude prune`, in either engine) creates it `wx` before it acts on the
+  session and unlinks it after, so two runs never both stop one session. `swarm claude-wake` does not take it: a wake must not wait on a stop,
+  and it writes the state file only for a session the listing no longer shows.
+- Readers: a run that finds it leaves the session for its next pass, unless it is stale: the named process is gone, or the file is older
+  than 15 minutes. A stale lock is renamed aside to `<path>.<pid>.<random>.stale` first, so of two runs that saw it stale one removes it.
+- Invariants: a run holds it only around one action. An unparseable lock counts as held until it is too old.
 
 ## claude-bg-task
 
 - Path: `$SCP_DIR/claude-bg-task.json`, mode 0600.
 - Writer and reader: `swarm claude-bg-task`, one run per interval that the native broker starts, never two at once. The run reads it first and
-  writes it last, also after a failed run, by rename from `<path>.<pid>.tmp`; a write error is ignored. The TypeScript broker runs the task
+  writes it last, also after a failed run, by rename from `<path>.<pid>.<random>.tmp`; a write error is ignored. The TypeScript broker runs the task
   in process and keeps the same state in memory instead.
 - Reader tolerance: a missing or unparseable file is a fresh state; malformed pairs, non-string ids and a non-boolean `listed` are dropped.
 - Invariants: Maps and Sets are written as arrays of `[key, value]` pairs and of members. `stopped` values are the entries `claude agents

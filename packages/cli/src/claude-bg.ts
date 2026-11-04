@@ -27,6 +27,8 @@ const LIST_TIMEOUT_MS = 15_000
 const ACT_TIMEOUT_MS = 30_000
 /** a refused `claude rm` is tried again no sooner than this */
 const RM_RETRY_MS = 86_400_000
+/** a session lock older than this outlived every run that could hold it */
+const LOCK_MAX_AGE_MS = 900_000
 const SHORT_ID = /^[0-9a-f]{8}$/
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** a session name passed back to `claude --name`: never read as an option */
@@ -479,11 +481,103 @@ export function readAllStates(env: Env): (BgState & { id: string })[] {
   })
 }
 
+/** `text` at `path`, mode 0600, by rename from a temporary file of this writer alone, so two writers never share one */
+function writePrivate(path: string, text: string): void {
+  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`
+  const fd = openSync(temp, "wx", 0o600)
+  try {
+    try {
+      writeFileSync(fd, text)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(temp, path)
+  } catch (error) {
+    try {
+      unlinkSync(temp)
+    } catch {}
+    throw error
+  }
+}
+
 export function writeState(env: Env, id: string, state: BgState): void {
-  const path = statePath(env, id)
   privateDir(bgDir(env))
-  writeFileSync(`${path}.tmp`, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
-  renameSync(`${path}.tmp`, path)
+  writePrivate(statePath(env, id), `${JSON.stringify(state, null, 2)}\n`)
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/** whether a lock with `text`, written `ageMs` ago, belongs to no run: its process is gone, or it is older than any run */
+function staleLock(text: string, ageMs: number): boolean {
+  if (ageMs > LOCK_MAX_AGE_MS) return true
+  try {
+    const pid = (JSON.parse(text) as { pid?: unknown } | null)?.pid
+    return typeof pid === "number" && Number.isInteger(pid) && pid > 0 && !alive(pid)
+  } catch {
+    return false
+  }
+}
+
+/** takes a stale lock out of the way by renaming it, so of two runs that saw it stale one removes it; a lock taken since goes back */
+function clearStale(path: string, text: string): void {
+  const aside = `${path}.${process.pid}.${crypto.randomUUID()}.stale`
+  try {
+    renameSync(path, aside)
+  } catch {
+    return
+  }
+  if (readFileSync(aside, "utf8") === text) unlinkSync(aside)
+  else renameSync(aside, path)
+}
+
+/**
+ * the lock of session `id`, held while a run acts on that session: a task and a `claude prune` at once would otherwise each stop it, and the
+ * one whose `claude stop` fails would undo the other's hibernation. Returns what releases it, or undefined while another live run holds it
+ */
+export function lockSession(env: Env, id: string): (() => void) | undefined {
+  privateDir(bgDir(env))
+  const path = join(bgDir(env), `${id}.lock`)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number
+    try {
+      fd = openSync(path, "wx", 0o600)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      let text: string
+      let ageMs: number
+      try {
+        ageMs = Date.now() - statSync(path).mtimeMs
+        text = readFileSync(path, "utf8")
+      } catch {
+        continue
+      }
+      if (!staleLock(text, ageMs)) return undefined
+      clearStale(path, text)
+      continue
+    }
+    const release = () => {
+      try {
+        unlinkSync(path)
+      } catch {}
+    }
+    try {
+      writeFileSync(fd, `${JSON.stringify({ pid: process.pid })}\n`)
+    } catch (error) {
+      release()
+      throw error
+    } finally {
+      closeSync(fd)
+    }
+    return release
+  }
+  return undefined
 }
 
 /** the short ids whose state files a plan reads: the recorded sessions and every listed background session */
@@ -895,14 +989,19 @@ async function apply(actions: Act[], port: BgPort, run: Run): Promise<Outcome[]>
   const outcomes: Outcome[] = []
   for (const action of actions) {
     let failed: string | null
+    let release: (() => void) | undefined
     try {
-      if (action.kind === "unhibernate") {
+      release = lockSession(run.env, action.id)
+      if (!release) failed = "another claude-bg run is acting on it"
+      else if (action.kind === "unhibernate") {
         await port.unhibernate(action.agent)
         failed = null
       } else if (action.kind === "orphan") failed = await removeOrphan(action, port, run)
       else failed = action.kind === "stop" ? await stopWorker(action, port, run) : await removeWorker(action, port, run)
     } catch (error) {
       failed = error instanceof Error ? error.message : String(error)
+    } finally {
+      release?.()
     }
     outcomes.push({ action, ok: failed === null, note: failed ?? "" })
   }
@@ -1080,8 +1179,7 @@ export function readTaskState(env: Env): BgTaskState {
 export function writeTaskState(env: Env, state: BgTaskState): void {
   const path = taskStatePath(env)
   const value = { sessions: [...state.sessions], seen: [...state.seen], stopped: [...state.stopped], listed: state.listed }
-  writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify(value)}\n`, { mode: 0o600 })
-  renameSync(`${path}.${process.pid}.tmp`, path)
+  writePrivate(path, `${JSON.stringify(value)}\n`)
 }
 
 /** one run of the claude-bg task on `port` with what the last run learnt, kept in `<relay dir>/claude-bg-task.json` */

@@ -1,0 +1,647 @@
+//! What the claude-bg policy reads and writes: `claude agents` entries, the broker's agents, launcher records, `<id>.state.json`,
+//! `claude-bg-task.json` and the per-session lock. Objects stay `Json`, so a rewrite keeps their key order and any key it does not know.
+
+use crate::fleet::json::Json;
+use crate::open::node_fs_error;
+use indexmap::{IndexMap, IndexSet};
+use scp_core::protocol::{LIMITS, revive_record};
+use scp_mcp::client::relay_dir;
+use scp_mcp::ps::Env;
+use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// the provider a stopped or removed worker is hibernated by; its waker is `swarm claude-wake`
+pub const PROVIDER: &str = "claude-bg";
+/// a lock older than this outlived every run that could hold it
+const LOCK_MAX_AGE: Duration = Duration::from_secs(900);
+
+fn hex_lower(text: &str) -> bool {
+    text.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+pub fn short_id(text: &str) -> bool {
+    text.len() == 8 && hex_lower(text)
+}
+
+pub fn session_id(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(part, len)| part.len() == len && hex_lower(part))
+}
+
+/// a session name passed back to `claude --name`: never read as an option
+pub fn safe_name(text: &str) -> bool {
+    let word = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'@' | b'+' | b' ');
+    let bytes = text.as_bytes();
+    (1..=100).contains(&bytes.len())
+        && word(bytes[0])
+        && bytes[1..].iter().all(|b| word(*b) || *b == b'-')
+}
+
+pub fn wake_ticket(text: &str) -> bool {
+    text.strip_prefix("kwt_")
+        .is_some_and(|hex| hex.len() == 64 && hex_lower(hex))
+}
+
+/// the hibernation ref of a worker: its revive record, or the bare session id when the record would not fit a ref
+pub fn revive_ref(session: &str, cwd: &str, name: Option<&str>) -> String {
+    let mut argv = vec!["claude", "--bg", "--resume", session];
+    if let Some(name) = name.filter(|name| safe_name(name)) {
+        argv.extend(["--name", name]);
+    }
+    let record = Json::object(vec![
+        ("via", Json::str(PROVIDER)),
+        ("harness", Json::str("claude-code")),
+        ("session", Json::str(session)),
+        ("cwd", Json::str(cwd)),
+        ("argv", Json::Arr(argv.into_iter().map(Json::str).collect())),
+    ]);
+    let text = record.compact();
+    if text.encode_utf16().count() <= LIMITS.wake_ref_chars as usize {
+        text
+    } else {
+        session.to_owned()
+    }
+}
+
+/// the session id a `claude-bg` hibernation ref names: a revive record's session, or the bare id
+pub fn ref_session(reference: &str) -> String {
+    revive_record(Some(reference)).map_or_else(|| reference.to_owned(), |record| record.session)
+}
+
+/// one entry of `claude agents --json [--all]`; `raw` is what Claude Code printed
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub id: Option<String>,
+    pub cwd: Option<String>,
+    pub kind: Option<String>,
+    pub session_id: Option<String>,
+    pub name: Option<String>,
+    pub state: Option<String>,
+    pub pid: Option<f64>,
+    pub status: Option<String>,
+    pub raw: Json,
+}
+
+impl Entry {
+    pub fn new(raw: Json) -> Entry {
+        let text = |key: &str| raw.get(key).and_then(Json::as_str).map(str::to_owned);
+        Entry {
+            id: text("id"),
+            cwd: text("cwd"),
+            kind: text("kind"),
+            session_id: text("sessionId"),
+            name: text("name"),
+            state: text("state"),
+            pid: raw.get("pid").and_then(Json::as_f64),
+            status: text("status"),
+            raw,
+        }
+    }
+
+    /// the entry as the task remembers a session it stopped
+    pub fn without_pid(&self) -> Entry {
+        Entry::new(without(&self.raw, &["pid"]))
+    }
+
+    pub fn background(&self) -> bool {
+        self.kind.as_deref() == Some("background")
+    }
+}
+
+/// the object without `keys`
+pub fn without(object: &Json, keys: &[&str]) -> Json {
+    match object {
+        Json::Obj(entries) => Json::Obj(
+            entries
+                .iter()
+                .filter(|(key, _)| !keys.contains(&key.as_str()))
+                .cloned()
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// what the policy reads of one broker agent
+#[derive(Debug, Clone, PartialEq)]
+pub struct Agent {
+    pub id: String,
+    pub address: String,
+    pub handle: String,
+    pub harness: Option<String>,
+    pub parent: Option<String>,
+    pub children: f64,
+    pub subagents: f64,
+    pub harness_session: Option<String>,
+    pub state: String,
+    pub presence: String,
+    pub historic: bool,
+    pub worked_at: String,
+    pub mail_at: Option<String>,
+    pub connections: f64,
+    pub hibernate: Option<String>,
+    pub unread: bool,
+    pub unread_at: Option<String>,
+    pub handed_back: bool,
+}
+
+impl Agent {
+    pub fn new(value: &Json) -> Agent {
+        let text = |key: &str| value.get(key).and_then(Json::as_str).map(str::to_owned);
+        let number = |key: &str| value.get(key).and_then(Json::as_f64).unwrap_or(0.0);
+        let flag = |key: &str| matches!(value.get(key), Some(Json::Bool(true)));
+        Agent {
+            id: text("id").unwrap_or_default(),
+            address: text("address").unwrap_or_default(),
+            handle: text("handle").unwrap_or_default(),
+            harness: text("harness"),
+            parent: text("parent"),
+            children: number("children"),
+            subagents: number("subagents"),
+            harness_session: text("harness_session"),
+            state: text("state").unwrap_or_default(),
+            presence: text("presence").unwrap_or_default(),
+            historic: flag("historic"),
+            worked_at: text("worked_at").unwrap_or_default(),
+            mail_at: text("mail_at"),
+            connections: number("connections"),
+            hibernate: text("hibernate"),
+            unread: flag("unread"),
+            unread_at: text("unread_at"),
+            handed_back: flag("handed_back"),
+        }
+    }
+}
+
+/// a background session `swarm claude --bg` started: its MCP config, the handle that config claims, and whether it asked for a parent
+#[derive(Debug, Clone, PartialEq)]
+pub struct BgRecord {
+    pub file: String,
+    pub handle: Option<String>,
+    pub parented: bool,
+}
+
+impl BgRecord {
+    pub fn parse(file: String, text: &str) -> Option<BgRecord> {
+        let config = Json::parse(text.as_bytes())?;
+        let vars = config
+            .get("mcpServers")
+            .and_then(|servers| servers.get("scp"))
+            .and_then(|scp| scp.get("env"));
+        let var = |key: &str| vars.and_then(|vars| vars.get(key)).and_then(Json::as_str);
+        Some(BgRecord {
+            file,
+            handle: var("SCP_NAME")
+                .filter(|handle| !handle.is_empty())
+                .map(str::to_owned),
+            parented: ["SCP_GRANT", "SCP_UNDER"]
+                .iter()
+                .any(|key| var(key).is_some_and(|value| !value.is_empty())),
+        })
+    }
+}
+
+pub type Records = IndexMap<String, BgRecord>;
+
+/// what `<id>.state.json` keeps of a worker the policy stopped or removed
+#[derive(Debug, Clone, PartialEq)]
+pub struct BgState(pub Json);
+
+impl BgState {
+    pub fn parse(text: &str) -> Option<BgState> {
+        let value = Json::parse(text.as_bytes())?;
+        let valid = ["sessionId", "cwd"]
+            .iter()
+            .all(|key| value.get(key).and_then(Json::as_str).is_some());
+        valid.then_some(BgState(value))
+    }
+
+    fn text(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(Json::as_str)
+    }
+
+    pub fn session_id(&self) -> &str {
+        self.text("sessionId").unwrap_or_default()
+    }
+
+    pub fn cwd(&self) -> &str {
+        self.text("cwd").unwrap_or_default()
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.text("name").filter(|name| !name.is_empty())
+    }
+
+    pub fn handle(&self) -> Option<&str> {
+        self.text("handle")
+    }
+
+    pub fn moved_to(&self) -> Option<&str> {
+        self.text("movedTo").filter(|id| !id.is_empty())
+    }
+
+    pub fn removed(&self) -> bool {
+        !matches!(
+            self.0.get("removedAt"),
+            None | Some(Json::Null | Json::Bool(false))
+        ) && self.0.get("removedAt").and_then(Json::as_f64) != Some(0.0)
+    }
+
+    /// when `claude rm` refused and why; `at` is NaN when unreadable, as it compares in JavaScript
+    pub fn rm_refused(&self) -> Option<(f64, String)> {
+        let refused = self.0.get("rmRefused")?;
+        if matches!(refused, Json::Null) {
+            return None;
+        }
+        let at = refused.get("at").and_then(Json::as_f64).unwrap_or(f64::NAN);
+        let reason = refused
+            .get("reason")
+            .and_then(Json::as_str)
+            .unwrap_or("undefined");
+        Some((at, reason.to_owned()))
+    }
+}
+
+/// `{sessionId, cwd, name?, handle?}` over `base`'s keys, as a spread of `base` then those
+pub fn state_over(
+    base: Json,
+    session: &str,
+    cwd: &str,
+    name: Option<&str>,
+    handle: Option<&str>,
+) -> Json {
+    let mut state = base;
+    state.set("sessionId", Json::str(session));
+    state.set("cwd", Json::str(cwd));
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        state.set("name", Json::str(name));
+    }
+    if let Some(handle) = handle {
+        state.set("handle", Json::str(handle));
+    }
+    state
+}
+
+/// what one claude-bg task run hands the next
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskState {
+    /// the short ids of the background sessions in the last listing, by session id
+    pub sessions: IndexMap<String, String>,
+    /// the records the last listing covered
+    pub seen: IndexSet<String>,
+    /// the sessions with a record the last listing showed stopped, by short id
+    pub stopped: IndexMap<String, Entry>,
+    pub listed: bool,
+}
+
+impl TaskState {
+    pub fn parse(text: &str) -> TaskState {
+        let Some(raw) = Json::parse(text.as_bytes()) else {
+            return TaskState::default();
+        };
+        let pairs = |key: &str| -> Vec<(String, Json)> {
+            raw.get(key)
+                .map(Json::items)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|pair| match pair {
+                    Json::Arr(items) if items.len() == 2 => {
+                        Some((items[0].as_str()?.to_owned(), items[1].clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        TaskState {
+            sessions: pairs("sessions")
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, value.as_str()?.to_owned())))
+                .collect(),
+            seen: raw
+                .get("seen")
+                .map(Json::items)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|one| one.as_str().map(str::to_owned))
+                .collect(),
+            stopped: pairs("stopped")
+                .into_iter()
+                .filter(|(_, value)| matches!(value, Json::Obj(_)))
+                .map(|(key, value)| (key, Entry::new(value)))
+                .collect(),
+            listed: matches!(raw.get("listed"), Some(Json::Bool(true))),
+        }
+    }
+
+    pub fn to_json(&self) -> Json {
+        let strings = |key: &str, value: &str| Json::Arr(vec![Json::str(key), Json::str(value)]);
+        Json::object(vec![
+            (
+                "sessions",
+                Json::Arr(self.sessions.iter().map(|(k, v)| strings(k, v)).collect()),
+            ),
+            ("seen", Json::Arr(self.seen.iter().map(Json::str).collect())),
+            (
+                "stopped",
+                Json::Arr(
+                    self.stopped
+                        .iter()
+                        .map(|(id, entry)| Json::Arr(vec![Json::str(id), entry.raw.clone()]))
+                        .collect(),
+                ),
+            ),
+            ("listed", Json::Bool(self.listed)),
+        ])
+    }
+}
+
+pub fn bg_dir(env: &Env) -> PathBuf {
+    relay_dir(env).join("claude-bg")
+}
+
+fn state_path(env: &Env, id: &str) -> PathBuf {
+    bg_dir(env).join(format!("{id}.state.json"))
+}
+
+fn task_path(env: &Env) -> PathBuf {
+    relay_dir(env).join("claude-bg-task.json")
+}
+
+fn file_text(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn fs_fail(error: &std::io::Error, syscall: &str, path: &Path) -> String {
+    node_fs_error(error, syscall, &path.to_string_lossy())
+}
+
+/// `path` as a private directory: made if missing, refused unless a directory this user owns, then set to 0700
+pub fn private_dir(path: &Path) -> Result<(), String> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|error| fs_fail(&error, "mkdir", path))?;
+    let meta = std::fs::symlink_metadata(path).map_err(|error| fs_fail(&error, "lstat", path))?;
+    // SAFETY: getuid cannot fail
+    if !meta.is_dir() || meta.uid() != unsafe { libc::getuid() } {
+        return Err(format!(
+            "{} is not a directory this user owns",
+            path.display()
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| fs_fail(&error, "chmod", path))
+}
+
+/// this process's id and 64 random bits: a temporary name no other writer has
+fn unique() -> String {
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    format!("{}.{random:016x}", std::process::id())
+}
+
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// `text` at `path`, mode 0600, by rename from a temporary file of this writer alone, so two writers never share one
+pub fn write_private(path: &Path, text: &str) -> Result<(), String> {
+    let temp = beside(path, &format!(".{}.tmp", unique()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|error| fs_fail(&error, "open", &temp))?;
+    let written = file
+        .write_all(text.as_bytes())
+        .map_err(|error| fs_fail(&error, "write", &temp))
+        .and_then(|()| {
+            std::fs::rename(&temp, path).map_err(|error| fs_fail(&error, "rename", &temp))
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+/// the sessions `swarm claude --bg` started, by short id
+pub fn read_records(env: &Env) -> Records {
+    let dir = bg_dir(env);
+    let mut records = Records::new();
+    let Ok(names) = std::fs::read_dir(&dir) else {
+        return records;
+    };
+    for name in names.flatten() {
+        let name = name.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".json").filter(|id| short_id(id)) else {
+            continue;
+        };
+        let Ok(file) = std::fs::canonicalize(dir.join(&name)) else {
+            continue;
+        };
+        let record = file_text(&file)
+            .and_then(|text| BgRecord::parse(file.to_string_lossy().into_owned(), &text));
+        if let Some(record) = record {
+            records.insert(id.to_owned(), record);
+        }
+    }
+    records
+}
+
+pub fn read_state(env: &Env, id: &str) -> Option<BgState> {
+    BgState::parse(&file_text(&state_path(env, id))?)
+}
+
+pub fn write_state(env: &Env, id: &str, state: &Json) -> Result<(), String> {
+    private_dir(&bg_dir(env))?;
+    write_private(&state_path(env, id), &format!("{}\n", state.pretty()))
+}
+
+pub fn remove_state(env: &Env, id: &str) -> Result<(), String> {
+    let path = state_path(env, id);
+    std::fs::remove_file(&path).map_err(|error| fs_fail(&error, "unlink", &path))
+}
+
+/// the states of `ids`, leaving out those with no readable file
+pub fn read_states<'a>(env: &Env, ids: impl Iterator<Item = &'a str>) -> HashMap<String, BgState> {
+    ids.filter_map(|id| read_state(env, id).map(|state| (id.to_owned(), state)))
+        .collect()
+}
+
+pub fn read_task_state(env: &Env) -> TaskState {
+    file_text(&task_path(env)).map_or_else(TaskState::default, |text| TaskState::parse(&text))
+}
+
+pub fn write_task_state(env: &Env, state: &TaskState) -> Result<(), String> {
+    write_private(&task_path(env), &format!("{}\n", state.to_json().compact()))
+}
+
+/// the lock of one session, which a claude-bg run holds while it acts on that session; dropping it lets go
+#[derive(Debug)]
+pub struct SessionLock(PathBuf);
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists
+    pid > 0
+        && (unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+/// whether a lock with `text`, written `age` ago, belongs to no run: its process is gone, or it is older than any run
+fn stale_lock(text: &str, age: Duration) -> bool {
+    let pid = Json::parse(text.as_bytes())
+        .and_then(|value| value.get("pid").and_then(Json::as_f64))
+        .filter(|pid| pid.fract() == 0.0 && *pid > 0.0 && *pid <= f64::from(i32::MAX));
+    age > LOCK_MAX_AGE || pid.is_some_and(|pid| !alive(pid as i32))
+}
+
+/// takes a stale lock out of the way by renaming it, so of two runs that saw it stale one removes it; a lock taken since goes back
+fn clear_stale(path: &Path, text: &str) {
+    let aside = beside(path, &format!(".{}.stale", unique()));
+    if std::fs::rename(path, &aside).is_err() {
+        return;
+    }
+    if file_text(&aside).as_deref() == Some(text) {
+        let _ = std::fs::remove_file(&aside);
+    } else {
+        let _ = std::fs::rename(&aside, path);
+    }
+}
+
+/// the lock of session `id`, None while another live run holds it; both engines take it around every action on the session
+pub fn lock_session(env: &Env, id: &str) -> Result<Option<SessionLock>, String> {
+    let dir = bg_dir(env);
+    private_dir(&dir)?;
+    let path = dir.join(format!("{id}.lock"));
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let lock = SessionLock(path.clone());
+                let pid = Json::object(vec![("pid", Json::Num(f64::from(std::process::id())))]);
+                file.write_all(format!("{}\n", pid.compact()).as_bytes())
+                    .map_err(|error| fs_fail(&error, "write", &path))?;
+                return Ok(Some(lock));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let age = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|at| at.elapsed().ok())
+                    .unwrap_or_default();
+                let Some(text) = file_text(&path) else {
+                    continue;
+                };
+                if !stale_lock(&text, age) {
+                    return Ok(None);
+                }
+                clear_stale(&path, &text);
+            }
+            Err(error) => return Err(fs_fail(&error, "open", &path)),
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("scp-bg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn env_of(dir: &Path) -> Env {
+        Env::from([("SCP_DIR".to_owned(), dir.display().to_string())])
+    }
+
+    #[test]
+    fn concurrent_writers_never_leave_a_torn_file_or_a_temporary_one() {
+        let dir = scratch("writers");
+        let path = dir.join("state.json");
+        let writers: Vec<_> = (0..4)
+            .map(|one| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let text = format!("{}\n", one.to_string().repeat(4096));
+                    for _ in 0..100 {
+                        write_private(&path, &text).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                assert_eq!(text.len(), 4097);
+                assert!(text.trim_end().chars().all(|c| text.starts_with(c)));
+            }
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(names.len(), 1);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_lock_excludes_until_dropped_and_a_dead_holder_is_taken_over() {
+        let dir = scratch("lock");
+        let env = env_of(&dir);
+        let lock = lock_session(&env, "1a2b3c4d").unwrap().unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
+        assert!(lock_session(&env, "2b3c4d5e").unwrap().is_some());
+        drop(lock);
+        let path = dir.join("claude-bg/1a2b3c4d.lock");
+        assert!(!path.exists());
+        std::fs::write(&path, "{\"pid\":2147483646}\n").unwrap();
+        let taken = lock_session(&env, "1a2b3c4d").unwrap();
+        assert!(taken.is_some());
+        drop(taken);
+        std::fs::write(&path, "{\"pid\":").unwrap();
+        assert!(lock_session(&env, "1a2b3c4d").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_lock_is_stale_once_its_process_is_gone_or_it_is_too_old() {
+        let own = format!("{{\"pid\":{}}}", std::process::id());
+        let young = Duration::from_secs(1);
+        assert!(!stale_lock(&own, young));
+        assert!(stale_lock(&own, LOCK_MAX_AGE + young));
+        assert!(stale_lock("{\"pid\":2147483646}", young));
+        assert!(!stale_lock("{", young));
+        assert!(stale_lock("{", LOCK_MAX_AGE + young));
+    }
+}

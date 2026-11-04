@@ -12,6 +12,7 @@ use tokio::time::Instant;
 
 pub const CLAUDE_BG_EVERY: Duration = Duration::from_secs(120);
 pub const CLAUDE_BG_EVERY_ENV: &str = "SCP_CLAUDE_BG_EVERY_S";
+pub const CLAUDE_BG_VERB: &str = "claude-bg-task";
 const CLAUDE_BG_EVERY_MAX_S: f64 = 2_147_483.0;
 const RUN_LIMIT: Duration = Duration::from_secs(600);
 const OUTPUT_MAX: u64 = 64 * 1024;
@@ -79,7 +80,7 @@ pub fn attach(task: Task, running: TaskPid) -> tokio::task::JoinHandle<()> {
 
 /// one run; its stderr goes to the broker's, except a failure the same as the last one
 async fn run(task: &Task, running: &TaskPid, failure: &mut Option<String>) {
-    let words = crate::launch::verb_command(&task.cli, "claude-bg-task");
+    let words = crate::launch::verb_command(&task.cli, CLAUDE_BG_VERB);
     let Some((program, args)) = words.split_first() else {
         return;
     };

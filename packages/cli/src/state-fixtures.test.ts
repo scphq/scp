@@ -13,6 +13,7 @@ import {
   historicAfterS,
   readAllStates,
   readRecords,
+  lockSession,
   readState,
   readTaskState,
   refSession,
@@ -167,6 +168,30 @@ describe("claude-bg-state", () => {
     expect(conforms("claude-bg-state", JSON.parse(readFileSync(path, "utf8")))).toEqual([])
     expect(fileMode(path)).toBe(0o600)
     expect(readdirSync(dirname(path))).toEqual(["1a2b3c4d.state.json"])
+  })
+})
+
+describe("claude-bg-lock", () => {
+  const place = (text: string) => {
+    const dir = scratch()
+    put(join(dir, "claude-bg", "1a2b3c4d.lock"), text)
+    return { SCP_DIR: dir }
+  }
+
+  test("a lock this process holds, or one it cannot read, keeps the session", () => {
+    expect(lockSession(place(`{"pid":${process.pid}}\n`), "1a2b3c4d")).toBeUndefined()
+    for (const f of bad("claude-bg-lock")) expect(lockSession(place(f.text), "1a2b3c4d")).toBeUndefined()
+  })
+
+  test("a lock whose process is gone is taken over, and the taker's conforms and goes when released", () => {
+    const env = place('{"pid":2147483646}\n')
+    const path = join(env.SCP_DIR, "claude-bg", "1a2b3c4d.lock")
+    const release = lockSession(env, "1a2b3c4d")!
+    expect(conforms("claude-bg-lock", JSON.parse(readFileSync(path, "utf8")))).toEqual([])
+    expect(fileMode(path)).toBe(0o600)
+    expect(lockSession(env, "1a2b3c4d")).toBeUndefined()
+    release()
+    expect(readdirSync(dirname(path))).toEqual([])
   })
 })
 

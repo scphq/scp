@@ -105,6 +105,7 @@ impl Broker {
         }
         let task = cli
             .or_else(|| crate::launch::path_cli(&options.env))
+            .or_else(|| crate::launch::runs_natively(crate::tasks::CLAUDE_BG_VERB).then(Vec::new))
             .map(|cli| crate::tasks::Task {
                 cli,
                 dir: options.paths.dir.clone(),
