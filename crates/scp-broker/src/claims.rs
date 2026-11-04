@@ -1835,9 +1835,22 @@ async fn hello_transaction(
         {
             core.rename_row(row, handle, false, false).await?;
         }
-        let row = core.must_endpoint(text(row, "id").unwrap_or("")).await?;
-        core.wake_done(text(&row, "id").unwrap_or(""), "join")
+        let id = text(row, "id").unwrap_or("").to_owned();
+        core.store
+            .all(
+                "UPDATE endpoints SET hook_seen = ?, hook_ended = NULL WHERE id = ?",
+                &[SqlValue::Int(now_ms()), SqlValue::Text(id.clone())],
+            )
             .await?;
+        core.wake_done(&id, "join").await?;
+        let row = core.must_endpoint(&id).await?;
+        core.audit(
+            "join",
+            Some(&id),
+            None,
+            json!({"handle": text(&row, "handle")}),
+        )
+        .await?;
         if let Some(under) = join
             .get("under")
             .and_then(Value::as_str)
