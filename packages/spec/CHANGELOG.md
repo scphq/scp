@@ -1,5 +1,14 @@
 # @scp-dev/spec
 
+## 0.6.12
+
+### Patch Changes
+
+- b1c14b5: `SCP_CLAUDE_BG_EVERY_S` sets how often the broker runs its claude-bg task, in place of 120 s, in the TypeScript and the native broker alike. A test of the native broker now runs the task every second and checks that an idle broker still stops.
+- b1c14b5: Under `SCP_NATIVE=1` the native hook client starts the native broker directly (`$SCP_SWARM_BIN`, or the `swarm` in the native package, when its version matches), told its launcher in `SCP_CLI_ARGV`, instead of through the CLI's `daemon`, so no Node process stays resident above it. `SCP_NATIVE=mcp` keeps the TypeScript broker.
+- b1c14b5: Under `SCP_NATIVE=1` or `mcp`, `swarm setup --cowork` and `swarm setup claude-desktop` build launchers that run the native `swarm mcp` by its absolute path while it is there, else the Node one as before, so local Cowork sessions and desktop chat keep no Node process resident. Cloud Cowork sessions still run the pinned CLI through npx.
+- b1c14b5: The native broker audits the hibernations its claude-bg task makes over the socket `{by: "broker"}`, as the TypeScript broker's in-process task does, instead of as the human's. It knows the task's connection by its peer pid.
+
 ## 0.6.11
 
 ### Patch Changes
