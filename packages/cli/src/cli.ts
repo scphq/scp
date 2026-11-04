@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+import { route } from "./route"
 import { subagentFastPath } from "./hook-fast"
 import { quietSqliteWarning } from "./warnings"
+
+await route()
 
 // A subagent hook runs on every tool call, so it leaves before the CLI loads.
 if (!(await subagentFastPath(process.argv.slice(2)))) {
