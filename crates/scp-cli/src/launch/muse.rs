@@ -2,7 +2,7 @@
 
 use super::attribute::{Placement, attribute, attributed, validate_under};
 use super::channel::{
-    Channel, ChannelSetup, Latch, Output, Server, Transport, bind_channel, broker_connect,
+    Channel, ChannelSetup, Latch, Server, Spool, Transport, bind_channel, broker_connect,
     launcher_claim, pushed, start_server,
 };
 use crate::args::js_string;
@@ -451,7 +451,7 @@ fn present(value: Option<&Json>) -> Option<&Json> {
 }
 
 /// answers a server request of muse serve for a session no human watches: approvals are declined, anything else is refused
-pub fn answer_request(host: &Rc<MuseHost>, message: &Json, output: &Rc<Output>) {
+pub fn answer_request(host: &Rc<MuseHost>, message: &Json, output: &Rc<Spool>) {
     let id = message.get("id").cloned().unwrap_or(Json::Null);
     let method = message.get("method");
     if method.and_then(Json::as_str) != Some("approval/request") {
@@ -538,7 +538,7 @@ struct Run<'a> {
     cwd: &'a str,
     server: &'a Server,
     host: Rc<MuseHost>,
-    output: Rc<Output>,
+    output: Rc<Spool>,
     latch: Latch,
     stopping: Rc<Cell<bool>>,
     unlaunch: RefCell<Option<crate::spawn::muse::LaunchFile>>,
@@ -720,7 +720,7 @@ impl Run<'_> {
 }
 
 /// a message of muse serve that is no reply to this client
-fn on_message(host: &Rc<MuseHost>, message: &Json, output: &Rc<Output>) {
+fn on_message(host: &Rc<MuseHost>, message: &Json, output: &Rc<Spool>) {
     if message.get("id").is_some() && message.get("method").and_then(Json::as_str).is_some() {
         answer_request(host, message, output);
         return;
@@ -820,7 +820,7 @@ async fn launch(call: &Call<'_>, args: &[String], env: &Env, cwd: &str, parsed: 
             stop.finish(0);
         }
     });
-    let printed: Rc<Output> = Rc::default();
+    let printed: Rc<Spool> = Rc::default();
     let printing = printed.clone();
     let host = MuseHost::start(
         input,

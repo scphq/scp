@@ -527,7 +527,7 @@ fn run_claude(bin: &str, args: &[String], env: &Env, cwd: &str, pipe: bool) -> R
         })?;
         let pid = child.id().map_or(0, |pid| pid as i32);
         let mut out = child.stdout.take();
-        let tee = out.is_some().then(|| Spool::new(term::print_bytes));
+        let tee = out.is_some().then(Spool::default);
         let mut printed = Vec::new();
         let mut chunk = vec![0u8; 65536];
         let mut status = None;

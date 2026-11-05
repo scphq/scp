@@ -3,7 +3,7 @@
 
 use super::attribute::{Placement, attribute, attributed, options_before, validate_under};
 use super::channel::{
-    Channel, ChannelSetup, Latch, Output, Server, Transport, Watched, bind_channel, broker_connect,
+    Channel, ChannelSetup, Latch, Server, Spool, Transport, Watched, bind_channel, broker_connect,
     default_signals, launcher_claim, os_tmpdir, pushed, spawn_error, start_server, temp_dir,
 };
 use super::ws::{Link, Upgrade};
@@ -773,7 +773,7 @@ struct Run {
     waker: Rc<RefCell<Option<Rc<CodexWaker>>>>,
     tui: Rc<RefCell<Option<Rc<Watched>>>>,
     headless: bool,
-    output: Rc<Output>,
+    output: Rc<Spool>,
 }
 
 impl Run {

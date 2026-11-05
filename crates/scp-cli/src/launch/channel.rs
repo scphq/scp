@@ -48,20 +48,28 @@ pub fn spawn_error(bin: &str, error: &std::io::Error) -> String {
 /// how long the last of what a launcher wrote may take to reach a reader that is slow to drain it, as `exitFlushed` waits
 const FLUSH_WAIT: Duration = Duration::from_secs(10);
 
-/// bytes on their way out, written by a thread of its own so a slow reader never holds up the signals; dropped or finished, it waits at
-/// most [`FLUSH_WAIT`] for what it still holds
+enum Chunk {
+    Out(Vec<u8>),
+    Err(Vec<u8>),
+}
+
+/// what a launcher prints while a harness runs, in the order it came, written by a thread of its own so a slow reader never holds up the
+/// signals; dropped or finished, it waits at most [`FLUSH_WAIT`] for what it still holds
 pub struct Spool {
-    chunks: RefCell<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
+    chunks: RefCell<Option<std::sync::mpsc::Sender<Chunk>>>,
     done: std::sync::mpsc::Receiver<()>,
 }
 
-impl Spool {
-    pub fn new(write: fn(&[u8])) -> Spool {
-        let (chunks, queued) = std::sync::mpsc::channel::<Vec<u8>>();
+impl Default for Spool {
+    fn default() -> Spool {
+        let (chunks, queued) = std::sync::mpsc::channel::<Chunk>();
         let (finished, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for chunk in queued {
-                write(&chunk);
+                match chunk {
+                    Chunk::Out(bytes) => crate::term::print_bytes(&bytes),
+                    Chunk::Err(bytes) => crate::term::eprint_bytes(&bytes),
+                }
             }
             let _ = finished.send(());
         });
@@ -70,13 +78,31 @@ impl Spool {
             done,
         }
     }
+}
 
-    pub fn send(&self, bytes: Vec<u8>) {
+impl Spool {
+    fn queue(&self, chunk: Chunk) {
         if let Some(chunks) = self.chunks.borrow().as_ref() {
-            let _ = chunks.send(bytes);
+            let _ = chunks.send(chunk);
         }
     }
 
+    /// `bytes` on stdout
+    pub fn send(&self, bytes: Vec<u8>) {
+        self.queue(Chunk::Out(bytes));
+    }
+
+    /// one line on stdout
+    pub fn print(&self, line: &str) {
+        self.send(format!("{line}\n").into_bytes());
+    }
+
+    /// one line on stderr
+    pub fn err(&self, line: &str) {
+        self.queue(Chunk::Err(format!("{line}\n").into_bytes()));
+    }
+
+    /// waits for what is still on its way out
     pub fn finish(&self) {
         if self.chunks.borrow_mut().take().is_some() {
             let _ = self.done.recv_timeout(FLUSH_WAIT);
@@ -87,39 +113,6 @@ impl Spool {
 impl Drop for Spool {
     fn drop(&mut self) {
         self.finish();
-    }
-}
-
-/// what a launcher prints while it supervises a harness
-pub struct Output {
-    out: Spool,
-    err: Spool,
-}
-
-impl Default for Output {
-    fn default() -> Output {
-        Output {
-            out: Spool::new(crate::term::print_bytes),
-            err: Spool::new(crate::term::eprint_bytes),
-        }
-    }
-}
-
-impl Output {
-    /// one line on stdout
-    pub fn print(&self, line: &str) {
-        self.out.send(format!("{line}\n").into_bytes());
-    }
-
-    /// one line on stderr
-    pub fn err(&self, line: &str) {
-        self.err.send(format!("{line}\n").into_bytes());
-    }
-
-    /// waits for what is still on its way out
-    pub fn finish(&self) {
-        self.out.finish();
-        self.err.finish();
     }
 }
 
@@ -572,6 +565,21 @@ pub fn os_tmpdir(env: &Env) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_start_names_its_errno_as_node_does() {
+        for (errno, code) in [
+            (libc::ETXTBSY, "ETXTBSY"),
+            (libc::ENOEXEC, "ENOEXEC"),
+            (libc::E2BIG, "E2BIG"),
+            (libc::ENOMEM, "ENOMEM"),
+            (libc::EMFILE, "EMFILE"),
+            (libc::EAGAIN, "EAGAIN"),
+        ] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(spawn_error("x", &error), format!("spawn x {code}"));
+        }
+    }
 
     #[test]
     fn an_address_is_the_line_that_names_one() {

@@ -399,6 +399,20 @@ describe.skipIf(!swarmBinary || !node)("swarm codex: the native swarm runs it as
     await blocked(m, "codex", ["--headless"], {})
   })
 
+  test("stdout and stderr on one file keep the order of what happened", async () => {
+    const m = machine("native")
+    await broker(m)
+    const log = join(m.root, "merged.txt")
+    const file = openSync(log, "w")
+    const child = Bun.spawn([resolve(swarmBinary!), "codex", "--headless"], { cwd: m.work, stdin: "ignore", stdout: file, stderr: file, env: m.env })
+    await until(() => readFileSync(log, "utf8").includes("hello from the thread") && readFileSync(log, "utf8").includes("waiting for messages"))
+    child.kill("SIGTERM")
+    expect(await child.exited).toBe(0)
+    closeSync(file)
+    const text = readFileSync(log, "utf8")
+    expect(text.indexOf("declined item/commandExecution/requestApproval")).toBeLessThan(text.indexOf("hello from the thread"))
+  })
+
   test("the TUI runs on the app-server, with codex's arguments and its exit code", async () => {
     const out = await same(
       each("codex", [

@@ -10,6 +10,8 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 
 const MAX_FRAME: u64 = 64 * 1024 * 1024;
+/// how many scheduler turns without a frame written mean the stream takes no more
+const IDLE_TURNS: u32 = 2;
 
 /// the HTTP request that opens the link
 #[derive(Debug, Clone, Default)]
@@ -40,6 +42,7 @@ pub struct Link {
     on_close: OnClose,
     reader: RefCell<Option<AbortHandle>>,
     sender: RefCell<Option<AbortHandle>>,
+    wrote: Rc<Cell<u64>>,
     buffer: RefCell<Vec<u8>>,
     fragments: RefCell<Vec<u8>>,
     opened: Cell<bool>,
@@ -112,6 +115,7 @@ impl Link {
             on_close,
             reader: RefCell::new(None),
             sender: RefCell::new(None),
+            wrote: Rc::new(Cell::new(0)),
             buffer: RefCell::new(Vec::new()),
             fragments: RefCell::new(Vec::new()),
             opened: Cell::new(false),
@@ -159,12 +163,14 @@ impl Link {
             return;
         }
         let writing = self.clone();
+        let wrote = self.wrote.clone();
         let sending = tokio::task::spawn_local(async move {
             while let Some(bytes) = outgoing.recv().await {
                 if let Err(error) = write.write_all(&bytes).await {
                     writing.fail(&stream_error("write", &error));
                     return;
                 }
+                wrote.set(wrote.get() + 1);
             }
         });
         *self.sender.borrow_mut() = Some(sending.abort_handle());
@@ -223,8 +229,15 @@ impl Link {
             reader.abort();
         }
         if let Some(sender) = self.sender.borrow_mut().take() {
+            let wrote = self.wrote.clone();
             tokio::task::spawn_local(async move {
-                tokio::task::yield_now().await;
+                let mut seen = wrote.get();
+                let mut idle = 0;
+                while idle < IDLE_TURNS {
+                    tokio::task::yield_now().await;
+                    idle = if wrote.get() == seen { idle + 1 } else { 0 };
+                    seen = wrote.get();
+                }
                 sender.abort();
             });
         }
@@ -356,47 +369,74 @@ impl Link {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_failed_link_drops_what_the_stream_does_not_take() {
+    fn local(future: impl Future<Output = ()>) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        tokio::task::LocalSet::new().block_on(&runtime, async {
-            let (near, mut far) = tokio::io::duplex(4096);
-            let link = Link::open(
-                async move { Ok(near) },
-                Upgrade::default(),
-                "test",
-                Box::new(|_| {}),
-                Box::new(|_| {}),
-            );
-            let mut request = vec![0u8; 1024];
-            let n = far.read(&mut request).await.unwrap();
-            let request = String::from_utf8_lossy(&request[..n]).into_owned();
-            let key = request
-                .split("\r\n")
-                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
-                .unwrap();
-            let accept = derive_accept_key(key.as_bytes());
-            let reply = format!(
-                "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-            );
-            far.write_all(reply.as_bytes()).await.unwrap();
-            link.ready().await.unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, future);
+    }
+
+    /// a link through its upgrade, on a stream of `room` bytes, and the far end
+    async fn opened(room: usize) -> (Rc<Link>, tokio::io::DuplexStream) {
+        let (near, mut far) = tokio::io::duplex(room);
+        let link = Link::open(
+            async move { Ok(near) },
+            Upgrade::default(),
+            "test",
+            Box::new(|_| {}),
+            Box::new(|_| {}),
+        );
+        let mut request = vec![0u8; 1024];
+        let n = far.read(&mut request).await.unwrap();
+        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let key = request
+            .split("\r\n")
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .unwrap();
+        let accept = derive_accept_key(key.as_bytes());
+        let reply =
+            format!("HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {accept}\r\n\r\n");
+        far.write_all(reply.as_bytes()).await.unwrap();
+        link.ready().await.unwrap();
+        (link, far)
+    }
+
+    async fn rest(far: &mut tokio::io::DuplexStream) -> Vec<u8> {
+        let mut sent = Vec::new();
+        let read = far.read_to_end(&mut sent);
+        tokio::time::timeout(std::time::Duration::from_secs(5), read)
+            .await
+            .unwrap()
+            .unwrap();
+        sent
+    }
+
+    #[test]
+    fn a_failed_link_drops_what_the_stream_does_not_take() {
+        local(async {
+            let (link, mut far) = opened(4096).await;
             let big = "x".repeat(1 << 20);
             link.send("small").unwrap();
             link.send(&big).unwrap();
             link.fail("stop");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let mut sent = Vec::new();
-            let read = far.read_to_end(&mut sent);
-            tokio::time::timeout(std::time::Duration::from_secs(5), read)
-                .await
-                .unwrap()
-                .unwrap();
+            let sent = rest(&mut far).await;
             assert!(sent.len() < 1 << 20, "{}", sent.len());
             assert!(sent.len() > 5);
+        });
+    }
+
+    #[test]
+    fn a_failed_link_sends_every_frame_the_stream_takes() {
+        local(async {
+            let (link, mut far) = opened(1 << 20).await;
+            for _ in 0..5000 {
+                link.send("pong").unwrap();
+            }
+            link.fail("stop");
+            let sent = rest(&mut far).await;
+            assert_eq!(sent.len(), 5000 * (2 + 4 + 4));
         });
     }
 
