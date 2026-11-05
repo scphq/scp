@@ -1077,6 +1077,7 @@ async fn launch(
         root: parsed.root,
         under: parsed.under.as_deref(),
         resume,
+        dir: None,
     };
     let warn = |line: &str| term::err(line);
     let attribution = attribute("codex", placement, call.env, cwd, &warn).await?;

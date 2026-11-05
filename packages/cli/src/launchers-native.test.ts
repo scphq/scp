@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { type Broker, startBroker } from "@scp-dev/broker"
+import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
+import { processKey } from "./identity"
 import { swarmBinary } from "./test-setup"
 import { ensureBuilt } from "./testing/fixtures"
 
@@ -13,9 +14,11 @@ const node = Bun.which("node")
 const SELF = [node ?? "node", dist]
 const top = realpathSync(mkdtempSync(join(process.env.HOME!, "launchers-native-")))
 const brokers: Broker[] = []
+const servers: ReturnType<typeof Bun.serve>[] = []
 beforeAll(ensureBuilt)
 afterAll(async () => {
   for (const broker of brokers) await broker.stop()
+  for (const server of servers) server.stop(true)
   rmSync(top, { recursive: true, force: true })
 })
 
@@ -23,7 +26,7 @@ type Engine = "ts" | "native"
 
 /** one fake harness for every launcher: records how it was started, and plays the part `$FAKE` asks for */
 const FAKE = `#!${process.execPath}
-import { writeFileSync, appendFileSync } from "node:fs"
+import { writeFileSync, appendFileSync, readFileSync } from "node:fs"
 const root = process.env.FAKE_ROOT
 const args = process.argv.slice(2)
 const shown = Object.entries(process.env).filter(([key]) => /^(SCP_|CODEX|T3|XDG_STATE)/.test(key)).map(([key, value]) => key + "=" + value).sort().join("\\n")
@@ -63,6 +66,52 @@ if (args[0] === "app-server") {
       },
     },
   })
+} else if (args[0] === "serve") {
+  record("muse")
+  if (process.env.FAKE_APP === "die") {
+    console.error("serve boom")
+    process.exit(3)
+  }
+  writeFileSync(root + "/muse.pid", String(process.pid))
+  const write = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n")
+  let buffer = ""
+  let turn = 0
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk
+    for (;;) {
+      const end = buffer.indexOf("\\n")
+      if (end < 0) return
+      const line = buffer.slice(0, end)
+      buffer = buffer.slice(end + 1)
+      const message = JSON.parse(line)
+      appendFileSync(root + "/wire.log", line.replace(/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid7>") + "\\n")
+      if (message.method === "session/start" || message.method === "session/resume") {
+        const dir = process.env.HOME + "/.local/state/scp/launch"
+        appendFileSync(root + "/launch.log", readFileSync(dir + "/muse-" + process.pid + ".json", "utf8") + "\\n")
+        if (process.env.FAKE_APP === "refuse") write({ id: message.id, error: { message: "no", code: 7 } })
+        else if (process.env.FAKE_APP === "unnamed") write({ id: message.id, result: { session: {} } })
+        else {
+          write({ id: message.id, result: { session: { sessionId: "s-1" } } })
+          write({ id: "r1", method: "approval/request", params: { approvalId: "a", sessionId: "s-1", currentRequirementId: "q", subject: { command: "rm -rf" }, availableChoices: [{ decision: "approved", choiceId: "c0" }, { decision: "denied", choiceId: "c1" }] } })
+          write({ id: "r2", method: "approval/request", params: { subject: { kind: "network" }, availableChoices: [] } })
+          write({ id: "r3", method: "other/thing", params: {} })
+          write({ method: "item/completed", params: { item: { kind: "agentMessage", text: "hello from muse" } } })
+          write({ method: "item/completed", params: { item: { kind: "agentMessage", text: "" } } })
+          process.stdout.write("not json\\n\\n")
+        }
+      } else if (message.method === "turn/start") {
+        write({ id: message.id, result: { status: ++turn === 1 && process.env.FAKE_APP === "busy" ? "rejected" : "accepted" } })
+      } else if (message.id !== undefined && message.method) write({ id: message.id, result: {} })
+    }
+  })
+  process.stdin.on("end", () => process.exit(0))
+} else if (args[0] === "auth") {
+  record("t3")
+  if (process.env.FAKE_APP === "refuse") {
+    console.error("one\\ntwo\\nthree\\nfour")
+    process.exit(2)
+  }
+  console.log(process.env.FAKE_APP === "spaced" ? "some words here" : "banner\\n  tok-1  ")
 } else {
   record("run")
   process.exit(Number(process.env.FAKE_CODE ?? 0))
@@ -76,7 +125,7 @@ function machine(engine: Engine) {
   const work = join(root, "Work Dir")
   mkdirSync(bin)
   mkdirSync(join(work, ".git"), { recursive: true })
-  writeFileSync(join(bin, "codex"), FAKE, { mode: 0o755 })
+  for (const harness of ["codex", "muse", "t3"]) writeFileSync(join(bin, harness), FAKE, { mode: 0o755 })
   const env: Record<string, string> = {
     HOME: root,
     PATH: `${bin}:/usr/bin:/bin`,
@@ -89,14 +138,15 @@ function machine(engine: Engine) {
     FAKE_ROOT: root,
     ...(process.env.SCP_ROUTE_LOG ? { SCP_ROUTE_LOG: process.env.SCP_ROUTE_LOG } : {}),
   }
-  return { engine, root, work, env }
+  return { engine, root, work, env, broker: undefined as Broker | undefined }
 }
 
 type Machine = ReturnType<typeof machine>
 
 /** a broker of its own, so no launcher leaves a daemon behind */
-async function broker(m: Machine) {
-  brokers.push(await startBroker({ dir: m.env.SCP_DIR!, idleMs: 0, policyPath: join(m.root, "policy.json"), log: () => {} }))
+async function broker(m: Machine, dir = m.env.SCP_DIR!) {
+  m.broker = await startBroker({ dir, idleMs: 0, policyPath: join(m.root, "policy.json"), log: () => {} })
+  brokers.push(m.broker)
 }
 
 const start = (m: Machine, verb: string, args: string[], extra: Record<string, string>, cwd: string) =>
@@ -122,9 +172,19 @@ function outcome(m: Machine, shown: Record<string, unknown>) {
       .replaceAll(m.root, "<root>")
       .replace(/scp-codex-[A-Za-z0-9]{6}/g, "<socket>")
       .replace(/SCP_SHIM_BINDING=[0-9a-f]{32}/g, "SCP_SHIM_BINDING=<binding>")
+      .replace(/SCP_SESSION=[0-9a-f]{32}/g, "SCP_SESSION=<session>")
       .replace(/krt_[0-9a-f]{64}/g, "<grant>")
-      .replace(/swarm mcp: could not reach the relay broker yet: codex channel stopped\\n/g, "")
-  return JSON.parse(normal(JSON.stringify({ ...shown, records })))
+      .replace(/"process":"pid:[^"]*/g, '"process":"<process>')
+      .replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:<port>")
+      .replace(/(msg|thr)_[0-9a-z]+/g, "$1_<id>")
+      .replace(/short=\\"[0-9a-f]{6}/g, 'short=\\"<short>')
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid4>")
+      .replace(/swarm mcp: could not reach the relay broker yet: codex channel stopped\n/g, "")
+  const each = (value: unknown): unknown => (typeof value === "string" ? normal(value) : value)
+  return {
+    ...Object.fromEntries(Object.entries(shown).map(([key, value]) => [key, each(value)])),
+    records: Object.fromEntries(Object.entries(records).map(([key, value]) => [key, normal(value)])),
+  }
 }
 
 /** `swarm <verb> <args>` to its end */
@@ -134,28 +194,40 @@ async function run(m: Machine, verb: string, args: string[], extra: Record<strin
   return outcome(m, { code, stdout, stderr })
 }
 
-/** `swarm <verb> <args>` until stderr shows `marker`, then `signal`, which it takes as the end of the run */
-async function supervise(m: Machine, verb: string, args: string[], marker: RegExp, extra: Record<string, string> = {}, signal: NodeJS.Signals = "SIGTERM") {
+/** `swarm <verb> <args>` until stderr shows `marker`, or `stop()` runs: then `signal`, which it takes as the end of the run */
+function supervise(m: Machine, verb: string, args: string[], marker: RegExp, extra: Record<string, string> = {}, signal: NodeJS.Signals = "SIGTERM") {
   const child = start(m, verb, args, extra, m.work)
   const out = new Response(child.stdout).text()
   let stderr = ""
   const decoder = new TextDecoder()
   const reader = child.stderr.getReader()
-  const signalled = (async () => {
+  const stop = () => child.kill(signal)
+  const read = (async () => {
     for (;;) {
       const { value, done } = await reader.read()
       if (done) return
       stderr += decoder.decode(value, { stream: true })
       if (marker.test(stderr)) {
         await Bun.sleep(300)
-        child.kill(signal)
+        stop()
         marker = /$^/
       }
     }
   })()
-  const code = await child.exited
-  await signalled
-  return outcome(m, { code, stdout: await out, stderr })
+  const finished = (async () => {
+    const code = await child.exited
+    await read
+    return outcome(m, { code, stdout: await out, stderr })
+  })()
+  return Object.assign(finished, { stop, stderr: () => stderr })
+}
+
+async function until(probe: () => boolean, ms = 20_000) {
+  const end = Date.now() + ms
+  while (!probe()) {
+    if (Date.now() > end) throw new Error("timed out")
+    await Bun.sleep(50)
+  }
 }
 
 /** runs `steps` on a TypeScript machine and a native one, each set up by `prepare`, and expects every step to come out the same */
@@ -177,6 +249,17 @@ const each =
     for (const [args, extra] of lists) out.push(await run(m, verb, args, extra))
     return out
   }
+
+/** a shim's claim of the process in `file`, once it is there, on the machine's broker */
+async function shim(m: Machine, file: string, handle: string, harness: string) {
+  while (!existsSync(join(m.root, file))) await Bun.sleep(20)
+  const pid = Number(readFileSync(join(m.root, file), "utf8"))
+  const client = await RelayClient.connect(m.broker!.socket)
+  const key = processKey(pid)
+  await client.hello({ claim: { handle, harness, process: key, lineage: [key] } })
+  rmSync(join(m.root, file))
+  return client
+}
 
 const THREAD = "019bd3c6-f4a2-7c3e-9d5e-1f2a3b4c5d6e"
 const WAITING = /waiting for messages/
@@ -271,5 +354,216 @@ describe.skipIf(!swarmBinary || !node)("swarm codex: the native swarm runs it as
         await broker(m)
       },
     )
+  })
+})
+
+const MUSE_MOUNT = JSON.stringify({ mcpServers: { scp: { command: "swarm", args: ["mcp"] } } })
+
+/** a machine Muse has its mount on, with the default broker its shim would reach */
+async function museMachine(m: Machine) {
+  mkdirSync(join(m.env.XDG_CONFIG_HOME!, "muse"), { recursive: true })
+  writeFileSync(join(m.env.XDG_CONFIG_HOME!, "muse", "settings.json"), MUSE_MOUNT)
+  await broker(m, join(m.root, ".local", "state", "scp"))
+}
+
+describe.skipIf(!swarmBinary || !node)("swarm muse: the native swarm runs it as the TypeScript CLI does", () => {
+  test("a serve that dies is named with its stderr, whichever of its pipe and its exit came first", async () => {
+    const m = machine("native")
+    await museMachine(m)
+    const died = await run(m, "muse", [], { FAKE_APP: "die" })
+    expect(died.code).toBe(125)
+    expect(died.stderr).toContain("swarm muse: muse serve failed\nserve boom\n")
+  })
+
+  test("usage errors and mount hints", async () => {
+    await same(
+      each("muse", [
+        [["--name"]],
+        [["--name", "me"]],
+        [["--as=Bad Name"]],
+        [["--resume"]],
+        [["--under"]],
+        [["--root", "--under=lead"]],
+        [["--approval-mode", "yes"]],
+        [["--contributor-mode"]],
+        [["--contributor-mode", "max"]],
+        [["--contributor-mode=max"]],
+      ]),
+      async (m) => {
+        await museMachine(m)
+      },
+    )
+    await same(each("muse", [[[]]]))
+    await same(each("muse", [[[]]]), (m) => {
+      mkdirSync(join(m.env.XDG_CONFIG_HOME!, "muse"), { recursive: true })
+      writeFileSync(join(m.env.XDG_CONFIG_HOME!, "muse", "settings.json"), "[1]")
+    })
+  })
+
+  test("a serve that fails says why", async () => {
+    await same(
+      each("muse", [
+        [[], { SCP_MUSE_BIN: "/nonexistent/muse" }],
+        [[], { FAKE_APP: "refuse" }],
+        [[], { FAKE_APP: "unnamed" }],
+      ]),
+      museMachine,
+    )
+  })
+
+  test("a session: its arguments, launch file, approvals, messages and a signal end it with 0", async () => {
+    const out = await same(async (m) => {
+      const steps: unknown[] = []
+      const claimed = shim(m, "muse.pid", "lead", "muse")
+      steps.push(await supervise(m, "muse", ["--name=lead", "--approval-mode=never", "--model", "m", "--", "--provider", "x"], WAITING))
+      ;(await claimed).close()
+      const again = shim(m, "muse.pid", "muse-work-dir", "muse")
+      steps.push(await supervise(m, "muse", ["--resume", "s-9", "--contributor-mode=on"], WAITING, { SCP_DIR: join(m.root, "other") }, "SIGINT"))
+      ;(await again).close()
+      return steps
+    }, museMachine)
+    const first = out[0] as { code: number; stdout: string; stderr: string; records: Record<string, string> }
+    expect(first.code).toBe(0)
+    expect(first.stdout).toBe("hello from muse\n")
+    expect(first.stderr).toContain("declined rm -rf")
+    expect(first.records["muse.args"]).toContain("--disable-request-user-input")
+    expect(first.records["launch.log"]).toContain('"name":"lead"')
+  })
+
+  test("a relay message wakes the session, retried when it is busy", async () => {
+    const out = await same(async (m) => {
+      const claimed = shim(m, "muse.pid", "lead", "muse")
+      const waited = supervise(m, "muse", ["--name", "lead"], /$^/, { FAKE_APP: "busy" })
+      const client = await claimed
+      await until(() => waited.stderr().includes("waiting for messages"))
+      const sender = await RelayClient.connect(m.broker!.socket)
+      await sender.hello({ claim: { handle: "tester", harness: "test", process: "pid:1:tester", lineage: [] } })
+      await sender.request("send", { to: "me/lead", body: "ping" })
+      await until(() => existsSync(join(m.root, "wire.log")) && (readFileSync(join(m.root, "wire.log"), "utf8").match(/turn\/start/g)?.length ?? 0) >= 2)
+      sender.close()
+      waited.stop()
+      const done = await waited
+      client.close()
+      return [done]
+    }, museMachine)
+    expect((out[0] as { records: Record<string, string> }).records["wire.log"]).toContain("ping")
+  })
+})
+
+/** a stand-in T3 Code server: answers the projection, streams the shell, and logs what it was sent */
+function t3Server(m: Machine, script: { token?: string; fail?: string; ended?: boolean; deleted?: boolean } = {}) {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request, server) {
+      if (request.headers.get("authorization") !== `Bearer ${script.token ?? "tok-1"}`) return new Response("no", { status: 401 })
+      if (new URL(request.url).search !== "?orchestrationProtocol=2") return new Response("no", { status: 404 })
+      return server.upgrade(request) ? undefined : new Response("no", { status: 400 })
+    },
+    websocket: {
+      message(ws, raw) {
+        const message = JSON.parse(String(raw))
+        appendFileSync(join(m.root, "wire.log"), `${String(raw)}\n`)
+        const exit = (exit: unknown) => ws.send(JSON.stringify({ _tag: "Exit", requestId: message.id, exit }))
+        if (message.tag === "orchestration.getThreadProjection") {
+          if (script.fail) exit({ _tag: "Failure", cause: [{ error: { message: script.fail } }] })
+          else exit({ _tag: "Success", value: { runs: [{ id: "run-1", status: "running" }] } })
+        } else if (message.tag === "orchestration.subscribeShell") {
+          ws.send(JSON.stringify({ _tag: "Ping" }))
+          ws.send(
+            JSON.stringify({
+              _tag: "Chunk",
+              requestId: message.id,
+              values: [{ kind: "snapshot", snapshot: { threads: [{ id: "t-1", activeRunId: "run-2" }] } }],
+            }),
+          )
+          if (script.deleted) ws.send(JSON.stringify({ _tag: "Chunk", requestId: message.id, values: [{ thread: { id: "t-1", deletedAt: "now" } }] }))
+          if (script.ended) exit({ _tag: "Failure", cause: [{ error: "stream over" }] })
+        } else if (message.tag === "orchestration.dispatchCommand") exit({ _tag: "Success", value: {} })
+      },
+    },
+  })
+  servers.push(server)
+  return String(server.port)
+}
+
+const T3 = ["--thread", "t-1"]
+
+describe.skipIf(!swarmBinary || !node)("swarm t3code: the native swarm runs it as the TypeScript CLI does", () => {
+  test("usage errors and what it needs before it starts", async () => {
+    await same(
+      each("t3code", [
+        [[]],
+        [["--model"]],
+        [["--thread="]],
+        [["--thread"]],
+        [[...T3, "--name"]],
+        [[...T3, "--name", "me"]],
+        [[...T3, "--root", "--under=lead"]],
+        [[...T3, "--under=me/vm/Bad"]],
+        [T3],
+        [T3, { SCP_T3_URL: "nope" }],
+        [T3, { SCP_T3_URL: "https://x" }],
+      ]),
+    )
+    await same(async (m) => {
+      const dir = join(m.root, ".t3", "userdata")
+      mkdirSync(dir, { recursive: true })
+      const file = join(dir, "server-runtime.json")
+      const out: unknown[] = []
+      for (const content of ["{", "[1]", '{"port":"x","host":"h"}', '{"port":1,"pid":999999,"host":"h"}']) {
+        writeFileSync(file, content)
+        out.push(await run(m, "t3code", T3))
+      }
+      return out
+    })
+  })
+
+  test("a token comes from the variable or from t3", async () => {
+    await same(async (m) => {
+      const url = `http://127.0.0.1:${t3Server(m, { fail: "gone" })}`
+      const empty = join(m.root, "empty")
+      mkdirSync(empty)
+      return [
+        await run(m, "t3code", T3, { SCP_T3_URL: url, SCP_T3_TOKEN: "  tok-1 " }),
+        await run(m, "t3code", T3, { SCP_T3_URL: url }),
+        await run(m, "t3code", ["--base-dir=/b", ...T3], { SCP_T3_URL: url, FAKE_APP: "refuse" }),
+        await run(m, "t3code", T3, { SCP_T3_URL: url, FAKE_APP: "spaced" }),
+        await run(m, "t3code", T3, { SCP_T3_URL: url, PATH: empty }),
+        await run(m, "t3code", T3, { SCP_T3_URL: url, SCP_T3_BIN: "/nonexistent/t3" }),
+      ]
+    })
+  })
+
+  test("a server that refuses, has no thread or ends its stream stops the launch", async () => {
+    await same(async (m) => {
+      const token = { SCP_T3_TOKEN: "tok-1" }
+      return [
+        await run(m, "t3code", T3, { ...token, SCP_T3_URL: "http://127.0.0.1:9" }),
+        await run(m, "t3code", T3, { ...token, SCP_T3_URL: `http://127.0.0.1:${t3Server(m, { token: "other" })}` }),
+        await run(m, "t3code", T3, { ...token, SCP_T3_URL: `http://127.0.0.1:${t3Server(m, { fail: "no such thread" })}` }),
+        await run(m, "t3code", T3, { ...token, SCP_T3_URL: `http://127.0.0.1:${t3Server(m, { ended: true })}` }),
+        await run(m, "t3code", T3, { ...token, SCP_T3_URL: `http://127.0.0.1:${t3Server(m, { deleted: true })}` }),
+      ]
+    }, broker)
+  })
+
+  test("a relay message becomes a user message on the thread, steering its active run", async () => {
+    const out = await same(async (m) => {
+      const url = `http://127.0.0.1:${t3Server(m)}`
+      const env = { SCP_T3_TOKEN: "tok-1", SCP_T3_URL: url }
+      const waited = supervise(m, "t3code", ["--name", "lead", ...T3], /$^/, env)
+      await until(() => waited.stderr().includes("waking T3 Code thread"))
+      const sender = await RelayClient.connect(m.broker!.socket)
+      await sender.hello({ claim: { handle: "tester", harness: "test", process: "pid:1:tester", lineage: [] } })
+      await sender.request("send", { to: "me/lead", body: "ping" })
+      await until(() => existsSync(join(m.root, "wire.log")) && readFileSync(join(m.root, "wire.log"), "utf8").includes("message.dispatch"))
+      sender.close()
+      waited.stop()
+      return [await waited]
+    }, broker)
+    const first = out[0] as { code: number; records: Record<string, string> }
+    expect(first.code).toBe(0)
+    expect(first.records["wire.log"]).toContain("steer_active")
   })
 })

@@ -4,6 +4,8 @@
 pub mod attribute;
 pub mod channel;
 pub mod codex;
+pub mod muse;
+pub mod t3code;
 pub mod ws;
 
 use crate::spawn::argv::executable;
@@ -12,10 +14,20 @@ use scp_mcp::ps::{Env, basename, dirname, join};
 use scp_mcp::render::js_space;
 use std::io::Read;
 
-pub const VERBS: &[Verb] = &[Verb {
-    name: "codex",
-    run: Run::Words(codex::codex),
-}];
+pub const VERBS: &[Verb] = &[
+    Verb {
+        name: "codex",
+        run: Run::Words(codex::codex),
+    },
+    Verb {
+        name: "muse",
+        run: Run::Words(muse::muse),
+    },
+    Verb {
+        name: "t3code",
+        run: Run::Words(t3code::t3code),
+    },
+];
 
 /// a child's exit as a launcher hands it on: its code, 1 when a signal ended it
 pub fn exit_code(status: std::process::ExitStatus) -> i32 {

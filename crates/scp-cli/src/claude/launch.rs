@@ -872,6 +872,7 @@ pub fn claude(call: &Call, argv: &[String]) -> Done {
         root: parsed.root,
         under: parsed.under.as_deref(),
         resume: resumes(args),
+        dir: None,
     };
     let warn = |line: &str| term::err(line);
     if parsed.bg {

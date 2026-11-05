@@ -11,6 +11,7 @@ use scp_mcp::ps::{Env, SHELL_PS_TIMEOUT_MS, read_ps_table};
 use scp_mcp::tools::{get, truthy};
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -29,6 +30,8 @@ pub struct Placement<'a> {
     pub root: bool,
     pub under: Option<&'a str>,
     pub resume: bool,
+    /// the broker to ask, when it is not the one `env` names
+    pub dir: Option<&'a str>,
 }
 
 /// how long a launcher waits on the broker for attribution before it starts the session unlinked
@@ -98,16 +101,21 @@ fn no_broker(error: &CallError) -> bool {
     }
 }
 
+fn broker_dir(broker: Option<&str>, env: &Env) -> PathBuf {
+    broker.map_or_else(|| relay_dir(env), PathBuf::from)
+}
+
 /// the explicit parent `under`, with a parent on this broker's own machine as a local address; another machine's needs a hub link
 async fn place_under(
     launcher: &str,
     under: &str,
+    broker: Option<&str>,
     env: &Env,
     warn: &dyn Fn(&str),
 ) -> Result<Attribution, Fail> {
     let mut parent = under.to_owned();
     if let Some((machine, handle)) = machine_address(under) {
-        let dir = relay_dir(env);
+        let dir = broker_dir(broker, env);
         let shown = dir.to_string_lossy().into_owned();
         let ms = ATTRIBUTE_TIMEOUT_MS;
         let check = async {
@@ -191,7 +199,9 @@ pub async fn attribute(
 ) -> Result<Option<Attribution>, Fail> {
     validate_under(placement.under, placement.root)?;
     if let Some(under) = placement.under {
-        return place_under(launcher, under, env, warn).await.map(Some);
+        return place_under(launcher, under, placement.dir, env, warn)
+            .await
+            .map(Some);
     }
     if placement.resume || env.get("SCP_TRANSPORT").is_some_and(|t| t == "cloud") {
         return Ok(None);
@@ -207,17 +217,18 @@ pub async fn attribute(
     if walk.keys.is_empty() {
         return Ok(None);
     }
-    Ok(caller_grant(launcher, placement.name, &walk, env, cwd, warn).await)
+    Ok(caller_grant(launcher, placement, &walk, env, cwd, warn).await)
 }
 
 async fn caller_grant(
     launcher: &str,
-    name: Option<&str>,
+    placement: Placement<'_>,
     walk: &Walk,
     env: &Env,
     cwd: &str,
     warn: &dyn Fn(&str),
 ) -> Option<Attribution> {
+    let name = placement.name;
     let grant = env.get("SCP_GRANT").filter(|g| !g.is_empty());
     let own = if grant.is_some() || !terminal_attached(false) {
         walk.own.clone()
@@ -233,7 +244,7 @@ async fn caller_grant(
     let caller: RefCell<Option<String>> = RefCell::new(None);
     let ms = ATTRIBUTE_TIMEOUT_MS;
     let mint = async {
-        let client = connect_within(&relay_dir(env), None, ms)
+        let client = connect_within(&broker_dir(placement.dir, env), None, ms)
             .await
             .map_err(Stop::from)?;
         let minted: Result<Option<Attribution>, Stop> = async {

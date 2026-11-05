@@ -38,7 +38,7 @@ pub struct Link {
     writer: RefCell<Option<mpsc::UnboundedSender<Vec<u8>>>>,
     on_text: OnText,
     on_close: OnClose,
-    tasks: RefCell<Vec<AbortHandle>>,
+    reader: RefCell<Option<AbortHandle>>,
     buffer: RefCell<Vec<u8>>,
     fragments: RefCell<Vec<u8>>,
     opened: Cell<bool>,
@@ -109,7 +109,7 @@ impl Link {
             writer: RefCell::new(None),
             on_text,
             on_close,
-            tasks: RefCell::new(Vec::new()),
+            reader: RefCell::new(None),
             buffer: RefCell::new(Vec::new()),
             fragments: RefCell::new(Vec::new()),
             opened: Cell::new(false),
@@ -120,7 +120,7 @@ impl Link {
         let task = tokio::task::spawn_local(async move {
             running.run(connect, upgrade, rx).await;
         });
-        link.tasks.borrow_mut().push(task.abort_handle());
+        *link.reader.borrow_mut() = Some(task.abort_handle());
         link
     }
 
@@ -157,7 +157,7 @@ impl Link {
             return;
         }
         let writing = self.clone();
-        let task = tokio::task::spawn_local(async move {
+        tokio::task::spawn_local(async move {
             while let Some(bytes) = outgoing.recv().await {
                 if let Err(error) = write.write_all(&bytes).await {
                     writing.fail(&stream_error("write", &error));
@@ -165,7 +165,6 @@ impl Link {
                 }
             }
         });
-        self.tasks.borrow_mut().push(task.abort_handle());
         let mut chunk = vec![0u8; 65536];
         loop {
             match read.read(&mut chunk).await {
@@ -217,8 +216,8 @@ impl Link {
             waiting
         });
         self.writer.borrow_mut().take();
-        for task in self.tasks.borrow_mut().drain(..) {
-            task.abort();
+        if let Some(reader) = self.reader.borrow_mut().take() {
+            reader.abort();
         }
         if self.destroyed() {
             return;
