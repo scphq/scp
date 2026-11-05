@@ -10,6 +10,7 @@ use crate::fleet::view::text;
 use crate::launch::attribute::{
     Attribution, Placement, attribute, attributed, options_before, under_text, validate_under,
 };
+use crate::launch::channel::Spool;
 use crate::open::{block_on, errno_words, node_fs_error};
 use crate::spawn::argv::{mcp_mount, mcp_words, mount_vars, pin_mode, which_on_path};
 use crate::spawn::signals::Listener;
@@ -494,51 +495,11 @@ fn signal_code(signal: i32) -> i32 {
     }
 }
 
-/// how long the last of claude's stdout may take to reach a reader that is slow to drain it, as `exitFlushed` waits
-const FLUSH_WAIT: Duration = Duration::from_secs(10);
-
-/// claude's stdout on its way to this process's stdout, written by a thread of its own so a slow reader never holds up the signals;
-/// dropped, it waits at most [`FLUSH_WAIT`] for what it still holds
-struct Tee {
-    chunks: Option<std::sync::mpsc::Sender<Vec<u8>>>,
-    done: std::sync::mpsc::Receiver<()>,
-}
-
-impl Tee {
-    fn new() -> Tee {
-        let (chunks, queued) = std::sync::mpsc::channel::<Vec<u8>>();
-        let (finished, done) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for chunk in queued {
-                term::print_bytes(&chunk);
-            }
-            let _ = finished.send(());
-        });
-        Tee {
-            chunks: Some(chunks),
-            done,
-        }
-    }
-
-    fn send(&self, bytes: Vec<u8>) {
-        if let Some(chunks) = &self.chunks {
-            let _ = chunks.send(bytes);
-        }
-    }
-}
-
-impl Drop for Tee {
-    fn drop(&mut self) {
-        self.chunks.take();
-        let _ = self.done.recv_timeout(FLUSH_WAIT);
-    }
-}
-
 /// a finished claude run: its exit code, and with its stdout piped what it printed and the tee still writing it
 struct Ran {
     code: i32,
     printed: Vec<u8>,
-    tee: Option<Tee>,
+    tee: Option<Spool>,
 }
 
 /// runs claude with the terminal passed through, its stdout also kept when `pipe`
@@ -566,7 +527,7 @@ fn run_claude(bin: &str, args: &[String], env: &Env, cwd: &str, pipe: bool) -> R
         })?;
         let pid = child.id().map_or(0, |pid| pid as i32);
         let mut out = child.stdout.take();
-        let tee = out.is_some().then(Tee::new);
+        let tee = out.is_some().then(|| Spool::new(term::print_bytes));
         let mut printed = Vec::new();
         let mut chunk = vec![0u8; 65536];
         let mut status = None;

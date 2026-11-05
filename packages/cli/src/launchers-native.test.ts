@@ -1,6 +1,21 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import {
+  appendFileSync,
+  closeSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { dirname, join, relative, resolve } from "node:path"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { opencodePlugin } from "./hooks"
 import { processKey } from "./identity"
@@ -28,7 +43,8 @@ type Engine = "ts" | "native"
 
 /** one fake harness for every launcher: records how it was started, and plays the part `$FAKE` asks for */
 const FAKE = `#!${process.execPath}
-import { writeFileSync, appendFileSync, readFileSync } from "node:fs"
+import { writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs"
+import { spawn } from "node:child_process"
 const root = process.env.FAKE_ROOT
 const args = process.argv.slice(2)
 const shown = Object.entries(process.env).filter(([key]) => /^(SCP_|CODEX|T3|XDG_STATE)/.test(key)).map(([key, value]) => key + "=" + value).sort().join("\\n")
@@ -37,15 +53,30 @@ const record = (name) => {
   writeFileSync(root + "/" + name + ".env", shown + "\\n")
 }
 const reply = (ws, id, result) => ws.send(JSON.stringify({ id, result }))
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const there = (name) => existsSync(root + "/" + name)
 if (args[0] === "--remote") {
   record("tui")
+  if (process.env.FAKE_APP === "vanish") {
+    while (!there("app.gone")) await pause(5)
+    await pause(30)
+  }
   process.exit(Number(process.env.FAKE_TUI_CODE ?? 0))
 }
 if (args[0] === "app-server") {
   record("app")
+  writeFileSync(root + "/server.pid", String(process.pid))
   if (process.env.FAKE_APP === "die") {
     console.error("app-server boom")
     process.exit(3)
+  }
+  if (process.env.FAKE_APP === "vanish") {
+    ;(async () => {
+      while (!there("tui.args")) await pause(5)
+      spawn("sleep", ["1"], { stdio: ["ignore", "ignore", "inherit"], detached: true }).unref()
+      writeFileSync(root + "/app.gone", "")
+      process.exit(0)
+    })()
   }
   Bun.serve({
     unix: args[2].replace("unix://", ""),
@@ -64,6 +95,8 @@ if (args[0] === "app-server") {
           ws.send(JSON.stringify({ id: "a1", method: "item/commandExecution/requestApproval", params: {} }))
           ws.send(JSON.stringify({ id: "a2", method: "other/ask", params: {} }))
           ws.send(JSON.stringify({ method: "item/completed", params: { item: { type: "agentMessage", text: "hello from the thread" } } }))
+          if (process.env.FAKE_APP === "flood")
+            for (let i = 0; i < 8; i++) ws.send(JSON.stringify({ method: "item/completed", params: { item: { type: "agentMessage", text: "x".repeat(1 << 20) } } }))
         } else if (message.id !== undefined && message.method) reply(ws, message.id, {})
       },
     },
@@ -75,6 +108,7 @@ if (args[0] === "app-server") {
     process.exit(3)
   }
   writeFileSync(root + "/muse.pid", String(process.pid))
+  writeFileSync(root + "/server.pid", String(process.pid))
   const write = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n")
   let buffer = ""
   let turn = 0
@@ -100,6 +134,8 @@ if (args[0] === "app-server") {
           write({ method: "item/completed", params: { item: { kind: "agentMessage", text: "hello from muse" } } })
           write({ method: "item/completed", params: { item: { kind: "agentMessage", text: "" } } })
           process.stdout.write("not json\\n\\n")
+          if (process.env.FAKE_APP === "flood")
+            for (let i = 0; i < 8; i++) write({ method: "item/completed", params: { item: { kind: "agentMessage", text: "x".repeat(1 << 20) } } })
         }
       } else if (message.method === "turn/start") {
         write({ id: message.id, result: { status: ++turn === 1 && process.env.FAKE_APP === "busy" ? "rejected" : "accepted" } })
@@ -109,6 +145,7 @@ if (args[0] === "app-server") {
   process.stdin.on("end", () => process.exit(0))
 } else if (args[0] === "auth") {
   record("t3")
+  if (process.env.FAKE_APP === "stdin") await Bun.stdin.text()
   if (process.env.FAKE_APP === "refuse") {
     console.error("one\\ntwo\\nthree\\nfour")
     process.exit(2)
@@ -162,8 +199,10 @@ const start = (m: Machine, verb: string, args: string[], extra: Record<string, s
     env: { ...m.env, ...extra },
   })
 
+type Outcome = { code: number; stdout: string; stderr: string; records: Record<string, string> }
+
 /** what a run left: its output and code, and every record the fakes wrote */
-function outcome(m: Machine, shown: Record<string, unknown>) {
+function outcome(m: Machine, shown: Record<string, unknown>): Outcome {
   const records = Object.fromEntries(
     readdirSync(m.root)
       .filter((name) => /\.(args|env|log)$/.test(name))
@@ -190,7 +229,7 @@ function outcome(m: Machine, shown: Record<string, unknown>) {
   return {
     ...Object.fromEntries(Object.entries(shown).map(([key, value]) => [key, each(value)])),
     records: Object.fromEntries(Object.entries(records).map(([key, value]) => [key, normal(value)])),
-  }
+  } as Outcome
 }
 
 /** `swarm <verb> <args>` to its end */
@@ -270,6 +309,39 @@ async function shim(m: Machine, file: string, handle: string, harness: string) {
 const THREAD = "019bd3c6-f4a2-7c3e-9d5e-1f2a3b4c5d6e"
 const WAITING = /waiting for messages/
 
+/** the native `swarm <verb>`, its stdout a pipe nobody reads and flooded by its harness: SIGTERM still stops the harness at once */
+async function blocked(m: Machine, verb: string, args: string[], extra: Record<string, string>, ready?: () => Promise<unknown>) {
+  const fifo = join(m.root, "stdout.fifo")
+  Bun.spawnSync(["mkfifo", fifo])
+  const pipe = openSync(fifo, constants.O_RDWR)
+  const child = Bun.spawn([resolve(swarmBinary!), verb, ...args], {
+    cwd: m.work,
+    stdin: "ignore",
+    stdout: pipe,
+    stderr: "pipe",
+    env: { ...m.env, FAKE_APP: "flood", ...extra },
+  })
+  const seen = new Response(child.stderr).text()
+  await ready?.()
+  await until(() => existsSync(join(m.root, "server.pid")))
+  await Bun.sleep(1500)
+  const pid = Number(readFileSync(join(m.root, "server.pid"), "utf8"))
+  const alive = () => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  expect(alive()).toBe(true)
+  child.kill("SIGTERM")
+  await until(() => !alive(), 5000)
+  expect(await child.exited).toBe(0)
+  await seen
+  closeSync(pipe)
+}
+
 /** `tester` sending `body` to `to` on the machine's broker */
 async function send(m: Machine, to: string, body: string) {
   const sender = await RelayClient.connect(m.broker!.socket)
@@ -315,6 +387,18 @@ describe.skipIf(!swarmBinary || !node)("swarm codex: the native swarm runs it as
     expect((out[1] as { code: number; stderr: string }).stderr).toContain("app-server boom")
   })
 
+  test("an app-server gone before the TUI is a failure, though what it left behind holds its stderr", async () => {
+    const out = await same(each("codex", [[[], { FAKE_APP: "vanish" }]]), broker)
+    expect((out[0] as Outcome).code).toBe(1)
+    expect((out[0] as Outcome).stderr).toContain("app-server failed")
+  })
+
+  test("a stdout nobody reads never holds up a signal", async () => {
+    const m = machine("native")
+    await broker(m)
+    await blocked(m, "codex", ["--headless"], {})
+  })
+
   test("the TUI runs on the app-server, with codex's arguments and its exit code", async () => {
     const out = await same(
       each("codex", [
@@ -327,7 +411,10 @@ describe.skipIf(!swarmBinary || !node)("swarm codex: the native swarm runs it as
       ]),
       async (m) => {
         mkdirSync(join(m.root, ".codex"))
-        writeFileSync(join(m.root, ".codex", "mock.config.toml"), 'model = "mock"\nwhen = 2024-01-02T03:04:05Z\n[tools]\nweb = true\nlist = [1, "two"]\n')
+        writeFileSync(
+          join(m.root, ".codex", "mock.config.toml"),
+          'model = "mock"\nwhen = 2024-01-02T03:04:05Z\nzero = 2024-01-02T03:04:05-00:00\n[tools]\nweb = true\nlist = [1, "two"]\n',
+        )
         await broker(m)
       },
     )
@@ -451,6 +538,16 @@ describe.skipIf(!swarmBinary || !node)("swarm muse: the native swarm runs it as 
     expect(first.records["launch.log"]).toContain('"name":"lead"')
   })
 
+  test("a stdout nobody reads never holds up a signal", async () => {
+    const m = machine("native")
+    await museMachine(m)
+    let client: RelayClient | undefined
+    await blocked(m, "muse", [], {}, async () => {
+      client = await shim(m, "muse.pid", "muse-work-dir", "muse")
+    })
+    client?.close()
+  })
+
   test("a relay message wakes the session, retried when it is busy", async () => {
     const out = await same(async (m) => {
       const claimed = shim(m, "muse.pid", "lead", "muse")
@@ -542,6 +639,7 @@ describe.skipIf(!swarmBinary || !node)("swarm t3code: the native swarm runs it a
       const url = `http://127.0.0.1:${t3Server(m, { fail: "gone" })}`
       const empty = join(m.root, "empty")
       mkdirSync(empty)
+      writeFileSync(join(m.root, "plain-file"), "")
       return [
         await run(m, "t3code", T3, { SCP_T3_URL: url, SCP_T3_TOKEN: "  tok-1 " }),
         await run(m, "t3code", T3, { SCP_T3_URL: url }),
@@ -549,6 +647,8 @@ describe.skipIf(!swarmBinary || !node)("swarm t3code: the native swarm runs it a
         await run(m, "t3code", T3, { SCP_T3_URL: url, FAKE_APP: "spaced" }),
         await run(m, "t3code", T3, { SCP_T3_URL: url, PATH: empty }),
         await run(m, "t3code", T3, { SCP_T3_URL: url, SCP_T3_BIN: "/nonexistent/t3" }),
+        await run(m, "t3code", T3, { SCP_T3_URL: url, SCP_T3_BIN: join(m.root, "plain-file") }),
+        await run(m, "t3code", T3, { SCP_T3_URL: url, FAKE_APP: "stdin" }),
       ]
     })
   })
@@ -712,6 +812,25 @@ describe.skipIf(!swarmBinary || !node)("swarm opencode and swarm pi: the native 
       broker,
     )
     expect((out[3] as { code: number }).code).toBe(7)
+  })
+
+  test("pi: the extension the CLI bundles is found through a relative or linked launcher", async () => {
+    await same(async (m) => {
+      const link = join(m.root, "swarm-link")
+      symlinkSync(dist, link)
+      return [
+        await run(m, "pi", [], { SCP_CLI_ARGV: JSON.stringify([node, relative(m.work, dist)]) }),
+        await run(m, "pi", [], { SCP_CLI_ARGV: JSON.stringify([node, link]) }),
+      ]
+    }, broker)
+  })
+
+  test("a bare launcher word never reads the working directory", async () => {
+    const m = machine("native")
+    await broker(m)
+    writeFileSync(join(m.work, "pi-extension.js"), "// planted")
+    const out = await run(m, "pi", [], { SCP_CLI_ARGV: JSON.stringify(["swarm"]) })
+    expect(out.records["turns.log"]).toContain("<root>/relay/pi/extension-")
   })
 
   test("the native swarm embeds the extension the CLI bundles, and writes it to the relay directory", async () => {

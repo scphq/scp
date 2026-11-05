@@ -3,7 +3,7 @@
 
 use super::attribute::{Placement, attribute, attributed, options_before, validate_under};
 use super::channel::{
-    Channel, ChannelSetup, Latch, Server, Transport, Watched, bind_channel, broker_connect,
+    Channel, ChannelSetup, Latch, Output, Server, Transport, Watched, bind_channel, broker_connect,
     default_signals, launcher_claim, os_tmpdir, pushed, spawn_error, start_server, temp_dir,
 };
 use super::ws::{Link, Upgrade};
@@ -184,7 +184,7 @@ fn server_setting(flag: &str) -> Option<&'static str> {
 }
 
 /// a TOML datetime as the TOML reader's `toISOString` writes it: milliseconds, and the offset as given
-fn iso_date(at: &toml::value::Datetime) -> String {
+fn iso_date(at: &toml::value::Datetime, raw: Option<&str>) -> String {
     let mut text = String::new();
     if let Some(date) = &at.date {
         text.push_str(&format!(
@@ -207,7 +207,8 @@ fn iso_date(at: &toml::value::Datetime) -> String {
     match at.offset {
         Some(toml::value::Offset::Z) => text.push('Z'),
         Some(toml::value::Offset::Custom { minutes }) => {
-            let sign = if minutes < 0 { '-' } else { '+' };
+            let negative = minutes < 0 || raw.is_some_and(|raw| raw.ends_with("-00:00"));
+            let sign = if negative { '-' } else { '+' };
             let minutes = minutes.unsigned_abs();
             text.push_str(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60));
         }
@@ -216,13 +217,26 @@ fn iso_date(at: &toml::value::Datetime) -> String {
     text
 }
 
-/// each leaf of `value` as a `-c key=value` override
-fn leaves(value: &Toml, path: &mut Vec<String>, out: &mut Vec<String>) {
+/// a datetime item as the file writes it, which holds the sign of a zero offset
+fn raw_date(item: Option<&toml_edit::Item>) -> Option<&str> {
+    let toml_edit::Value::Datetime(date) = item?.as_value()? else {
+        return None;
+    };
+    date.as_repr()?.as_raw().as_str()
+}
+
+/// each leaf of `value` as a `-c key=value` override; `item` is the same value as the file writes it
+fn leaves(
+    value: &Toml,
+    item: Option<&toml_edit::Item>,
+    path: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
     match value {
         Toml::Table(table) => {
             for (key, child) in entries(table) {
                 path.push(key.clone());
-                leaves(child, path, out);
+                leaves(child, item.and_then(|item| item.get(key)), path, out);
                 path.pop();
             }
         }
@@ -232,7 +246,7 @@ fn leaves(value: &Toml, path: &mut Vec<String>, out: &mut Vec<String>) {
             out.push(format!(
                 "{}={}",
                 path.join("."),
-                toml(&Toml::String(iso_date(at)))
+                toml(&Toml::String(iso_date(at, raw_date(item))))
             ));
         }
         leaf => {
@@ -251,13 +265,15 @@ fn profile_overrides(file: &str) -> Result<Vec<String>, String> {
             node_fs_error(&error, "open", file)
         }
     })?;
-    let table: toml::Table = toml::from_str(&String::from_utf8_lossy(&bytes))
-        .map_err(|error| error.message().to_owned())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let table: toml::Table = toml::from_str(&text).map_err(|error| error.message().to_owned())?;
     if !table.values().all(lossless) {
         return Err("integer value cannot be represented losslessly".into());
     }
     let mut out = Vec::new();
-    leaves(&Toml::Table(table), &mut Vec::new(), &mut out);
+    let document = text.parse::<toml_edit::DocumentMut>().ok();
+    let root = document.as_ref().map(|document| document.as_item());
+    leaves(&Toml::Table(table), root, &mut Vec::new(), &mut out);
     Ok(out)
 }
 
@@ -757,6 +773,7 @@ struct Run {
     waker: Rc<RefCell<Option<Rc<CodexWaker>>>>,
     tui: Rc<RefCell<Option<Rc<Watched>>>>,
     headless: bool,
+    output: Rc<Output>,
 }
 
 impl Run {
@@ -777,7 +794,8 @@ impl Run {
         let method = message.get("method").and_then(Json::as_str);
         if let (Some(id), Some(method)) = (message.get("id"), method) {
             let answer = if method.ends_with("/requestApproval") {
-                term::err(&format!("{CLI_NAME} codex: declined {method}"));
+                self.output
+                    .err(&format!("{CLI_NAME} codex: declined {method}"));
                 Json::object(vec![
                     ("id", id.clone()),
                     (
@@ -810,7 +828,7 @@ impl Run {
                 == Some("agentMessage")
                 && let Some(text) = text
             {
-                term::print(&format!("{text}\n"));
+                self.output.print(text);
             }
         }
     }
@@ -895,7 +913,7 @@ async fn serve(run: &Rc<Run>, session: &Session<'_>) -> Done {
         return Ok(0);
     }
     let Some(opened) = opened.filter(|_| !died()) else {
-        return Err(fail_server(server));
+        return Err(fail_server(server).await);
     };
     let mut thread_id: Option<String> = None;
     if launch.headless {
@@ -933,7 +951,7 @@ async fn serve(run: &Rc<Run>, session: &Session<'_>) -> Done {
                     Some(thread) => codex_owner(thread, &launch.env).await,
                     None => Owner::Unknown,
                 };
-                term::err(&held_thread_text(resume, owner));
+                run.output.err(&held_thread_text(resume, owner));
                 return Ok(1);
             }
         };
@@ -980,7 +998,10 @@ async fn serve(run: &Rc<Run>, session: &Session<'_>) -> Done {
             claim: claim.clone(),
             wake: "codex-app-server",
             env: launch.env.clone(),
-            log: Rc::new(term::err),
+            log: {
+                let output = run.output.clone();
+                Rc::new(move |line| output.err(line))
+            },
             on_message: Rc::new(move |message| {
                 if let Some(content) = pushed(message) {
                     pushing.push(content);
@@ -994,7 +1015,7 @@ async fn serve(run: &Rc<Run>, session: &Session<'_>) -> Done {
     if launch.headless {
         let handle = launch.name.as_deref().unwrap_or(field(&claim, "handle"));
         let thread = thread_id.as_deref().unwrap_or("undefined");
-        term::err(&format!(
+        run.output.err(&format!(
             "{CLI_NAME} codex: {handle} waiting for messages (thread {thread})"
         ));
     } else {
@@ -1002,7 +1023,7 @@ async fn serve(run: &Rc<Run>, session: &Session<'_>) -> Done {
     }
     let code = run.latch.done().await;
     if server.died() {
-        term::err(&server.failure(&failure_head()));
+        run.output.err(&server.failure(&failure_head()).await);
         return Ok(1);
     }
     Ok(code)
@@ -1012,8 +1033,8 @@ fn failure_head() -> String {
     format!("{CLI_NAME} codex: app-server failed")
 }
 
-fn fail_server(server: &Server) -> Fail {
-    usage(server.failure(&failure_head()))
+async fn fail_server(server: &Server) -> Fail {
+    usage(server.failure(&failure_head()).await)
 }
 
 /// the TUI on the app-server, the terminal passed through
@@ -1032,7 +1053,8 @@ fn start_tui(run: &Rc<Run>, launch: &CodexLaunch, path: &str, bin: &str) {
     let mut command = tokio::process::Command::from(command);
     match command.spawn() {
         Err(error) => {
-            term::err(&format!("{CLI_NAME} codex: {}", spawn_error(bin, &error)));
+            run.output
+                .err(&format!("{CLI_NAME} codex: {}", spawn_error(bin, &error)));
             run.latch.finish(1);
         }
         Ok(child) => {
@@ -1142,6 +1164,7 @@ async fn launch(
         waker: Rc::default(),
         tui: Rc::default(),
         headless: launch.headless,
+        output: Rc::default(),
     });
     let mut listener = Listener::new(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
     let on_signal = run.clone();
@@ -1177,7 +1200,7 @@ async fn launch(
     signals.abort();
     let _ = signals.await;
     let result = match result {
-        Err(_) if server.died() => Err(fail_server(&server)),
+        Err(_) if server.died() => Err(fail_server(&server).await),
         other => other,
     };
     let waker = run.waker.borrow().clone();
@@ -1198,6 +1221,7 @@ async fn launch(
     }
     server.terminate(TERMINATE_MS).await;
     let _ = std::fs::remove_dir_all(&dir);
+    run.output.finish();
     result
 }
 
@@ -1266,7 +1290,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("mock.config.toml"),
-            "model = \"mock\"\nwhen = 2024-01-02T03:04:05Z\nday = 2024-01-02\n[a]\nb = 1\nc = [1, \"x\"]\n",
+            "model = \"mock\"\nwhen = 2024-01-02T03:04:05Z\nday = 2024-01-02\nzero = 2024-01-02T03:04:05-00:00\n[a]\nb = 1\nc = [1, \"x\"]\n",
         )
         .unwrap();
         let env = Env::from([("CODEX_HOME".to_owned(), dir.to_string_lossy().into_owned())]);
@@ -1297,6 +1321,8 @@ mod tests {
                 "when=\"2024-01-02T03:04:05.000Z\"",
                 "-c",
                 "day=\"2024-01-02\"",
+                "-c",
+                "zero=\"2024-01-02T03:04:05.000-00:00\"",
                 "-c",
                 "a.b=1",
                 "-c",
@@ -1334,7 +1360,7 @@ mod tests {
 
     #[test]
     fn a_datetime_is_written_with_its_milliseconds_and_offset() {
-        let at = |text: &str| iso_date(&text.parse().unwrap());
+        let at = |text: &str| iso_date(&text.parse().unwrap(), None);
         assert_eq!(at("2024-01-02"), "2024-01-02");
         assert_eq!(at("03:04:05"), "03:04:05.000");
         assert_eq!(at("2024-01-02T03:04:05.250"), "2024-01-02T03:04:05.250");

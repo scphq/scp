@@ -28,5 +28,6 @@ reqwest = { version = "=0.12.23", default-features = false, features = ["json"] 
 tokio-tungstenite = "=0.26.2"
 libc = "=0.2.191"
 toml = "=0.8.23"
+toml_edit = "=0.22.27"
 zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
 indexmap = "=2.14.2"

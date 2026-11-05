@@ -2,8 +2,8 @@
 
 use super::attribute::{Placement, attribute, attributed, validate_under};
 use super::channel::{
-    Channel, ChannelSetup, Latch, Server, Transport, bind_channel, broker_connect, launcher_claim,
-    pushed, start_server,
+    Channel, ChannelSetup, Latch, Output, Server, Transport, bind_channel, broker_connect,
+    launcher_claim, pushed, start_server,
 };
 use crate::args::js_string;
 use crate::fleet::json::Json;
@@ -451,7 +451,7 @@ fn present(value: Option<&Json>) -> Option<&Json> {
 }
 
 /// answers a server request of muse serve for a session no human watches: approvals are declined, anything else is refused
-pub fn answer_request(host: &Rc<MuseHost>, message: &Json, log: &dyn Fn(&str)) {
+pub fn answer_request(host: &Rc<MuseHost>, message: &Json, output: &Rc<Output>) {
     let id = message.get("id").cloned().unwrap_or(Json::Null);
     let method = message.get("method");
     if method.and_then(Json::as_str) != Some("approval/request") {
@@ -487,7 +487,7 @@ pub fn answer_request(host: &Rc<MuseHost>, message: &Json, log: &dyn Fn(&str)) {
         .and_then(|s| present(s.get("command")))
         .or_else(|| subject.and_then(|s| present(s.get("kind"))));
     let what = named.map_or_else(|| "an approval".to_owned(), |named| text(Some(named)));
-    log(&format!("{CLI_NAME} muse: declined {what}"));
+    output.err(&format!("{CLI_NAME} muse: declined {what}"));
     let Some(choice) = choice else { return };
     let mut decide = Vec::new();
     let mut put = |key: &'static str, value: Option<&Json>| {
@@ -504,9 +504,10 @@ pub fn answer_request(host: &Rc<MuseHost>, message: &Json, log: &dyn Fn(&str)) {
     let reply = host
         .clone()
         .ask("approval/decide".into(), Json::object(decide));
+    let output = output.clone();
     tokio::task::spawn_local(async move {
         if let Err(error) = reply.await {
-            term::err(&format!(
+            output.err(&format!(
                 "{CLI_NAME} muse: could not decline: Error: {error}"
             ));
         }
@@ -537,6 +538,7 @@ struct Run<'a> {
     cwd: &'a str,
     server: &'a Server,
     host: Rc<MuseHost>,
+    output: Rc<Output>,
     latch: Latch,
     stopping: Rc<Cell<bool>>,
     unlaunch: RefCell<Option<crate::spawn::muse::LaunchFile>>,
@@ -549,8 +551,8 @@ fn io_fail(error: String) -> Fail {
 }
 
 impl Run<'_> {
-    fn failure(&self) -> Fail {
-        usage(self.server.failure(&failure_head()))
+    async fn failure(&self) -> Fail {
+        usage(self.server.failure(&failure_head()).await)
     }
 
     /// the session muse serve opened
@@ -593,7 +595,7 @@ impl Run<'_> {
 
     async fn serve(&self) -> Done {
         if self.server.died() || self.server.child.is_none() {
-            return Err(self.failure());
+            return Err(self.failure().await);
         }
         let pid = self.server.child.as_ref().map_or(0, |child| child.pid());
         let key = process_key(i64::from(pid), &ps_start);
@@ -609,7 +611,7 @@ impl Run<'_> {
         }
         let started = match started {
             Some(session) if !session.is_empty() && !self.server.died() => session,
-            _ => return Err(self.failure()),
+            _ => return Err(self.failure().await),
         };
         let claim = launcher_claim("muse", self.cwd, self.env, i64::from(pid));
         let ended = Rc::new(Cell::new(false));
@@ -631,7 +633,7 @@ impl Run<'_> {
             return Ok(0);
         }
         if self.server.died() {
-            return Err(self.failure());
+            return Err(self.failure().await);
         }
         let first = match bound {
             Some(Ok(client)) => client,
@@ -654,13 +656,14 @@ impl Run<'_> {
         *self.waker.borrow_mut() = Some(waker.clone());
         let channel = self.open_channel(first, connect, claim.clone(), waker, ended);
         channel.initialize("scp-waker").await;
-        term::err(&format!(
+        self.output.err(&format!(
             "{CLI_NAME} muse: {} waiting for messages (session {started})",
             field(&claim, "handle")
         ));
         let code = self.latch.done().await;
         if self.server.died() && !self.stopping.get() {
-            term::err(&self.server.failure(&failure_head()));
+            let failure = self.server.failure(&failure_head()).await;
+            self.output.err(&failure);
             return Ok(1);
         }
         Ok(code)
@@ -699,7 +702,10 @@ impl Run<'_> {
                 claim,
                 wake: "muse-serve",
                 env: self.env.clone(),
-                log: Rc::new(term::err),
+                log: {
+                    let output = self.output.clone();
+                    Rc::new(move |line| output.err(line))
+                },
                 on_message: Rc::new(move |message: &Value| {
                     if let Some(content) = pushed(message) {
                         waker.push(content);
@@ -714,9 +720,9 @@ impl Run<'_> {
 }
 
 /// a message of muse serve that is no reply to this client
-fn on_message(host: &Rc<MuseHost>, message: &Json) {
+fn on_message(host: &Rc<MuseHost>, message: &Json, output: &Rc<Output>) {
     if message.get("id").is_some() && message.get("method").and_then(Json::as_str).is_some() {
-        answer_request(host, message, &term::err);
+        answer_request(host, message, output);
         return;
     }
     if message.get("method").and_then(Json::as_str) != Some("item/completed") {
@@ -732,7 +738,7 @@ fn on_message(host: &Rc<MuseHost>, message: &Json) {
     if kind == Some("agentMessage")
         && let Some(line) = line.filter(|line| !line.is_empty())
     {
-        term::print(&format!("{line}\n"));
+        output.print(line);
     }
 }
 
@@ -814,7 +820,13 @@ async fn launch(call: &Call<'_>, args: &[String], env: &Env, cwd: &str, parsed: 
             stop.finish(0);
         }
     });
-    let host = MuseHost::start(input, output, Box::new(on_message));
+    let printed: Rc<Output> = Rc::default();
+    let printing = printed.clone();
+    let host = MuseHost::start(
+        input,
+        output,
+        Box::new(move |host, message| on_message(host, message, &printing)),
+    );
     let run = Run {
         launch: &launch,
         env: &run_env,
@@ -823,6 +835,7 @@ async fn launch(call: &Call<'_>, args: &[String], env: &Env, cwd: &str, parsed: 
         cwd,
         server: &server,
         host: host.clone(),
+        output: printed.clone(),
         latch,
         stopping,
         unlaunch: RefCell::new(None),
@@ -833,7 +846,7 @@ async fn launch(call: &Call<'_>, args: &[String], env: &Env, cwd: &str, parsed: 
     signals.abort();
     let _ = signals.await;
     let result = match result {
-        Err(_) if server.died() => Err(run.failure()),
+        Err(_) if server.died() => Err(run.failure().await),
         other => other,
     };
     let waker = run.waker.borrow().clone();
@@ -850,6 +863,7 @@ async fn launch(call: &Call<'_>, args: &[String], env: &Env, cwd: &str, parsed: 
     if let Some(file) = run.unlaunch.borrow_mut().take() {
         file.remove();
     }
+    printed.finish();
     result
 }
 

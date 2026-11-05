@@ -39,6 +39,7 @@ pub struct Link {
     on_text: OnText,
     on_close: OnClose,
     reader: RefCell<Option<AbortHandle>>,
+    sender: RefCell<Option<AbortHandle>>,
     buffer: RefCell<Vec<u8>>,
     fragments: RefCell<Vec<u8>>,
     opened: Cell<bool>,
@@ -110,6 +111,7 @@ impl Link {
             on_text,
             on_close,
             reader: RefCell::new(None),
+            sender: RefCell::new(None),
             buffer: RefCell::new(Vec::new()),
             fragments: RefCell::new(Vec::new()),
             opened: Cell::new(false),
@@ -157,7 +159,7 @@ impl Link {
             return;
         }
         let writing = self.clone();
-        tokio::task::spawn_local(async move {
+        let sending = tokio::task::spawn_local(async move {
             while let Some(bytes) = outgoing.recv().await {
                 if let Err(error) = write.write_all(&bytes).await {
                     writing.fail(&stream_error("write", &error));
@@ -165,6 +167,7 @@ impl Link {
                 }
             }
         });
+        *self.sender.borrow_mut() = Some(sending.abort_handle());
         let mut chunk = vec![0u8; 65536];
         loop {
             match read.read(&mut chunk).await {
@@ -206,7 +209,7 @@ impl Link {
         }
     }
 
-    /// ends the link with `error`
+    /// ends the link with `error`: frames the stream takes at once still go, the rest is dropped
     pub fn fail(&self, error: &str) {
         self.ready.send_if_modified(|ready| {
             let waiting = *ready == Ready::Waiting;
@@ -218,6 +221,12 @@ impl Link {
         self.writer.borrow_mut().take();
         if let Some(reader) = self.reader.borrow_mut().take() {
             reader.abort();
+        }
+        if let Some(sender) = self.sender.borrow_mut().take() {
+            tokio::task::spawn_local(async move {
+                tokio::task::yield_now().await;
+                sender.abort();
+            });
         }
         if self.destroyed() {
             return;
@@ -346,6 +355,50 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_link_drops_what_the_stream_does_not_take() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+            let (near, mut far) = tokio::io::duplex(4096);
+            let link = Link::open(
+                async move { Ok(near) },
+                Upgrade::default(),
+                "test",
+                Box::new(|_| {}),
+                Box::new(|_| {}),
+            );
+            let mut request = vec![0u8; 1024];
+            let n = far.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..n]).into_owned();
+            let key = request
+                .split("\r\n")
+                .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+                .unwrap();
+            let accept = derive_accept_key(key.as_bytes());
+            let reply = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+            );
+            far.write_all(reply.as_bytes()).await.unwrap();
+            link.ready().await.unwrap();
+            let big = "x".repeat(1 << 20);
+            link.send("small").unwrap();
+            link.send(&big).unwrap();
+            link.fail("stop");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let mut sent = Vec::new();
+            let read = far.read_to_end(&mut sent);
+            tokio::time::timeout(std::time::Duration::from_secs(5), read)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(sent.len() < 1 << 20, "{}", sent.len());
+            assert!(sent.len() > 5);
+        });
+    }
 
     #[test]
     fn the_status_line_decides_the_upgrade() {

@@ -7,7 +7,7 @@ use super::channel::{
 };
 use super::ws::{Link, Upgrade};
 use crate::args::js_string;
-use crate::claude::bg_io::exec_file;
+use crate::claude::bg_io::exec_with;
 use crate::fleet::json::Json;
 use crate::fleet::view::truthy;
 use crate::open::block_on;
@@ -289,10 +289,19 @@ async fn t3_token(env: &Env, dir: &str) -> Result<String, Fail> {
     let argv = issue_argv(dir);
     let words: Vec<&str> = argv.iter().map(String::as_str).collect();
     let started = std::time::Instant::now();
-    let ran = exec_file(&bin, &words, ISSUE_TIMEOUT_MS, ISSUE_MAX_BUFFER, env, None).await;
+    let ran = exec_with(
+        &bin,
+        &words,
+        ISSUE_TIMEOUT_MS,
+        ISSUE_MAX_BUFFER,
+        env,
+        None,
+        std::process::Stdio::null(),
+    )
+    .await;
     let timed_out = started.elapsed() >= Duration::from_millis(ISSUE_TIMEOUT_MS);
-    let unrun = if ran.missing {
-        format!("spawnSync {bin} ENOENT")
+    let unrun = if let Some(code) = &ran.unstarted {
+        format!("spawnSync {bin} {code}")
     } else if timed_out && ran.code.is_none() {
         format!("spawnSync {bin} ETIMEDOUT")
     } else {

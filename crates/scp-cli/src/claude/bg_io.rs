@@ -174,6 +174,8 @@ pub struct Exec {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub missing: bool,
+    /// the code of the error that stopped it from starting
+    pub unstarted: Option<String>,
 }
 
 /// runs `bin` with `args`, never through a shell, as Node's `execFile` does: its exit code, None for a signal, a failed start or more than
@@ -188,12 +190,25 @@ pub async fn exec_file(
     env: &Env,
     cwd: Option<&str>,
 ) -> Exec {
+    exec_with(bin, args, timeout_ms, max, env, cwd, Stdio::piped()).await
+}
+
+/// [`exec_file`] with its stdin as `stdin`
+pub async fn exec_with(
+    bin: &str,
+    args: &[&str],
+    timeout_ms: u64,
+    max: usize,
+    env: &Env,
+    cwd: Option<&str>,
+    stdin: Stdio,
+) -> Exec {
     let mut command = tokio::process::Command::new(bin);
     command
         .args(args)
         .env_clear()
         .envs(env)
-        .stdin(Stdio::piped())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = cwd {
@@ -204,6 +219,10 @@ pub async fn exec_file(
         Err(error) => {
             return Exec {
                 missing: error.raw_os_error() == Some(libc::ENOENT),
+                unstarted: Some(
+                    crate::open::errno_words(&error)
+                        .map_or_else(|| error.to_string(), |(code, _)| code.to_owned()),
+                ),
                 ..Exec::default()
             };
         }
@@ -260,6 +279,7 @@ pub async fn exec_file(
         stdout: out.take(),
         stderr: err.take(),
         missing: false,
+        unstarted: None,
     }
 }
 

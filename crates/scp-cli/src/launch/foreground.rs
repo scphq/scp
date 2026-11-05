@@ -325,9 +325,13 @@ fn extension_path(call: &Call, env: &Env) -> Result<String, Fail> {
         return Ok(file.clone());
     }
     let words = scp_mcp::spawn::named_launcher(call.env).or_else(|| (call.host.beside)(call.env));
-    let script = words.as_ref().and_then(|words| words.last());
-    if let Some(script) = script.filter(|script| script.starts_with('/')) {
-        let dir = dirname(script);
+    let script = words
+        .as_ref()
+        .and_then(|words| words.last())
+        .filter(|script| script.contains('/'))
+        .and_then(|script| std::fs::canonicalize(script).ok());
+    if let Some(script) = script {
+        let dir = dirname(&script.to_string_lossy()).to_owned();
         for candidate in [
             join(&[&dir, "pi-extension.js"]),
             scp_mcp::ps::resolve(&dir, "../../pi/src/index.ts"),

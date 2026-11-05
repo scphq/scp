@@ -45,6 +45,84 @@ pub fn spawn_error(bin: &str, error: &std::io::Error) -> String {
     format!("spawn {bin} {code}")
 }
 
+/// how long the last of what a launcher wrote may take to reach a reader that is slow to drain it, as `exitFlushed` waits
+const FLUSH_WAIT: Duration = Duration::from_secs(10);
+
+/// bytes on their way out, written by a thread of its own so a slow reader never holds up the signals; dropped or finished, it waits at
+/// most [`FLUSH_WAIT`] for what it still holds
+pub struct Spool {
+    chunks: RefCell<Option<std::sync::mpsc::Sender<Vec<u8>>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl Spool {
+    pub fn new(write: fn(&[u8])) -> Spool {
+        let (chunks, queued) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (finished, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for chunk in queued {
+                write(&chunk);
+            }
+            let _ = finished.send(());
+        });
+        Spool {
+            chunks: RefCell::new(Some(chunks)),
+            done,
+        }
+    }
+
+    pub fn send(&self, bytes: Vec<u8>) {
+        if let Some(chunks) = self.chunks.borrow().as_ref() {
+            let _ = chunks.send(bytes);
+        }
+    }
+
+    pub fn finish(&self) {
+        if self.chunks.borrow_mut().take().is_some() {
+            let _ = self.done.recv_timeout(FLUSH_WAIT);
+        }
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// what a launcher prints while it supervises a harness
+pub struct Output {
+    out: Spool,
+    err: Spool,
+}
+
+impl Default for Output {
+    fn default() -> Output {
+        Output {
+            out: Spool::new(crate::term::print_bytes),
+            err: Spool::new(crate::term::eprint_bytes),
+        }
+    }
+}
+
+impl Output {
+    /// one line on stdout
+    pub fn print(&self, line: &str) {
+        self.out.send(format!("{line}\n").into_bytes());
+    }
+
+    /// one line on stderr
+    pub fn err(&self, line: &str) {
+        self.err.send(format!("{line}\n").into_bytes());
+    }
+
+    /// waits for what is still on its way out
+    pub fn finish(&self) {
+        self.out.finish();
+        self.err.finish();
+    }
+}
+
 /// the code a run ends with, once it is known; the first one given stands
 #[derive(Clone, Default)]
 pub struct Latch {
@@ -139,11 +217,12 @@ pub struct Server {
     pub child: Option<Rc<Watched>>,
     pub error: Option<String>,
     stderr: Rc<RefCell<Vec<u8>>>,
+    drained: Rc<watch::Sender<bool>>,
     died: Rc<Cell<bool>>,
 }
 
 const STDERR_KEPT: usize = 8192;
-/// how long what a server wrote last may take to reach the end of its stderr, once it exited
+/// how long a failure waits for the end of the stderr of a server that exited, which a process it left behind may hold open
 const STDERR_WAIT: Duration = Duration::from_millis(100);
 
 /// the server `command` starts, its stderr piped, finishing `latch` with 1 when it ends; its stdin and stdout, when piped
@@ -159,6 +238,7 @@ pub fn start_server(
     default_signals(command.as_std_mut());
     let stderr = Rc::new(RefCell::new(Vec::new()));
     let died = Rc::new(Cell::new(false));
+    let drained = Rc::new(watch::Sender::new(false));
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -168,6 +248,7 @@ pub fn start_server(
                 child: None,
                 error: Some(spawn_error(bin, &error)),
                 stderr,
+                drained,
                 died,
             };
             return (server, None, None);
@@ -176,27 +257,26 @@ pub fn start_server(
     let input = child.stdin.take();
     let output = child.stdout.take();
     let pipe = child.stderr.take();
-    let (drained, mut read) = tokio::sync::oneshot::channel::<()>();
-    let kept = stderr.clone();
+    let (kept, ended_pipe) = (stderr.clone(), drained.clone());
     tokio::task::spawn_local(async move {
-        let Some(mut pipe) = pipe else { return };
-        let mut chunk = vec![0u8; 8192];
-        while let Ok(n) = pipe.read(&mut chunk).await {
-            if n == 0 {
-                break;
+        if let Some(mut pipe) = pipe {
+            let mut chunk = vec![0u8; 8192];
+            while let Ok(n) = pipe.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                let mut kept = kept.borrow_mut();
+                kept.extend_from_slice(&chunk[..n]);
+                let over = kept.len().saturating_sub(STDERR_KEPT);
+                kept.drain(..over);
             }
-            let mut kept = kept.borrow_mut();
-            kept.extend_from_slice(&chunk[..n]);
-            let over = kept.len().saturating_sub(STDERR_KEPT);
-            kept.drain(..over);
         }
-        let _ = drained.send(());
+        ended_pipe.send_replace(true);
     });
     let watched = Watched::start(child);
     let (ended, gone, exiting) = (latch.clone(), died.clone(), watched.clone());
     tokio::task::spawn_local(async move {
         exiting.exited().await;
-        let _ = tokio::time::timeout(STDERR_WAIT, &mut read).await;
         gone.set(true);
         ended.finish(1);
     });
@@ -204,6 +284,7 @@ pub fn start_server(
         child: Some(watched),
         error: None,
         stderr,
+        drained,
         died,
     };
     (server, input, output)
@@ -215,7 +296,12 @@ impl Server {
     }
 
     /// `head`, with why it failed and what it wrote to stderr
-    pub fn failure(&self, head: &str) -> String {
+    pub async fn failure(&self, head: &str) -> String {
+        if self.child.is_some() {
+            let mut drained = self.drained.subscribe();
+            let end = drained.wait_for(|ended| *ended);
+            let _ = tokio::time::timeout(STDERR_WAIT, end).await;
+        }
         let mut text = head.to_owned();
         if let Some(error) = &self.error {
             text.push_str(&format!(": {error}"));
