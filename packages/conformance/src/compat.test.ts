@@ -71,10 +71,14 @@ for (const name of targetNames) {
         for (const m of machines) m.assertIsolated();
         expect(hello.endpoints).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ address: "acme/laptop/ada", machine: "laptop", presence: "online" }),
-            expect.objectContaining({ address: "acme/desk/bob", machine: "desk", presence: "online" }),
+            expect.objectContaining({ address: "acme/laptop/ada", machine: "laptop" }),
+            expect.objectContaining({ address: "acme/desk/bob", machine: "desk" }),
           ]),
         );
+        await waitFor(async () => {
+          const endpoints = await hubList();
+          return ["acme/laptop/ada", "acme/desk/bob"].every((address) => endpoints.some((e) => e.address === address && e.presence === "online"));
+        }, "both agents online on the hub");
       });
       test("mirror reaches the peer and hub", async () => {
         await waitFor(async () => (await desk.list()).some((e) => e.address === "me/laptop/ada"), "old mirror on peer");
