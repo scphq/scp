@@ -470,7 +470,7 @@ fn opencode_client(text: &str) -> Result<Option<(String, bool)>, ()> {
 }
 
 /// the gone native hook clients `file`, the hooks of `harness`, runs, as (bin, guarded)
-fn gone_clients(harness: &str, file: &str) -> Vec<(String, bool)> {
+pub fn gone_clients(harness: &str, file: &str) -> Vec<(String, bool)> {
     let found: Vec<(String, bool)> = (|| -> Result<Vec<(String, bool)>, ()> {
         if !exists(file) {
             return Ok(Vec::new());

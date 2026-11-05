@@ -97,7 +97,7 @@ export function decide(argv: string[], env: Env, version = pkg.version, locate =
   if (env.SCP_NATIVE !== "1") return { engine: "ts", reason: "off" }
   const verb = verbOf(argv)
   if (verb === undefined) return { engine: "ts", reason: "unported" }
-  if (verb === "hook" || verb === "mcp") return { engine: "ts", reason: verb }
+  if (verb === "hook" || (verb === "mcp" && argv[argv.indexOf(verb) + 1] !== "install")) return { engine: "ts", reason: verb }
   const forced = (env.SCP_NATIVE_TS ?? "").split(/[\s,]+/).filter(Boolean)
   if (forced.includes("*") || forced.includes(verb)) return { engine: "ts", reason: "forced" }
   const bin = locate(env)
