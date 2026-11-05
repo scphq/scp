@@ -505,14 +505,55 @@ fn signal_code(signal: i32) -> i32 {
     }
 }
 
-/// runs claude with the terminal passed through, its stdout also kept when `pipe`; its exit code and what it printed
-fn run_claude(
-    bin: &str,
-    args: &[String],
-    env: &Env,
-    cwd: &str,
-    pipe: bool,
-) -> Result<(i32, Vec<u8>), Fail> {
+/// how long the last of claude's stdout may take to reach a reader that is slow to drain it, as `exitFlushed` waits
+const FLUSH_WAIT: Duration = Duration::from_secs(10);
+
+/// claude's stdout on its way to this process's stdout, written by a thread of its own so a slow reader never holds up the signals;
+/// dropped, it waits at most [`FLUSH_WAIT`] for what it still holds
+struct Tee {
+    chunks: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl Tee {
+    fn new() -> Tee {
+        let (chunks, queued) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (finished, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for chunk in queued {
+                term::print_bytes(&chunk);
+            }
+            let _ = finished.send(());
+        });
+        Tee {
+            chunks: Some(chunks),
+            done,
+        }
+    }
+
+    fn send(&self, bytes: Vec<u8>) {
+        if let Some(chunks) = &self.chunks {
+            let _ = chunks.send(bytes);
+        }
+    }
+}
+
+impl Drop for Tee {
+    fn drop(&mut self) {
+        self.chunks.take();
+        let _ = self.done.recv_timeout(FLUSH_WAIT);
+    }
+}
+
+/// a finished claude run: its exit code, and with its stdout piped what it printed and the tee still writing it
+struct Ran {
+    code: i32,
+    printed: Vec<u8>,
+    tee: Option<Tee>,
+}
+
+/// runs claude with the terminal passed through, its stdout also kept when `pipe`
+fn run_claude(bin: &str, args: &[String], env: &Env, cwd: &str, pipe: bool) -> Result<Ran, Fail> {
     let mut command = tokio::process::Command::new(bin);
     command
         .args(args)
@@ -546,14 +587,7 @@ fn run_claude(
         })?;
         let pid = child.id().map_or(0, |pid| pid as i32);
         let mut out = child.stdout.take();
-        let (tee, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
-        let writer = out.is_some().then(|| {
-            std::thread::spawn(move || {
-                for chunk in chunks {
-                    term::print_bytes(&chunk);
-                }
-            })
-        });
+        let tee = out.is_some().then(Tee::new);
         let mut printed = Vec::new();
         let mut chunk = vec![0u8; 65536];
         let mut status = None;
@@ -561,7 +595,9 @@ fn run_claude(
             tokio::select! {
                 read = async { out.as_mut().unwrap().read(&mut chunk).await }, if out.is_some() => match read {
                     Ok(n) if n > 0 => {
-                        let _ = tee.send(chunk[..n].to_vec());
+                        if let Some(tee) = &tee {
+                            tee.send(chunk[..n].to_vec());
+                        }
                         printed.extend_from_slice(&chunk[..n]);
                     }
                     _ => out = None,
@@ -575,17 +611,13 @@ fn run_claude(
                 }
             }
         }
-        drop(tee);
-        if let Some(writer) = writer {
-            let _ = writer.join();
-        }
         let code = match status {
             Some(Ok(status)) => status
                 .code()
                 .unwrap_or_else(|| status.signal().map_or(1, signal_code)),
             _ => 1,
         };
-        Ok((code, printed))
+        Ok(Ran { code, printed, tee })
     })?
 }
 
@@ -671,7 +703,7 @@ impl Launch<'_> {
             file.to_string_lossy().into_owned(),
         ]);
         let clean = without(env, &LAUNCHER_IDENTITY);
-        let (code, printed) = run_claude(
+        let Ran { code, printed, tee } = run_claude(
             &self.bin,
             &before_dashes(args, added),
             &clean,
@@ -702,10 +734,14 @@ impl Launch<'_> {
             "me/{}",
             handle.unwrap_or_else(|| derive_handle("claude-code", &self.cwd))
         );
-        term::out(&format!(
-            "{CLI_NAME} claude: background session {id} is {address} on SCP{}; messages wake it through its inbox. {CLI_NAME} claude attach {id} opens it",
+        let line = format!(
+            "{CLI_NAME} claude: background session {id} is {address} on SCP{}; messages wake it through its inbox. {CLI_NAME} claude attach {id} opens it\n",
             under_text(attribution)
-        ));
+        );
+        match &tee {
+            Some(tee) => tee.send(line.into_bytes()),
+            None => term::print(&line),
+        }
         Ok(code)
     }
 
@@ -752,7 +788,7 @@ impl Launch<'_> {
             self.rename_background(target, &rename, env)?;
         }
         let attach = ["attach".to_owned(), target.clone()];
-        Ok(run_claude(&self.bin, &attach, env, &self.cwd, false)?.0)
+        Ok(run_claude(&self.bin, &attach, env, &self.cwd, false)?.code)
     }
 
     /// renames the endpoint of the background session `target` (its short id, or its name) to `to`, and the name its scp mount claims
@@ -895,7 +931,7 @@ pub fn claude(call: &Call, argv: &[String]) -> Done {
                 "{CLI_NAME} claude: {resume} is a live background session, already woken through claude-inbox; attaching to it (claude attach {id})"
             ));
             let attach = ["attach".to_owned(), id.to_owned()];
-            return Ok(run_claude(&launch.bin, &attach, &env, &launch.cwd, false)?.0);
+            return Ok(run_claude(&launch.bin, &attach, &env, &launch.cwd, false)?.code);
         }
     }
     let external = external_mcp(args);
@@ -929,7 +965,7 @@ pub fn claude(call: &Call, argv: &[String]) -> Done {
         &launch.cwd,
         false,
     )?
-    .0)
+    .code)
 }
 
 #[cfg(test)]
