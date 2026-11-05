@@ -105,7 +105,7 @@ const SERVER: &str = "scp";
 const SETUP_HARNESSES: [&str; 6] = ["claude", "codex", "opencode", "grok", "muse", "agy"];
 
 /// the user-level file that holds a harness's MCP servers
-fn mcp_file(harness: &str, env: &Env) -> String {
+pub(crate) fn mcp_file(harness: &str, env: &Env) -> String {
     match harness {
         "claude" => match var(env, "CLAUDE_CONFIG_DIR") {
             Some(dir) => join(&[dir, ".claude.json"]),
@@ -144,7 +144,7 @@ fn mcp_file(harness: &str, env: &Env) -> String {
 }
 
 /// the scp entry a harness has now
-fn mounted_entry(harness: &str, file: &str) -> Result<Option<Json>, ()> {
+pub(crate) fn mounted_entry(harness: &str, file: &str) -> Result<Option<Json>, ()> {
     let toml = harness == "codex" || harness == "grok";
     let config = if toml {
         read_toml(file)?
@@ -164,7 +164,7 @@ fn mounted_entry(harness: &str, file: &str) -> Result<Option<Json>, ()> {
     Ok(entry.filter(|e| matches!(e, Json::Obj(_))).cloned())
 }
 
-fn entry_argv(harness: &str, entry: &Json) -> Vec<String> {
+pub(crate) fn entry_argv(harness: &str, entry: &Json) -> Vec<String> {
     let strings = |value: Option<&Json>| match value {
         Some(Json::Arr(items)) => items.iter().map(|i| text(Some(i))).collect(),
         _ => Vec::new(),
@@ -382,7 +382,7 @@ pub fn hook_client(command: &Json) -> Option<(String, bool)> {
 }
 
 /// whether `bin` is an absolute path that is no executable file
-fn gone_command(bin: &str) -> bool {
+pub(crate) fn gone_command(bin: &str) -> bool {
     if !bin.starts_with('/') {
         return false;
     }

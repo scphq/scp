@@ -4,13 +4,14 @@ pub mod bg_cmd;
 pub mod bg_io;
 pub mod bg_plan;
 pub mod bg_state;
+pub mod launch;
 
 use crate::{Run, Verb};
 
 pub const VERBS: &[Verb] = &[
     Verb {
         name: "claude",
-        run: Run::Words(|call, words| bg_cmd::claude(words, call.env, call.host)),
+        run: Run::Words(launch::claude),
     },
     Verb {
         name: "claude-bg-task",
@@ -22,7 +23,5 @@ pub const VERBS: &[Verb] = &[
     },
 ];
 
-/// the first words `swarm claude` runs natively; any other goes to the TypeScript CLI
-pub const CLAUDE_WORDS: [&str; 2] = ["ls", "prune"];
 /// verbs the broker runs: they take no flags, so no flag or variable hands them back
 pub const BROKER_VERBS: [&str; 2] = ["claude-bg-task", "claude-wake"];
