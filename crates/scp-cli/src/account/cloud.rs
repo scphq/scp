@@ -1,12 +1,16 @@
-//! The hub (`remote.ts`): machine names, and cloud.json, which links the local broker to it.
+//! The hub (`remote.ts`): machine names, the connection a `--cloud` command opens to it, its machine inventory, and cloud.json, which links
+//! the local broker to it.
 
 use super::relay::{active_relay, relay_credential};
+use super::ws;
 use crate::fleet::json::Json;
-use crate::fleet::result_of;
-use crate::fleet::view::{text, truthy};
+use crate::fleet::view::{table, text, truthy};
+use crate::fleet::{ask, reading, result_of};
+use crate::open::{Bound, Opened};
 use crate::term::out;
 use crate::{Call, Done, Fail, usage};
 use scp_core::protocol::CLI_NAME;
+use scp_mcp::LocalFuture;
 use scp_mcp::ps::Env;
 use serde_json::{Map, Value};
 
@@ -56,6 +60,115 @@ pub fn machine_name(flag: Option<&str>, env: &Env) -> Result<String, Fail> {
         )));
     }
     Ok(name)
+}
+
+/// a `--cloud` command's machine and how it is bound, beside the hello it sends
+#[derive(Debug, Clone)]
+pub struct Hub {
+    pub machine: String,
+    pub bound: Bound,
+}
+
+/// connects to the active relay's hub with its login and says `hello`
+pub async fn open_hub(hello: Map<String, Value>, hub: Hub, env: &Env) -> Result<Opened, Fail> {
+    let (url, _) = active_relay(env)?;
+    let credential = relay_credential(env, &url)?;
+    let Some(token) = credential.token else {
+        return Err(usage(credential.problem.unwrap_or_default()));
+    };
+    let client = ws::connect(&url, &token).await?;
+    let reply = client.request_line("hello", Value::Object(hello)).await;
+    let hello = match reply.map_err(Fail::from).and_then(|line| result_of(&line)) {
+        Ok(hello) => hello,
+        Err(fail) => {
+            client.close();
+            return Err(fail);
+        }
+    };
+    let endpoint = hello.get("endpoint").cloned().unwrap_or(Json::Null);
+    Ok(Opened {
+        client,
+        me: endpoint.to_value(),
+        endpoint,
+        broker: Value::Null,
+        bound: hub.bound,
+        harness_pid: None,
+        hub: Some(format!(
+            "the relay at {url}, account {}, machine {}",
+            text(hello.get("account")),
+            hub.machine
+        )),
+    })
+}
+
+/// `swarm machines [rm NAME]`: the hub's machines, or one released
+pub fn machines<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
+    Box::pin(async move {
+        let words = &call.parsed.positionals;
+        let json = call.parsed.on("json");
+        match words.first().map(String::as_str) {
+            Some("rm") => {
+                let name = match words.as_slice() {
+                    [_, name] if !name.is_empty() => name,
+                    _ => {
+                        return Err(usage(format!(
+                            "{CLI_NAME} machines rm needs one machine name"
+                        )));
+                    }
+                };
+                let result = ask(
+                    opened,
+                    "machines_rm",
+                    vec![("name", Value::from(name.as_str()))],
+                )
+                .await?;
+                if json {
+                    out(&result.pretty());
+                } else {
+                    out(&format!(
+                        "released {} ({} endpoints dropped)",
+                        text(result.get("removed")),
+                        text(result.get("endpoints"))
+                    ));
+                }
+                Ok(0)
+            }
+            Some(_) => Err(usage(format!(
+                "{CLI_NAME} machines takes no argument, or rm NAME"
+            ))),
+            None => {
+                let result = ask(opened, "machines", Vec::new()).await?;
+                let machines = result.get("machines");
+                if json {
+                    let entries = machines.map(|m| ("machines", m.clone()));
+                    out(&Json::object(entries.into_iter().collect()).pretty());
+                    return Ok(0);
+                }
+                let mut rows = vec![
+                    ["MACHINE", "KIND", "ONLINE", "BRIDGE", "LAST SEEN"]
+                        .map(String::from)
+                        .to_vec(),
+                ];
+                for m in reading(machines, "machines", "map")? {
+                    let yes = |key: &str| if truthy(m.get(key)) { "yes" } else { "no" };
+                    rows.push(vec![
+                        text(m.get("name")),
+                        text(m.get("kind")),
+                        yes("online").into(),
+                        yes("bridge").into(),
+                        match m.get("last_seen") {
+                            None | Some(Json::Null) => String::new(),
+                            seen => text(seen),
+                        },
+                    ]);
+                }
+                for line in table(&rows) {
+                    out(&line);
+                }
+                Ok(0)
+            }
+        }
+    })
 }
 
 #[cfg(unix)]

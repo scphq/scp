@@ -1,8 +1,9 @@
-//! Relay, login, logout and cloud.
+//! Relay, login, logout, cloud and machines, and the `--cloud` transport that talks to the hub directly.
 
 pub mod cloud;
 pub mod login;
 pub mod relay;
+pub mod ws;
 
 use crate::{Run, Verb};
 
@@ -23,5 +24,9 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "cloud",
         run: Run::Parsed(cloud::cloud),
+    },
+    Verb {
+        name: "machines",
+        run: Run::Opened(cloud::machines),
     },
 ];

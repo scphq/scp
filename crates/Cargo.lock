@@ -1706,6 +1706,7 @@ dependencies = [
 name = "scp-cli"
 version = "0.4.10"
 dependencies = [
+ "futures-util",
  "indexmap",
  "libc",
  "rand 0.8.5",
@@ -1715,6 +1716,7 @@ dependencies = [
  "scp-mcp",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "zip",
 ]
