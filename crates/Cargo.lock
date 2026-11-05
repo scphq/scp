@@ -1715,6 +1715,7 @@ dependencies = [
  "scp-dev-core",
  "scp-mcp",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-tungstenite",
  "toml",

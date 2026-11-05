@@ -740,7 +740,7 @@ export async function relayMain(argv: string[], cwd = safeCwd()): Promise<number
   }
 
   if (verb === "relay") return (await import("./relay")).relayVerb(positionals, values.json === true)
-  if (verb === "up") return (await import("./up")).up(positionals, values as UpValues, cwd, relinkBroker)
+  if (verb === "up") return (await import("./up")).up(positionals, values as UpValues, cwd, relinkBroker, cliVersion())
   if (verb === "login") {
     const code = await (await import("./relay")).loginMain(positionals, values as { token?: string; label?: string; "no-browser"?: boolean; json?: boolean })
     if (code === 0) await relinkRunning()

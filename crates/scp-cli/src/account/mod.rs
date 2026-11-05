@@ -3,6 +3,8 @@
 pub mod cloud;
 pub mod login;
 pub mod relay;
+#[cfg(unix)]
+pub mod up;
 pub mod ws;
 
 use crate::{Run, Verb};
@@ -24,6 +26,11 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "cloud",
         run: Run::Parsed(cloud::cloud),
+    },
+    #[cfg(unix)]
+    Verb {
+        name: "up",
+        run: Run::Parsed(up::up),
     },
     Verb {
         name: "machines",

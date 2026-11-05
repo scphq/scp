@@ -107,27 +107,30 @@ describe.skipIf(!swarmBinary)("hooks install and mcp install, TypeScript against
     expect(readFileSync(log, "utf8")).toContain("hooks native run")
   })
 
-  test("a settings file the native engine cannot keep goes to TypeScript, and an unreadable one is refused alike", () => {
+  test("a settings file the native engine cannot keep is refused and left as it was, and an unreadable one is refused alike", () => {
     const log = join(root, "surrogate.log")
-    const seeded = (text: string) => {
+    const seeded = (text: string | Buffer) => {
       const dir = home()
       mkdirSync(join(dir, ".claude"), { recursive: true })
       writeFileSync(join(dir, ".claude", "settings.json"), text)
       return dir
     }
-    const lone = '{"keep": "\\ud800", "\\ud800": 1, "\\ud801": 2}'
     const args = ["hooks", "install", "--harness", "claude", "--scope", "user", "--write"]
-    const [ts, native] = [seeded(lone), seeded(lone)]
-    expect(swarm("native", native, args, log).stdout).toBe(swarm("ts", ts, args).stdout)
-    expect(files(native)).toEqual(files(ts))
-    expect(Object.keys(JSON.parse(readFileSync(join(native, ".claude", "settings.json"), "utf8")))).toEqual(["keep", "\ud800", "\ud801", "hooks"])
-    expect(readFileSync(log, "utf8")).toContain("hooks ts surrogate")
-    const proto = '{"hooks": {"__proto__": [{"hooks": [{"command": "mine"}]}], "Stop": []}}'
-    const [tsProto, nativeProto] = [seeded(proto), seeded(proto)]
-    expect(swarm("native", nativeProto, args, log).stdout).toBe(swarm("ts", tsProto, args).stdout)
-    expect(files(nativeProto)).toEqual(files(tsProto))
-    expect(swarm("native", nativeProto, args, log).stdout).toContain("already has the swarm hooks")
-    expect(readFileSync(log, "utf8")).toContain("hooks ts proto")
+    for (const [text, reason] of [
+      ['{"keep": "\\ud800", "\\ud800": 1, "\\ud801": 2}', "lone surrogate"],
+      ['{"hooks": {"__proto__": [{"hooks": [{"command": "mine"}]}], "Stop": []}}', "__proto__ event"],
+      [Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]), "not valid UTF-8"],
+    ] as const) {
+      const dir = seeded(text)
+      const before = files(dir)
+      const refused = swarm("native", dir, args, log)
+      expect(refused.code).toBe(125)
+      expect(refused.stdout).toBe("")
+      expect(refused.stderr).toContain(reason)
+      expect(refused.stderr).toContain(".claude/settings.json")
+      expect(files(dir)).toEqual(before)
+    }
+    expect(readFileSync(log, "utf8")).not.toContain("hooks ts")
     const detail = (text: string) => text.replace(/is not valid JSON \(.*\)/, "is not valid JSON (<parse error>)")
     for (const text of ["{x", "", "null", '{"hooks": []}', '{"hooks": {"Stop": [{"hooks": [{"command": {"toString": null}}]}]}}']) {
       const [a, b] = [seeded(text), seeded(text)]

@@ -172,7 +172,7 @@ pub fn machines<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, D
 }
 
 #[cfg(unix)]
-pub use local::{cloud, relink_running};
+pub use local::{cloud, enable, relink_broker, relink_running};
 
 /// the verbs that link the local broker to the hub, which only a machine that runs one has
 #[cfg(unix)]
@@ -305,7 +305,7 @@ mod local {
 
     /// asks the broker to link again with the cloud config and login on disk, starting one when none runs; one that cannot take the
     /// config restarts, and the status is the new broker's
-    async fn relink_broker(env: &Env) -> Result<(), Fail> {
+    pub async fn relink_broker(env: &Env) -> Result<Json, Fail> {
         let (dir, start) = broker_start(env);
         let client = connect_or_start(&dir, Some(start)).await?;
         let asked = async {
@@ -324,17 +324,17 @@ mod local {
         let (pid, result) = match asked {
             Ok(asked) => asked,
             Err(CallError::Relay { code, .. }) if code == "method_not_found" => {
-                return cloud_status(env).await.map(drop);
+                return cloud_status(env).await;
             }
             Err(error) => return Err(error.into()),
         };
         if !scp_mcp::tools::truthy(result.get("restarting")) {
-            return Ok(());
+            return Ok(Json::from(&result));
         }
         if let Some(pid) = pid {
             exited(pid as i32).await;
         }
-        cloud_status(env).await.map(drop)
+        cloud_status(env).await
     }
 
     async fn exited(pid: i32) {
@@ -356,7 +356,7 @@ mod local {
                 Ok(client) => client.close(),
                 Err(_) => return,
             }
-            if let Err(fail) = relink_broker(env).await {
+            if let Err(fail) = relink_broker(env).await.map(drop) {
                 let message = match fail {
                     Fail::Usage(message) | Fail::Decline(message) => message,
                     Fail::Call(error) => error.message().to_owned(),
@@ -366,6 +366,41 @@ mod local {
                 ));
             }
         });
+    }
+
+    /// writes cloud.json, which links the broker to the active relay as `machine`, and says so
+    pub fn enable(machine: Option<&str>, json: bool, env: &Env) -> Result<(), Fail> {
+        let path = config_file(env, "cloud.json")?;
+        let machine = machine_name(machine, env)?;
+        let (url, _) = active_relay(env)?;
+        let problem = relay_credential(env, &url)?.problem;
+        let file = Json::object(vec![
+            ("bridge", Json::Bool(true)),
+            ("machine", Json::str(machine.clone())),
+            ("url", Json::str(url.clone())),
+        ]);
+        write_private_json(&path, &file)?;
+        if json {
+            let token = if problem.is_some() {
+                "missing"
+            } else {
+                "found"
+            };
+            let shown = Json::spread(
+                vec![("file", Json::str(path))],
+                &file,
+                vec![("token", Json::str(token))],
+            );
+            out(&shown.pretty());
+        } else {
+            out(&format!(
+                "the relay broker links to {url} as machine {machine} ({path})"
+            ));
+            if let Some(problem) = problem {
+                note(&problem);
+            }
+        }
+        Ok(())
     }
 
     /// `swarm cloud enable [--machine NAME] | disable | status`
@@ -378,35 +413,7 @@ mod local {
         };
         let path = config_file(env, "cloud.json")?;
         if action == "enable" {
-            let machine = machine_name(flags.text("machine"), env)?;
-            let (url, _) = active_relay(env)?;
-            let problem = relay_credential(env, &url)?.problem;
-            let file = Json::object(vec![
-                ("bridge", Json::Bool(true)),
-                ("machine", Json::str(machine.clone())),
-                ("url", Json::str(url.clone())),
-            ]);
-            write_private_json(&path, &file)?;
-            if json {
-                let token = if problem.is_some() {
-                    "missing"
-                } else {
-                    "found"
-                };
-                let shown = Json::spread(
-                    vec![("file", Json::str(path))],
-                    &file,
-                    vec![("token", Json::str(token))],
-                );
-                out(&shown.pretty());
-            } else {
-                out(&format!(
-                    "the relay broker links to {url} as machine {machine} ({path})"
-                ));
-                if let Some(problem) = problem {
-                    note(&problem);
-                }
-            }
+            enable(flags.text("machine"), json, env)?;
             relink_running(env);
             return Ok(0);
         }

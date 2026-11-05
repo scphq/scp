@@ -266,7 +266,7 @@ pub fn which_on_path(name: &str, env: &Env) -> Option<String> {
 }
 
 /// `$SCP_SWARM_BIN`, when it is an executable file whose `--version` prints `swarm <version>`, else this binary
-fn native_swarm(env: &Env) -> Option<String> {
+pub(crate) fn native_swarm(env: &Env) -> Option<String> {
     let Some(given) = env.get("SCP_SWARM_BIN") else {
         let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
         return Some(exe.to_string_lossy().into_owned());

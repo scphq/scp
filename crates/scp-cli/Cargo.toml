@@ -21,6 +21,7 @@ scp-broker = { path = "../scp-broker" }
 scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.10" }
 scp-mcp = { path = "../scp-mcp" }
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { version = "=1.47.1", features = ["rt", "net", "io-util", "time", "macros", "sync", "process"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 toml = { workspace = true, features = ["preserve_order"] }
