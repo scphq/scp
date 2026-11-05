@@ -16,7 +16,7 @@ pub fn runner_name(value: &str) -> bool {
 }
 
 fn printable(value: &str, max: usize, allow_space: bool) -> bool {
-    let count = value.chars().count();
+    let count = value.encode_utf16().count();
     (1..=max).contains(&count)
         && value.chars().all(|c| {
             if allow_space {
@@ -414,5 +414,11 @@ mod tests {
         let secret =
             json!({"address": "me/box/w", "machine": "box", "ref": "AKIAABCDEFGHIJKLMNOP"});
         assert!(!runner_reply(&secret, "w").unwrap().contains_key("ref"));
+        let attach = |count: usize| json!({"address": "me/box/w", "machine": "box", "attach": "\u{1f600}".repeat(count)});
+        assert!(runner_reply(&attach(600), "w").is_none());
+        assert_eq!(
+            runner_reply(&attach(512), "w").unwrap()["attach"],
+            "\u{1f600}".repeat(512)
+        );
     }
 }
