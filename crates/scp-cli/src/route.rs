@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::sync::OnceLock;
 
 /// flags the native verbs hand to the TypeScript CLI, which the router also checks before it hands a verb over
-pub const DECLINE_FLAGS: [&str; 4] = ["--help", "-h", "--cloud", "--via"];
+pub const DECLINE_FLAGS: [&str; 3] = ["--help", "-h", "--cloud"];
 /// variables that do the same
 pub const DECLINE_ENV: [(&str, &str); 1] = [("SCP_TRANSPORT", "cloud")];
 /// set by the router: `<its pid>:<its parent's pid>`, so a child it spawned walks from the shell that ran the command
@@ -242,10 +242,7 @@ mod tests {
             declined("whoami", &words(&["--cloud=1"]), &env).as_deref(),
             Some("cloud")
         );
-        assert_eq!(
-            declined("spawn", &words(&["--via", "m"]), &env).as_deref(),
-            Some("via")
-        );
+        assert_eq!(declined("spawn", &words(&["--via", "m"]), &env), None);
         assert_eq!(declined("set-now", &words(&["--", "-h"]), &env), None);
         assert_eq!(declined("spawn-wake", &words(&["--run", "-h"]), &env), None);
         assert_eq!(declined("codex-wake", &words(&["--cloud"]), &env), None);

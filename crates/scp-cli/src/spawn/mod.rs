@@ -9,6 +9,7 @@ pub mod harness;
 pub mod hold;
 pub mod muse;
 pub mod output;
+pub mod remote;
 pub mod run;
 pub mod runner;
 pub mod settings;

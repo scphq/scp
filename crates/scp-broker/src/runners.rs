@@ -71,6 +71,11 @@ impl<'de> serde::Deserialize<'de> for Ordered {
 
 /// runners.json's runners by name, or the message naming what is wrong with it
 pub fn parse_config(text: &str, path: &str) -> Result<HashMap<String, Runner>, String> {
+    parse_entries(text, path).map(|entries| entries.into_iter().collect())
+}
+
+/// [`parse_config`], the runners in the order a JavaScript engine enumerates their names
+pub fn parse_entries(text: &str, path: &str) -> Result<Vec<(String, Runner)>, String> {
     let value: Value = serde_json::from_str(text).map_err(|_| format!("{path} is not JSON"))?;
     if !value.is_object() {
         return Err(format!(
@@ -78,7 +83,7 @@ pub fn parse_config(text: &str, path: &str) -> Result<HashMap<String, Runner>, S
         ));
     }
     let Ordered(entries) = serde_json::from_str(text).map_err(|_| format!("{path} is not JSON"))?;
-    let mut runners = HashMap::new();
+    let mut runners = Vec::new();
     for (name, entry) in entries {
         if !crate::spawn::runner_name(&name) {
             return Err(format!(
@@ -122,7 +127,7 @@ pub fn parse_config(text: &str, path: &str) -> Result<HashMap<String, Runner>, S
         let status = argv("status")?;
         let status_timeout_s = timeout("status_timeout_s", 5, 60)?;
         let timeout_s = timeout("timeout_s", 60, 3600)?;
-        runners.insert(
+        runners.push((
             name,
             Runner {
                 command,
@@ -131,7 +136,7 @@ pub fn parse_config(text: &str, path: &str) -> Result<HashMap<String, Runner>, S
                 status,
                 status_timeout_s,
             },
-        );
+        ));
     }
     Ok(runners)
 }
@@ -227,13 +232,15 @@ fn taken(tail: &Tail) -> (String, bool) {
     })
 }
 
-/// runs a runner in its own process group with `request` on stdin; its exit code (124 on timeout, the group then killed), stdout and cleaned stderr tail
+/// runs a runner in its own session with `request` on stdin; its exit code (124 on timeout, the group then sent `signal`), stdout and
+/// cleaned stderr tail
 pub async fn run(
     command: &[String],
     timeout_s: u64,
     request: &str,
     env: &[(OsString, OsString)],
     cwd: &Path,
+    signal: i32,
 ) -> Outcome {
     let deadline = Instant::now() + Duration::from_secs(timeout_s);
     let program = command.first().map_or("", String::as_str);
@@ -243,16 +250,25 @@ pub async fn run(
         stdout: String::new(),
         stderr: crate::session::handback_output(&message, false, STDERR_BYTES as i64),
     };
-    let spawned = tokio::process::Command::new(program)
+    let mut spawning = tokio::process::Command::new(program);
+    spawning
         .args(command.iter().skip(1))
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    // SAFETY: setsid is async-signal-safe
+    unsafe {
+        spawning.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let spawned = spawning.spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -294,7 +310,7 @@ pub async fn run(
         _ = tokio::time::sleep_until(deadline) => {
             if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
                 // Signals the whole group the runner leads.
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                unsafe { libc::kill(-pid, signal) };
             }
             (124, true)
         }
@@ -414,6 +430,7 @@ impl Service {
             input,
             &environment(std::env::vars_os()),
             &home,
+            libc::SIGKILL,
         )
         .await
     }
@@ -799,16 +816,32 @@ mod tests {
     async fn runs_report_exit_codes_stdout_and_timeouts() {
         let sh = |script: &str| vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()];
         let dir = std::env::temp_dir();
-        let r = run(&sh("cat; echo err >&2; exit 3"), 5, "{\"a\":1}", &[], &dir).await;
+        let r = run(
+            &sh("cat; echo err >&2; exit 3"),
+            5,
+            "{\"a\":1}",
+            &[],
+            &dir,
+            libc::SIGKILL,
+        )
+        .await;
         assert_eq!(
             (r.code, r.timed_out, r.stdout.as_str(), r.stderr.as_str()),
             (3, false, "{\"a\":1}\n", "err")
         );
         let started = std::time::Instant::now();
-        let r = run(&sh("sleep 30 & wait"), 1, "{}", &[], &dir).await;
+        let r = run(&sh("sleep 30 & wait"), 1, "{}", &[], &dir, libc::SIGKILL).await;
         assert_eq!((r.code, r.timed_out), (124, true));
         assert!(started.elapsed() < Duration::from_secs(3));
-        let r = run(&["/no/such/runner".to_owned()], 5, "{}", &[], &dir).await;
+        let r = run(
+            &["/no/such/runner".to_owned()],
+            5,
+            "{}",
+            &[],
+            &dir,
+            libc::SIGKILL,
+        )
+        .await;
         assert_eq!(
             (r.code, r.stderr.as_str()),
             (127, "/no/such/runner: command not found")
