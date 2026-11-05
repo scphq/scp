@@ -3,6 +3,7 @@
 
 use super::hold::framed;
 use super::wake::{decline, read_all_stdin};
+use crate::claude::bg_io::exec_file;
 use crate::open::block_on;
 use crate::{Call, Done, Fail, route, term};
 use scp_core::protocol::CLI_NAME;
@@ -14,13 +15,10 @@ use scp_mcp::ps::{
 use scp_mcp::render::js_space;
 use scp_mcp::tools::get;
 use serde_json::{Value, json};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashSet;
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
-const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+const RUN_TIMEOUT_MS: u64 = 30_000;
 const MAX_BUFFER: usize = 1 << 20;
 /// how long the waker keeps trying a busy broker: well inside its run's timeout
 const WAKER_CONNECT_MS: u64 = 15_000;
@@ -225,104 +223,25 @@ pub fn fuser_pids(text: &str, path: &str) -> Vec<i64> {
         .collect()
 }
 
-/// reads `stream` into `out` until it ends; past the limit it marks the run overflowed, stops the child and reads no more
-async fn capped<R: AsyncRead + Unpin>(
-    stream: Option<R>,
-    out: &RefCell<Vec<u8>>,
-    overflow: &Cell<bool>,
-    stop: &dyn Fn(),
-) {
-    let Some(mut stream) = stream else {
-        return;
-    };
-    let mut chunk = [0u8; 8192];
-    loop {
-        match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(read) => {
-                let mut out = out.borrow_mut();
-                let room = MAX_BUFFER - out.len();
-                out.extend_from_slice(&chunk[..read.min(room)]);
-                if read > room {
-                    overflow.set(true);
-                    stop();
-                    return;
-                }
-            }
-        }
-    }
-}
-
 /// runs `bin` with `args` as Node's `execFile` does, never through a shell and without the wake request's variables: 30 s, then SIGTERM;
 /// past 1 MiB on either stream SIGTERM too
 pub async fn run_file(bin: &str, args: &[String], env: &Env) -> Ran {
-    let mut command = tokio::process::Command::new(bin);
-    command
-        .args(args)
-        .env_clear()
-        .envs(env.iter().filter(|(key, _)| !key.starts_with("SCP_WAKE_")))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            return Ran {
-                missing: error.raw_os_error() == Some(libc::ENOENT),
-                ..Ran::default()
-            };
-        }
-    };
-    let stdin = child.stdin.take();
-    let pid = child.id().and_then(|pid| i32::try_from(pid).ok());
-    let reaped = Cell::new(false);
-    let overflow = Cell::new(false);
-    let stop = || {
-        if let (Some(pid), false) = (pid, reaped.get()) {
-            // SAFETY: the child is not reaped, so its pid is still its own
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
-    };
-    let (out, err) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
-    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-    let streams = async {
-        tokio::join!(
-            capped(stdout, &out, &overflow, &stop),
-            capped(stderr, &err, &overflow, &stop)
-        )
-    };
-    tokio::pin!(streams);
-    let wait = child.wait();
-    tokio::pin!(wait);
-    let deadline = tokio::time::sleep(RUN_TIMEOUT);
-    tokio::pin!(deadline);
-    let mut status = None;
-    let (mut drained, mut cut) = (false, false);
-    while status.is_none() || !(drained || cut) {
-        tokio::select! {
-            biased;
-            exited = &mut wait, if status.is_none() => {
-                reaped.set(true);
-                status = Some(exited.ok());
-            }
-            ((), ()) = &mut streams, if !drained && !cut => drained = true,
-            () = &mut deadline, if !cut => {
-                cut = true;
-                stop();
-            }
-        }
-        cut |= overflow.get();
-    }
-    drop(stdin);
-    let code = status
-        .flatten()
-        .and_then(|status| status.code())
-        .filter(|_| !overflow.get());
+    run_file_within(bin, args, env, RUN_TIMEOUT_MS).await
+}
+
+async fn run_file_within(bin: &str, args: &[String], env: &Env, timeout_ms: u64) -> Ran {
+    let env: Env = env
+        .iter()
+        .filter(|(key, _)| !key.starts_with("SCP_WAKE_"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let ran = exec_file(bin, &args, timeout_ms, MAX_BUFFER, &env, None).await;
     Ran {
-        code,
-        stdout: String::from_utf8_lossy(&out.borrow()).into_owned(),
-        stderr: String::from_utf8_lossy(&err.borrow()).into_owned(),
-        missing: false,
+        code: ran.code,
+        stdout: String::from_utf8_lossy(&ran.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&ran.stderr).into_owned(),
+        missing: ran.missing,
     }
 }
 
@@ -724,6 +643,28 @@ mod tests {
             vec![1, 1, 1, 1]
         );
         assert!(batches(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_child_that_writes_as_it_is_stopped_still_returns() {
+        let script = "trap 'head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2; exit 3' TERM; while :; do sleep 0.05; done";
+        let args = ["-c".to_owned(), script.to_owned()];
+        let env = Env::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
+        let started = std::time::Instant::now();
+        let ran = block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                run_file_within("/bin/sh", &args, &env, 300),
+            )
+            .await
+        })
+        .unwrap()
+        .expect("the run returns");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(ran.code, Some(3));
+        assert_eq!((ran.stdout.len(), ran.stderr.len()), (300_000, 300_000));
+        let missing = block_on(run_file("/nowhere/codex", &[], &env)).unwrap();
+        assert_eq!((missing.code, missing.missing), (None, true));
     }
 
     #[test]
