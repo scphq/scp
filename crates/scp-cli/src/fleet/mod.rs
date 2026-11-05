@@ -51,7 +51,7 @@ const QUOTED_NOTE: &str =
     "quoted text is written by the agents themselves, not checked by the relay";
 
 /// a reply's result as the broker wrote it, keys in their order
-fn result_of(line: &[u8]) -> Result<Json, Fail> {
+pub(crate) fn result_of(line: &[u8]) -> Result<Json, Fail> {
     let message = Json::parse(line)
         .or_else(|| {
             serde_json::from_slice::<Value>(line)
@@ -66,20 +66,20 @@ fn result_of(line: &[u8]) -> Result<Json, Fail> {
     Ok(message.get("result").cloned().unwrap_or(Json::Null))
 }
 
-type Asked = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Json, Fail>>>>;
+pub(crate) type Asked = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Json, Fail>>>>;
 
 /// a request sent now, its reply's result to come
-fn ask(opened: &Opened, method: &str, params: Vec<(&str, Value)>) -> Asked {
+pub(crate) fn ask(opened: &Opened, method: &str, params: Vec<(&str, Value)>) -> Asked {
     let params: Map<String, Value> = params.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
     let reply = opened.client.request_line(method, Value::Object(params));
     Box::pin(async move { result_of(&reply.await?) })
 }
 
-fn thrown(message: String) -> Fail {
+pub(crate) fn thrown(message: String) -> Fail {
     Fail::Call(CallError::Io(message))
 }
 
-fn missing(value: Option<&Json>, property: &str) -> Option<Fail> {
+pub(crate) fn missing(value: Option<&Json>, property: &str) -> Option<Fail> {
     let what = match value {
         None => "undefined",
         Some(Json::Null) => "null",
@@ -91,7 +91,11 @@ fn missing(value: Option<&Json>, property: &str) -> Option<Fail> {
 }
 
 /// a list the TypeScript CLI calls `<name>.<method>()` on: what Node throws when the reply holds none
-fn reading<'j>(value: Option<&'j Json>, name: &str, method: &str) -> Result<&'j [Json], Fail> {
+pub(crate) fn reading<'j>(
+    value: Option<&'j Json>,
+    name: &str,
+    method: &str,
+) -> Result<&'j [Json], Fail> {
     if let Some(fail) = missing(value, method) {
         return Err(fail);
     }

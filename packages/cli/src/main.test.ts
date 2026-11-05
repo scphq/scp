@@ -300,6 +300,34 @@ describe("swarm", () => {
     expect((await swarm(["show", "--as", "show-reader"])).stderr).toContain("show takes one message id")
   })
 
+  test("hibernate, machine and relink check their words after connecting, and print the broker's reply", async () => {
+    const usage = "swarm: run `swarm --help` for usage\n"
+    expect(await swarm(["hibernate", "--as", "sleeper"])).toEqual({
+      code: 125,
+      stdout: "",
+      stderr: `swarm hibernate takes --wake <provider>, or --wake none (--gone) to clear it\n${usage}`,
+    })
+    expect(await swarm(["hibernate", "--wake", "w", "--eta", "soon", "--as", "sleeper"])).toEqual({
+      code: 125,
+      stdout: "",
+      stderr: 'swarm: --eta "soon" is not a duration like 90s, 30m or 1h30m\n',
+    })
+    expect(await swarm(["hibernate", "--gone", "--as", "sleeper"])).toEqual({ code: 0, stdout: "me/sleeper online\n", stderr: "" })
+    expect(JSON.parse((await swarm(["hibernate", "--gone", "--as", "sleeper", "--json"])).stdout)).toMatchObject({
+      endpoint: { address: "me/sleeper" },
+      mirrored: false,
+    })
+    expect(await swarm(["machine", "wake-url", "https://waker.invalid", "--human"])).toEqual({
+      code: 125,
+      stdout: "",
+      stderr: `swarm: set $SCP_MACHINE_WAKE_SECRET to the waker's secret (16 to 256 characters); it is never read from the command line\n${usage}`,
+    })
+    expect((await swarm(["machine", "wake-url", "--clear", "--human"])).stderr).toBe("swarm: this broker has no hub link: the machine waker lives on the hub\n")
+    expect((await swarm(["relink", "--check", "--live", "--human"])).stderr).toBe(`swarm relink --check changes nothing: drop --live\n${usage}`)
+    expect(JSON.parse((await swarm(["relink", "--check", "--json", "--human"])).stdout)).toHaveProperty("mismatched")
+    expect((await swarm(["relink", "--as", "sleeper"])).stderr).toBe("swarm: only the human at a terminal relinks endpoints\n")
+  })
+
   test("--as and --human go anywhere on the line, before the verb too", async () => {
     expect((await swarm(["--as", "anywhere", "whoami"])).stdout.split("\n")[0]).toBe("me/anywhere (agent, cli)")
     expect((await swarm(["--as=anywhere", "whoami", "--json"])).stdout).toContain('"address": "me/anywhere"')

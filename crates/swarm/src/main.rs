@@ -161,7 +161,10 @@ fn foreground(options: Daemon) -> i32 {
 fn control(restart: bool) -> Result<String, Box<dyn std::error::Error>> {
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let paths = Paths::from_env(&env)?;
-    let stopped = daemon::stop(&paths.dir)?;
+    let script = scp_cli::daemon::cli_script(&env.clone().into_iter().collect()).or_else(|| {
+        scp_broker::launch::recorded(&paths.dir).and_then(scp_cli::daemon::launcher_script)
+    });
+    let stopped = scp_cli::daemon::stop(&paths.dir, script.as_deref())?;
     if !restart {
         return Ok(match stopped {
             None => "no relay broker runs".into(),

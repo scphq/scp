@@ -69,7 +69,7 @@ fn record(dir: &Path, words: &[String]) {
 }
 
 /// the recorded launch, when its program and every absolute path among its words still exist
-fn recorded(dir: &Path) -> Option<Vec<String>> {
+pub fn recorded(dir: &Path) -> Option<Vec<String>> {
     let text = std::fs::read_to_string(dir.join(RECORD_FILE)).ok()?;
     let words: Vec<String> = serde_json::from_str(&text).ok()?;
     if words.is_empty() || words.iter().any(String::is_empty) || !executable(Path::new(&words[0])) {

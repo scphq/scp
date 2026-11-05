@@ -10,6 +10,7 @@ import { joinMode, setJoinMode } from "./relay"
 import { parseSetupArgs } from "./setup"
 import { rmSync, writeFileSync } from "node:fs"
 import { processKey, writeShimBinding } from "./identity"
+import { nativeCli } from "./test-setup"
 
 setDefaultTimeout(30_000)
 
@@ -108,10 +109,12 @@ test("join --under in a codex shell with no broker running names relay_join and 
 
 const entry = join(import.meta.dir, "cli.ts")
 const MARKERS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_CODE_|OPENCODE|GROK_|MUSE_|CODEX_THREAD_ID|SCP_)/
+/** the router's variables, kept under SCP_CLI_NATIVE=1 so the CLI these tests start hands its verbs to the native swarm */
+const ROUTER = new Set(["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_ROUTE_LOG"])
 
 function cleanEnv(extra: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {}
-  for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !MARKERS.test(key)) env[key] = value
+  for (const [key, value] of Object.entries(process.env)) if (value !== undefined && (!MARKERS.test(key) || (nativeCli && ROUTER.has(key)))) env[key] = value
   return { ...env, ...extra }
 }
 

@@ -265,6 +265,54 @@ fn daemon_stop_and_restart() {
 }
 
 #[test]
+fn daemon_stop_knows_a_broker_the_cli_script_runs() {
+    let temp = Temp::new();
+    let tool = std::path::PathBuf::from(format!("/tmp/cli-direct-{}", std::process::id()));
+    let dir = tool.join("r");
+    fs::create_dir_all(&dir).unwrap();
+    let script = tool.join("cli.js").display().to_string();
+    fs::write(&script, "").unwrap();
+    let broker = || {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30; :", &script, "daemon"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        fs::write(dir.join("broker.lock"), format!("{pid}:0")).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        (pid, std::thread::spawn(move || child.wait()))
+    };
+    let stop = |argv: Option<String>| {
+        let mut command = temp.swarm(&["daemon", "stop"]);
+        command.env("SCP_DIR", &dir);
+        if let Some(argv) = argv {
+            command.env("SCP_CLI_ARGV", argv);
+        }
+        let done = output(command);
+        format!("{}{}", text(&done.stdout), text(&done.stderr))
+    };
+    let stopped = |pid: u32| {
+        format!("stopped the relay broker (pid {pid}); the next command starts a fresh one\n")
+    };
+    let (first, reaped) = broker();
+    assert_eq!(stop(None), "no relay broker runs\n");
+    assert_eq!(
+        stop(Some(format!(r#"["node",{script:?}]"#))),
+        stopped(first)
+    );
+    let _ = reaped.join();
+    let (second, reaped) = broker();
+    fs::write(
+        dir.join("cli-argv.json"),
+        format!(r#"["/bin/sh",{script:?}]"#),
+    )
+    .unwrap();
+    assert_eq!(stop(None), stopped(second));
+    let _ = reaped.join();
+    let _ = fs::remove_dir_all(&tool);
+}
+
+#[test]
 fn builtin_wakers_run_the_named_cli() {
     use scp_broker::wake::{Wakers, cli_argv};
     let env = |value: &str| [("SCP_CLI_ARGV".to_owned(), value.to_owned())].into();
