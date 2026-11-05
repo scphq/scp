@@ -1708,6 +1708,8 @@ version = "0.4.10"
 dependencies = [
  "indexmap",
  "libc",
+ "rand 0.8.5",
+ "reqwest",
  "scp-broker",
  "scp-dev-core",
  "scp-mcp",

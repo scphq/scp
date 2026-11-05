@@ -14,6 +14,8 @@ name = "scp_cli"
 [dependencies]
 indexmap.workspace = true
 libc.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls"] }
 scp-broker = { path = "../scp-broker" }
 scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.10" }
 scp-mcp = { path = "../scp-mcp" }
