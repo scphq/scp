@@ -880,7 +880,6 @@ describe.skipIf(noBinary)("setup through the router", () => {
     const lines = readFileSync(log, "utf8")
     expect(lines).toContain("setup native run")
     expect(lines).toContain("setup ts forced")
-    expect(lines).toContain("setup ts decline")
   })
 })
 

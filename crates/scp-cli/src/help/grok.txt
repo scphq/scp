@@ -1,0 +1,9 @@
+swarm grok [--name N | --as N] [--root] [--under ADDR] [--] [grok args...]
+  runs grok headless, wake on: a -p prompt is its first turn, and each new message resumes the same session as a turn
+  (grok --resume <id> -p <message>); without a prompt the first message starts it. The session id is yours (-s, -r)
+  or a new one. Refuses -c and --fork-session: nothing local starts a turn in an interactive grok, so run plain grok
+  for that. Adds the --allow rules for the relay tools unless you pass your own.
+  $SCP_GROK_BIN picks the grok binary (default grok on PATH).
+  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
+  run from an agent's shell, it links under that agent by itself (as under env $(swarm spawn-env)); a $SCP_GRANT minted for it
+  applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.

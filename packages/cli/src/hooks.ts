@@ -1056,7 +1056,13 @@ async function push(
 }
 
 /** Hooks exit silently {@link HOOK_DEADLINE_MS} after process start (agy: sooner), unless a worker wait extends the deadline. */
-export async function relayHookCommand(args: string[], startDaemon: (dir: string) => void, origin: number = performance.timeOrigin): Promise<number> {
+/** when this hook began: `$SCP_HOOK_ORIGIN` from the native hook it took over from, else this process's start */
+export function hookOrigin(env: Record<string, string | undefined>): number {
+  const given = Number(env.SCP_HOOK_ORIGIN)
+  return Number.isSafeInteger(given) && given > 0 ? given : performance.timeOrigin
+}
+
+export async function relayHookCommand(args: string[], startDaemon: (dir: string) => void, origin: number = hookOrigin(process.env)): Promise<number> {
   if (args.includes("--cowork-only") && !coworkLive(process.env)) return 0
   const agy = args[0] === "agy"
   let printed = false

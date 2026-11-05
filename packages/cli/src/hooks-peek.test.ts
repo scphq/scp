@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { type Envelope, PEEK } from "@scp-dev/core"
 import { type Broker, MAX_LINE, type RelayClient } from "@scp-dev/broker"
-import { hookModes, testBroker, testHook } from "./hook-test"
+import { hookModes, routedHooks, testBroker, testHook } from "./hook-test"
 
 for (const mode of hookModes)
   describe(mode, () => {
@@ -140,7 +140,7 @@ for (const mode of hookModes)
 
       beforeAll(async () => {
         mkdirSync(join(project, ".git"), { recursive: true })
-        broker = await startBroker({ dir, idleMs: 0, policyPath: join(process.env.HOME!, "hook-peek-policy.json"), log: () => {} })
+        broker = await startBroker({ dir, idleMs: 0, policyPath: join(process.env.HOME!, "hook-peek-policy.json"), log: () => {}, ...routedHooks(dir) })
       })
       afterAll(async () => {
         await broker.stop()

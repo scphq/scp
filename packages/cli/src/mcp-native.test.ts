@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { dirname, join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import { nativeMcp, runNativeMcp } from "./mcp-native"
+import { swarmBinary } from "./test-setup"
 
 const root = mkdtempSync(join(process.env.HOME!, "mcp-native-"))
 const entry = join(import.meta.dir, "cli.ts")
@@ -56,7 +57,7 @@ test("the server gets the words, this process's parent and this CLI, and its exi
 test("swarm mcp routes to the native server, mcp install and an unusable binary do not", async () => {
   const { bin, record } = fakeServer(3)
   const run = async (args: string[], env: Record<string, string>) => {
-    const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "SCP_MCP_BIN" && key !== "SCP_SWARM_BIN"))
+    const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => !["SCP_MCP_BIN", "SCP_SWARM_BIN", "SCP_ROUTE_LOG"].includes(key)))
     const child = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", ...args], {
       env: { ...base, ...env },
       stdin: "ignore",
@@ -88,3 +89,33 @@ test("swarm mcp routes to the native server, mcp install and an unusable binary 
   expect(none.stderr).toContain("no native swarm")
   expect(none.stderr).toContain("--human is not available")
 })
+
+test.skipIf(!swarmBinary)(
+  "a routed swarm mcp runs SCP_MCP_BIN in place of the native swarm, naming the harness when a router stands between them",
+  async () => {
+    const { bin, record } = fakeServer(3)
+    const env = { ...process.env, SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary!, SCP_MCP_BIN: bin }
+    for (const exec of ["execve", "spawn"]) {
+      const child = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", "--as", "w"], {
+        env: { ...env, SCP_ROUTE_EXEC: exec },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      expect(await child.exited).toBe(3)
+      const [words, ppid, argv] = readFileSync(record, "utf8").split("\n")
+      expect(words).toBe("--as w")
+      expect(ppid).toBe(exec === "spawn" ? String(process.pid) : "")
+      expect(JSON.parse(argv!).at(-1)).toBe(entry)
+    }
+    const unusable = Bun.spawn([process.execPath, "--no-env-file", entry, "mcp", "--human"], {
+      env: { ...env, SCP_MCP_BIN: join(root, "missing") },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const stderr = await new Response(unusable.stderr).text()
+    expect(stderr).toContain("no usable native MCP server")
+    expect(stderr).toContain("--human is not available")
+  },
+)

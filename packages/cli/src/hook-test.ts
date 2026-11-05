@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Readable } from "node:stream"
-import { RelayClient, startBroker, type BrokerOptions, type HookParams } from "@scp-dev/broker"
+import { RelayClient, startBroker, type BrokerOptions, type HookHandler, type HookParams } from "@scp-dev/broker"
 import { readCapped } from "./hook-fast"
 import { hookEnv, hookHandler, relayHookRpc } from "./hook-rpc"
 import { readPsTable } from "./identity"
 import { runHook, type HookOptions } from "./hooks"
+import { nativeCli } from "./test-setup"
 
 const processTable = readPsTable() ?? new Map()
 
@@ -14,7 +15,7 @@ export const hookModes = ["direct", "rpc"] as const
 export type HookMode = (typeof hookModes)[number]
 
 export function testBroker(mode: HookMode, options: BrokerOptions) {
-  return startBroker({ ...options, ...(mode === "rpc" ? { hook: hookHandler(options.dir, options.dir) } : {}) })
+  return startBroker({ ...options, ...(mode === "rpc" ? { hook: hookHandler(options.dir, options.dir) } : routedHooks(options.dir)) })
 }
 
 /** Exercises the transport while retaining each fixture's clock and downstream broker. */
@@ -92,4 +93,9 @@ export async function testHook(mode: HookMode, args: string[], options: HookOpti
     await broker.stop()
     rmSync(root, { recursive: true, force: true })
   }
+}
+
+/** what a test's broker takes to serve hooks as a daemon does: the native hook has no in-process path, so under native routing it needs them */
+export function routedHooks(dir: string): { hook?: HookHandler } {
+  return nativeCli ? { hook: hookHandler(dir, dir) } : {}
 }

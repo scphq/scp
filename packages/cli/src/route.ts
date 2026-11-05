@@ -11,13 +11,26 @@ type Env = Record<string, string | undefined>
 
 /**
  * what the native `swarm` runs, as `swarm __verbs --json` prints it and release packaging keeps beside it as swarm-verbs.json; a verb in
- * `subverbs` runs natively only with one of those words right after it
+ * `subverbs` runs natively only with one of those words right after it. With `ts_verbs`, every word but those goes native, which answers
+ * one it does not know itself
  */
-export type Registry = { version: string; verbs: string[]; subverbs?: Record<string, string[]>; declines: string[]; decline_env: string[] }
+export type Registry = {
+  version: string
+  verbs: string[]
+  subverbs?: Record<string, string[]>
+  ts_verbs?: string[]
+  declines: string[]
+  decline_env: string[]
+}
 
-export type Decision = { engine: "native"; bin: string; registry: Registry } | { engine: "ts"; reason: string }
+export type Decision = { engine: "native"; bin: string; registry: Registry } | { engine: "ts"; reason: string; bin?: string }
 
 export const REGISTRY_FILE = "swarm-verbs.json"
+
+/** how long `swarm __verbs` may take when no swarm-verbs.json lies beside the binary: long enough for a loaded machine */
+const PROBE_MS = 60_000
+/** a hook's share of that: its harness gives it a second or two, so it stays here rather than wait */
+const HOOK_PROBE_MS = 500
 
 export function nativeKey(platform = process.platform, arch = process.arch, glibc = linuxGlibc()): string | undefined {
   if (platform === "darwin" && (arch === "arm64" || arch === "x64")) return `darwin-${arch}`
@@ -76,35 +89,55 @@ function parseRegistry(text: string): Registry | undefined {
   try {
     const value = JSON.parse(text) as Partial<Registry>
     if (typeof value.version !== "string" || !Array.isArray(value.verbs)) return undefined
-    return { version: value.version, verbs: value.verbs, subverbs: value.subverbs ?? {}, declines: value.declines ?? [], decline_env: value.decline_env ?? [] }
+    return {
+      version: value.version,
+      verbs: value.verbs,
+      subverbs: value.subverbs ?? {},
+      ...(value.ts_verbs ? { ts_verbs: value.ts_verbs } : {}),
+      declines: value.declines ?? [],
+      decline_env: value.decline_env ?? [],
+    }
   } catch {
     return undefined
   }
 }
 
-/** the registry beside `bin`, else what `bin __verbs --json` prints */
-export function loadRegistry(bin: string, env: Env): Registry | undefined {
+/** the registry beside `bin`, else what `bin __verbs --json` prints; `slow` when it did not answer in time */
+export function loadRegistry(bin: string, env: Env, budget = PROBE_MS): Registry | "slow" | undefined {
   try {
-    return parseRegistry(readFileSync(join(dirname(bin), REGISTRY_FILE), "utf8"))
+    const beside = parseRegistry(readFileSync(join(dirname(bin), REGISTRY_FILE), "utf8"))
+    if (beside) return beside
   } catch {}
-  const result = spawnSync(bin, ["__verbs", "--json"], { env: env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 10_000, maxBuffer: 1 << 20 })
+  const timeout = Number(env.SCP_ROUTE_PROBE_MS) || budget
+  const result = spawnSync(bin, ["__verbs", "--json"], { env: env as NodeJS.ProcessEnv, encoding: "utf8", timeout, maxBuffer: 1 << 20 })
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") return "slow"
   return result.status === 0 ? parseRegistry(result.stdout) : undefined
+}
+
+type Execve = (file: string, args: string[], env: Env) => never
+
+/** `process.execve`, unless this runtime lacks it or `SCP_ROUTE_EXEC=spawn` asks for the child path */
+function execveOf(env: Env): Execve | undefined {
+  const execve = (process as { execve?: Execve }).execve
+  return typeof execve === "function" && env.SCP_ROUTE_EXEC !== "spawn" ? execve : undefined
 }
 
 /** which CLI runs `argv`: the native swarm for a verb it registers, else this one, saying why */
 export function decide(argv: string[], env: Env, version = pkg.version, locate = nativeBin, load = loadRegistry): Decision {
   if (env.SCP_ROUTED === "ts") return { engine: "ts", reason: "routed" }
   if (env.SCP_NATIVE !== "1") return { engine: "ts", reason: "off" }
-  const verb = verbOf(argv)
-  if (verb === undefined) return { engine: "ts", reason: "unported" }
-  if (verb === "hook" || (verb === "mcp" && argv[argv.indexOf(verb) + 1] !== "install")) return { engine: "ts", reason: verb }
+  const verb = verbOf(argv) ?? "help"
   const forced = (env.SCP_NATIVE_TS ?? "").split(/[\s,]+/).filter(Boolean)
   if (forced.includes("*") || forced.includes(verb)) return { engine: "ts", reason: "forced" }
+  // a native hook gives way to this CLI on a broker that runs no hooks, whose walk would start at a router still standing above it
+  if (verb === "hook" && !execveOf(env)) return { engine: "ts", reason: "spawn" }
   const bin = locate(env)
-  const registry = bin ? load(bin, env) : undefined
-  if (!bin || !registry) return { engine: "ts", reason: "missing" }
+  if (!bin) return { engine: "ts", reason: "missing" }
+  const registry = load(bin, env, verb === "hook" ? HOOK_PROBE_MS : PROBE_MS)
+  if (registry === "slow") return { engine: "ts", reason: "slow", bin }
+  if (!registry) return { engine: "ts", reason: "unreadable", bin }
   if (registry.version !== version) return { engine: "ts", reason: "version" }
-  if (!registry.verbs.includes(verb)) return { engine: "ts", reason: "unported" }
+  if (registry.ts_verbs ? registry.ts_verbs.includes(verb) : !registry.verbs.includes(verb)) return { engine: "ts", reason: "unported" }
   const words = registry.subverbs?.[verb]
   if (words && !words.includes(argv[argv.indexOf(verb) + 1] ?? "")) return { engine: "ts", reason: "unported" }
   if (declined(argv, env, registry)) return { engine: "ts", reason: "decline" }
@@ -188,6 +221,8 @@ export async function route(argv: string[] = process.argv.slice(2), env: Env = p
   const verb = verbOf(argv)
   if (decision.engine === "ts") {
     if (decision.reason !== "off") routeLog(env, verb, "ts", decision.reason)
+    if (decision.bin)
+      process.stderr.write(`swarm: the native swarm ${decision.bin} did not answer __verbs (${decision.reason}), so the TypeScript CLI runs this command\n`)
     return
   }
   const { [GIVEN_ARGV]: _stale, ...rest } = env
@@ -196,13 +231,14 @@ export async function route(argv: string[] = process.argv.slice(2), env: Env = p
     ...(env.SCP_CLI_ARGV !== undefined ? { [GIVEN_ARGV]: env.SCP_CLI_ARGV } : {}),
     SCP_CLI_ARGV: JSON.stringify(launch()),
     SCP_ROUTED: "native",
+    ...(verb === "hook" ? { SCP_HOOK_ORIGIN: String(Math.round(performance.timeOrigin)) } : {}),
   }
   if (verb === "spawn" && env.SCP_SPAWN_RUNNER !== undefined && open(3)) {
     routeLog(env, verb, "native", "handoff")
     await handOff(decision.bin, argv, handed)
   }
-  const execve = (process as { execve?: (file: string, args: string[], env: Env) => never }).execve
-  if (typeof execve === "function" && env.SCP_ROUTE_EXEC !== "spawn") {
+  const execve = execveOf(env)
+  if (execve) {
     routeLog(env, verb, "native", "execve")
     try {
       execve.call(process, decision.bin, [decision.bin, ...argv], handed)

@@ -1,4 +1,4 @@
-//! The native side of the router: its variables, the route log, the flags handed back and the TypeScript fallback.
+//! The native side of the router: its variables, the route log and the TypeScript fallback.
 
 use crate::Host;
 use crate::term;
@@ -8,10 +8,8 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::sync::OnceLock;
 
-/// flags the native verbs hand to the TypeScript CLI, which the router also checks before it hands a verb over
-pub const DECLINE_FLAGS: [&str; 2] = ["--help", "-h"];
-/// variables that do the same
-pub const DECLINE_ENV: [(&str, &str); 0] = [];
+/// the verbs only the TypeScript CLI runs: the experimental mesh is a TypeScript package a source checkout loads
+pub const TS_VERBS: [&str; 1] = ["mesh"];
 /// set by the router: `<its pid>:<its parent's pid>`, so a child it spawned walks from the shell that ran the command
 pub const PARENT: &str = "SCP_CLI_PARENT";
 /// `native` when the router handed this invocation over, `ts` on the TypeScript CLI this hands back to
@@ -99,12 +97,20 @@ pub fn parent_shell(value: Option<&str>, parent: i64) -> Option<i64> {
     (pid == parent && pid > 1 && ppid > 0).then_some(ppid)
 }
 
+fn parent_pid() -> i64 {
+    // SAFETY: getppid cannot fail
+    i64::from(unsafe { libc::getppid() })
+}
+
+/// the router's parent, when the router spawned this process and is still its parent
+pub fn router_parent() -> Option<i64> {
+    let given = START.get().and_then(|s| s.parent.as_deref());
+    parent_shell(given, parent_pid())
+}
+
 /// the process that ran the command: the router's parent when the router spawned this one and is still its parent, else the parent
 pub fn shell_pid() -> i64 {
-    // SAFETY: getppid cannot fail
-    let parent = i64::from(unsafe { libc::getppid() });
-    let given = START.get().and_then(|s| s.parent.as_deref());
-    parent_shell(given, parent).unwrap_or(parent)
+    router_parent().unwrap_or_else(parent_pid)
 }
 
 /// appends `verb engine reason` to `$SCP_ROUTE_LOG`
@@ -120,42 +126,6 @@ pub fn log(verb: &str, engine: &str, reason: &str) {
     {
         let _ = file.write_all(line.as_bytes());
     }
-}
-
-/// whether `word` gives `flag`: a long flag alone or with `=value`, a short one anywhere in a short group
-pub fn gives(word: &str, flag: &str) -> bool {
-    match flag.strip_prefix("--") {
-        Some(_) => word == flag || word.strip_prefix(flag).is_some_and(|r| r.starts_with('=')),
-        None => {
-            let short = &flag[1..];
-            word.starts_with('-')
-                && !word.starts_with("--")
-                && word.len() > 1
-                && word[1..].contains(short)
-        }
-    }
-}
-
-/// why `verb` with `words` goes to the TypeScript CLI, if it does: a flag or variable the native verbs do not cover yet
-pub fn declined(verb: &str, words: &[String], env: &Env) -> Option<String> {
-    if crate::claude::BROKER_VERBS.contains(&verb) || crate::spawn::BROKER_VERBS.contains(&verb) {
-        return None;
-    }
-    for word in words {
-        if word == "--" {
-            break;
-        }
-        if let Some(flag) = DECLINE_FLAGS.iter().find(|flag| gives(word, flag)) {
-            return Some(match *flag {
-                "--help" | "-h" => "help".into(),
-                flag => flag.trim_start_matches('-').into(),
-            });
-        }
-    }
-    DECLINE_ENV
-        .iter()
-        .find(|(key, value)| env.get(*key).is_some_and(|v| v == value))
-        .map(|(key, _)| key.to_lowercase())
 }
 
 /// the words that start the TypeScript CLI: `$SCP_CLI_ARGV`, else the CLI beside this executable's native package
@@ -220,27 +190,5 @@ mod tests {
         let mut env = routers.clone();
         restore_argv(&mut env, replaced(true, Some("[\"caller\"]")));
         assert_eq!(env[scp_mcp::spawn::CLI_ARGV], "[\"caller\"]");
-    }
-
-    #[test]
-    fn declined_flags_stop_at_the_terminator() {
-        let words = |list: &[&str]| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
-        let env = Env::new();
-        assert_eq!(
-            declined("whoami", &words(&["--help"]), &env).as_deref(),
-            Some("help")
-        );
-        assert_eq!(
-            declined("whoami", &words(&["-xh"]), &env).as_deref(),
-            Some("help")
-        );
-        assert_eq!(declined("whoami", &words(&["--cloud"]), &env), None);
-        assert_eq!(declined("spawn", &words(&["--via", "m"]), &env), None);
-        assert_eq!(declined("set-now", &words(&["--", "-h"]), &env), None);
-        assert_eq!(declined("spawn-wake", &words(&["--run", "-h"]), &env), None);
-        assert_eq!(declined("codex-wake", &words(&["--cloud"]), &env), None);
-        assert_eq!(declined("set-now", &words(&["--helpful"]), &env), None);
-        let cloud = Env::from([("SCP_TRANSPORT".to_owned(), "cloud".to_owned())]);
-        assert_eq!(declined("whoami", &[], &cloud), None);
     }
 }

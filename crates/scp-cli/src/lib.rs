@@ -1,7 +1,7 @@
 //! The swarm CLI verbs, natively: what the TypeScript router hands the `swarm` binary under `SCP_NATIVE=1`.
 //!
-//! Each area owns a module and lists its verbs in `VERBS`; the registry (`swarm __verbs --json`) is their union. A verb this binary
-//! does not run, or a flag it does not cover yet, goes to the TypeScript CLI (`SCP_CLI_ARGV`, else the one beside the native package).
+//! Each area owns a module and lists its verbs in `VERBS`; the registry (`swarm __verbs --json`) is their union. Only `route::TS_VERBS`
+//! go to the TypeScript CLI (`SCP_CLI_ARGV`, else the one beside the native package).
 
 pub mod account;
 pub mod args;
@@ -36,6 +36,8 @@ pub struct Host {
     pub daemon: fn(&[String]) -> i32,
     /// the TypeScript CLI beside this executable's native package, as the words that start it
     pub beside: fn(&Env) -> Option<Vec<String>>,
+    /// `[launcher...] hook <args>` as the native binary runs it, for the given parent process
+    pub hook: fn(&[String], i64) -> i32,
 }
 
 /// a verb's failure, printed as the TypeScript CLI prints it
@@ -45,8 +47,6 @@ pub enum Fail {
     Usage(String),
     /// a broker refusal or a connection failure
     Call(CallError),
-    /// the TypeScript CLI takes over, for the reason given
-    Decline(String),
 }
 
 impl From<CallError> for Fail {
@@ -136,19 +136,21 @@ pub fn main(args: &[String], host: &Host) -> i32 {
     }
     let env: Env = std::env::vars().collect();
     let hoisted = args::hoist_identity(args);
-    let Some((name, rest)) = hoisted.split_first() else {
-        return route::fallback(args, "", "usage", &env, host);
+    let (name, rest) = match hoisted.split_first() {
+        Some((name, rest)) if !name.is_empty() => (name.as_str(), rest),
+        Some((_, rest)) => ("--help", rest),
+        None => ("--help", &[][..]),
     };
     let Some(spec) = verb(name) else {
-        return route::fallback(args, name, "unported", &env, host);
+        if route::TS_VERBS.contains(&name) {
+            return route::fallback(args, name, "unported", &env, host);
+        }
+        route::log(name, "native", "unknown");
+        return report(help::unknown(name));
     };
-    if let Some(reason) = route::declined(name, rest, &env) {
-        return route::fallback(args, name, &reason, &env, host);
-    }
     route::log(name, "native", "run");
     match run_spec(spec, name, rest, &env, host) {
         Ok(code) => code,
-        Err(Fail::Decline(reason)) => route::fallback(args, name, &reason, &env, host),
         Err(fail) => report(fail),
     }
 }
@@ -158,6 +160,9 @@ fn run_spec(spec: &Verb, name: &str, rest: &[String], env: &Env, host: &Host) ->
         Run::Words(_) => Parsed::default(),
         _ => args::parse_verb(name, rest).map_err(Fail::Usage)?,
     };
+    if parsed.has("help") {
+        return help::show(name, parsed.on("all"));
+    }
     let call = Call {
         verb: name,
         parsed,
@@ -175,7 +180,7 @@ fn run_spec(spec: &Verb, name: &str, rest: &[String], env: &Env, host: &Host) ->
 pub fn run_verb(name: &str, words: &[String], env: &Env, host: &Host) -> Done {
     match verb(name) {
         Some(spec) => run_spec(spec, name, words, env, host),
-        None => Err(Fail::Decline("unported".into())),
+        None => Err(help::unknown(name)),
     }
 }
 
@@ -197,31 +202,21 @@ pub fn report(fail: Fail) -> i32 {
             }
         }
         Fail::Call(CallError::Io(message)) => term::note(&message),
-        Fail::Decline(reason) => term::note(&format!("declined: {reason}")),
     }
     term::FAILED
 }
 
-/// `swarm __verbs [--json]`: the verbs this binary runs, and what it hands back even then
+/// `swarm __verbs [--json]`: the verbs this binary runs, and the ones it hands to the TypeScript CLI
 fn registry(args: &[String]) -> i32 {
     let verbs = native_verbs();
     if args.iter().any(|a| a == "--json") {
         let verbs = Value::from(verbs);
-        let declines = Value::from(route::DECLINE_FLAGS.to_vec());
-        let env = Value::from(
-            route::DECLINE_ENV
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>(),
-        );
+        let ts_verbs = Value::from(route::TS_VERBS.to_vec());
         let version = Value::from(VERSION);
-        let subverbs = serde_json::json!({ "mcp": setup::MCP_WORDS });
         term::json_entries(&[
             ("version", &version),
             ("verbs", &verbs),
-            ("subverbs", &subverbs),
-            ("declines", &declines),
-            ("decline_env", &env),
+            ("ts_verbs", &ts_verbs),
         ]);
     } else {
         for name in verbs {

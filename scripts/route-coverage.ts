@@ -1,4 +1,4 @@
-// Checks a SCP_ROUTE_LOG: every verb the native swarm registers ran natively at least once, and no verb fell back over a version mismatch.
+// Checks a SCP_ROUTE_LOG: every verb the native swarm registers ran natively at least once, and nothing stayed on TypeScript but what a test forced.
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -13,7 +13,7 @@ const counts = new Map<string, number>();
 for (const [verb, engine, reason] of lines) counts.set(`${verb} ${engine} ${reason}`, (counts.get(`${verb} ${engine} ${reason}`) ?? 0) + 1);
 for (const [key, count] of [...counts].sort()) console.log(`${String(count).padStart(6)} ${key}`);
 const unrouted = registry.verbs.filter((verb) => !lines.some(([v, engine]) => v === verb && engine === "native"));
-const version = lines.filter(([, , reason]) => reason === "version");
+const declines = lines.filter(([, engine, reason]) => engine === "ts" && reason !== "forced");
 if (unrouted.length) console.error(`never routed native: ${unrouted.join(", ")}`);
-if (version.length) console.error(`${version.length} version declines: the native swarm and the CLI disagree on the version`);
-if (unrouted.length || version.length) process.exit(1);
+if (declines.length) console.error(`${declines.length} commands stayed on TypeScript unforced`);
+if (unrouted.length || declines.length) process.exit(1);

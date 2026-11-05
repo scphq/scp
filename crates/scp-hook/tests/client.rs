@@ -355,7 +355,7 @@ fn fallback_launcher_and_engine() {
     for engine in [false, true] {
         let temp = Temp::new();
         let script = temp.0.join("launcher.sh");
-        fs::write(&script,"test \"$1\" = prefix || exit 1\ntest \"$2\" = hook || exit 1\ntest \"$3\" = agy || exit 1\ncat\n").unwrap();
+        fs::write(&script,"test \"$SCP_ROUTED\" = ts || exit 1\ntest \"$1\" = prefix || exit 1\ntest \"$2\" = hook || exit 1\ntest \"$3\" = agy || exit 1\ncat\n").unwrap();
         let server = if engine {
             None
         } else {

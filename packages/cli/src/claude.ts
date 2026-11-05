@@ -416,7 +416,7 @@ export async function claudeCommand(
   )
 }
 
-const CLAUDE_HELP = `${CLI_NAME} claude [--name N | --as N] [--root] [--under ADDR] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake it
+export const CLAUDE_HELP = `${CLI_NAME} claude [--name N | --as N] [--root] [--under ADDR] [--] [claude args...]   start Claude Code with the scp channel loaded, so peer messages wake it
 ${CLI_NAME} claude --bg [--name N] [--root] [--under ADDR] [--] [claude args...]   start it in the background (claude --bg) with an scp mount that claims N and
                                                  a grant, so it links under you; messages wake it through its inbox. Prints its short id and address
   --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.

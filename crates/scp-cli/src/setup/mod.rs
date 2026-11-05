@@ -13,8 +13,6 @@ pub mod verify;
 
 use crate::{Run, Verb};
 
-pub use mcp_install::MCP_WORDS;
-
 pub const VERBS: &[Verb] = &[
     Verb {
         name: "hooks",
@@ -22,7 +20,7 @@ pub const VERBS: &[Verb] = &[
     },
     Verb {
         name: "mcp",
-        run: Run::Parsed(mcp_install::mcp),
+        run: Run::Words(mcp_install::mcp),
     },
     Verb {
         name: "setup",

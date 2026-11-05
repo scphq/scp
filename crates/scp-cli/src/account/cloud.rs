@@ -203,7 +203,7 @@ mod local {
             _ => return Err(format!("{path}: machine is not a valid name")),
         };
         let message = |fail: Fail| match fail {
-            Fail::Usage(message) | Fail::Decline(message) => message,
+            Fail::Usage(message) => message,
             Fail::Call(error) => error.message().to_owned(),
         };
         let url = match value.get("url") {
@@ -358,7 +358,7 @@ mod local {
             }
             if let Err(fail) = relink_broker(env).await.map(drop) {
                 let message = match fail {
-                    Fail::Usage(message) | Fail::Decline(message) => message,
+                    Fail::Usage(message) => message,
                     Fail::Call(error) => error.message().to_owned(),
                 };
                 note(&format!(

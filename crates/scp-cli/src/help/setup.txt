@@ -1,0 +1,24 @@
+swarm setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--join auto|manual] [--undo] [--bin PATH] [--harness H] [--engine auto|ts|native]
+  mounts the relay MCP shim in every installed harness (claude, codex, opencode, grok, muse, agy) at user scope, running
+  the swarm PATH finds (by that path) or --bin, and installs the relay hooks at user scope (Muse's as a plugin). Prints
+  the plan; --write applies it (each file backed up next to itself as <file>.bak-<time>, its mode kept), then checks
+  each harness's own MCP listing. Rerunning changes nothing.
+  The hooks report activity and hand the model new messages after tools and with prompts; a stop names each request
+  not yet answered once, and is held while a require_reply request waits. --block-stop-on-unread also holds it while
+  messages are unread; without it a hooks file keeps the stop hook it has. swarm spawn returns at once from an
+  agent's shell; while the workers it started run, a stop waits up to 600 s for their next message or handback (hooks
+  install --push-wait), so results arrive by themselves. --no-hooks mounts the MCP shim only.
+  --join auto (the default) puts every hooked session on the relay when it starts; --join manual keeps a session off it
+  until it runs swarm join <name> (or calls relay_join); saved in ~/.config/scp/config.json with --write.
+  --engine auto uses a matching native hook client when installed; ts forces Node, native requires it.
+  SCP_ENGINE sets the default engine; SCP_HOOK_BIN overrides the native binary path.
+  With SCP_NATIVE=1 every mount runs the native swarm's mcp directly (no node stays resident), when one matching this
+  CLI is installed or SCP_SWARM_BIN names it, and the broker it starts is the native one; SCP_NATIVE=mcp mounts the
+  same native server but keeps the TypeScript broker. Without a native swarm the mounts run through node, as without
+  SCP_NATIVE.
+  --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
+  The Claude Code and codex hooks and every mount run swarm by absolute paths (a node script as absolute node plus its
+  real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or swarm.
+  --cowork builds only the Cowork plugin zip in SCP state, without --write. Upload it in Claude: Customize, Plugins,
+  Add, Upload plugin. Cloud sessions run the pinned CLI through npx; scheduled tasks do not wake.
+  swarm setup claude-desktop builds the Claude desktop chat extension (see its --help).

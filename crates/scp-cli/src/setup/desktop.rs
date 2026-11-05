@@ -239,20 +239,21 @@ pub struct DesktopOptions {
     pub bin: Option<String>,
 }
 
-pub fn parse_claude_desktop_args(args: &[String]) -> Result<DesktopOptions, Fail> {
+/// the options, or None for `--help`
+pub fn parse_claude_desktop_args(args: &[String]) -> Result<Option<DesktopOptions>, Fail> {
     let parsed = parse_flags(
         args,
         &flags(&[("out", true), ("open", false), ("bin", true)]),
     )
     .map_err(usage)?;
     if parsed.on("help") {
-        return Err(Fail::Decline("help".into()));
+        return Ok(None);
     }
-    Ok(DesktopOptions {
+    Ok(Some(DesktopOptions {
         out: parsed.text("out").map(str::to_owned),
         open: parsed.on("open"),
         bin: parsed.text("bin").map(str::to_owned),
-    })
+    }))
 }
 
 fn default_mcpb_file(env: &Env) -> String {

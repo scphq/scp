@@ -147,7 +147,7 @@ describe("SCP_NATIVE", () => {
   })
 
   test("with no native binary it says so once and the TypeScript broker starts and serves", async () => {
-    const env = { SCP_DIR: join(root, "fallback-relay"), SCP_IDLE: "30s", SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "nowhere", "swarm") }
+    const env = { SCP_DIR: join(root, "fallback-relay"), SCP_IDLE: "30s", SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "nowhere", "swarm"), SCP_ROUTE_LOG: "" }
     try {
       const human = await swarm(["whoami", "--human"], env)
       expect(human.code).toBe(0)
@@ -166,7 +166,7 @@ describe("SCP_NATIVE", () => {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "pipe",
-      env: { ...process.env, SCP_DIR: dir, SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "nowhere", "swarm") },
+      env: { ...process.env, SCP_DIR: dir, SCP_NATIVE: "1", SCP_SWARM_BIN: join(root, "nowhere", "swarm"), SCP_ROUTE_LOG: "" },
     })
     try {
       await waitFor(() => existsSync(join(dir, "broker.lock")) && lockPid(dir) === child.pid, 15_000, "the TypeScript broker")

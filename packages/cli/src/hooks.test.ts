@@ -39,7 +39,7 @@ import {
   shortHostname,
   toHandle,
 } from "./identity"
-import { hookModes, testBroker, testHook } from "./hook-test"
+import { hookModes, routedHooks, testBroker, testHook } from "./hook-test"
 
 for (const mode of hookModes)
   describe(mode, () => {
@@ -366,7 +366,7 @@ for (const mode of hookModes)
 
       beforeAll(async () => {
         mkdirSync(join(project, ".git"), { recursive: true })
-        broker = await startBroker({ dir, idleMs: 0, policyPath: join(process.env.HOME!, "hook-policy.json"), log: () => {} })
+        broker = await startBroker({ dir, idleMs: 0, policyPath: join(process.env.HOME!, "hook-policy.json"), log: () => {}, ...routedHooks(dir) })
       })
       afterAll(async () => {
         await broker.stop()

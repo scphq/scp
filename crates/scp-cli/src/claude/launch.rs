@@ -803,7 +803,7 @@ fn set_name(config: &mut Json, to: &str) {
 pub fn claude(call: &Call, argv: &[String]) -> Done {
     let first = argv.first().map(String::as_str);
     if matches!(first, Some("--help" | "-h")) {
-        return Err(Fail::Decline("help".into()));
+        return crate::help::show_claude();
     }
     if matches!(first, Some("ls" | "prune")) {
         return super::bg_cmd::claude(argv, call.env, call.host);
