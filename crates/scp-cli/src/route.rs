@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::sync::OnceLock;
 
 /// flags the native verbs hand to the TypeScript CLI, which the router also checks before it hands a verb over
-pub const DECLINE_FLAGS: [&str; 3] = ["--help", "-h", "--via"];
+pub const DECLINE_FLAGS: [&str; 2] = ["--help", "-h"];
 /// variables that do the same
 pub const DECLINE_ENV: [(&str, &str); 0] = [];
 /// set by the router: `<its pid>:<its parent's pid>`, so a child it spawned walks from the shell that ran the command
@@ -138,7 +138,7 @@ pub fn gives(word: &str, flag: &str) -> bool {
 
 /// why `verb` with `words` goes to the TypeScript CLI, if it does: a flag or variable the native verbs do not cover yet
 pub fn declined(verb: &str, words: &[String], env: &Env) -> Option<String> {
-    if crate::claude::BROKER_VERBS.contains(&verb) {
+    if crate::claude::BROKER_VERBS.contains(&verb) || crate::spawn::BROKER_VERBS.contains(&verb) {
         return None;
     }
     let first = words.first().map(String::as_str).unwrap_or_default();
@@ -239,11 +239,10 @@ mod tests {
             Some("help")
         );
         assert_eq!(declined("whoami", &words(&["--cloud"]), &env), None);
-        assert_eq!(
-            declined("spawn", &words(&["--via", "m"]), &env).as_deref(),
-            Some("via")
-        );
+        assert_eq!(declined("spawn", &words(&["--via", "m"]), &env), None);
         assert_eq!(declined("set-now", &words(&["--", "-h"]), &env), None);
+        assert_eq!(declined("spawn-wake", &words(&["--run", "-h"]), &env), None);
+        assert_eq!(declined("codex-wake", &words(&["--cloud"]), &env), None);
         assert_eq!(declined("set-now", &words(&["--helpful"]), &env), None);
         let cloud = Env::from([("SCP_TRANSPORT".to_owned(), "cloud".to_owned())]);
         assert_eq!(declined("whoami", &[], &cloud), None);

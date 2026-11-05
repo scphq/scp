@@ -16,6 +16,7 @@ use super::output::{
     HarnessRun, TRANSCRIPT_BYTES, claude_transcripts, codex_thread, harness_output, replies_output,
     stderr_output, transcript_replies,
 };
+use super::remote;
 use super::runner::{Channel, detach_spawn};
 use super::settings::{SPAWN_IDLE_S, spawn_idle_default};
 use super::text::{
@@ -139,26 +140,8 @@ pub fn agent_shell(env: &Env) -> bool {
             .any(|key| env.get(*key).is_some_and(|v| !v.is_empty()))
 }
 
-/// whether `--under` names an agent on a machine, which only the TypeScript CLI's hub lookup can place
-fn linked_under(values: &Parsed) -> bool {
-    let Some(rest) = values.text("under").and_then(|u| u.strip_prefix("me/")) else {
-        return false;
-    };
-    let Some((machine, agent)) = rest.split_once('/') else {
-        return false;
-    };
-    let bytes = machine.as_bytes();
-    (1..=32).contains(&bytes.len())
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
-        && !agent.is_empty()
-        && !agent.contains('/')
-}
-
 /// this CLI as the words a codex mount falls back on: what the router named, else the CLI beside this package, else this binary, whose `mcp` runs without Node
-fn self_words(call: &Call, env: &Env) -> Vec<String> {
+pub(crate) fn self_words(call: &Call, env: &Env) -> Vec<String> {
     scp_mcp::spawn::named_launcher(env)
         .or_else(|| (call.host.beside)(env))
         .unwrap_or_else(|| {
@@ -187,9 +170,6 @@ pub fn spawn(call: &Call, args: &[String]) -> Done {
     if values.has("help") {
         return Err(Fail::Decline("help".into()));
     }
-    if linked_under(&values) {
-        return Err(Fail::Decline("under".into()));
-    }
     let bytes = values
         .text("handback-bytes")
         .map(handback_bytes)
@@ -209,11 +189,39 @@ pub fn spawn(call: &Call, args: &[String]) -> Done {
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);
     }
+    if values.text("via").is_some() {
+        return open::block_on(remote::via_spawn(&values, &command, &cwd, &env))?;
+    }
     let detach = runner.is_none()
         && (values.on("bg") || (!values.on("fg") && (!tty(1) || (!tty(0) && agent_shell(&env)))));
     open::block_on(async {
         if detach {
             return detach_spawn(args, &cwd, &env).await;
+        }
+        let plan = match remote::linked_plan(&values, &command, &env).await {
+            Ok(plan) => plan,
+            Err(fail) => {
+                channel.failed(&fail);
+                return Err(fail);
+            }
+        };
+        if let Some(plan) = plan {
+            let detached = runner.is_some();
+            let name = plan.name.clone();
+            let mut started = |failed: Option<&super::harness::Failed>| match failed {
+                Some(failed) => channel.not_started(&failed.message, failed.code),
+                None => channel.started(&name),
+            };
+            let linked = remote::Linked {
+                call,
+                env: &env,
+                command: &command,
+                cwd: &cwd,
+                group: detached,
+                bytes,
+            };
+            let started = detached.then_some(&mut started as super::harness::Started);
+            return remote::linked_spawn(&plan, &linked, started).await;
         }
         let spawned = Spawn {
             self_words: self_words(call, &env),
@@ -751,37 +759,6 @@ impl Worker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn under(value: &str) -> Parsed {
-        Parsed {
-            values: vec![("under".into(), crate::args::Val::Text(value.into()))],
-            positionals: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn only_an_agent_on_a_machine_goes_to_the_typescript_cli() {
-        for linked in [
-            "me/box/lead",
-            "me/b0x-1/a.b",
-            &format!("me/{}/x", "m".repeat(32)),
-        ] {
-            assert!(linked_under(&under(linked)), "{linked}");
-        }
-        for local in [
-            "lead",
-            "me/lead",
-            "me/Box/lead",
-            "me/-box/lead",
-            "me/box/",
-            "me/box/a/b",
-            &format!("me/{}/x", "m".repeat(33)),
-            "you/box/lead",
-        ] {
-            assert!(!linked_under(&under(local)), "{local}");
-        }
-        assert!(!linked_under(&Parsed::default()));
-    }
 
     #[test]
     fn an_agent_shell_is_a_harness_or_a_relay_identity() {
