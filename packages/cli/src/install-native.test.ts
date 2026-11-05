@@ -48,7 +48,7 @@ function files(dir: string): Record<string, string> {
   const found: Record<string, string> = {}
   const walk = (at: string, rel: string) => {
     for (const name of readdirSync(at, { withFileTypes: true })) {
-      if (name.name === ".git" || (rel === "" && (name.name === "Library" || name.name === ".cache"))) continue
+      if (name.name === ".git" || (rel === "" && (name.name === "Library" || name.name === ".cache" || name.name === ".bun"))) continue
       const path = join(at, name.name)
       const key = `${rel}${name.name}`.replace(/\.bak-\d{14}/, ".bak-<stamp>")
       if (name.isDirectory()) walk(path, `${key}/`)
