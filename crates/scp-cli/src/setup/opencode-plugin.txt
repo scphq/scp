@@ -1,0 +1,181 @@
+/** before a session exists, the waiter starts this long after load, so a session opened at launch claims the first message */
+const STARTUP_MS = 3000
+
+type Reply = { hookSpecificOutput?: { additionalContext?: unknown }; decision?: unknown; reason?: unknown }
+
+const hook = async (payload: Record<string, unknown>, wait: boolean, inject = true, hold = BLOCK_STOP): Promise<Reply> => {
+  try {
+    const args = [@@LAUNCH@@, "hook", "opencode", ...(hold ? ["--block-stop-on-unread"] : []), ...(inject ? [] : ["--no-inject"])]
+    const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", wait ? "pipe" : "ignore", "ignore"] })
+    const ended = new Promise<void>((resolve, reject) => {
+      child.once("error", reject)
+      child.once("close", () => resolve())
+    })
+    child.stdin!.on("error", () => {})
+    child.stdin!.end(JSON.stringify(payload))
+    if (!wait) {
+      void ended.catch(() => {})
+      child.unref()
+      return {}
+    }
+    const [output] = await Promise.all([readAll(child.stdout!), ended])
+    const text = output.trim()
+    return text ? (JSON.parse(text) as Reply) : {}
+  } catch {
+    return {}
+  }
+}
+
+const context = (reply: Reply) => (typeof reply.hookSpecificOutput?.additionalContext === "string" ? reply.hookSpecificOutput.additionalContext : undefined)
+
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+/** an OpenCode part id (prt_, the low 48 bits of time and counter in hex, 14 base62) that sorts after the message's other parts */
+const partId = (parts: Record<string, unknown>[]) => {
+  let next = (BigInt(Date.now()) * 4096n) & 0xffffffffffffn
+  for (const part of parts) {
+    const match = /^prt_([0-9a-f]{12})/.exec(String(part.id))
+    if (match && BigInt("0x" + match[1]) >= next) next = BigInt("0x" + match[1]) + 1n
+  }
+  if (next > 0xffffffffffffn) next = 0xffffffffffffn
+  const tail = Array.from(crypto.getRandomValues(new Uint8Array(14)), (byte) => BASE62[byte % 62]).join("")
+  return "prt_" + next.toString(16).padStart(12, "0").slice(-12) + tail
+}
+
+export const Scp = async ({ client, directory }: { client: any; directory: string }) => {
+  const WAKE = process.env.SCP_WAKE !== "0"
+  const busy = new Set<string>()
+  let target: string | undefined
+  let fresh = true
+  let waiter: ReturnType<typeof spawn> | undefined
+  let looping = false
+  let armed = 0
+  const cancel = () => { waiter?.kill("SIGTERM") }
+  const wake = async () => {
+    if (looping) return
+    looping = true
+    let version = armed
+    try {
+      while (WAKE && busy.size === 0 && (target || fresh)) {
+        const id = target
+        const began = Date.now()
+        let text: string | undefined
+        try {
+          const args = [@@LAUNCH@@, "hook", "opencode", "--wake", "50"]
+          const child = spawn(args[0]!, args.slice(1), { env: { ...process.env }, stdio: ["pipe", "pipe", "ignore"] })
+          waiter = child
+          const ended = new Promise<void>((resolve, reject) => {
+            child.once("error", reject)
+            child.once("close", () => resolve())
+          })
+          child.stdin!.on("error", () => {})
+          child.stdin!.end(JSON.stringify({ hook_event_name: "Wake", ...(id ? { session_id: id } : {}), cwd: directory }))
+          const [output] = await Promise.all([readAll(child.stdout!), ended])
+          text = output.trim() ? context(JSON.parse(output) as Reply) : undefined
+        } catch {} finally {
+          waiter = undefined
+        }
+        if (text) {
+          version = armed
+          const into = target ?? (await client.session.create({ body: {} }).then((made: any) => made?.data?.id).catch(() => undefined))
+          if (into) await client.session.promptAsync({ path: { id: into }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
+          break
+        }
+        if (Date.now() - began < 2000) await new Promise((resolve) => setTimeout(resolve, 5000))
+      }
+    } catch {} finally {
+      looping = false
+      if (armed !== version) void wake()
+    }
+  }
+  const arm = (id: string) => {
+    target = id
+    fresh = false
+    armed++
+    void wake()
+  }
+  const children = new Map<string, Promise<boolean | undefined>>()
+  const failed = new Set<string>()
+  const isChild = async (id: string) => {
+    let known = children.get(id)
+    if (!known) {
+      known = Promise.resolve()
+        .then(() => client.session.get({ path: { id } }))
+        .then((found: any) => (found?.data ? Boolean(found.data.parentID) : undefined))
+        .catch(() => undefined)
+      children.set(id, known)
+    }
+    const child = await known
+    if (child === undefined && children.get(id) === known) children.delete(id)
+    return child === true
+  }
+  setTimeout(() => {
+    if (fresh && busy.size === 0) void wake()
+  }, STARTUP_MS).unref?.()
+  return {
+    "tool.execute.after": async (input: { tool: string; sessionID: string; args?: unknown }, output: { output?: unknown }) => {
+      const payload = { hook_event_name: "PostToolUse", session_id: input.sessionID, cwd: directory, tool_name: input.tool, tool_input: input.args }
+      if (await isChild(input.sessionID)) {
+        await hook({ ...payload, agent_id: input.sessionID.slice(-6), agent_type: "subagent" }, false)
+        return
+      }
+      const text = context(await hook(payload, true, typeof output.output === "string"))
+      if (text && typeof output.output === "string") output.output = output.output + "\n\n" + text
+    },
+    "chat.message": async (input: { sessionID: string }, output: { message?: { id?: string }; parts: Record<string, unknown>[] }) => {
+      const messageID = output.message?.id
+      if (await isChild(input.sessionID)) return
+      busy.add(input.sessionID)
+      cancel()
+      if (!messageID) return
+      const text = context(await hook({ hook_event_name: "UserPromptSubmit", session_id: input.sessionID, cwd: directory }, true))
+      if (text) output.parts.push({ id: partId(output.parts), sessionID: input.sessionID, messageID, type: "text", text, synthetic: true })
+    },
+    event: async ({ event }: { event: { type: string; properties?: { sessionID?: string; status?: { type?: string }; info?: { id?: string; parentID?: string; sessionID?: string; role?: string; error?: unknown } } } }) => {
+      const info = event.properties?.info
+      if (event.type === "message.updated") {
+        if (info?.role === "assistant" && info.sessionID && info.error) failed.add(info.sessionID)
+        else if (info?.role === "assistant" && info.sessionID) failed.delete(info.sessionID)
+        return
+      }
+      const name = event.type === "session.created" ? "SessionStart" : event.type === "session.idle" ? "Stop" : undefined
+      const sessionID = event.properties?.sessionID ?? info?.id
+      if (!sessionID) return
+      if (event.type === "session.error") failed.add(sessionID)
+      if (event.type === "session.deleted") {
+        const child = await isChild(sessionID)
+        children.delete(sessionID)
+        failed.delete(sessionID)
+        if (!child) {
+          busy.delete(sessionID)
+          if (target === sessionID) target = undefined
+          cancel()
+        }
+        return
+      }
+      if (event.type === "session.created" && info) children.set(sessionID, Promise.resolve(Boolean(info.parentID)))
+      if (await isChild(sessionID)) return
+      if (event.type === "session.status") {
+        const status = event.properties?.status?.type
+        if (status === "busy" || status === "retry") {
+          busy.add(sessionID)
+          cancel()
+        } else if (status === "idle") busy.delete(sessionID)
+        return
+      }
+      if (event.type === "session.idle") busy.delete(sessionID)
+      if (!name) return
+      const stop = name === "Stop" && !failed.has(sessionID)
+      const title = name === "Stop" ? await client.session.get({ path: { id: sessionID } }).then((found: any) => found?.data?.title).catch(() => undefined) : undefined
+      const reply = await hook(
+        { hook_event_name: name, session_id: sessionID, cwd: directory, ...(name === "SessionStart" ? { source: "startup" } : {}), ...(typeof title === "string" ? { session_title: title } : {}) },
+        stop,
+        name !== "Stop" || stop,
+        stop && BLOCK_STOP,
+      )
+      const text = reply.decision === "block" && typeof reply.reason === "string" && !reply.reason.includes("<relay-message") ? reply.reason : undefined
+      if (text) await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text }] } }).catch(() => {})
+      else arm(sessionID)
+    },
+  }
+}
