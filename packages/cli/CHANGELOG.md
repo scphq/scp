@@ -1,5 +1,12 @@
 # @scp-dev/cli
 
+## 1.3.0
+
+### Minor Changes
+
+- 13b456d: Under `SCP_NATIVE=1` the native `swarm` also runs join, name, leave, adopt, link, unlink, hibernate, end, machine and relink, with the TypeScript CLI's output and checks, and `swarm daemon stop|restart` run directly now knows a broker the CLI's script runs.
+- 3299c8b: Under `SCP_NATIVE=1` the CLI also hands `rules`, `group`, `admin`, `spawn-env`, `holds`, `peek` and `set-peek` to the native `swarm`, with the same output, errors and exit codes.
+
 ## 1.2.0
 
 ### Minor Changes
