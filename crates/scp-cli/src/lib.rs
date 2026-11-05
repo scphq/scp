@@ -215,7 +215,7 @@ fn registry(args: &[String]) -> i32 {
                 .collect::<Vec<_>>(),
         );
         let version = Value::from(VERSION);
-        let subverbs = serde_json::json!({});
+        let subverbs = serde_json::json!({ "mcp": setup::MCP_WORDS });
         term::json_entries(&[
             ("version", &version),
             ("verbs", &verbs),

@@ -108,7 +108,7 @@ function cap(text: string | undefined): string | undefined {
 }
 
 /** a command line's words with shell quoting and escapes removed, each marked when any of it was quoted or escaped; undefined when a quote is left open */
-function shellWords(command: string): { text: string; quoted: boolean }[] | undefined {
+export function shellWords(command: string): { text: string; quoted: boolean }[] | undefined {
   const words: { text: string; quoted: boolean }[] = []
   let word = ""
   let open = false

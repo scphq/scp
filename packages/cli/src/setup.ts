@@ -808,10 +808,10 @@ function planAgyRules(plan: Plan, ctx: Ctx, remove: boolean) {
 }
 
 /** the command starts of hooks of ours a launch may have written, with and without its native client */
-const launcherPrefixes = (launch: HookLaunch): string[] =>
+export const launcherPrefixes = (launch: HookLaunch): string[] =>
   launch.launcher ? [launch.launcher, ...(launch.native ? [[launch.native, ...launch.launcher]] : [])].map((words) => words.map(shellQuote).join(" ")) : []
 
-function hookContent(kind: Hooked, existing: string | undefined, blockStop: boolean, launch: HookLaunch): string {
+export function hookContent(kind: Hooked, existing: string | undefined, blockStop: boolean, launch: HookLaunch): string {
   const options = { blockStop, ...launch }
   if (kind === "opencode") return opencodePlugin(options)
   if (kind === "muse") return `${JSON.stringify(musePlugin(options), null, 2)}\n`

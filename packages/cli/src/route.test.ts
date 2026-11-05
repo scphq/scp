@@ -62,6 +62,10 @@ describe("the routing decision", () => {
     ).toEqual({ engine: "ts", reason: "off" })
     expect(reason({}, ["hook", "claude"], registry(["hook", "whoami"]))).toBe("hook")
     expect(reason({}, ["mcp"], registry(["mcp"]))).toBe("mcp")
+    const install = { ...registry(["mcp"]), subverbs: { mcp: ["install"] } }
+    expect(reason({}, ["mcp", "install", "--harness", "claude"], install)).toBe("native")
+    expect(reason({}, ["mcp", "--harness", "claude", "install"], install)).toBe("mcp")
+    expect(reason({}, ["mcp", "install"], registry(["whoami"]))).toBe("unported")
     expect(reason({ SCP_NATIVE_TS: "set-now, whoami" }, ["whoami"])).toBe("forced")
     expect(reason({ SCP_NATIVE_TS: "*" }, ["daemon"])).toBe("forced")
     expect(reason({ SCP_NATIVE_TS: "set-now" }, ["whoami"])).toBe("native")
