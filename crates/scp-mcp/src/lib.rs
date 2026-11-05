@@ -30,7 +30,7 @@ pub enum Membership {
     Joined(Option<String>),
 }
 
-/// `swarm mcp <args>`: the words after `mcp`. Owns stdin and stdout, logs to stderr, returns the exit code.
+/// `swarm mcp <args>`: the words after `mcp`, with `install` taken by the CLI. Owns stdin and stdout, logs to stderr, returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     shim::main(args)
 }

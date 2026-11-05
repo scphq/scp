@@ -9,6 +9,7 @@ use super::channel::{
 use super::ws::{Link, Upgrade};
 use crate::args::js_string;
 use crate::fleet::json::Json;
+use crate::help;
 use crate::open::{block_on, node_fs_error};
 use crate::spawn::argv::{
     codex_mount, codex_overrides, entries, home, lossless, native_mount_bin, toml,
@@ -1071,7 +1072,7 @@ fn start_tui(run: &Rc<Run>, launch: &CodexLaunch, path: &str, bin: &str) {
 /// `swarm codex`: an app-server with a channel waker and either a remote TUI or an ambient thread; returns its exit code
 pub fn codex(call: &Call, args: &[String]) -> Done {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
-        return Err(Fail::Decline("help".into()));
+        return help::show_text(help::CODEX);
     }
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);

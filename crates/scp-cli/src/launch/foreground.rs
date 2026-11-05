@@ -4,6 +4,7 @@ use super::attribute::{Placement, attribute, attributed, has_flag, validate_unde
 use super::channel::{default_signals, spawn_error};
 use crate::args::js_string;
 use crate::fleet::mounts::{mcp_file, mounted_entry};
+use crate::help;
 use crate::open::{block_on, node_fs_error};
 use crate::setup::hook_cmd::{HookLaunch, opencode_plugin};
 use crate::setup::hooks_install::hooks_target;
@@ -195,7 +196,7 @@ async fn run_foreground(argv: &[String], env: &Env) -> Done {
 pub fn opencode(call: &Call, args: &[String]) -> Done {
     let own = super::attribute::options_before(args);
     if own.iter().any(|arg| arg == "--help" || arg == "-h") {
-        return Err(Fail::Decline("help".into()));
+        return help::show_text(help::OPENCODE);
     }
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);
@@ -347,7 +348,7 @@ fn extension_path(call: &Call, env: &Env) -> Result<String, Fail> {
 /// `swarm pi`: runs pi in the foreground with the extension loaded, exiting with its code
 pub fn pi(call: &Call, args: &[String]) -> Done {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
-        return Err(Fail::Decline("help".into()));
+        return help::show_text(help::PI);
     }
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);

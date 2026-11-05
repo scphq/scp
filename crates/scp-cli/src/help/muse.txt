@@ -1,0 +1,8 @@
+swarm muse [--name N | --as N] [--root] [--under ADDR] [--resume SESSION] [--approval-mode never|on-request|untrusted] [--] [muse serve args...]
+  runs a headless Muse session (muse serve) that relay messages wake: a message starts a turn on the idle session or steers a running one.
+  every other argument goes to muse serve (--provider, --model, -c, sandbox flags); it runs with --contributor-mode off unless you pass on.
+  prints the agent's messages; approvals the mode leaves to a human are declined. --resume SESSION reopens a stored session.
+  needs the scp mount and plugin swarm setup --write installs. $SCP_MUSE_BIN picks the muse binary (default muse on PATH).
+  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
+  run from an agent's shell, it links under that agent by itself (as under env $(swarm spawn-env)); a $SCP_GRANT minted for it
+  applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.

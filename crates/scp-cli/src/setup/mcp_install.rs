@@ -1,15 +1,16 @@
 //! `swarm mcp install`: the command, or config snippet, that mounts the relay MCP shim in a harness; printed, never run.
 
 use super::hook_cmd::AGY_UNVERIFIED;
-use crate::args::js_string;
+use crate::args::{js_string, parse_verb};
 use crate::fleet::json::Json;
-use crate::term::out;
-use crate::{Call, Done, Fail, usage};
+use crate::spawn::argv::executable;
+use crate::term::{note, out};
+use crate::{Call, Done, Fail, help, route, usage};
 use scp_core::address::valid_handle;
 use scp_core::protocol::CLI_NAME;
-
-/// the words after `mcp` the router hands to this binary; `swarm mcp` itself is the shim, which the TypeScript CLI still starts
-pub const MCP_WORDS: [&str; 1] = ["install"];
+use scp_mcp::shim::SHIM_PPID;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
 
 fn shell_word(word: &str) -> String {
     let plain = !word.is_empty()
@@ -113,11 +114,48 @@ pub fn mcp_install(harness: Option<&str>, name: Option<&str>) -> Result<Vec<Stri
     })
 }
 
-/// `swarm mcp install --harness H [--as NAME]`; the shim itself goes to the TypeScript CLI
-pub fn mcp(call: &Call) -> Done {
-    let parsed = &call.parsed;
+/// the server `$SCP_MCP_BIN` names in place of this process, as a routed `swarm mcp` runs it; returns when it cannot, saying so
+fn exec_named_server(bin: &str, words: &[String]) {
+    if !(Path::new(bin).is_absolute() && executable(bin)) {
+        note(&format!(
+            "no usable native MCP server ({bin} is not an executable file); the built-in one serves this session"
+        ));
+        return;
+    }
+    let _ = std::process::Command::new(bin).args(words).exec();
+    note(&format!(
+        "could not start the native MCP server {bin}; the built-in one serves this session"
+    ));
+}
+
+/// tells the shim who the harness is when a router stands between them
+fn hand_parent_to_shim() {
+    // SAFETY: no other thread runs yet: the shim's runtime starts after this
+    unsafe {
+        match route::router_parent() {
+            Some(parent) => std::env::set_var(SHIM_PPID, parent.to_string()),
+            None => std::env::remove_var(SHIM_PPID),
+        }
+    }
+}
+
+/// `swarm mcp`, the stdio shim, or `swarm mcp install --harness H [--as NAME]`
+pub fn mcp(call: &Call, words: &[String]) -> Done {
+    let parsed = parse_verb("mcp", words).map_err(Fail::Usage)?;
+    if parsed.has("help") {
+        return help::show("mcp", parsed.on("all"));
+    }
     if parsed.positionals.first().map(String::as_str) != Some("install") {
-        return Err(Fail::Decline("the MCP shim".into()));
+        if let Ok(exe) = std::env::current_exe() {
+            scp_mcp::spawn::set_native_daemon(exe);
+        }
+        if route::routed() {
+            hand_parent_to_shim();
+            if let Some(bin) = call.env.get("SCP_MCP_BIN") {
+                exec_named_server(bin, words);
+            }
+        }
+        return Ok(scp_mcp::main(words));
     }
     if parsed.positionals.len() > 1 || parsed.on("human") || parsed.on("channels") {
         return Err(usage(format!(

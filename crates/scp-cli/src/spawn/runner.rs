@@ -69,7 +69,6 @@ impl Channel {
         match fail {
             Fail::Usage(message) => self.send(&json!({ "error": message, "usage": true })),
             Fail::Call(error) => self.send(&json!({ "error": error.message() })),
-            Fail::Decline(reason) => self.send(&json!({ "error": reason })),
         }
     }
 }

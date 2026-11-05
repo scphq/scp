@@ -54,6 +54,9 @@ jobs:
       - name: Check the native CLI goldens
         run: bun scripts/cli-goldens.ts --check
 
+      - name: Check the native help text
+        run: bun scripts/help-text.ts --check
+
       - name: Check the native spawn goldens
         run: bun scripts/spawn-goldens.ts --check
 
@@ -212,6 +215,10 @@ jobs:
         working-directory: crates
         run: cargo build --locked --bin swarm
 
+      # release packaging keeps the registry beside the binary too, so no CLI here waits on a __verbs probe
+      - name: Keep the verb registry beside the native swarm
+        run: crates/target/debug/swarm __verbs --json > crates/target/debug/swarm-verbs.json
+
       # every CLI the tests start hands the verbs the native swarm registers to it
       - name: CLI tests with native routing
         env:
@@ -227,8 +234,11 @@ jobs:
           SCP_ROUTE_LOG: ${{ runner.temp }}/route.log
         run: bun test packages/conformance/src/cli.test.ts packages/conformance/src/lifecycle.test.ts
 
-      - name: Every native verb routed, no version declines
+      - name: Every native verb routed, only forced declines
         run: bun scripts/route-coverage.ts "${{ runner.temp }}/route.log" "${{ github.workspace }}/crates/target/debug/swarm"
+
+      - name: The router and the argument parser under Node
+        run: bun scripts/node-parity.ts crates/target/debug/swarm
 
   hook:
     name: Native hook (${{ matrix.target }})

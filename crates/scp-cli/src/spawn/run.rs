@@ -166,10 +166,11 @@ fn take_runner(env: &Env) -> Option<String> {
 
 /// the verb
 pub fn spawn(call: &Call, args: &[String]) -> Done {
-    let (values, command) = parse_spawn(args)?;
-    if values.has("help") {
-        return Err(Fail::Decline("help".into()));
+    let (flags, _) = split_spawn(args);
+    if flags.iter().any(|flag| flag == "--help" || flag == "-h") {
+        return crate::help::show_spawn(flags.iter().any(|flag| flag == "--all"));
     }
+    let (values, command) = parse_spawn(args)?;
     let bytes = values
         .text("handback-bytes")
         .map(handback_bytes)
@@ -177,7 +178,9 @@ pub fn spawn(call: &Call, args: &[String]) -> Done {
         .map(|bytes| bytes as i64);
     let cwd = safe_cwd();
     let idle_after = spawn_idle_default(call.env);
-    durable_check(&values, &command, &cwd, idle_after, call.env)?;
+    if !values.has("help") {
+        durable_check(&values, &command, &cwd, idle_after, call.env)?;
+    }
     let runner = take_runner(call.env);
     let mut env = call.env.clone();
     env.remove(SPAWN_RUNNER);
@@ -478,7 +481,6 @@ impl Worker<'_> {
             let message = match &error {
                 Fail::Usage(message) => message.as_str(),
                 Fail::Call(error) => error.message(),
-                Fail::Decline(reason) => reason.as_str(),
             };
             harness::note(&format!(
                 "{CLI_NAME} spawn: could not mark {} as exited: {message}",

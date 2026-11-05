@@ -7,6 +7,7 @@ use super::channel::{
 };
 use crate::args::js_string;
 use crate::fleet::json::Json;
+use crate::help;
 use crate::open::{block_on, node_fs_error};
 use crate::setup::hook_cmd::AGY_HOOK_SET;
 use crate::setup::hooks_install::hooks_target;
@@ -585,7 +586,10 @@ async fn launch(
 
 fn command(call: &Call, harness: Harness, args: &[String]) -> Done {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
-        return Err(Fail::Decline("help".into()));
+        return help::show_text(match harness {
+            Harness::Agy => help::AGY,
+            Harness::Grok => help::GROK,
+        });
     }
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);

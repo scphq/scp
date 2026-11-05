@@ -35,6 +35,7 @@ import { RELAY_HELP, verbHelp } from "./main"
 import { SPAWN_HELP } from "./help-spawn"
 import { alive, waitFor } from "./testing/fixtures"
 import { nativeCli, swarmBinary } from "./test-setup"
+import { routedHooks } from "./hook-test"
 
 setDefaultTimeout(30_000)
 
@@ -243,7 +244,7 @@ describe("swarm spawn", () => {
       `#!/bin/sh\nexec env -u SCP_GRANT -u SCP_NAME -u SCP_LABELS -u SCP_SESSION MUSE_SESSION_ID=fake-muse FAKE_SHIM=${JSON.stringify(JSON.stringify([...SELF, "mcp"]))} ${JSON.stringify(process.execPath)} --no-env-file ${JSON.stringify(join(root, "fake-muse.ts"))} "$@"\n`,
     )
     for (const name of ["codex", "claude", "opencode", "muse"]) chmodSync(join(bin, name), 0o755)
-    broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "policy.json"), log: () => {} })
+    broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "policy.json"), log: () => {}, ...routedHooks(dir) })
     lead = await RelayClient.connect(broker.socket)
     await lead.hello({ claim: { handle: "lead", harness: "claude-code", process: processKey(process.pid), lineage: [processKey(process.pid)] } })
   })

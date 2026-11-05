@@ -1,13 +1,30 @@
-//! `swarm daemon`: the broker in the foreground, or `stop` and `restart`, read as the TypeScript CLI reads them and run natively.
+//! `swarm daemon`: the broker in the foreground, or `stop` and `restart`, read as the TypeScript CLI reads them and run natively; and
+//! `swarm hook`, the other verb the binary around this crate runs.
 
 use crate::{Call, Done, Fail, Run, Verb, term, usage};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::client::CallError;
 
-pub const VERBS: &[Verb] = &[Verb {
-    name: "daemon",
-    run: Run::Parsed(daemon),
-}];
+pub const VERBS: &[Verb] = &[
+    Verb {
+        name: "daemon",
+        run: Run::Parsed(daemon),
+    },
+    Verb {
+        name: "hook",
+        run: Run::Words(hook),
+    },
+];
+
+/// `swarm hook <args>`: the hook client, given the words that start this CLI for a broker it starts
+fn hook(call: &Call, words: &[String]) -> Done {
+    let mut argv = scp_mcp::spawn::named_launcher(call.env)
+        .or_else(|| (call.host.beside)(call.env))
+        .unwrap_or_default();
+    argv.push("hook".into());
+    argv.extend_from_slice(words);
+    Ok((call.host.hook)(&argv, crate::route::shell_pid()))
+}
 
 fn daemon(call: &Call) -> Done {
     let parsed = &call.parsed;

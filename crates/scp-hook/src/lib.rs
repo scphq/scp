@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -661,13 +661,62 @@ impl Rpc {
     }
 }
 
+/// `raw` as a file open for reading from its start, with no name left on disk
+fn unnamed_file(raw: &[u8]) -> io::Result<fs::File> {
+    let path = std::env::temp_dir().join(format!("scp-hook-{}-{}", std::process::id(), now()));
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    fs::remove_file(&path)?;
+    file.write_all(raw)?;
+    file.seek(io::SeekFrom::Start(0))?;
+    Ok(file)
+}
+
+/// the CLI's own hook in place of this process, reading `raw`: its parent stays the harness that a child of this process would not see,
+/// and it counts from this hook's start to this hook's deadline
+fn replace_with_cli(
+    origin: u64,
+    launcher: &[String],
+    args: &[String],
+    raw: &[u8],
+    deadline: &Deadline,
+) -> io::Result<()> {
+    let Some(program) = launcher.first() else {
+        return Ok(());
+    };
+    let input = unnamed_file(raw)?;
+    if unsafe { libc::dup2(input.as_raw_fd(), 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Err(Command::new(program)
+        .args(&launcher[1..])
+        .arg("hook")
+        .args(args)
+        .env("SCP_ROUTED", "ts")
+        .env(HOOK_ORIGIN, origin.to_string())
+        .env(
+            "SCP_HOOK_DEADLINE_MS",
+            deadline.ends().saturating_sub(origin).max(1).to_string(),
+        )
+        .exec())
+}
+
 fn fallback(
+    origin: u64,
     launcher: &[String],
     args: &[String],
     raw: Vec<u8>,
     env: &HashMap<String, String>,
     deadline: &Deadline,
+    caller: Caller,
 ) -> io::Result<()> {
+    if caller.routed {
+        return replace_with_cli(origin, launcher, args, &raw, deadline);
+    }
     let Some(program) = launcher.first() else {
         return Ok(());
     };
@@ -679,6 +728,7 @@ fn fallback(
         .args(&launcher[1..])
         .arg("hook")
         .args(args)
+        .env("SCP_ROUTED", "ts")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
@@ -737,12 +787,37 @@ fn fallback(
 }
 
 /// `run` as a binary entry: silent on panic and on errors, since a hook never fails its harness
-pub fn entry(origin: u64, argv: &[String]) {
-    std::panic::set_hook(Box::new(|_| {}));
-    let _ = std::panic::catch_unwind(|| run(origin, argv));
+/// set by the router and on the CLI a hook gives way to: when the hook began, in epoch ms, which the process running it did not see
+pub const HOOK_ORIGIN: &str = "SCP_HOOK_ORIGIN";
+
+/// who a hook runs for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caller {
+    /// the process that ran the hook command, which is not this one's parent when a router stands between them
+    pub ppid: i32,
+    /// whether the CLI's router handed this hook over, so the CLI's own hook takes this process's place rather than starting under it
+    pub routed: bool,
 }
 
-pub fn run(origin: u64, argv: &[String]) -> io::Result<()> {
+pub fn entry(origin: u64, argv: &[String]) {
+    // SAFETY: getppid cannot fail
+    let ppid = unsafe { libc::getppid() };
+    entry_for(
+        origin,
+        argv,
+        Caller {
+            ppid,
+            routed: false,
+        },
+    );
+}
+
+pub fn entry_for(origin: u64, argv: &[String], caller: Caller) {
+    std::panic::set_hook(Box::new(|_| {}));
+    let _ = std::panic::catch_unwind(|| run(origin, argv, caller));
+}
+
+pub fn run(origin: u64, argv: &[String], caller: Caller) -> io::Result<()> {
     let Some((launcher, args)) = parse_argv(argv) else {
         return Ok(());
     };
@@ -774,11 +849,11 @@ pub fn run(origin: u64, argv: &[String]) -> io::Result<()> {
         return Ok(());
     }
     if env.get("SCP_ENGINE").is_some_and(|s| s == "ts") {
-        let result = fallback(launcher, args, raw, &env, &deadline);
+        let result = fallback(origin, launcher, args, raw, &env, &deadline, caller);
         deadline.print(None);
         return result;
     }
-    let result = run_rpc(origin, launcher, args, raw, &env, &deadline);
+    let result = run_rpc(origin, caller, launcher, args, raw, &env, &deadline);
     deadline.print(None);
     result
 }
@@ -835,6 +910,7 @@ pub fn session_start(args: &[String], payload: &Value, env: &HashMap<String, Str
 
 fn run_rpc(
     origin: u64,
+    caller: Caller,
     launcher: &[String],
     args: &[String],
     raw: Vec<u8>,
@@ -845,7 +921,7 @@ fn run_rpc(
     if !payload.is_object() {
         payload = json!({});
     }
-    let ppid = unsafe { libc::getppid() };
+    let ppid = caller.ppid;
     let procs = process::collect(ppid, env);
     let dir = relay_dir(env);
     let start = session_start(args, &payload, env)
@@ -865,7 +941,7 @@ fn run_rpc(
         .is_some_and(|a| a.iter().any(|c| c == "hook"))
     {
         drop(rpc);
-        return fallback(launcher, args, raw, env, deadline);
+        return fallback(origin, launcher, args, raw, env, deadline, caller);
     }
     let names: Vec<String> = serde_json::from_str(include_str!(
         "../../../packages/spec/schema/broker/hook-env.json"

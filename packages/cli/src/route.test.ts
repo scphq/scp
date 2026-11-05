@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { decide, declined, gives, type Registry, verbOf } from "./route"
+import { decide, declined, gives, loadRegistry, REGISTRY_FILE, type Registry, verbOf } from "./route"
 import { swarmBinary } from "./test-setup"
 
 setDefaultTimeout(60_000)
@@ -60,12 +60,20 @@ describe("the routing decision", () => {
         () => registry(["whoami"]),
       ),
     ).toEqual({ engine: "ts", reason: "off" })
-    expect(reason({}, ["hook", "claude"], registry(["hook", "whoami"]))).toBe("hook")
-    expect(reason({}, ["mcp"], registry(["mcp"]))).toBe("mcp")
+    expect(reason({}, ["hook", "claude"], registry(["hook", "whoami"]))).toBe("native")
+    expect(reason({ SCP_ROUTE_EXEC: "spawn" }, ["hook", "claude"], registry(["hook", "whoami"]))).toBe("spawn")
+    expect(reason({}, ["mcp"], registry(["mcp"]))).toBe("native")
     const install = { ...registry(["mcp"]), subverbs: { mcp: ["install"] } }
     expect(reason({}, ["mcp", "install", "--harness", "claude"], install)).toBe("native")
-    expect(reason({}, ["mcp", "--harness", "claude", "install"], install)).toBe("mcp")
+    expect(reason({}, ["mcp", "--harness", "claude", "install"], install)).toBe("unported")
     expect(reason({}, ["mcp", "install"], registry(["whoami"]))).toBe("unported")
+    const full = { ...registry(["whoami", "help"]), ts_verbs: ["mesh"], declines: [] }
+    expect(reason({}, [], full)).toBe("native")
+    expect(reason({}, ["frobnicate"], full)).toBe("native")
+    expect(reason({}, ["--as", "x", "frobnicate"], full)).toBe("native")
+    expect(reason({}, ["mesh", "status"], full)).toBe("unported")
+    expect(reason({ SCP_NATIVE_TS: "frobnicate" }, ["frobnicate"], full)).toBe("forced")
+    expect(reason({}, [], registry(["whoami"]))).toBe("unported")
     expect(reason({ SCP_NATIVE_TS: "set-now, whoami" }, ["whoami"])).toBe("forced")
     expect(reason({ SCP_NATIVE_TS: "*" }, ["daemon"])).toBe("forced")
     expect(reason({ SCP_NATIVE_TS: "set-now" }, ["whoami"])).toBe("native")
@@ -83,7 +91,55 @@ describe("the routing decision", () => {
         () => "/bin/swarm",
         () => undefined,
       ),
-    ).toEqual({ engine: "ts", reason: "missing" })
+    ).toEqual({ engine: "ts", reason: "unreadable", bin: "/bin/swarm" })
+    expect(
+      decide(
+        ["whoami"],
+        { SCP_NATIVE: "1" },
+        pkg.version,
+        () => "/bin/swarm",
+        () => "slow",
+      ),
+    ).toEqual({ engine: "ts", reason: "slow", bin: "/bin/swarm" })
+  })
+
+  test("the registry beside the binary spares the probe, and only an unusable one falls back to it", () => {
+    const dir = join(root, "beside")
+    mkdirSync(dir)
+    const bin = join(dir, "swarm")
+    const probed = join(dir, "probed")
+    writeFileSync(bin, `#!/bin/sh\ntouch '${probed}'\nprintf '{"version":"9.9.9","verbs":["list"]}'\n`)
+    chmodSync(bin, 0o755)
+    writeFileSync(join(dir, REGISTRY_FILE), JSON.stringify(registry(["whoami"])))
+    expect(loadRegistry(bin, {})).toMatchObject({ verbs: ["whoami"] })
+    expect(existsSync(probed)).toBe(false)
+    writeFileSync(join(dir, REGISTRY_FILE), "{ not json")
+    expect(loadRegistry(bin, {})).toMatchObject({ verbs: ["list"] })
+    expect(existsSync(probed)).toBe(true)
+  })
+
+  test("a hook waits for the probe a fraction of what another verb does", () => {
+    const budgets: Record<string, number | undefined> = {}
+    for (const verb of ["hook", "whoami"])
+      decide(
+        [verb],
+        { SCP_NATIVE: "1" },
+        pkg.version,
+        () => "/bin/swarm",
+        (_bin, _env, budget) => {
+          budgets[verb] = budget
+          return registry(["whoami", "hook"])
+        },
+      )
+    expect(budgets.hook).toBe(500)
+    expect(budgets.whoami).toBe(60_000)
+  })
+
+  test("a probe that runs out of time reads as slow, not as no binary", () => {
+    const bin = join(root, "slow-swarm")
+    writeFileSync(bin, "#!/bin/sh\nexec sleep 30\n")
+    chmodSync(bin, 0o755)
+    expect(loadRegistry(bin, { SCP_ROUTE_PROBE_MS: "200" })).toBe("slow")
   })
 
   test("declined flags: long ones alone or with a value, short ones anywhere in a group", () => {
@@ -101,9 +157,9 @@ const FAKE = join(root, "fake-swarm")
 writeFileSync(
   FAKE,
   `#!/bin/sh
-if [ "$1" = "__verbs" ]; then printf '{"version":"%s","verbs":["whoami"],"declines":["--help"],"decline_env":[]}' "$FAKE_VERSION"; exit 0; fi
+if [ "$1" = "__verbs" ]; then printf '{"version":"%s","verbs":["whoami","hook"],"declines":["--help"],"decline_env":[]}' "$FAKE_VERSION"; exit 0; fi
 if [ -n "$FAKE_SLEEP" ]; then exec sleep 30; fi
-printf 'args=%s ppid=%s parent=%s routed=%s given=%s argv=%s\\n' "$*" "$PPID" "$SCP_CLI_PARENT" "$SCP_ROUTED" "$SCP_CLI_ARGV_GIVEN" "$SCP_CLI_ARGV"
+printf 'origin=%s args=%s ppid=%s parent=%s routed=%s given=%s argv=%s\\n' "$SCP_HOOK_ORIGIN" "$*" "$PPID" "$SCP_CLI_PARENT" "$SCP_ROUTED" "$SCP_CLI_ARGV_GIVEN" "$SCP_CLI_ARGV"
 exit 7
 `,
 )
@@ -181,6 +237,26 @@ describe("the hand-off", () => {
     expect((await cli(["policy", "--bogus"], fake())).code).toBe(125)
     expect(logLines(log)).toEqual(["whoami ts decline", "policy ts unported"])
   })
+
+  test("a hook hands on when it began, and only a hook", async () => {
+    const before = Date.now()
+    const hook = await cli(["hook", "claude"], fake())
+    const origin = Number(/^origin=(\d+) /.exec(hook.out)![1])
+    expect(origin).toBeGreaterThan(before - 60_000)
+    expect(origin).toBeLessThanOrEqual(Date.now())
+    expect((await cli(["whoami"], fake())).out).toStartWith("origin= ")
+  })
+
+  test("a probe that never answers says so and logs why, then the command runs here", async () => {
+    rmSync(log, { force: true })
+    const hung = join(root, "hung-swarm")
+    writeFileSync(hung, "#!/bin/sh\nexec sleep 30\n")
+    chmodSync(hung, 0o755)
+    const run = await cli(["whoami", "--bogus"], fake({ SCP_SWARM_BIN: hung, SCP_ROUTE_PROBE_MS: "200" }))
+    expect(run.err).toStartWith(`swarm: the native swarm ${hung} did not answer __verbs (slow), so the TypeScript CLI runs this command\n`)
+    expect(run.err).toContain("Unknown option '--bogus'")
+    expect(logLines(log)).toEqual(["whoami ts slow"])
+  })
 })
 
 describe.skipIf(!swarmBinary)("the native swarm", () => {
@@ -220,12 +296,12 @@ describe.skipIf(!swarmBinary)("the native swarm", () => {
     }
   })
 
-  test("a declined verb reaches the TypeScript CLI with the caller's SCP_CLI_ARGV, or none, not the router's", async () => {
+  test("a TypeScript verb reaches the TypeScript CLI with the caller's SCP_CLI_ARGV, or none, not the router's", async () => {
     const ts = join(root, "fake-ts-cli")
     writeFileSync(ts, `#!/bin/sh\nprintf 'routed=%s argv=%s given=%s\\n' "$SCP_ROUTED" "\${SCP_CLI_ARGV-unset}" "\${SCP_CLI_ARGV_GIVEN-unset}"\n`)
     chmodSync(ts, 0o755)
     const declined = async (extra: Record<string, string>) => {
-      const child = Bun.spawn([swarmBinary!, "whoami", "--help"], {
+      const child = Bun.spawn([swarmBinary!, "mesh", "status"], {
         env: { ...env(), SCP_ROUTED: "native", SCP_CLI_ARGV: JSON.stringify([ts]), ...extra },
         stdout: "pipe",
       })

@@ -1,0 +1,8 @@
+swarm codex [--name N | --as N] [--root] [--under ADDR] [--headless] [--resume THREAD] [--] [codex args...]
+  every codex argument, profile and config value is honoured; a -- after codex arguments is passed through.
+  runs codex with relay messages waking an idle thread or steering a running turn; approvals stay with the TUI.
+  --headless runs an ambient worker without a TUI; --resume THREAD reopens its thread.
+  $SCP_CODEX_BIN picks the codex binary (default codex on PATH).
+  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
+  run from an agent's shell, it links under that agent by itself (as under env $(swarm spawn-env)); a $SCP_GRANT minted for it
+  applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.

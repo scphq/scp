@@ -1,0 +1,8 @@
+swarm setup claude-desktop [--out FILE] [--open] [--bin PATH]
+  builds scp.mcpb, a Claude desktop extension that mounts the relay MCP shim in the app's chat (harness claude-desktop-chat),
+  at ~/.config/scp/scp.mcpb or --out. It runs the swarm PATH finds (or --bin) by absolute paths, a node script by
+  absolute node and its real path, since the app does not start it with your shell's PATH; rebuild it after moving or
+  upgrading either. With SCP_NATIVE=1 or mcp it runs the native swarm mcp while that binary is there, as the setup mounts
+  do. Install it by opening the file (double-click, or --open). Chat is pull only: the model reads new
+  messages when it calls relay_inbox; nothing wakes it. The app's Code tab is Claude Code and uses swarm setup.
+  claude_desktop_config.json is never edited.

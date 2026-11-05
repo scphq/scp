@@ -9,7 +9,7 @@ use crate::ps::{
     launcher_pid, ps_parent, read_ps_table,
 };
 use crate::server::{Options, SpawnRequest};
-use crate::spawn::{launcher, spawn_detached, spawn_words, start_daemon};
+use crate::spawn::{spawn_detached, spawn_words, start_daemon};
 use crate::{Claim, Membership};
 use scp_core::address::valid_handle;
 use scp_core::protocol::CLI_NAME;
@@ -107,8 +107,6 @@ const BOOLEAN_OPTIONS: [&str; 33] = [
     "gone",
     "clear",
 ];
-/// set on the CLI this shim hands `--help` to, so a native `swarm` found as that CLI prints the usage rather than handing it on again
-const HELP_FORWARDED: &str = "SCP_MCP_HELP_FORWARDED";
 /// the flags `swarm mcp` takes
 const MCP_OPTIONS: [&str; 5] = ["as", "harness", "human", "channels", "cowork-only"];
 
@@ -722,42 +720,19 @@ fn write_stdout(line: &str) {
     let _ = out.write_all(line.as_bytes()).and_then(|()| out.flush());
 }
 
-/// `swarm mcp <args>`: the words after `mcp`. Owns stdin and stdout, logs to stderr, returns the exit code.
+/// `swarm mcp <args>`: the words after `mcp`, with `install` taken by the CLI. Owns stdin and stdout, logs to stderr, returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     let values = match parse_args(args) {
         Ok(values) => values,
         Err(Usage(message)) => return usage(&message),
     };
-    let env = process_env();
-    if values.help && env.contains_key(HELP_FORWARDED) {
+    if values.help {
         write_stdout(&format!(
             "usage: {CLI_NAME} mcp [--as NAME] [--harness H] [--channels] [--cowork-only]   the relay MCP server over stdio\n"
         ));
         return 0;
     }
-    if values.help {
-        let argv = launcher(&env);
-        let mut command = std::process::Command::new(&argv[0]);
-        command
-            .args(&argv[1..])
-            .arg("mcp")
-            .args(args)
-            .env_remove(SHIM_PPID)
-            .env_remove(crate::spawn::CLI_ARGV)
-            .env(HELP_FORWARDED, "1");
-        return match command.status() {
-            Ok(status) => status.code().unwrap_or(FAILED),
-            Err(error) => {
-                note(&error.to_string());
-                FAILED
-            }
-        };
-    }
-    if values.positionals.first().is_some_and(|w| w == "install") {
-        return usage(&format!(
-            "{CLI_NAME} mcp install runs in the TypeScript CLI: run it with {CLI_NAME}, not this binary"
-        ));
-    }
+    let env = process_env();
     if !values.positionals.is_empty() {
         return usage(&format!(
             "{CLI_NAME} mcp takes no arguments (did you mean {CLI_NAME} mcp install?)"

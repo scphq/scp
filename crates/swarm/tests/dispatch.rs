@@ -73,15 +73,33 @@ fn version_usage_and_errors() {
     assert!(text(&mcp.stderr).contains("mcp takes no arguments"));
     let unknown = output(temp.swarm(&["frobnicate"]));
     assert_eq!(unknown.status.code(), Some(125));
-    assert!(text(&unknown.stderr).contains("frobnicate is not native in this swarm"));
-    let mut handed = temp.swarm(&["--as", "x", "frobnicate", "a"]);
+    assert_eq!(
+        text(&unknown.stderr),
+        "swarm: unknown command \"frobnicate\"\nswarm: run `swarm --help` for usage\n"
+    );
+    let mesh = output(temp.swarm(&["mesh"]));
+    assert_eq!(mesh.status.code(), Some(125));
+    assert!(text(&mesh.stderr).contains("mesh is not native in this swarm"));
+    let mut handed = temp.swarm(&["--as", "x", "mesh", "a"]);
     handed.env(
         "SCP_CLI_ARGV",
         r#"["/bin/sh","-c","echo \"$SCP_ROUTED $*\"","sh"]"#,
     );
     let handed = output(handed);
-    assert_eq!(text(&handed.stdout), "ts --as x frobnicate a\n");
-    assert_eq!(output(temp.swarm(&[])).status.code(), Some(2));
+    assert_eq!(text(&handed.stdout), "ts --as x mesh a\n");
+    let brief = output(temp.swarm(&[]));
+    assert_eq!(brief.status.code(), Some(0));
+    assert_eq!(brief.stdout, output(temp.swarm(&["--help"])).stdout);
+    assert_eq!(brief.stdout, output(temp.swarm(&["-h"])).stdout);
+    assert_eq!(brief.stdout, output(temp.swarm(&["help"])).stdout);
+    assert!(text(&brief.stdout).contains("swarm help --all"));
+    let send = output(temp.swarm(&["help", "send"]));
+    assert_eq!(send.stdout, output(temp.swarm(&["send", "--help"])).stdout);
+    assert!(text(&send.stdout).starts_with("  swarm send "));
+    assert_eq!(
+        text(&output(temp.swarm(&["version"])).stdout),
+        format!("{}\n", cli["version"].as_str().unwrap())
+    );
     let bad = output(temp.swarm(&["daemon", "start"]));
     assert_eq!(bad.status.code(), Some(2));
     let idle = output(temp.swarm(&["daemon", "--idle", "soon"]));
@@ -91,10 +109,7 @@ fn version_usage_and_errors() {
 #[test]
 fn hook_as_a_later_word_runs_the_cli_not_the_hook() {
     let temp = Temp::new();
-    for args in [
-        &["frobnicate", "x", "hook"][..],
-        &["send", "x", "hook", "--help"],
-    ] {
+    for args in [&["mesh", "x", "hook"][..], &["mesh", "hook", "--help"]] {
         let mut command = temp.swarm(args);
         command.env(
             "SCP_CLI_ARGV",
@@ -143,16 +158,17 @@ fn mcp_serves_stdio_in_process() {
 }
 
 #[test]
-fn mcp_help_never_hands_itself_on() {
+fn mcp_help_and_install_run_here_never_in_the_shim() {
     let temp = Temp::new();
-    let bin = temp.0.join("bin");
-    fs::create_dir(&bin).unwrap();
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_swarm"), bin.join("swarm")).unwrap();
-    let mut command = temp.swarm(&["mcp", "--help"]);
-    command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-    let out = output(command);
+    let out = output(temp.swarm(&["mcp", "--help"]));
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).starts_with("usage: swarm mcp "));
+    assert!(text(&out.stdout).contains("\n  swarm mcp "));
+    let install = output(temp.swarm(&["mcp", "install", "--harness", "claude"]));
+    assert!(install.status.success(), "{}", text(&install.stderr));
+    assert!(text(&install.stdout).contains("claude mcp add"));
+    let bad = output(temp.swarm(&["mcp", "--nope"]));
+    assert_eq!(bad.status.code(), Some(125));
+    assert!(text(&bad.stderr).contains("Unknown option '--nope'"));
 }
 
 #[test]
@@ -175,6 +191,90 @@ fn line(reader: &mut BufReader<UnixStream>) -> Value {
 
 fn send(reader: &mut BufReader<UnixStream>, value: Value) {
     writeln!(reader.get_mut(), "{value}").unwrap();
+}
+
+#[test]
+fn a_routed_hook_serves_the_routers_parent() {
+    let temp = Temp::new();
+    fs::create_dir(temp.0.join("r")).unwrap();
+    let listener = UnixListener::bind(temp.0.join("r/relay.sock")).unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(6)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        line(&mut reader);
+        send(
+            &mut reader,
+            json!({"jsonrpc":"2.0","id":1,"result":{"capabilities":["hook"]}}),
+        );
+        let request = line(&mut reader);
+        send(&mut reader, json!({"id":2,"result":{"exit":0}}));
+        request["params"].clone()
+    });
+    let mut command = temp.swarm(&["--as", "x", "hook", "claude"]);
+    command
+        .env("SCP_ROUTED", "native")
+        .env("SCP_CLI_PARENT", format!("{}:4242", std::process::id()));
+    let mut child = command.spawn().unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let params = server.join().unwrap();
+    assert!(out.status.success());
+    assert_eq!(params["ppid"], 4242);
+    assert_eq!(params["args"], json!(["--as", "x", "claude"]));
+}
+
+#[test]
+fn a_routed_hook_gives_way_to_the_cli_in_place_when_the_broker_runs_no_hooks() {
+    let temp = Temp::new();
+    fs::create_dir(temp.0.join("r")).unwrap();
+    let listener = UnixListener::bind(temp.0.join("r/relay.sock")).unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        line(&mut reader);
+        send(
+            &mut reader,
+            json!({"jsonrpc":"2.0","id":1,"result":{"capabilities":[]}}),
+        );
+    });
+    let origin = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .to_string();
+    let script = temp.0.join("cli.sh");
+    fs::write(
+        &script,
+        format!(
+            "test \"$SCP_HOOK_ORIGIN\" = {origin} || exit 9\ntest \"$SCP_HOOK_DEADLINE_MS\" = 3500 || exit 9\necho \"$SCP_ROUTED $PPID $*\"\ncat\n"
+        ),
+    )
+    .unwrap();
+    let mut command = temp.swarm(&["hook", "claude"]);
+    command
+        .env("SCP_ROUTED", "native")
+        .env("SCP_HOOK_ORIGIN", &origin)
+        .env(
+            "SCP_CLI_ARGV",
+            json!(["/bin/sh", script.to_str().unwrap()]).to_string(),
+        );
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hello":true}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    server.join().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!("ts {} hook claude\n{{\"hello\":true}}", std::process::id())
+    );
 }
 
 #[test]

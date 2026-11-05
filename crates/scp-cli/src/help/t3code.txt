@@ -1,0 +1,10 @@
+swarm t3code [--name N | --as N] [--root] [--under ADDR] --thread THREAD [--base-dir DIR]
+  holds an agent endpoint for one T3 Code thread, wake on: each batch of relay messages goes to the thread as a user
+  message, starting a turn when it is idle and steering the running one otherwise; retried every 2 s until T3 Code takes it.
+  finds the running server in DIR/userdata/server-runtime.json (DIR: --base-dir, else $T3CODE_HOME, else ~/.t3) or at
+  $SCP_T3_URL, with the token $SCP_T3_TOKEN or one t3 auth session issue grants ($SCP_T3_BIN picks t3, default t3 on PATH).
+  refuses to start without a server, a token or the thread, and exits non-zero when the connection drops.
+  the thread's own agent joins through its provider's mount (codex or claude) as a separate t3code endpoint.
+  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
+  run from an agent's shell, it links under that agent by itself (as under env $(swarm spawn-env)); a $SCP_GRANT minted for it
+  applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { BrokerUnavailable, connectBroker } from "@scp-dev/broker"
-import { HOOK_DEADLINE_MS, hookEnds } from "./hooks"
+import { HOOK_DEADLINE_MS, hookEnds, hookOrigin } from "./hooks"
 import { safeCwd } from "./cwd"
 import { hookModes, testBroker, testHook } from "./hook-test"
 
@@ -104,6 +104,11 @@ for (const mode of hookModes)
         expect(hookEnds(false, 1000, 1900)).toBe(1000 + HOOK_DEADLINE_MS)
         expect(hookEnds(true, 1000, 1100)).toBe(2000)
         expect(hookEnds(true, 1000, 1000 + HOOK_DEADLINE_MS)).toBe(1000 + HOOK_DEADLINE_MS)
+      })
+
+      test("a hook takes over the start of the native hook it replaced; anything but a positive integer is ignored", () => {
+        expect(hookOrigin({ SCP_HOOK_ORIGIN: "1700000000000" })).toBe(1_700_000_000_000)
+        for (const given of [undefined, "", "0", "-1", "soon", "1.5"]) expect(hookOrigin({ SCP_HOOK_ORIGIN: given })).toBe(performance.timeOrigin)
       })
 
       test("SCP_HOOK_DEADLINE_MS replaces both deadlines; anything but a positive integer is ignored", () => {

@@ -10,6 +10,7 @@ use crate::args::js_string;
 use crate::claude::bg_io::exec_with;
 use crate::fleet::json::Json;
 use crate::fleet::view::truthy;
+use crate::help;
 use crate::open::block_on;
 use crate::spawn::argv::{home, which_on_path};
 use crate::spawn::signals::Listener;
@@ -750,7 +751,7 @@ fn shell_threads(value: &Json) -> Vec<&Json> {
 /// `swarm t3code`: holds an endpoint and wakes one T3 Code thread with each batch of new messages
 pub fn t3code(call: &Call, args: &[String]) -> Done {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
-        return Err(Fail::Decline("help".into()));
+        return help::show_text(help::T3CODE);
     }
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);

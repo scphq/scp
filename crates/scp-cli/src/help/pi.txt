@@ -1,0 +1,7 @@
+swarm pi [--name NAME | --as NAME] [--root] [--under ADDR] [--] [pi args...]
+  runs pi with the bundled SCP extension: the relay tools, and each new message as a turn, waking the session when idle.
+  pi's own --name and every other argument after the leading launcher flags go to pi untouched.
+  $SCP_PI_BIN picks the pi binary (default pi on PATH), $SCP_PI_EXTENSION the extension file.
+  --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
+  run from an agent's shell, it links under that agent by itself (as under env $(swarm spawn-env)); a $SCP_GRANT minted for it
+  applies instead (your own spent grant is replaced), a resumed session keeps its place, and --root starts it as a root.

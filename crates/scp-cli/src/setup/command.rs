@@ -21,7 +21,7 @@ use crate::fleet::mounts::native_mode;
 use crate::launch::launcher;
 use crate::spawn::argv::{executable, native_swarm, which_on_path};
 use crate::term::out as print;
-use crate::{Call, Done, Fail, usage};
+use crate::{Call, Done, Fail, help, usage};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::client::CallError;
 use scp_mcp::identity::safe_cwd;
@@ -71,7 +71,8 @@ pub fn flags(names: &[(&str, bool)]) -> Options {
 }
 
 /// setup's own flags: --hooks, the default, is accepted and changes nothing
-fn parse_setup_args(args: &[String]) -> Result<SetupOptions, Fail> {
+/// the options, or None for `--help`
+fn parse_setup_args(args: &[String]) -> Result<Option<SetupOptions>, Fail> {
     let options = flags(&[
         ("cowork", false),
         ("write", false),
@@ -86,7 +87,7 @@ fn parse_setup_args(args: &[String]) -> Result<SetupOptions, Fail> {
     ]);
     let parsed = parse_flags(args, &options).map_err(usage)?;
     if parsed.on("help") {
-        return Err(Fail::Decline("help".into()));
+        return Ok(None);
     }
     let engine = parsed.text("engine");
     if engine.is_some_and(|e| !["auto", "ts", "native"].contains(&e)) {
@@ -101,7 +102,7 @@ fn parse_setup_args(args: &[String]) -> Result<SetupOptions, Fail> {
             "--hooks and --no-hooks contradict each other; the hooks are installed unless --no-hooks",
         ));
     }
-    Ok(SetupOptions {
+    Ok(Some(SetupOptions {
         cowork: parsed.on("cowork"),
         engine: engine.filter(|e| !e.is_empty()).map(str::to_owned),
         write: parsed.on("write"),
@@ -111,7 +112,7 @@ fn parse_setup_args(args: &[String]) -> Result<SetupOptions, Fail> {
         bin: parsed.text("bin").map(str::to_owned),
         harness: parsed.text("harness").map(str::to_owned),
         join: join.map(str::to_owned),
-    })
+    }))
 }
 
 /// the `scp-hook` of the native package `exe` runs from, as the TypeScript CLI resolves it; a build outside a package has none. The
@@ -666,10 +667,15 @@ pub fn setup(call: &Call, words: &[String]) -> Done {
     let mut env = call.env.clone();
     crate::route::caller_argv(&mut env);
     if words.first().map(String::as_str) == Some("claude-desktop") {
-        let options = parse_claude_desktop_args(&words[1..])?;
-        return claude_desktop_setup(&options, &env);
+        return match parse_claude_desktop_args(&words[1..])? {
+            Some(options) => claude_desktop_setup(&options, &env),
+            None => help::show_text(help::CLAUDE_DESKTOP),
+        };
     }
-    relay_setup(&parse_setup_args(words)?, env, &safe_cwd())
+    match parse_setup_args(words)? {
+        Some(options) => relay_setup(&options, env, &safe_cwd()),
+        None => help::show_text(help::SETUP),
+    }
 }
 
 #[cfg(test)]

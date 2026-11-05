@@ -9,6 +9,7 @@ use crate::args::js_string;
 use crate::fleet::json::Json;
 use crate::fleet::mounts::{mcp_file, mounted_entry};
 use crate::fleet::view::text;
+use crate::help;
 use crate::open::block_on;
 use crate::spawn::muse::{MUSE_MODE, muse_modes, write_muse_launch};
 use crate::spawn::signals::Listener;
@@ -745,7 +746,7 @@ fn on_message(host: &Rc<MuseHost>, message: &Json, output: &Rc<Spool>) {
 /// `swarm muse`: muse serve with one session that relay messages wake, printing the agent's messages; returns its exit code
 pub fn muse(call: &Call, args: &[String]) -> Done {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
-        return Err(Fail::Decline("help".into()));
+        return help::show_text(help::MUSE);
     }
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);

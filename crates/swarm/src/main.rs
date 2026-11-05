@@ -11,13 +11,6 @@ use scp_broker::daemon::{self, DEFAULT_IDLE_S, idle_seconds};
 use scp_broker::paths::Paths;
 
 const VERSION: &str = env!("SWARM_VERSION");
-const USAGE: &str = "usage:
-  swarm daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground
-  swarm daemon stop|restart                        stop the running broker, or replace it with a fresh one
-  swarm hook <harness> [args]                      run a harness hook (also [launcher...] hook <args>)
-  swarm mcp                                        the MCP server
-  swarm __verbs [--json]                           the CLI verbs this binary runs; any other goes to the swarm CLI
-  swarm --version";
 
 #[derive(Parser)]
 #[command(name = "swarm daemon", no_binary_name = true)]
@@ -33,7 +26,22 @@ struct Daemon {
 const HOST: scp_cli::Host = scp_cli::Host {
     daemon: daemon_command,
     beside: beside_cli,
+    hook: hook_command,
 };
+
+fn hook_command(argv: &[String], parent: i64) -> i32 {
+    let caller = scp_hook::Caller {
+        ppid: parent as i32,
+        routed: scp_cli::routed(),
+    };
+    let origin = std::env::var(scp_hook::HOOK_ORIGIN)
+        .ok()
+        .filter(|_| caller.routed)
+        .and_then(|origin| origin.parse().ok())
+        .unwrap_or_else(scp_hook::now);
+    scp_hook::entry_for(origin, argv, caller);
+    0
+}
 
 fn beside_cli(env: &std::collections::HashMap<String, String>) -> Option<Vec<String>> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
@@ -49,32 +57,18 @@ fn main() {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let code = match args.first().map(String::as_str) {
-        Some(_) if scp_cli::routed() => scp_cli::main(&args, &HOST),
+        _ if scp_cli::routed() => scp_cli::main(&args, &HOST),
         Some("--version" | "-V") => {
             let _ = writeln!(std::io::stdout(), "swarm {VERSION}");
             0
         }
-        Some("--help" | "-h" | "help") => {
-            let _ = writeln!(std::io::stdout(), "{USAGE}");
-            0
-        }
         Some("daemon") => daemon_command(&args[1..]),
-        Some("mcp") => {
-            if let Ok(exe) = std::env::current_exe() {
-                scp_mcp::spawn::set_native_daemon(exe);
-            }
-            scp_mcp::main(&args[1..])
-        }
         Some("spawn") => scp_cli::main(&args, &HOST),
         _ if runs_hook(&args) => {
             scp_hook::entry(origin, &args);
             0
         }
-        Some(_) => scp_cli::main(&args, &HOST),
-        None => {
-            eprintln!("{USAGE}");
-            2
-        }
+        _ => scp_cli::main(&args, &HOST),
     };
     std::process::exit(code);
 }

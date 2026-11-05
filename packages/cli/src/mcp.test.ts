@@ -6,6 +6,7 @@ import { PREAMBLE } from "@scp-dev/core"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
 import { harnessPid, parsePsCommTable, processKey, readShimBinding, writeShimBinding } from "./identity"
 import { spawnWords, wakeTicket } from "./mcp"
+import { routedHooks } from "./hook-test"
 
 setDefaultTimeout(30_000)
 
@@ -66,7 +67,7 @@ describe("swarm mcp", () => {
   const env = { SCP_DIR: dir }
 
   beforeAll(async () => {
-    broker = await startBroker({ dir, idleMs: 0, policyPath: join(process.env.HOME!, "mcp-policy.json"), log: () => {} })
+    broker = await startBroker({ dir, idleMs: 0, policyPath: join(process.env.HOME!, "mcp-policy.json"), log: () => {}, ...routedHooks(dir) })
   })
   afterAll(async () => {
     await broker.stop()
