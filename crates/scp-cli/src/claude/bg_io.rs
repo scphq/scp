@@ -107,6 +107,8 @@ impl Ran {
 struct Watch {
     reaped: Cell<bool>,
     overflow: Cell<bool>,
+    /// the run was cut off by its timeout or a limit: what it writes from then on is read and dropped
+    frozen: Cell<bool>,
 }
 
 impl Watch {
@@ -119,7 +121,8 @@ impl Watch {
     }
 }
 
-/// reads `stream` into `out` until it ends; past the limit it marks the run overflowed, stops the child at once and reads no more
+/// reads `stream` into `out` until it ends, dropping what comes once the run is cut off; past the limit it marks the run overflowed and
+/// cut off, stops the child at once and reads no more
 async fn capped<R: AsyncRead + Unpin>(
     stream: Option<R>,
     out: &RefCell<Vec<u8>>,
@@ -134,12 +137,14 @@ async fn capped<R: AsyncRead + Unpin>(
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
+            Ok(_) if watch.frozen.get() => {}
             Ok(read) => {
                 let mut out = out.borrow_mut();
                 let room = max - out.len();
                 out.extend_from_slice(&chunk[..read.min(room)]);
                 if read > room {
                     watch.overflow.set(true);
+                    watch.frozen.set(true);
                     watch.signal(pid, libc::SIGTERM);
                     return;
                 }
@@ -173,8 +178,8 @@ pub struct Exec {
 
 /// runs `bin` with `args`, never through a shell, as Node's `execFile` does: its exit code, None for a signal, a failed start or more than
 /// `max` bytes on either stream. Past `timeout_ms` a running child gets SIGTERM, then SIGKILL once `KILL_GRACE` passes, its output read all
-/// the while; a child that already exited is never signalled, and its code stands though a process it left behind holds its pipes. It
-/// returns only once the child is reaped
+/// the while but kept only up to the cut, as Node destroys its readers then; a child that already exited is never signalled, and its code
+/// stands though a process it left behind holds its pipes. It returns only once the child is reaped
 pub async fn exec_file(
     bin: &str,
     args: &[&str],
@@ -233,6 +238,7 @@ pub async fn exec_file(
             ((), ()) = &mut streams, if !drained => drained = true,
             () = &mut deadline, if !timed_out => {
                 timed_out = true;
+                watch.frozen.set(true);
                 if status.is_none() {
                     watch.signal(pid, libc::SIGTERM);
                     kill.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
@@ -1230,14 +1236,25 @@ mod tests {
     }
 
     #[test]
-    fn a_term_handler_that_writes_a_lot_still_exits_within_the_grace() {
+    fn a_term_handler_that_writes_a_lot_still_exits_within_the_grace_its_output_dropped() {
         let (ran, took) = run(
-            "trap 'head -c 131072 /dev/zero; exit 7' TERM; while :; do sleep 0.05; done",
+            "echo before; trap 'head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2; exit 7' TERM; while :; do sleep 0.05; done",
             300,
         );
         assert_eq!(ran.code, Some(7));
         assert!(took < KILL_GRACE, "{took:?}");
-        assert_eq!(ran.out.len(), 131_072);
+        assert_eq!(ran.out, "before\n");
+    }
+
+    #[test]
+    fn output_after_an_overflow_on_the_other_stream_is_dropped() {
+        let (ran, _) = run(
+            "trap '' TERM; head -c 5000000 /dev/zero; echo late >&2; exit 0",
+            10_000,
+        );
+        assert_eq!(ran.code, None);
+        assert_eq!(ran.out.len(), OUTPUT_MAX);
+        assert!(!ran.out.contains("late"));
     }
 
     #[test]

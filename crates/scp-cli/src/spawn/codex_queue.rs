@@ -319,6 +319,32 @@ fn seqs(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// why a `codex queue` that did not exit 0 ends the waker: None for a thread with no rollout yet, which declines, else the note it fails with
+fn queue_failure(result: &Ran) -> Option<String> {
+    if result
+        .stderr
+        .to_ascii_lowercase()
+        .contains("no rollout found")
+    {
+        return None;
+    }
+    let last = result
+        .stderr
+        .trim_matches(js_space)
+        .split('\n')
+        .next_back()
+        .map(|line| line.trim_matches(js_space))
+        .unwrap_or_default();
+    let why = if result.missing {
+        "is not installed".to_owned()
+    } else if last.is_empty() {
+        "failed".to_owned()
+    } else {
+        format!("failed: {last}")
+    };
+    Some(format!("{CLI_NAME} codex-wake: codex queue {why}"))
+}
+
 /// confirms queued messages read, retried once: a lost confirmation would queue them again; whether all of them were
 async fn confirm(client: &Client, seqs: Vec<Value>, hold: &str) -> Result<bool, Fail> {
     let count = seqs.len();
@@ -441,29 +467,13 @@ async fn queue(
             ];
             let result = run_file(&codex, &args, env).await;
             if result.code != Some(0) {
-                if result
-                    .stderr
-                    .to_ascii_lowercase()
-                    .contains("no rollout found")
-                {
-                    return Ok(Some(decline("no-rollout")));
-                }
-                let last = result
-                    .stderr
-                    .trim_matches(js_space)
-                    .split('\n')
-                    .next_back()
-                    .map(|line| line.trim_matches(js_space))
-                    .unwrap_or_default();
-                let why = if result.missing {
-                    "is not installed".to_owned()
-                } else if last.is_empty() {
-                    "failed".to_owned()
-                } else {
-                    format!("failed: {last}")
-                };
-                term::note(&format!("{CLI_NAME} codex-wake: codex queue {why}"));
-                return Ok(Some(1));
+                return Ok(Some(match queue_failure(&result) {
+                    None => decline("no-rollout"),
+                    Some(note) => {
+                        term::note(&note);
+                        1
+                    }
+                }));
             }
             queued.set(true);
             if !confirm(client, seqs(&batch), &hold).await? {
@@ -645,9 +655,7 @@ mod tests {
         assert!(batches(&[]).is_empty());
     }
 
-    #[test]
-    fn a_child_that_writes_as_it_is_stopped_still_returns() {
-        let script = "trap 'head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2; exit 3' TERM; while :; do sleep 0.05; done";
+    fn timed_out(script: &str) -> (Ran, std::time::Duration) {
         let args = ["-c".to_owned(), script.to_owned()];
         let env = Env::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
         let started = std::time::Instant::now();
@@ -660,11 +668,55 @@ mod tests {
         })
         .unwrap()
         .expect("the run returns");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        (ran, started.elapsed())
+    }
+
+    #[test]
+    fn a_child_that_writes_as_it_is_stopped_returns_with_only_what_came_before() {
+        let (ran, took) = timed_out(
+            "echo before; echo early >&2; trap 'head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2; exit 3' TERM; while :; do sleep 0.05; done",
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
         assert_eq!(ran.code, Some(3));
-        assert_eq!((ran.stdout.len(), ran.stderr.len()), (300_000, 300_000));
+        assert_eq!(
+            (ran.stdout.as_str(), ran.stderr.as_str()),
+            ("before\n", "early\n")
+        );
+        let env = Env::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]);
         let missing = block_on(run_file("/nowhere/codex", &[], &env)).unwrap();
         assert_eq!((missing.code, missing.missing), (None, true));
+        assert_eq!(
+            queue_failure(&missing).as_deref(),
+            Some("swarm codex-wake: codex queue is not installed")
+        );
+    }
+
+    #[test]
+    fn a_rollout_error_printed_once_stopped_fails_the_wake_instead_of_declining() {
+        let (ran, took) = timed_out(
+            "trap 'echo \"Error: no rollout found for thread id x\" >&2; exit 1' TERM; while :; do sleep 0.05; done",
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        assert_eq!((ran.code, ran.stderr.as_str()), (Some(1), ""));
+        assert_eq!(
+            queue_failure(&ran).as_deref(),
+            Some("swarm codex-wake: codex queue failed")
+        );
+        let early = Ran {
+            code: Some(1),
+            stderr: "Error: No Rollout Found for thread id x\n".into(),
+            ..Ran::default()
+        };
+        assert_eq!(queue_failure(&early), None);
+        let failed = Ran {
+            code: Some(1),
+            stderr: "warn\nError: daemon unavailable\n".into(),
+            ..Ran::default()
+        };
+        assert_eq!(
+            queue_failure(&failed).as_deref(),
+            Some("swarm codex-wake: codex queue failed: Error: daemon unavailable")
+        );
     }
 
     #[test]
