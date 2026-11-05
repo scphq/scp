@@ -113,6 +113,7 @@ pub fn rules_call(parsed: &Parsed) -> Result<RulesCall, Fail> {
 
 pub fn rules<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let json = call.parsed.on("json");
         match rules_call(&call.parsed)? {
             RulesCall::View(method, params) => {
@@ -215,6 +216,7 @@ pub fn group_call(parsed: &Parsed) -> Result<Params, Fail> {
 
 pub fn group<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let params = group_call(&call.parsed)?;
         let result = ask(opened, "group", params).await?;
         if call.parsed.on("json") {
@@ -270,7 +272,9 @@ pub fn admin_call(parsed: &Parsed) -> Result<Option<Change>, Fail> {
 pub fn admin<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
         let json = call.parsed.on("json");
-        let Some(change) = admin_call(&call.parsed)? else {
+        let change = admin_call(&call.parsed)?;
+        opened.local(call.verb)?;
+        let Some(change) = change else {
             let result = ask(opened, "admin", vec![("action", Value::from("ls"))]).await?;
             if json {
                 out(&result.pretty());

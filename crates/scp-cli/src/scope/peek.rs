@@ -41,6 +41,7 @@ pub fn turns_arg(value: Option<&Val>) -> Result<Option<u32>, Fail> {
 
 pub fn peek<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let flags = &call.parsed;
         let json = flags.on("json");
         let words = &flags.positionals;
@@ -107,6 +108,7 @@ pub fn set_peek_args(words: &[String]) -> Result<(&str, Option<&str>), Fail> {
 
 pub fn set_peek<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let (level, endpoint) = set_peek_args(&call.parsed.positionals)?;
         let mut params = vec![("level", Value::from(level))];
         if let Some(endpoint) = endpoint {

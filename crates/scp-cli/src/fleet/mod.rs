@@ -248,6 +248,7 @@ fn list<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
 
 fn peers<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let flags = &call.parsed;
         let all = flags.on("all");
         let reply = ask(
@@ -307,6 +308,7 @@ fn why<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             [from, to] if !from.is_empty() && !to.is_empty() => (from, to),
             _ => return Err(usage(format!("{CLI_NAME} why takes <from> <to>"))),
         };
+        opened.local(call.verb)?;
         let result = ask(
             opened,
             "why",
@@ -387,6 +389,7 @@ fn log<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
 
 fn policy<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let json = call.parsed.on("json");
         let words = &call.parsed.positionals;
         let action = words.first().map(String::as_str);
@@ -456,6 +459,11 @@ async fn receipts(call: &Call<'_>, opened: &Opened) -> Done {
             "{CLI_NAME} status takes one message id, or --all and --activity for the fleet"
         )));
     }
+    if opened.broker.is_null() {
+        return Err(usage(format!(
+            "{CLI_NAME} status <id> is the local broker's; it has no --cloud form"
+        )));
+    }
     if !scp_mcp::tools::truthy(Some(&opened.me)) {
         return Err(usage(format!(
             "{CLI_NAME} status <id> reads a message you sent: pass --as HANDLE, or run it from the agent's shell or your terminal"
@@ -494,6 +502,7 @@ fn status<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         let broker = snapshot.get("broker").filter(|b| truthy(Some(b))).cloned();
         let engine = broker
             .as_ref()
+            .filter(|_| !opened.broker.is_null())
             .and_then(|b| mounts::broker_engine(&field(b, "pid")));
         notes(
             mounts::gone_hook_lines(call.env)
@@ -512,7 +521,7 @@ fn status<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         }
         out(&match &broker {
             Some(broker) => view::broker_line(&broker.to_value(), engine),
-            None => view::broker_line(&opened.broker, None),
+            None => opened.place(),
         });
         if let Some(line) = mounts::mcp_line(&mounted) {
             out(&line);
@@ -576,10 +585,10 @@ fn snapshot(
         })
         .collect();
     let broker = snapshot.get("broker").filter(|b| truthy(Some(b)));
-    out(&view::broker_line(
-        &broker.map_or_else(|| opened.broker.clone(), Json::to_value),
-        None,
-    ));
+    out(&match broker {
+        Some(broker) => view::broker_line(&broker.to_value(), None),
+        None => opened.place(),
+    });
     out("");
     print(view::endpoints(
         &shown,

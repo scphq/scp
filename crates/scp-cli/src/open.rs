@@ -1,10 +1,11 @@
 //! Acting as the caller: the identity a command claims or binds to, and the broker connection that carries it (`common.ts::open`).
 
+use crate::account::cloud::{Hub, machine_name, open_hub};
 use crate::args::{Parsed, parse_verb};
 use crate::fleet::json::Json;
 use crate::fleet::result_of;
 use crate::{Call, Done, Fail, route, term, usage};
-use scp_core::protocol::CLI_NAME;
+use scp_core::protocol::{CLI_NAME, PROTOCOL};
 use scp_mcp::LocalFuture;
 use scp_mcp::client::{CallError, Client, Start, connect_or_start, relay_dir};
 use scp_mcp::identity::{
@@ -21,6 +22,9 @@ use scp_mcp::{Claim, Membership};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::rc::Rc;
+
+/// verbs that observe the hub, without an identity, on the cloud transport
+pub const CLOUD_OBSERVE: [&str; 5] = ["list", "status", "watch", "log", "machines"];
 
 /// verbs that run with no identity of the caller's
 pub const OBSERVE: [&str; 14] = [
@@ -75,6 +79,8 @@ pub struct Plan {
     pub harness_pid: Option<i64>,
     pub unread: bool,
     pub shell: i64,
+    /// the hub's machine and binding on the cloud transport, where the hello goes to the hub instead of the broker
+    pub hub: Option<Hub>,
 }
 
 /// how a command came to act as an endpoint: `as`, `lineage` or `human`
@@ -89,6 +95,33 @@ pub struct Opened {
     pub broker: Value,
     pub bound: Bound,
     pub harness_pid: Option<i64>,
+    /// on the cloud transport, which hub, account and machine the command runs on
+    pub hub: Option<String>,
+}
+
+impl Opened {
+    /// where the command runs, as status and watch print it without a broker in the snapshot
+    pub fn place(&self) -> String {
+        match &self.hub {
+            Some(hub) => hub.clone(),
+            None => crate::fleet::view::broker_line(&self.broker, None),
+        }
+    }
+
+    /// the local broker's connection, refused on the cloud transport (`localClient`)
+    pub fn local(&self, verb: &str) -> Result<(), Fail> {
+        if self.broker.is_null() {
+            return Err(usage(format!(
+                "{CLI_NAME} {verb} is the local broker's; it has no --cloud form"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// whether a command takes the cloud transport: --cloud or `$SCP_TRANSPORT=cloud`
+pub fn cloud_transport(parsed: &Parsed, env: &Env) -> bool {
+    parsed.on("cloud") || env.get("SCP_TRANSPORT").is_some_and(|t| t == "cloud")
 }
 
 /// whether a terminal is attached: stdin is one, or, while the body does not come from stdin, stdout or stderr is
@@ -236,9 +269,7 @@ fn plan_from(
         ));
     }
     let grant = nonempty(env, "SCP_GRANT");
-    let cloud = parsed.on("cloud")
-        || env.get("SCP_TRANSPORT").is_some_and(|t| t == "cloud")
-        || verb == "machines";
+    let cloud = cloud_transport(parsed, env) || verb == "machines";
     if let Some(grant) = grant {
         if !grant_token(grant) {
             return Err(usage(format!(
@@ -257,7 +288,12 @@ fn plan_from(
         }
     }
     if cloud {
-        return Err(Fail::Decline("cloud".into()));
+        if named.is_none() && !human && !tty && !OBSERVE.contains(&verb) {
+            return Err(usage(format!(
+                "{CLI_NAME} {verb} needs an identity: --as HANDLE (or $SCP_NAME) for an agent, or --human for your own inbox me/ (no terminal is attached, so me/ is not assumed)"
+            )));
+        }
+        return hub_plan(verb, parsed, env, shell, tty, given, named, human);
     }
     if parsed.has("machine") {
         return Err(usage(
@@ -361,6 +397,96 @@ fn plan_from(
         harness_pid,
         unread: here.unread,
         shell,
+        hub: None,
+    })
+}
+
+/// the hello a `--cloud` command sends the hub: a claim with --as, an observer that binds no machine for the verbs that observe, else
+/// the account's human inbox
+#[allow(clippy::too_many_arguments)]
+fn hub_plan(
+    verb: &str,
+    parsed: &Parsed,
+    env: &Env,
+    shell: i64,
+    tty: bool,
+    given: Option<&Walk>,
+    named: Option<&str>,
+    human: bool,
+) -> Result<Plan, Fail> {
+    let mut hello = Map::new();
+    hello.insert("protocol".into(), Value::from(PROTOCOL));
+    let (machine, mode, bound) = match named {
+        Some(named) => {
+            let handle = local_handle(named)?;
+            let read;
+            let here = match given {
+                Some(here) => here,
+                None => {
+                    read = walk(env, shell, read_ps_table(SHELL_PS_TIMEOUT_MS).map(Rc::new));
+                    &read
+                }
+            };
+            let harness = claim_harness(parsed, env, here, shell);
+            let machine = machine_name(parsed.text("machine"), env)?;
+            let mut claim = Claim::new();
+            claim.insert("handle".into(), Value::from(handle));
+            claim.insert("harness".into(), Value::from(harness));
+            claim.insert("cwd".into(), Value::from(safe_cwd()));
+            if let Some(parent) = nonempty(env, "SCP_PARENT") {
+                claim.insert("parent".into(), Value::from(parent));
+            }
+            let host = machine.clone();
+            claim.insert(
+                "labels".into(),
+                Value::Object(labels_for(env, &move || host.clone())),
+            );
+            hello.insert("machine".into(), Value::from(machine.as_str()));
+            hello.insert("claim".into(), Value::Object(claim));
+            (machine, Mode::As, Some("as"))
+        }
+        None => {
+            let machine = machine_name(parsed.text("machine"), env)?;
+            if !human && CLOUD_OBSERVE.contains(&verb) {
+                hello.insert("observe".into(), Value::Bool(true));
+                hello.insert("machine".into(), Value::from(machine.as_str()));
+                (machine, Mode::Observe, None)
+            } else {
+                hello.insert("machine".into(), Value::from(machine.as_str()));
+                hello.insert("human".into(), Value::Bool(true));
+                hello.insert("tty".into(), Value::Bool(tty));
+                (machine, Mode::Human, Some("human"))
+            }
+        }
+    };
+    Ok(Plan {
+        hello,
+        mode,
+        harness_pid: None,
+        unread: false,
+        shell,
+        hub: Some(Hub { machine, bound }),
+    })
+}
+
+/// the human at this terminal on the hub, as `openAdoptHuman` opens it with --cloud
+pub fn hub_human(parsed: &Parsed, env: &Env) -> Result<Plan, Fail> {
+    let machine = machine_name(parsed.text("machine"), env)?;
+    let mut hello = Map::new();
+    hello.insert("protocol".into(), Value::from(PROTOCOL));
+    hello.insert("machine".into(), Value::from(machine.as_str()));
+    hello.insert("human".into(), Value::Bool(true));
+    hello.insert("tty".into(), Value::Bool(true));
+    Ok(Plan {
+        hello,
+        mode: Mode::Human,
+        harness_pid: None,
+        unread: false,
+        shell: 0,
+        hub: Some(Hub {
+            machine,
+            bound: Some("human"),
+        }),
     })
 }
 
@@ -483,6 +609,9 @@ pub async fn connect_shell(dir: &str, env: &Env, tool: &str) -> Result<Client, F
 
 /// connects as `plan` says, failing as `open()` does when the broker binds the command to no one
 pub async fn open(verb: &str, plan: Plan, env: &Env) -> Result<Opened, Fail> {
+    if let Some(hub) = plan.hub {
+        return open_hub(plan.hello, hub, env).await;
+    }
     let dir = relay_dir(env).to_string_lossy().into_owned();
     let client = connect_shell(&dir, env, "the scp MCP tools (relay_*)").await?;
     let hello = match client.hello_line(plan.hello.clone()).await {
@@ -547,6 +676,7 @@ pub async fn open(verb: &str, plan: Plan, env: &Env) -> Result<Opened, Fail> {
         endpoint,
         bound,
         harness_pid: plan.harness_pid,
+        hub: None,
     })
 }
 
@@ -603,6 +733,7 @@ pub fn with_opened(
         route::shell_pid(),
         terminal_attached(crate::messages::body_from_stdin(call.verb, &call.parsed)),
     )?;
+    let hub = plan.hub.is_some();
     let runtime = runtime()?;
     let local = tokio::task::LocalSet::new();
     let done = local.block_on(&runtime, async {
@@ -611,10 +742,24 @@ pub fn with_opened(
         opened.client.close();
         done
     });
-    drop(local);
-    runtime.shutdown_background();
+    finish(runtime, local, hub);
     done
 }
+
+/// ends a command's runtime; with a hub connection, after the hub took its close or `HUB_CLOSE` passed
+pub fn finish(runtime: tokio::runtime::Runtime, local: tokio::task::LocalSet, hub: bool) {
+    if hub {
+        runtime.block_on(async {
+            let _ = tokio::time::timeout(HUB_CLOSE, local).await;
+        });
+    } else {
+        drop(local);
+    }
+    runtime.shutdown_background();
+}
+
+/// how long a command waits for the hub to take its close before it exits
+const HUB_CLOSE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// `swarm __probe identity <verb> [flags]`: the hello the verb would send from here, as JSON, connecting to nothing
 pub fn probe(args: &[String]) -> i32 {

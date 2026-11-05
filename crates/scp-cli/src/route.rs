@@ -9,9 +9,9 @@ use std::os::unix::process::CommandExt;
 use std::sync::OnceLock;
 
 /// flags the native verbs hand to the TypeScript CLI, which the router also checks before it hands a verb over
-pub const DECLINE_FLAGS: [&str; 4] = ["--help", "-h", "--cloud", "--via"];
+pub const DECLINE_FLAGS: [&str; 3] = ["--help", "-h", "--via"];
 /// variables that do the same
-pub const DECLINE_ENV: [(&str, &str); 1] = [("SCP_TRANSPORT", "cloud")];
+pub const DECLINE_ENV: [(&str, &str); 0] = [];
 /// set by the router: `<its pid>:<its parent's pid>`, so a child it spawned walks from the shell that ran the command
 pub const PARENT: &str = "SCP_CLI_PARENT";
 /// `native` when the router handed this invocation over, `ts` on the TypeScript CLI this hands back to
@@ -238,10 +238,7 @@ mod tests {
             declined("whoami", &words(&["-xh"]), &env).as_deref(),
             Some("help")
         );
-        assert_eq!(
-            declined("whoami", &words(&["--cloud=1"]), &env).as_deref(),
-            Some("cloud")
-        );
+        assert_eq!(declined("whoami", &words(&["--cloud"]), &env), None);
         assert_eq!(
             declined("spawn", &words(&["--via", "m"]), &env).as_deref(),
             Some("via")
@@ -249,9 +246,6 @@ mod tests {
         assert_eq!(declined("set-now", &words(&["--", "-h"]), &env), None);
         assert_eq!(declined("set-now", &words(&["--helpful"]), &env), None);
         let cloud = Env::from([("SCP_TRANSPORT".to_owned(), "cloud".to_owned())]);
-        assert_eq!(
-            declined("whoami", &[], &cloud).as_deref(),
-            Some("scp_transport")
-        );
+        assert_eq!(declined("whoami", &[], &cloud), None);
     }
 }

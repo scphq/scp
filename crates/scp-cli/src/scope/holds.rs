@@ -69,6 +69,7 @@ pub fn holds(call: &Call) -> Done {
 
 fn run<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
+        opened.local(call.verb)?;
         let flags = &call.parsed;
         let (action, id) = holds_args(flags)?;
         let json = flags.on("json");

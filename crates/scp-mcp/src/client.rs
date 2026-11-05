@@ -77,6 +77,7 @@ impl Pending {
 }
 
 struct Inner {
+    max_line: usize,
     next_id: Cell<u64>,
     pending: RefCell<HashMap<u64, Pending>>,
     closed: RefCell<Option<String>>,
@@ -148,6 +149,23 @@ impl Inner {
     }
 }
 
+/// what a framed connection's transport hands in: each message the other side sent, and the end of the connection
+pub struct Feed {
+    inner: Rc<Inner>,
+}
+
+impl Feed {
+    /// one message as the other side sent it; one that is not JSON is dropped
+    pub fn message(&self, text: &[u8]) {
+        let _ = self.inner.dispatch(text);
+    }
+
+    /// ends the connection: each pending request and each later one fails with `error`
+    pub fn fail(&self, error: &str) {
+        self.inner.fail(error);
+    }
+}
+
 /// one connection to the broker; needs a tokio LocalSet, which runs its reader and writer
 pub struct Client {
     inner: Rc<Inner>,
@@ -166,6 +184,7 @@ impl Client {
         let (read, write) = stream.into_split();
         let (tx, rx) = mpsc::unbounded_channel();
         let inner = Rc::new(Inner {
+            max_line: MAX_LINE,
             next_id: Cell::new(1),
             pending: RefCell::new(HashMap::new()),
             closed: RefCell::new(None),
@@ -175,6 +194,27 @@ impl Client {
         tokio::task::spawn_local(read_loop(inner.clone(), read));
         tokio::task::spawn_local(write_loop(inner.clone(), write, rx));
         Ok(Client { inner })
+    }
+
+    /// a connection whose transport frames each message itself, as the hub's WebSocket does: the lines to send, each ending in a
+    /// newline, come out of the receiver, and what arrives goes in through the feed; no line cap applies
+    pub fn framed() -> (Client, mpsc::UnboundedReceiver<Vec<u8>>, Feed) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let inner = Rc::new(Inner {
+            max_line: usize::MAX,
+            next_id: Cell::new(1),
+            pending: RefCell::new(HashMap::new()),
+            closed: RefCell::new(None),
+            writer: RefCell::new(Some(tx)),
+            notifications: RefCell::new(None),
+        });
+        (
+            Client {
+                inner: inner.clone(),
+            },
+            rx,
+            Feed { inner },
+        )
     }
 
     /// whether the connection is closed, by either side
@@ -221,7 +261,7 @@ impl Client {
         self.inner.next_id.set(id + 1);
         let mut line =
             json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
-        if line.len() > MAX_LINE {
+        if line.len() > self.inner.max_line {
             return Err(CallError::relay(
                 "too_large",
                 format!(
@@ -610,6 +650,7 @@ mod tests {
     #[test]
     fn a_refusal_carries_its_code_and_retry() {
         let inner = Inner {
+            max_line: MAX_LINE,
             next_id: Cell::new(1),
             pending: RefCell::new(HashMap::new()),
             closed: RefCell::new(None),
@@ -635,6 +676,7 @@ mod tests {
     fn a_line_reply_and_a_notification_come_as_the_broker_wrote_them() {
         let (sink, mut events) = mpsc::unbounded_channel();
         let inner = Inner {
+            max_line: MAX_LINE,
             next_id: Cell::new(1),
             pending: RefCell::new(HashMap::new()),
             closed: RefCell::new(None),
