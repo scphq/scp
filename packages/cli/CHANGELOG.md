@@ -1,5 +1,12 @@
 # @scp-dev/cli
 
+## 1.6.0
+
+### Minor Changes
+
+- 45dad98: Under `SCP_NATIVE=1` the native `swarm` also runs the long-running harness launchers itself: `swarm codex`, `swarm muse`, `swarm t3code`, `swarm agy`, `swarm grok`, `swarm opencode` and `swarm pi`, with the same grant attribution, `--under` placement, harness arguments and environment, output and exit codes as the TypeScript CLI. The relay channel of `codex`, `muse`, `t3code`, `agy` and `grok` runs in the native process, and the native `swarm` embeds the pi extension for installs without the TypeScript CLI beside it.
+- 1ef2157: Under `SCP_NATIVE=1` the native `swarm` also runs `swarm setup` itself: the plan, `--write`, `--undo`, `--engine` and `--join`, then `setup claude-desktop`, `setup --cowork` and `swarm up`, with the same output, files and `setup.json` as the TypeScript CLI. A config file holding a lone surrogate, a `__proto__` event under `hooks`, or bytes that are not UTF-8 is now refused with a line saying why and left as it was. `swarm up` now passes the CLI's version to setup, so under `SCP_NATIVE` it finds the matching native binaries.
+
 ## 1.5.0
 
 ### Minor Changes
