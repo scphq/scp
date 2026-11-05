@@ -169,6 +169,8 @@ impl Feed {
 /// one connection to the broker; needs a tokio LocalSet, which runs its reader and writer
 pub struct Client {
     inner: Rc<Inner>,
+    /// what `hello` answers without asking the broker, for a connection already bound
+    bound: RefCell<Option<Value>>,
 }
 
 impl Client {
@@ -193,7 +195,10 @@ impl Client {
         });
         tokio::task::spawn_local(read_loop(inner.clone(), read));
         tokio::task::spawn_local(write_loop(inner.clone(), write, rx));
-        Ok(Client { inner })
+        Ok(Client {
+            inner,
+            bound: RefCell::new(None),
+        })
     }
 
     /// a connection whose transport frames each message itself, as the hub's WebSocket does: the lines to send, each ending in a
@@ -211,6 +216,7 @@ impl Client {
         (
             Client {
                 inner: inner.clone(),
+                bound: RefCell::new(None),
             },
             rx,
             Feed { inner },
@@ -289,7 +295,15 @@ impl Client {
 
     /// `hello` with the protocol and no capabilities, then `fields`
     pub async fn hello(&self, fields: Map<String, Value>) -> Result<Value, CallError> {
+        if let Some(bound) = self.bound.borrow().clone() {
+            return Ok(bound);
+        }
         self.request("hello", hello_params(fields)).await
+    }
+
+    /// every later `hello` answers `reply`: this connection is already bound, by the hello that gave it
+    pub fn keep_hello(&self, reply: Value) {
+        *self.bound.borrow_mut() = Some(reply);
     }
 
     /// `hello`, answered with the whole reply line as the broker wrote it
@@ -368,7 +382,7 @@ async fn write_loop(
     let _ = write.shutdown().await;
 }
 
-fn errno_code(error: &io::Error) -> Option<&'static str> {
+pub fn errno_code(error: &io::Error) -> Option<&'static str> {
     Some(match error.raw_os_error()? {
         libc::EPERM => "EPERM",
         libc::EACCES => "EACCES",
@@ -379,6 +393,9 @@ fn errno_code(error: &io::Error) -> Option<&'static str> {
         libc::ENOTDIR => "ENOTDIR",
         libc::ETIMEDOUT => "ETIMEDOUT",
         libc::ECONNRESET => "ECONNRESET",
+        libc::EPIPE => "EPIPE",
+        libc::EHOSTUNREACH => "EHOSTUNREACH",
+        libc::ENETUNREACH => "ENETUNREACH",
         libc::EADDRNOTAVAIL => "EADDRNOTAVAIL",
         libc::ENAMETOOLONG => "ENAMETOOLONG",
         libc::EINVAL => "EINVAL",

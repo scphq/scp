@@ -1718,6 +1718,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "toml_edit",
  "zip",
 ]
 
