@@ -25,4 +25,5 @@ sha2.workspace = true
 tokio = { version = "=1.47.1", features = ["rt", "net", "io-util", "time", "macros", "sync", "process"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 toml = { workspace = true, features = ["preserve_order"] }
+toml_edit.workspace = true
 zip.workspace = true

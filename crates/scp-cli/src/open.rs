@@ -528,6 +528,14 @@ pub fn errno_words(error: &std::io::Error) -> Option<(&'static str, &'static str
         libc::ELOOP => ("ELOOP", "too many symbolic links encountered"),
         libc::ENAMETOOLONG => ("ENAMETOOLONG", "name too long"),
         libc::ESRCH => ("ESRCH", "no such process"),
+        libc::ETXTBSY => ("ETXTBSY", "text file is busy"),
+        libc::ENOEXEC => ("ENOEXEC", "exec format error"),
+        libc::E2BIG => ("E2BIG", "argument list too long"),
+        libc::ENOMEM => ("ENOMEM", "not enough memory"),
+        libc::EAGAIN => ("EAGAIN", "resource temporarily unavailable"),
+        libc::EMFILE => ("EMFILE", "too many open files"),
+        libc::ENFILE => ("ENFILE", "file table overflow"),
+        libc::EIO => ("EIO", "i/o error"),
         _ => return None,
     })
 }

@@ -73,7 +73,7 @@ pub fn codex_mount(env: &Env) -> Option<Table> {
 }
 
 /// whether every integer in `value` is one a JavaScript number holds exactly: the TOML reader the TypeScript CLI uses refuses the file otherwise
-fn lossless(value: &Toml) -> bool {
+pub(crate) fn lossless(value: &Toml) -> bool {
     const SAFE: i64 = (1 << 53) - 1;
     match value {
         Toml::Integer(n) => n.abs_diff(0) <= SAFE as u64,
@@ -90,7 +90,7 @@ fn index_key(key: &str) -> Option<u32> {
 }
 
 /// a table's entries in `Object.entries` order: array indexes ascending, then the rest as written
-fn entries(table: &Table) -> Vec<(&String, &Toml)> {
+pub(crate) fn entries(table: &Table) -> Vec<(&String, &Toml)> {
     let mut indexed: Vec<(u32, (&String, &Toml))> = table
         .iter()
         .filter_map(|(k, v)| index_key(k).map(|n| (n, (k, v))))
