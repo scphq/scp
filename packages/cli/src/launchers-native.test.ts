@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { type Broker, RelayClient, startBroker } from "@scp-dev/broker"
+import { opencodePlugin } from "./hooks"
 import { processKey } from "./identity"
+import { hooksTarget } from "./install"
 import { swarmBinary } from "./test-setup"
 import { ensureBuilt } from "./testing/fixtures"
 
@@ -113,7 +115,9 @@ if (args[0] === "app-server") {
   }
   console.log(process.env.FAKE_APP === "spaced" ? "some words here" : "banner\\n  tok-1  ")
 } else {
-  record("run")
+  appendFileSync(root + "/turns.log", JSON.stringify(args) + "\\n" + shown + "\\n")
+  if (process.env.SCP_AGY_CONVERSATION_FILE && !process.env.FAKE_NO_CONVERSATION) writeFileSync(process.env.SCP_AGY_CONVERSATION_FILE, "conv-1\\n")
+  if (args.some((word) => String(word).includes("please-fail"))) process.exit(4)
   process.exit(Number(process.env.FAKE_CODE ?? 0))
 }
 `
@@ -125,7 +129,7 @@ function machine(engine: Engine) {
   const work = join(root, "Work Dir")
   mkdirSync(bin)
   mkdirSync(join(work, ".git"), { recursive: true })
-  for (const harness of ["codex", "muse", "t3"]) writeFileSync(join(bin, harness), FAKE, { mode: 0o755 })
+  for (const harness of ["codex", "muse", "t3", "agy", "grok", "opencode", "pi"]) writeFileSync(join(bin, harness), FAKE, { mode: 0o755 })
   const env: Record<string, string> = {
     HOME: root,
     PATH: `${bin}:/usr/bin:/bin`,
@@ -173,6 +177,8 @@ function outcome(m: Machine, shown: Record<string, unknown>) {
       .replace(/scp-codex-[A-Za-z0-9]{6}/g, "<socket>")
       .replace(/SCP_SHIM_BINDING=[0-9a-f]{32}/g, "SCP_SHIM_BINDING=<binding>")
       .replace(/SCP_SESSION=[0-9a-f]{32}/g, "SCP_SESSION=<session>")
+      .replace(/SCP_HARNESS_PID=\d+/g, "SCP_HARNESS_PID=<pid>")
+      .replace(/resume-[A-Za-z0-9]{6}/g, "resume-<dir>")
       .replace(/krt_[0-9a-f]{64}/g, "<grant>")
       .replace(/"process":"pid:[^"]*/g, '"process":"<process>')
       .replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:<port>")
@@ -263,6 +269,21 @@ async function shim(m: Machine, file: string, handle: string, harness: string) {
 
 const THREAD = "019bd3c6-f4a2-7c3e-9d5e-1f2a3b4c5d6e"
 const WAITING = /waiting for messages/
+
+/** `tester` sending `body` to `to` on the machine's broker */
+async function send(m: Machine, to: string, body: string) {
+  const sender = await RelayClient.connect(m.broker!.socket)
+  await sender.hello({ claim: { handle: "tester", harness: "test", process: "pid:1:tester", lineage: [] } })
+  await sender.request("send", { to, body })
+  sender.close()
+}
+
+const turns = (m: Machine) =>
+  existsSync(join(m.root, "turns.log"))
+    ? readFileSync(join(m.root, "turns.log"), "utf8")
+        .split("\n")
+        .filter((line) => line.startsWith("[")).length
+    : 0
 
 describe.skipIf(!swarmBinary || !node)("swarm codex: the native swarm runs it as the TypeScript CLI does", () => {
   test("usage errors", async () => {
@@ -436,11 +457,8 @@ describe.skipIf(!swarmBinary || !node)("swarm muse: the native swarm runs it as 
       const waited = supervise(m, "muse", ["--name", "lead"], /$^/, { FAKE_APP: "busy" })
       const client = await claimed
       await until(() => waited.stderr().includes("waiting for messages"))
-      const sender = await RelayClient.connect(m.broker!.socket)
-      await sender.hello({ claim: { handle: "tester", harness: "test", process: "pid:1:tester", lineage: [] } })
-      await sender.request("send", { to: "me/lead", body: "ping" })
+      await send(m, "me/lead", "ping")
       await until(() => existsSync(join(m.root, "wire.log")) && (readFileSync(join(m.root, "wire.log"), "utf8").match(/turn\/start/g)?.length ?? 0) >= 2)
-      sender.close()
       waited.stop()
       const done = await waited
       client.close()
@@ -554,16 +572,160 @@ describe.skipIf(!swarmBinary || !node)("swarm t3code: the native swarm runs it a
       const env = { SCP_T3_TOKEN: "tok-1", SCP_T3_URL: url }
       const waited = supervise(m, "t3code", ["--name", "lead", ...T3], /$^/, env)
       await until(() => waited.stderr().includes("waking T3 Code thread"))
-      const sender = await RelayClient.connect(m.broker!.socket)
-      await sender.hello({ claim: { handle: "tester", harness: "test", process: "pid:1:tester", lineage: [] } })
-      await sender.request("send", { to: "me/lead", body: "ping" })
+      await send(m, "me/lead", "ping")
       await until(() => existsSync(join(m.root, "wire.log")) && readFileSync(join(m.root, "wire.log"), "utf8").includes("message.dispatch"))
-      sender.close()
       waited.stop()
       return [await waited]
     }, broker)
     const first = out[0] as { code: number; records: Record<string, string> }
     expect(first.code).toBe(0)
     expect(first.records["wire.log"]).toContain("steer_active")
+  })
+})
+
+/** a machine with agy's hooks in place and a broker of its own */
+async function agyMachine(m: Machine) {
+  const file = hooksTarget("agy", "user", m.env, m.work)
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify({ scp: { SessionStart: [{ command: "swarm hook" }] } }))
+  await broker(m)
+}
+
+describe.skipIf(!swarmBinary || !node)("swarm agy and swarm grok: the native swarm runs them as the TypeScript CLI does", () => {
+  test("usage errors, refusals and what they need before they start", async () => {
+    await same(
+      each("agy", [
+        [["--name"]],
+        [["--name", "me"]],
+        [["--under"]],
+        [["--root", "--under=lead"]],
+        [["-i"]],
+        [["--continue=x"]],
+        [["remote-control"]],
+        [["-p"]],
+        [["--conversation"]],
+        [[], { SCP_AGY_BIN: "", PATH: "/nonexistent" }],
+        [["-p", "hi"]],
+      ]),
+    )
+    await same(each("grok", [[["-c"]], [["--fork-session"]], [["-s"]], [["--prompt-file"]], [[], { PATH: "/nonexistent" }]]))
+    await same(each("agy", [[[]]]), async (m) => {
+      const file = hooksTarget("agy", "user", m.env, m.work)
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, JSON.stringify({ scp: { enabled: false, SessionStart: [{}] } }))
+    })
+  })
+
+  test("agy: a prompt is the first turn and each message resumes the conversation its hooks reported", async () => {
+    const out = await same(async (m) => {
+      const waited = supervise(m, "agy", ["--name", "w", "--", "--model", "m", "-p", "hi", "--", "tail"], /$^/)
+      await until(() => turns(m) === 1)
+      await send(m, "me/w", "ping")
+      await until(() => turns(m) === 2)
+      waited.stop()
+      return [await waited]
+    }, agyMachine)
+    expect((out[0] as { records: Record<string, string> }).records["turns.log"]).toContain('"--conversation","conv-1"')
+  })
+
+  test("agy: without a prompt the first message opens the conversation, and an unreported one stops it", async () => {
+    await same(async (m) => {
+      const waited = supervise(m, "agy", ["--name", "w"], /$^/, { FAKE_NO_CONVERSATION: "1" })
+      await until(() => waited.stderr().includes("waiting for messages"))
+      await send(m, "me/w", "ping")
+      return [await waited]
+    }, agyMachine)
+  })
+
+  test("grok: a chosen session, a failed turn and a binary that will not start", async () => {
+    await same(async (m) => {
+      const steps: unknown[] = []
+      const waited = supervise(m, "grok", ["--name", "g", "-s", "s1"], /$^/)
+      await until(() => waited.stderr().includes("waiting for messages"))
+      await send(m, "me/g", "ping")
+      await until(() => turns(m) === 1)
+      await send(m, "me/g", "pong")
+      await until(() => turns(m) === 2)
+      await send(m, "me/g", "please-fail")
+      steps.push(await waited)
+      steps.push(await run(m, "grok", ["--resume=r1", "-p", "hi", "--allow", "x"], { SCP_GROK_BIN: "/nonexistent/grok" }))
+      steps.push(await run(m, "grok", ["-p", "hi"], { FAKE_CODE: "6" }))
+      return steps
+    }, broker)
+  })
+
+  test("a signal stops the waiting launcher with 0", async () => {
+    await same(
+      async (m) => [await supervise(m, "grok", ["--name", "g"], WAITING), await supervise(m, "agy", ["--name", "a"], WAITING, {}, "SIGINT")],
+      agyMachine,
+    )
+  })
+})
+
+/** the plugin OpenCode would load, for the user */
+function opencodeFile(m: Machine, content: string) {
+  const file = hooksTarget("opencode", "user", m.env, m.work)
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, content)
+}
+
+describe.skipIf(!swarmBinary || !node)("swarm opencode and swarm pi: the native swarm runs them as the TypeScript CLI does", () => {
+  test("opencode: what it needs before it starts", async () => {
+    await same(each("opencode", [[[], { PATH: "/nonexistent" }], [["--name"]], [["--as", "me"]], [["--root", "--under=x"]], [[]]]))
+    await same(each("opencode", [[[]]]), (m) => opencodeFile(m, "// another plugin"))
+  })
+
+  test("opencode: arguments, environment and exit code", async () => {
+    const out = await same(
+      each("opencode", [
+        [["--name", "lead", "run", "--as=me/other", "--", "--name", "x"], { FAKE_CODE: "7" }],
+        [["-c", "--root"]],
+        [["--under=lead", "--session=s"]],
+        [[], { SCP_OPENCODE_BIN: "/nonexistent/opencode" }],
+      ]),
+      async (m) => {
+        opencodeFile(m, opencodePlugin({ blockStop: true }))
+        mkdirSync(join(m.env.XDG_CONFIG_HOME!, "opencode"), { recursive: true })
+        await broker(m)
+      },
+    )
+    expect((out[0] as { code: number }).code).toBe(7)
+    await same(each("opencode", [[[]]]), async (m) => {
+      opencodeFile(m, opencodePlugin())
+      writeFileSync(join(m.work, "opencode.json"), JSON.stringify({ mcp: { scp: { type: "local", command: ["swarm", "mcp"] } } }))
+      await broker(m)
+    })
+  })
+
+  test("pi: arguments, environment and exit code", async () => {
+    const out = await same(
+      each("pi", [
+        [["--name"]],
+        [["--as", "me"]],
+        [["--root", "--under=x"]],
+        [["--name=lead", "--model", "m", "--name", "session"], { FAKE_CODE: "7" }],
+        [["--as", "me/lead", "--", "-c"]],
+        [["-c"], { SCP_PI_EXTENSION: "/x/ext.ts" }],
+        [["--under=lead", "--resume"]],
+        [[], { SCP_PI_BIN: "/nonexistent/pi" }],
+      ]),
+      broker,
+    )
+    expect((out[3] as { code: number }).code).toBe(7)
+  })
+
+  test("the native swarm embeds the extension the CLI bundles, and writes it to the relay directory", async () => {
+    const bundled = readFileSync(join(dirname(dist), "pi-extension.js"), "utf8")
+    expect(readFileSync(join(import.meta.dir, "..", "..", "..", "crates", "scp-cli", "src", "launch", "pi-extension.txt"), "utf8")).toBe(bundled)
+    const m = machine("native")
+    await broker(m)
+    delete m.env.SCP_CLI_ARGV
+    const out = await run(m, "pi", ["-c"])
+    const file = out.records["turns.log"]!.split("\n")[0]!
+    const [, path] = JSON.parse(file) as string[]
+    expect(path!.startsWith("<root>/relay/pi/extension-")).toBe(true)
+    const written = path!.replace("<root>", m.root)
+    expect(readFileSync(written, "utf8")).toBe(bundled)
+    expect(statSync(written).mode & 0o777).toBe(0o600)
   })
 })

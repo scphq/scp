@@ -4,7 +4,9 @@
 pub mod attribute;
 pub mod channel;
 pub mod codex;
+pub mod foreground;
 pub mod muse;
+pub mod resume;
 pub mod t3code;
 pub mod ws;
 
@@ -26,6 +28,22 @@ pub const VERBS: &[Verb] = &[
     Verb {
         name: "t3code",
         run: Run::Words(t3code::t3code),
+    },
+    Verb {
+        name: "agy",
+        run: Run::Words(resume::agy),
+    },
+    Verb {
+        name: "grok",
+        run: Run::Words(resume::grok),
+    },
+    Verb {
+        name: "opencode",
+        run: Run::Words(foreground::opencode),
+    },
+    Verb {
+        name: "pi",
+        run: Run::Words(foreground::pi),
     },
 ];
 
