@@ -385,7 +385,7 @@ fn hibernate<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done
             params.push(("ref", Value::from(reference)));
         }
         if let Some(eta) = eta {
-            params.push(("eta_s", Value::from(eta.round() as i64)));
+            params.push(("eta_s", crate::messages::number(eta.round())));
         }
         let result = ask(opened, "hibernate", params).await?;
         if flags.on("json") {
@@ -549,6 +549,15 @@ mod tests {
         assert_eq!(one_line("  a\n\tb\u{a0}\u{feff}c \u{2028} "), "a b c");
         assert_eq!(one_line("\u{3000}"), "");
         assert_eq!(one_line("x\u{85}y"), "x\u{85}y");
+    }
+
+    #[test]
+    fn an_eta_beyond_a_javascript_number_goes_as_null() {
+        let eta =
+            |text: &str| crate::messages::number(parse_seconds(text, "--eta").unwrap().round());
+        assert_eq!(eta("90m"), Value::from(5400));
+        assert_eq!(eta(&"9".repeat(400)), Value::Null);
+        assert_eq!(eta(&format!("1{}", "0".repeat(20))).as_f64(), Some(1e20));
     }
 
     #[test]

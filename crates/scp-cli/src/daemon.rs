@@ -78,7 +78,7 @@ pub fn broker_pid(dir: &std::path::Path, script: Option<&str>) -> Option<i32> {
     let daemon = command.split_whitespace().any(|word| word == "daemon");
     let ours = command.contains("scp")
         || command.contains("swarm")
-        || script.is_some_and(|script| command.contains(script));
+        || script.is_some_and(|script| !script.is_empty() && command.contains(script));
     (daemon && ours).then_some(pid)
 }
 
@@ -98,7 +98,15 @@ pub fn kill_error(error: &std::io::Error) -> String {
 
 /// the script of the CLI that runs this command, from `$SCP_CLI_ARGV`, whose brokers run as `<node> <script> daemon`
 pub fn cli_script(env: &scp_mcp::ps::Env) -> Option<String> {
-    scp_mcp::spawn::named_launcher(env).and_then(|words| words.last().cloned())
+    scp_mcp::spawn::named_launcher(env).and_then(launcher_script)
+}
+
+/// the script a `<node> <script>` launcher runs, None for a bare program or an empty script
+pub fn launcher_script(words: Vec<String>) -> Option<String> {
+    (words.len() > 1)
+        .then(|| words.last().cloned())
+        .flatten()
+        .filter(|script| !script.is_empty())
 }
 
 /// stops the broker of the relay dir with SIGTERM and waits up to 5 s for it: its pid, None when none ran
@@ -208,6 +216,14 @@ mod tests {
         assert_eq!(broker_pid(&dir, Some(&script)), pid);
         assert_eq!(broker_pid(&dir, None), None);
         assert_eq!(broker_pid(&dir, Some("/elsewhere/cli.js")), None);
+        assert_eq!(broker_pid(&dir, Some("")), None);
+        let words = |w: &[&str]| w.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(launcher_script(words(&["node", ""])), None);
+        assert_eq!(launcher_script(words(&["node"])), None);
+        assert_eq!(
+            launcher_script(words(&["node", "/a/cli.js"])).as_deref(),
+            Some("/a/cli.js")
+        );
         std::fs::write(dir.join("broker.lock"), "1.5:0").unwrap();
         assert_eq!(broker_pid(&dir, Some(&script)), None);
         assert_eq!(

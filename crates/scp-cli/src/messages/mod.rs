@@ -154,7 +154,7 @@ fn wait_arg(value: Option<&str>, fallback: f64) -> Result<f64, Fail> {
 }
 
 /// a number as JSON carries it from JavaScript
-fn number(n: f64) -> Value {
+pub(crate) fn number(n: f64) -> Value {
     if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
         Value::from(n as i64)
     } else {
