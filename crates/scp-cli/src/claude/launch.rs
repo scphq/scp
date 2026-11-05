@@ -25,6 +25,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 
@@ -343,8 +344,8 @@ fn session_id(text: &str) -> bool {
             .all(|(part, len)| part.len() == len && part.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// `bin args` as `spawnSync` runs it, with stdin closed and stderr dropped: its stdout, whatever its exit, cut off by the timeout or
-/// past the buffer
+/// `bin args` as `spawnSync` runs it, with stdin closed and stderr dropped: its stdout whatever its exit, what it printed before the
+/// timeout's SIGTERM, or the first `max` bytes once it printed more, which ends it too
 fn stdout_of(bin: &str, args: &[&str], env: &Env, timeout_ms: u64, max: usize) -> Option<String> {
     let mut child = std::process::Command::new(bin)
         .args(args)
@@ -356,47 +357,48 @@ fn stdout_of(bin: &str, args: &[&str], env: &Env, timeout_ms: u64, max: usize) -
         .spawn()
         .ok()?;
     let mut pipe = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let (tx, ended) = std::sync::mpsc::channel();
+    let shared = kept.clone();
     std::thread::spawn(move || {
-        let mut out = Vec::new();
         let mut chunk = [0u8; 65536];
-        loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    out.extend_from_slice(&chunk[..n]);
-                    if out.len() > max {
-                        let _ = tx.send(None);
-                        return;
-                    }
-                }
+        let mut over = false;
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            let mut out = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let room = max.saturating_sub(out.len());
+            out.extend_from_slice(&chunk[..n.min(room)]);
+            if n > room {
+                over = true;
+                break;
             }
         }
-        let _ = tx.send(Some(out));
+        let _ = tx.send(over);
     });
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let read = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
-    let out = match read {
-        Ok(Some(out)) => out,
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
+    let over = ended
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok();
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
+            Ok(None) if over == Some(true) || Instant::now() >= deadline => {
                 // SAFETY: signals the child it started and has not reaped
                 unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
                 let _ = child.wait();
-                return None;
+                break;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(2)),
-            Err(_) => break,
+            _ => break,
         }
     }
+    if over.is_none() {
+        let _ = ended.recv_timeout(Duration::from_millis(100));
+    }
+    let out = kept.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -544,6 +546,14 @@ fn run_claude(
         })?;
         let pid = child.id().map_or(0, |pid| pid as i32);
         let mut out = child.stdout.take();
+        let (tee, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
+        let writer = out.is_some().then(|| {
+            std::thread::spawn(move || {
+                for chunk in chunks {
+                    term::print_bytes(&chunk);
+                }
+            })
+        });
         let mut printed = Vec::new();
         let mut chunk = vec![0u8; 65536];
         let mut status = None;
@@ -551,7 +561,7 @@ fn run_claude(
             tokio::select! {
                 read = async { out.as_mut().unwrap().read(&mut chunk).await }, if out.is_some() => match read {
                     Ok(n) if n > 0 => {
-                        term::print_bytes(&chunk[..n]);
+                        let _ = tee.send(chunk[..n].to_vec());
                         printed.extend_from_slice(&chunk[..n]);
                     }
                     _ => out = None,
@@ -564,6 +574,10 @@ fn run_claude(
                     }
                 }
             }
+        }
+        drop(tee);
+        if let Some(writer) = writer {
+            let _ = writer.join();
         }
         let code = match status {
             Some(Ok(status)) => status
@@ -818,6 +832,9 @@ pub fn claude(call: &Call, argv: &[String]) -> Done {
     if matches!(first, Some("ls" | "prune")) {
         return super::bg_cmd::claude(argv, call.env, call.host);
     }
+    if let Ok(exe) = std::env::current_exe() {
+        scp_mcp::spawn::set_native_daemon(exe);
+    }
     let mut env = call.env.clone();
     route::caller_argv(&mut env);
     let bin = which_on_path("claude", &env);
@@ -843,7 +860,7 @@ pub fn claude(call: &Call, argv: &[String]) -> Done {
     };
     let warn = |line: &str| term::err(line);
     if parsed.bg {
-        let attribution = block_on(attribute("claude", placement, &env, &launch.cwd, &warn))??;
+        let attribution = block_on(attribute("claude", placement, call.env, &launch.cwd, &warn))??;
         let prior = if attribution.is_some() || parsed.root {
             None
         } else {
@@ -897,7 +914,7 @@ pub fn claude(call: &Call, argv: &[String]) -> Done {
             "{CLI_NAME} claude: using your --mcp-config; it needs the scp server with --channels for messages to wake this session"
         ));
     }
-    let attribution = block_on(attribute("claude", placement, &env, &launch.cwd, &warn))??;
+    let attribution = block_on(attribute("claude", placement, call.env, &launch.cwd, &warn))??;
     let launch_env = attributed(&env, attribution.as_ref());
     let added = name_prompt(parsed.name.as_deref(), args, &launch_env, &launch.cwd);
     let mut run_env = without(&launch_env, &CLAUDE_SESSION_ENV);

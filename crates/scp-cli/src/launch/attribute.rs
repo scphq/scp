@@ -180,7 +180,8 @@ fn js_text(value: &Value) -> String {
 /// more. A $SCP_GRANT is the caller's own when it binds this shell (a spawned agent's spent grant), and is replaced; any other applies
 /// as is. An explicit parent replaces caller attribution with a claim request, including on resume. Nothing for a resumed session, on
 /// the cloud transport, or when no agent runs this shell, which stays silent. Once a harness or agent is found, a failure warns and the
-/// session starts unlinked; with `root`, or once the caller is known, without the caller's identity
+/// session starts unlinked; with `root`, or once the caller is known, without the caller's identity. `env` is the environment as the
+/// router handed it, whose `SCP_CLI_ARGV` starts a broker
 pub async fn attribute(
     launcher: &str,
     placement: Placement<'_>,
