@@ -6,7 +6,7 @@ pub mod relink;
 use crate::claude::bg_plan::parse_seconds;
 use crate::fleet::json::Json;
 use crate::fleet::view::{text, truthy, wake_text};
-use crate::fleet::{ask, missing, thrown};
+use crate::fleet::{ask, missing, result_of, thrown};
 use crate::open::{Opened, runtime, start_broker, terminal_attached};
 use crate::term::{note, out};
 use crate::{Call, Done, Fail, Run, Verb, usage};
@@ -183,16 +183,20 @@ async fn open_adopt_human(call: &Call<'_>) -> Result<Opened, Fail> {
     hello.insert("tty".into(), Value::Bool(true));
     hello.insert("cwd".into(), Value::from(safe_cwd()));
     hello.insert("brief".into(), Value::Bool(true));
-    let hello = match client.hello(hello).await {
+    let reply = client.hello_line(hello).await;
+    let hello = match reply.map_err(Fail::from).and_then(|line| result_of(&line)) {
         Ok(hello) => hello,
-        Err(error) => {
+        Err(fail) => {
             client.close();
-            return Err(error.into());
+            return Err(fail);
         }
     };
+    let endpoint = hello.get("endpoint").cloned().unwrap_or(Json::Null);
+    let hello = hello.to_value();
     Ok(Opened {
         client,
         me: get(&hello, "endpoint").cloned().unwrap_or(Value::Null),
+        endpoint,
         broker: get(&hello, "broker").cloned().unwrap_or(Value::Null),
         bound: Some("human"),
         harness_pid: None,
