@@ -1,0 +1,294 @@
+{
+  "views": [
+    {
+      "view": {
+        "address": "me/a",
+        "preset": "open",
+        "tree": "me/a",
+        "parent": null,
+        "depth": 0,
+        "rules": {},
+        "caps": [],
+        "groups": []
+      },
+      "lines": [
+        "me/a  scope open  tree me/a  depth 0",
+        "rules in: open",
+        "rules out: open"
+      ]
+    },
+    {
+      "view": {
+        "address": "me/kid",
+        "preset": "custom",
+        "tree": "me/r",
+        "parent": "me/r",
+        "depth": 2,
+        "rules": {
+          "in": [],
+          "out": [
+            "ep:b",
+            "*"
+          ]
+        },
+        "caps": [
+          {
+            "id": "cap_1",
+            "dir": "in",
+            "by": "me/r",
+            "sels": [
+              {
+                "sel": "tree:parent"
+              },
+              {
+                "sel": "ep:x",
+                "via": "me/r"
+              }
+            ]
+          },
+          {
+            "id": "group:g:out",
+            "dir": "out",
+            "by": "group:g",
+            "sels": []
+          }
+        ],
+        "groups": [
+          "g",
+          "ünï"
+        ]
+      },
+      "lines": [
+        "me/kid  scope custom  tree me/r  parent me/r  depth 2",
+        "rules in: (none)",
+        "rules out: ep:b,*",
+        "cap cap_1 in by me/r: tree:parent,ep:x (via me/r)",
+        "cap group:g:out out by group:g: (none)",
+        "groups: g, ünï"
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "result": [],
+      "text": "no groups"
+    },
+    {
+      "result": [
+        {
+          "name": "g",
+          "owner": "me/a",
+          "members": 1,
+          "pinned": true,
+          "policy": false
+        },
+        {
+          "name": "h",
+          "owner": "me/b",
+          "members": 0,
+          "pinned": false,
+          "policy": true,
+          "ignored": "no such tree"
+        }
+      ],
+      "text": "g  owner me/a  1 member  pinned\nh  owner me/b  0 members  policy  ignored: no such tree"
+    },
+    {
+      "result": {
+        "name": "g",
+        "dropped": true
+      },
+      "text": "group g dropped"
+    },
+    {
+      "result": {
+        "name": "g",
+        "endpoint": "me/a",
+        "member": true
+      },
+      "text": "me/a joined group g"
+    },
+    {
+      "result": {
+        "name": "g",
+        "endpoint": "me/a",
+        "member": false
+      },
+      "text": "me/a left group g"
+    },
+    {
+      "result": {
+        "name": "g",
+        "owner": "me/a",
+        "tree": null,
+        "pinned": false,
+        "members": [],
+        "rules": {}
+      },
+      "text": "group g  owner me/a\nrules in: open\nrules out: open\nmembers: none"
+    },
+    {
+      "result": {
+        "name": "g",
+        "owner": "me/a",
+        "tree": "me/r",
+        "pinned": true,
+        "members": [
+          "me/a",
+          "me/b"
+        ],
+        "rules": {
+          "in": [
+            {
+              "sel": "ep:a",
+              "via": "me/r"
+            },
+            {
+              "sel": "*"
+            }
+          ],
+          "out": []
+        }
+      },
+      "text": "group g  owner me/a  tree me/r  pinned\nrules in: ep:a (via me/r),*\nrules out: (none)\nmembers: me/a, me/b"
+    },
+    {
+      "result": {
+        "2": [
+          true
+        ],
+        "z": 1,
+        "a": {
+          "y": null,
+          "b": "é"
+        }
+      },
+      "text": "{\n  \"2\": [\n    true\n  ],\n  \"z\": 1,\n  \"a\": {\n    \"y\": null,\n    \"b\": \"é\"\n  }\n}"
+    },
+    {
+      "result": null,
+      "text": "null"
+    }
+  ],
+  "holds": [
+    {
+      "words": [],
+      "values": {},
+      "args": {
+        "action": "ls"
+      }
+    },
+    {
+      "words": [
+        "ls",
+        "h"
+      ],
+      "values": {},
+      "error": "swarm holds takes ls [--all], show <id>, release <id> [--redacted] or refuse <id> --reason TEXT"
+    },
+    {
+      "words": [
+        "show"
+      ],
+      "values": {},
+      "error": "swarm holds takes ls [--all], show <id>, release <id> [--redacted] or refuse <id> --reason TEXT"
+    },
+    {
+      "words": [
+        "nope",
+        "h"
+      ],
+      "values": {},
+      "error": "swarm holds takes ls [--all], show <id>, release <id> [--redacted] or refuse <id> --reason TEXT"
+    },
+    {
+      "words": [
+        "show",
+        "h",
+        "x"
+      ],
+      "values": {},
+      "error": "swarm holds takes ls [--all], show <id>, release <id> [--redacted] or refuse <id> --reason TEXT"
+    },
+    {
+      "words": [
+        "show",
+        "h"
+      ],
+      "values": {
+        "redacted": true
+      },
+      "error": "--redacted goes only with swarm holds release"
+    },
+    {
+      "words": [
+        "release",
+        "h"
+      ],
+      "values": {
+        "redacted": true,
+        "reason": "x"
+      },
+      "error": "--reason goes only with swarm holds refuse"
+    },
+    {
+      "words": [
+        "release",
+        "h"
+      ],
+      "values": {
+        "all": true
+      },
+      "error": "--all goes only with swarm holds ls"
+    },
+    {
+      "words": [
+        "refuse",
+        "h"
+      ],
+      "values": {},
+      "error": "swarm holds refuse needs --reason TEXT: the sender is told it"
+    },
+    {
+      "words": [
+        "refuse",
+        "h"
+      ],
+      "values": {
+        "reason": " \t\n"
+      },
+      "error": "swarm holds refuse needs --reason TEXT: the sender is told it"
+    },
+    {
+      "words": [
+        "refuse",
+        "h"
+      ],
+      "values": {
+        "reason": "spam"
+      },
+      "args": {
+        "action": "refuse",
+        "id": "h"
+      }
+    },
+    {
+      "words": [
+        "ls"
+      ],
+      "values": {
+        "all": true
+      },
+      "args": {
+        "action": "ls"
+      }
+    },
+    {
+      "words": [
+        ""
+      ],
+      "values": {},
+      "error": "swarm holds takes ls [--all], show <id>, release <id> [--redacted] or refuse <id> --reason TEXT"
+    }
+  ]
+}

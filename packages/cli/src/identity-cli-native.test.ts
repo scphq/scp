@@ -26,6 +26,14 @@ import { createServer } from "node:net"
 import { socketPath } from ${JSON.stringify(join(import.meta.dir, "../../broker/src/index.ts"))}
 import { open } from ${JSON.stringify(join(import.meta.dir, "common.ts"))}
 const [values, verb] = [JSON.parse(process.argv[2]), process.argv[3]]
+const harness = Number(process.env.PROBE_HARNESS)
+setInterval(() => {
+  try {
+    process.kill(harness, 0)
+  } catch {
+    process.exit(1)
+  }
+}, 250).unref()
 let hello
 const server = createServer((socket) => {
   let buffer = ""
@@ -40,13 +48,20 @@ const server = createServer((socket) => {
     }
   })
 })
-await new Promise((done, fail) => server.once("error", fail).listen(socketPath(process.env.SCP_DIR), done))
-const opened = await open(verb, values, process.cwd(), false)
-const { protocol, capabilities, ...rest } = hello
-console.log(JSON.stringify({ hello: rest, harness_pid: opened.harnessPid || null, shell: process.ppid }))
-opened.client.close()
-server.close()
-process.exit(0)
+let code = 1
+try {
+  await new Promise((done, fail) => server.once("error", fail).listen(socketPath(process.env.SCP_DIR), done))
+  const opened = await open(verb, values, process.cwd(), false)
+  opened.client.close()
+  const { protocol, capabilities, ...rest } = hello
+  console.log(JSON.stringify({ hello: rest, harness_pid: opened.harnessPid || null, shell: process.ppid }))
+  code = 0
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error))
+} finally {
+  server.close()
+  process.exit(code)
+}
 `
 
 /** a harness process: it runs both probes as its children, through `sh -c` when asked, and prints both */
@@ -55,7 +70,7 @@ const plan = JSON.parse(process.env.PROBE_PLAN)
 const hop = (argv) => (plan.shell ? ["sh", "-c", '"$@"; :', "sh", ...argv] : argv)
 const flags = [...(plan.values.as !== undefined ? ["--as", plan.values.as] : []), ...(plan.values.harness !== undefined ? ["--harness", plan.values.harness] : []), ...(plan.values.human ? ["--human"] : [])]
 const run = async (argv) => {
-  const child = Bun.spawn(hop(argv), { env: process.env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  const child = Bun.spawn(hop(argv), { env: { ...process.env, PROBE_HARNESS: String(process.pid) }, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
   const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   if (code !== 0) throw new Error(argv[0] + " exited " + code + ": " + err)
   return JSON.parse(out)
@@ -73,6 +88,22 @@ type Plan = {
   shell?: boolean
 }
 
+/** the process groups of fake harnesses still running: each harness leads its own, which holds its shells and probes */
+const groups = new Set<number>()
+
+function reap(group: number): void {
+  try {
+    process.kill(-group, "SIGKILL")
+  } catch {}
+  groups.delete(group)
+}
+afterAll(() => {
+  for (const group of groups) reap(group)
+})
+process.on("exit", () => {
+  for (const group of groups) reap(group)
+})
+
 async function probes(plan: Plan): Promise<{ ts: Record<string, unknown>; native: Record<string, unknown> }> {
   const base: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !MARKERS.test(key)) base[key] = value
@@ -86,10 +117,15 @@ async function probes(plan: Plan): Promise<{ ts: Record<string, unknown>; native
     PROBE_SCRIPT: join(root, "probe.ts"),
     PROBE_NATIVE: swarmBinary!,
   }
-  const child = Bun.spawn([join(bin, plan.harness), join(root, "harness.js")], { env, cwd: project, stdout: "pipe", stderr: "pipe" })
-  const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-  if (code !== 0) throw new Error(`the fake harness failed (${code}): ${err}`)
-  return JSON.parse(out)
+  const child = Bun.spawn([join(bin, plan.harness), join(root, "harness.js")], { env, cwd: project, stdout: "pipe", stderr: "pipe", detached: true })
+  groups.add(child.pid)
+  try {
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    if (code !== 0) throw new Error(`the fake harness failed (${code}): ${err}`)
+    return JSON.parse(out)
+  } finally {
+    reap(child.pid)
+  }
 }
 
 /** the native plan sends the hello this CLI's open() sends, from the same shell and harness */

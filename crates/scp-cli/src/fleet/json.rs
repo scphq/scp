@@ -53,6 +53,18 @@ impl Json {
         )
     }
 
+    /// `{ ...first, ...object, ...last }`: a later key takes an earlier one's value where it stands
+    pub fn spread(first: Vec<(&str, Json)>, object: &Json, last: Vec<(&str, Json)>) -> Json {
+        let mut spread = Json::object(first);
+        for (key, value) in object.entries() {
+            spread.set(key, value.clone());
+        }
+        for (key, value) in last {
+            spread.set(key, value);
+        }
+        spread
+    }
+
     pub fn str(text: impl Into<String>) -> Json {
         Json::Str(text.into())
     }
@@ -421,6 +433,22 @@ mod tests {
         assert_eq!(
             round(r#"{"4294967295":1,"4294967294":2}"#),
             r#"{"4294967294":2,"4294967295":1}"#
+        );
+    }
+
+    #[test]
+    fn spread_keys_keep_their_place_and_later_ones_append() {
+        let result = Json::parse(br#"{"b":1,"a":{"y":[1],"x":null},"7":0}"#).unwrap();
+        let spread = Json::spread(vec![("preamble", Json::str("p"))], &result, vec![]);
+        assert_eq!(
+            spread.compact(),
+            r#"{"7":0,"preamble":"p","b":1,"a":{"y":[1],"x":null}}"#
+        );
+        let reply = Json::parse(br#"{"z":0,"reply_to":1}"#).unwrap();
+        let answered = Json::object(vec![("id", Json::str("msg_1"))]);
+        assert_eq!(
+            Json::spread(vec![], &reply, vec![("reply_to", answered)]).compact(),
+            r#"{"z":0,"reply_to":{"id":"msg_1"}}"#
         );
     }
 

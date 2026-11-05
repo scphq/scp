@@ -3,8 +3,10 @@
 mod body;
 mod text;
 
+use crate::fleet::json::Json;
+use crate::fleet::result_of;
 use crate::open::Opened;
-use crate::term::{json, note, out};
+use crate::term::{note, out};
 use crate::{Call, Done, Fail, Run, Verb, usage};
 use body::{body_text, js_number};
 use scp_core::protocol::{CLI_NAME, LIMITS};
@@ -13,7 +15,7 @@ use scp_mcp::client::CallError;
 use scp_mcp::render::{PREAMBLE, list_of, reach_lines, short_id};
 use scp_mcp::tools::{get, held_text, js, js_num, js_trim, truthy};
 use serde_json::{Map, Value};
-use text::{Json, message_text, sent_lines};
+use text::{message_text, sent_lines};
 
 pub use body::body_from_stdin;
 
@@ -50,28 +52,32 @@ pub const VERBS: &[Verb] = &[
 
 const ACK_ALL_PAGES: u64 = (2 * LIMITS.inbox_max).div_ceil(LIMITS.inbox_page) + 1;
 
-async fn request(opened: &Opened, method: &str, params: Map<String, Value>) -> Result<Value, Fail> {
-    Ok(opened.client.request(method, Value::Object(params)).await?)
+/// a reply's result, its keys in the order the broker wrote them
+async fn request(opened: &Opened, method: &str, params: Map<String, Value>) -> Result<Json, Fail> {
+    let line = opened
+        .client
+        .request_line(method, Value::Object(params))
+        .await?;
+    result_of(&line)
 }
 
 /// a message delivered to the caller by id, seq, unique suffix or `last`, with `member` also one in a thread the caller is in;
 /// a reference the broker cannot resolve is a usage error saying why
-async fn lookup(opened: &Opened, id: &str, member: bool) -> Result<Option<Value>, Fail> {
+async fn lookup(opened: &Opened, id: &str, member: bool) -> Result<Option<Json>, Fail> {
     let mut params = Map::new();
     params.insert("id".into(), Value::from(id));
     if member {
         params.insert("member".into(), Value::Bool(true));
     }
-    match opened
-        .client
-        .request("message", Value::Object(params))
-        .await
-    {
-        Ok(reply) => Ok(get(&reply, "message").filter(|m| truthy(Some(m))).cloned()),
-        Err(CallError::Relay { code, message, .. }) if code == "invalid_params" => {
+    match request(opened, "message", params).await {
+        Ok(reply) => Ok(reply
+            .get("message")
+            .filter(|m| crate::fleet::view::truthy(Some(m)))
+            .cloned()),
+        Err(Fail::Call(CallError::Relay { code, message, .. })) if code == "invalid_params" => {
             Err(usage(message))
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     }
 }
 
@@ -167,12 +173,13 @@ fn print_message(message: &Value) {
 }
 
 /// what `ask` and `ask-wait` print for `result`, and the exit code: 0 with a reply, else 2
-fn print_ask(result: &Value, as_json: bool, to: &str) -> i32 {
+fn print_ask(answer: &Json, as_json: bool, to: &str) -> i32 {
+    let result = &answer.to_value();
     let reply = get(result, "reply").filter(|r| truthy(Some(r)));
     let ended = list_of(get(result, "ended"));
     if as_json {
-        let preamble = Value::from(PREAMBLE);
-        out(&Json::spread(&[("preamble", Json::Value(&preamble))], result, vec![]).text());
+        let preamble = vec![("preamble", Json::str(PREAMBLE))];
+        out(&Json::spread(preamble, answer, vec![]).pretty());
     } else if let Some(held) = get(result, "held").filter(|h| truthy(Some(h))) {
         out(&held_text(held));
     } else if let Some(reply) = reply {
@@ -248,7 +255,7 @@ fn send<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             Some(reference) => Some(
                 lookup(opened, reference, true)
                     .await?
-                    .and_then(|m| get(&m, "id").cloned())
+                    .and_then(|m| m.get("id").map(Json::to_value))
                     .filter(|id| !id.is_null())
                     .unwrap_or_else(|| Value::from(reference)),
             ),
@@ -279,9 +286,9 @@ fn send<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             }
             let result = request(opened, "send", params).await?;
             if as_json {
-                json(&result);
+                out(&result.pretty());
             } else {
-                for line in sent_lines(&result) {
+                for line in sent_lines(&result.to_value()) {
                     out(&line);
                 }
             }
@@ -310,6 +317,7 @@ fn reply<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
                 "no message {id} was delivered to you or sits in a thread you are in; {CLI_NAME} send writes to an agent"
             )));
         };
+        let message = message.to_value();
         let from = get(&message, "from").and_then(|f| get(f, "address"));
         let mut params = Map::new();
         if let Some(from) = from {
@@ -323,18 +331,19 @@ fn reply<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
                 params.insert(key.into(), value.clone());
             }
         }
-        let result = request(opened, "send", params).await?;
+        let answer = request(opened, "send", params).await?;
+        let result = answer.to_value();
         let id_value = get(&message, "id").cloned().unwrap_or(Value::Null);
         let message_id = js(get(&message, "id"));
         let short = Value::from(short_id(&message_id));
         let from = Value::from(js(from));
         if call.parsed.on("json") {
-            let answered = Json::Object(vec![
-                ("id", Json::Value(&id_value)),
-                ("short", Json::Value(&short)),
-                ("from", Json::Value(&from)),
+            let answered = Json::object(vec![
+                ("id", Json::from(&id_value)),
+                ("short", Json::from(&short)),
+                ("from", Json::from(&from)),
             ]);
-            out(&Json::spread(&[], &result, vec![("reply_to", answered)]).text());
+            out(&Json::spread(vec![], &answer, vec![("reply_to", answered)]).pretty());
             return Ok(0);
         }
         let deliveries = list_of(get(&result, "deliveries"));
@@ -380,19 +389,19 @@ fn inbox<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         let mut params = Map::new();
         params.insert("wait_s".into(), number(waited));
         let reply = request(opened, "inbox", params).await?;
-        let listed = get(&reply, "messages");
+        let listed = reply.get("messages");
         if parsed.on("json") {
-            let preamble = Value::from(PREAMBLE);
-            let mut entries = vec![("preamble", &preamble)];
+            let mut entries = vec![("preamble", Json::str(PREAMBLE))];
             if let Some(listed) = listed {
-                entries.push(("messages", listed));
+                entries.push(("messages", listed.clone()));
             }
-            crate::term::json_entries(&entries);
+            out(&Json::object(entries).pretty());
             if parsed.on("keep") {
                 return Ok(0);
             }
         }
-        let messages = messages_of(listed)?;
+        let listed = listed.map(Json::to_value);
+        let messages = messages_of(listed.as_ref())?;
         if !parsed.on("json") && messages.is_empty() {
             note(&empty_note(waited));
         } else if !parsed.on("json") {
@@ -424,12 +433,12 @@ fn show<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             return Err(usage(format!("no message {id} was delivered to you")));
         };
         if call.parsed.on("json") {
-            let preamble = Value::from(PREAMBLE);
-            crate::term::json_entries(&[("preamble", &preamble), ("message", &message)]);
+            let entries = vec![("preamble", Json::str(PREAMBLE)), ("message", message)];
+            out(&Json::object(entries).pretty());
         } else {
             out(PREAMBLE);
             out("");
-            print_message(&message);
+            print_message(&message.to_value());
         }
         Ok(0)
     })
@@ -457,7 +466,7 @@ async fn ack_seqs(opened: &Opened, seqs: &[Value]) -> Result<f64, Fail> {
     for chunk in seqs.chunks(LIMITS.inbox_page as usize) {
         let mut params = Map::new();
         params.insert("seqs".into(), Value::Array(chunk.to_vec()));
-        let reply = request(opened, "ack", params).await?;
+        let reply = request(opened, "ack", params).await?.to_value();
         acked = add_count(acked, get(&reply, "acked"));
     }
     Ok(acked)
@@ -479,7 +488,7 @@ fn ack<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             for _ in 0..ACK_ALL_PAGES {
                 let mut params = Map::new();
                 params.insert("wait_s".into(), Value::from(0));
-                let reply = request(opened, "inbox", params).await?;
+                let reply = request(opened, "inbox", params).await?.to_value();
                 let messages = messages_of(get(&reply, "messages"))?;
                 if messages.is_empty() {
                     break;
@@ -493,7 +502,7 @@ fn ack<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         } else {
             let mut seqs = Vec::new();
             for word in words {
-                let message = lookup(opened, word, false).await?;
+                let message = lookup(opened, word, false).await?.map(|m| m.to_value());
                 match message.as_ref().and_then(|m| get(m, "seq").map(|s| (m, s))) {
                     Some((message, seq)) => {
                         seqs.push(seq.clone());
@@ -513,22 +522,21 @@ fn ack<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             acked += ack_seqs(opened, &seqs).await?;
         }
         if parsed.on("json") {
-            let acked = number(acked);
-            let mut entries = vec![("acked", Json::Value(&acked))];
+            let mut entries = vec![("acked", Json::from(&number(acked)))];
             if !resolved.is_empty() {
                 let messages = resolved
                     .iter()
                     .map(|(id, short, from)| {
-                        Json::Object(vec![
-                            ("id", Json::Value(id)),
-                            ("short", Json::Value(short)),
-                            ("from", Json::Value(from)),
+                        Json::object(vec![
+                            ("id", Json::from(id)),
+                            ("short", Json::from(short)),
+                            ("from", Json::from(from)),
                         ])
                     })
                     .collect();
-                entries.push(("messages", Json::Array(messages)));
+                entries.push(("messages", Json::Arr(messages)));
             }
-            out(&Json::Object(entries).text());
+            out(&Json::object(entries).pretty());
         } else {
             let mut lines = vec![format!("{} acked", js_num(acked))];
             lines.extend(resolved.iter().map(|(id, short, from)| {

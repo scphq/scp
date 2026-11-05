@@ -1801,6 +1801,7 @@ dependencies = [
  "libc",
  "scp-broker",
  "scp-cli",
+ "scp-dev-core",
  "scp-hook",
  "scp-mcp",
  "serde_json",

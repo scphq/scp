@@ -1155,6 +1155,40 @@ describe("swarm, scopes", () => {
   }
   const addresses = async () => (await lead.request<{ endpoints: { address: string }[] }>("list", { all: true })).endpoints.map((e) => e.address)
 
+  test("spawn-env prints KEY=value lines, unquoted, that env $(...) splits into the grant whatever the title holds", async () => {
+    const title = `say "hi" to $HOME's\tünï 😀\nnext`
+    const spawned = await swarm(["spawn-env", "--name", "kid-quoted", "--title", title, "--ttl", "1h"], env)
+    expect([spawned.code, spawned.stderr]).toEqual([0, ""])
+    const token = /^SCP_GRANT=(krt_[0-9a-f]{64})\n/.exec(spawned.stdout)?.[1]
+    expect(spawned.stdout).toBe(`SCP_GRANT=${token}\nSCP_NAME=kid-quoted\n`)
+    const split = Bun.spawnSync(["sh", "-c", "exec env -i $(cat) /usr/bin/env"], { stdin: new TextEncoder().encode(spawned.stdout) })
+    expect(split.stdout.toString().split("\n").filter(Boolean).sort()).toEqual([`SCP_GRANT=${token}`, "SCP_NAME=kid-quoted"])
+    const whoami = await swarm(["whoami"], { ...env, SCP_GRANT: token!, SCP_NAME: "kid-quoted" })
+    expect(whoami.stdout.split("\n")[0]).toBe("me/kid-quoted (agent, cli)")
+    expect(whoami.stdout).toMatch(/^title +say "hi" to \$HOME's ünï 😀 next$/m)
+  })
+
+  test("--json keeps the key order the broker wrote", async () => {
+    const keys = async (args: string[]) => {
+      const run = await swarm([...args, "--json"], env)
+      expect(run.stderr).toBe("")
+      return Object.keys(JSON.parse(run.stdout) as object)
+    }
+    const unsorted = (list: string[]) => expect(list).not.toEqual([...list].sort())
+    const whoami = await keys(["whoami", "--as", "ordered"])
+    unsorted(whoami)
+    expect(whoami.at(-1)).toBe("bound")
+    const status = await keys(["set-status", "working", "on order", "--as", "ordered"])
+    unsorted(status)
+    expect(await keys(["set-now", "still", "--as", "ordered"])).toEqual(status)
+    unsorted(await keys(["set-title", "ordered keys", "--as", "ordered"]))
+    const sent = await keys(["send", "lead", "in order", "--as", "ordered"])
+    unsorted(sent)
+    const inbox = await swarm(["inbox", "--json", "--keep"], env)
+    const listed = (JSON.parse(inbox.stdout) as { messages: object[] }).messages
+    expect(Object.keys(listed[0]!)).not.toEqual(Object.keys(listed[0]!).sort())
+  })
+
   test("a spawn-env grant without a name, used from the spawner's own shell, fails loudly and acts as no one", async () => {
     const onlooker = await RelayClient.connect(broker.socket)
     try {
