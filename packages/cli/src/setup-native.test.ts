@@ -366,6 +366,11 @@ describe.skipIf(noBinary)("setup, TypeScript against native", () => {
       ["setup", "--cowork", "--no-hooks"],
       ["setup", "--cowork", "--join", "auto"],
       ["setup", "--cowork", "--block-stop-on-unread"],
+      ["setup", "claude-desktop", "--nope"],
+      ["setup", "claude-desktop", "--out", "relative.mcpb"],
+      ["setup", "claude-desktop", "--out", "/tmp/x.zip"],
+      ["setup", "claude-desktop", "--bin", "relative"],
+      ["setup", "claude-desktop", "stray"],
     ])
   })
 })
@@ -740,6 +745,107 @@ describe.skipIf(noBinary)("setup on files it has to be careful with", () => {
   })
 })
 
+describe.skipIf(noBinary)("setup claude-desktop and --cowork, TypeScript against native", () => {
+  const zipEntries = (bytes: Buffer) => {
+    const entries: Record<string, string> = {}
+    for (let at = 0; bytes.readUInt32LE(at) === 0x04034b50; ) {
+      const size = bytes.readUInt32LE(at + 18)
+      const nameLength = bytes.readUInt16LE(at + 26)
+      const name = bytes.toString("utf8", at + 30, at + 30 + nameLength)
+      entries[name] = bytes.toString("utf8", at + 30 + nameLength, at + 30 + nameLength + size)
+      at += 30 + nameLength + size
+    }
+    return entries
+  }
+
+  /** what `args` builds in `dir`, the outputs of a build before it gone, so both engines' paths and so their bytes are the same */
+  const build = (engine: Engine, dir: string, args: string[], vars: Vars) => {
+    rmSync(join(dir, ".scp"), { recursive: true, force: true })
+    rmSync(join(dir, ".config", "scp"), { recursive: true, force: true })
+    const result = swarm(engine, dir, args, vars)
+    const read = (file: string) => (existsSync(file) ? readFileSync(file) : undefined)
+    const tree: Record<string, string> = {}
+    const plugin = join(dir, ".scp", "cowork-plugin")
+    const walk = (at: string, rel: string) => {
+      for (const name of readdirSync(at, { withFileTypes: true })) {
+        if (name.isDirectory()) walk(join(at, name.name), `${rel}${name.name}/`)
+        else tree[`${rel}${name.name}`] = `${(lstatSync(join(at, name.name)).mode & 0o777).toString(8)} ${readFileSync(join(at, name.name), "utf8")}`
+      }
+    }
+    if (existsSync(plugin)) walk(plugin, "")
+    return { result, mcpb: read(join(dir, ".config", "scp", "scp.mcpb")), zip: read(join(dir, ".scp", "scp-cowork.zip")), tree }
+  }
+
+  const script = (dir: string) => {
+    put(join(dir, "tool", "cli.js"), "#!/usr/bin/env node\n", 0o755)
+    put(join(dir, "bin", "node"), "#!/bin/sh\n", 0o755)
+    rmSync(join(dir, "bin", "swarm"))
+    symlinkSync(join(dir, "tool", "cli.js"), join(dir, "bin", "swarm"))
+  }
+
+  const VARIANTS: { vars: Vars; prepare?: (dir: string) => void }[] = [
+    { vars: {} },
+    { vars: {}, prepare: script },
+    { vars: { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary ?? "" } },
+    { vars: { SCP_NATIVE: "mcp", SCP_SWARM_BIN: swarmBinary ?? "" } },
+    { vars: { SCP_NATIVE: "1", SCP_SWARM_BIN: "/no/such/swarm" } },
+  ]
+
+  test("the extension is the same bytes", () => {
+    for (const { vars, prepare } of VARIANTS) {
+      const dir = home()
+      prepare?.(dir)
+      const ts = build("ts", dir, ["setup", "claude-desktop"], vars)
+      const fromNative = build("native", dir, ["setup", "claude-desktop"], vars)
+      expect(ts.result.code).toBe(0)
+      expect(fromNative).toEqual(ts)
+    }
+    const dir = home()
+    const out = join(dir, "built", "x.mcpb")
+    put(join(dir, "bin", "open"), "#!/bin/sh\nexit 3\n", 0o755)
+    const direct = (["ts", "native"] as const).map((engine) => {
+      rmSync(join(dir, "built"), { recursive: true, force: true })
+      const steps = [
+        swarm(engine, dir, ["setup", "claude-desktop", "--out", out, "--open"]),
+        swarm(engine, dir, ["setup", "claude-desktop", "--out", out, "--bin", join(dir, "bin", "swarm")]),
+      ]
+      return [steps, files(dir)]
+    })
+    expect(direct[1]).toEqual(direct[0]!)
+    const noCli = (["ts", "native"] as const).map((engine) => swarm(engine, home(HARNESSES, undefined), ["setup", "claude-desktop"]))
+    expect(noCli[1]).toEqual(noCli[0]!)
+  })
+
+  test("the Cowork plugin compares entry by entry", () => {
+    for (const { vars, prepare } of VARIANTS) {
+      const dir = home()
+      prepare?.(dir)
+      const ts = build("ts", dir, ["setup", "--cowork"], vars)
+      const fromNative = build("native", dir, ["setup", "--cowork"], vars)
+      expect(ts.result).toMatchObject({ code: 0, stderr: "" })
+      expect(Object.keys(zipEntries(ts.zip!))).toEqual([".claude-plugin/plugin.json", ".mcp.json", "hooks/hooks.json"])
+      expect(zipEntries(fromNative.zip!)).toEqual(zipEntries(ts.zip!))
+      expect(fromNative).toEqual(ts)
+    }
+    const runs = (["ts", "native"] as const).map((engine) => {
+      const dir = home()
+      return [
+        swarm(engine, dir, ["setup", "--cowork", "--write"]),
+        swarm(engine, dir, ["setup", "--cowork"]),
+        swarm(engine, dir, ["setup", "--cowork", "--bin", "rel"]),
+        swarm(engine, dir, ["setup", "--cowork", "--bin", join(dir, "nope")]),
+      ]
+    })
+    expect(runs[1]).toEqual(runs[0]!)
+    const lost = (engine: Engine) => {
+      const dir = home()
+      put(join(dir, "bin", "swarm"), "#!/usr/bin/env node\n", 0o755)
+      return swarm(engine, dir, ["setup", "--cowork"], { PATH: join(dir, "bin") })
+    }
+    expect(lost("native")).toEqual(lost("ts"))
+  })
+})
+
 describe.skipIf(noBinary)("setup through the router", () => {
   test("a routed setup runs natively, and the kill switch keeps it on TypeScript", () => {
     const log = process.env.SCP_ROUTE_LOG ?? join(root, "route.log")
@@ -764,6 +870,8 @@ describe.skipIf(noBinary)("setup through the router", () => {
     expect(routed(["setup", "--write"]).exitCode).toBe(0)
     expect(routed(["setup"]).stdout.toString()).toContain("everything is in place")
     expect(routed(["setup"], { SCP_NATIVE_TS: "setup" }).stdout.toString()).toContain("everything is in place")
+    expect(routed(["setup", "claude-desktop"]).exitCode).toBe(0)
+    expect(routed(["setup", "--cowork"]).exitCode).toBe(0)
     expect(routed(["setup", "--help"]).stdout.toString()).toContain("--undo")
     const lines = readFileSync(log, "utf8")
     expect(lines).toContain("setup native run")

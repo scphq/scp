@@ -1,5 +1,7 @@
 //! `swarm setup`: the plan, and with `--write` its application and a check per harness.
 
+use super::cowork::cowork_setup;
+use super::desktop::{claude_desktop_setup, parse_claude_desktop_args};
 use super::files::{exists, fs_error, make_temp_dir, read_json, read_text, rewritable_text};
 use super::harness::{
     SETUP_HARNESSES, agy_rules, agy_settings_file, detect_harnesses, detect_t3, manifest_file,
@@ -201,7 +203,7 @@ pub fn relay_setup(options: &SetupOptions, env: Env, cwd: &str) -> Done {
         {
             return Err(usage("--cowork takes only --bin and optionally --write"));
         }
-        return Err(Fail::Decline("cowork".into()));
+        return cowork_setup(options.bin.as_deref(), &env, &which);
     }
     let now = now_s();
     let out = {
@@ -664,7 +666,8 @@ pub fn setup(call: &Call, words: &[String]) -> Done {
     let mut env = call.env.clone();
     crate::route::caller_argv(&mut env);
     if words.first().map(String::as_str) == Some("claude-desktop") {
-        return Err(Fail::Decline("claude-desktop".into()));
+        let options = parse_claude_desktop_args(&words[1..])?;
+        return claude_desktop_setup(&options, &env);
     }
     relay_setup(&parse_setup_args(words)?, env, &safe_cwd())
 }

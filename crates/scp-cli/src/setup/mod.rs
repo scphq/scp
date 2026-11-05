@@ -1,6 +1,8 @@
 //! Setup, hooks install and mcp install.
 
 pub mod command;
+pub mod cowork;
+pub mod desktop;
 pub mod files;
 pub mod harness;
 pub mod hook_cmd;
