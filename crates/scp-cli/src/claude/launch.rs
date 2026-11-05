@@ -268,10 +268,6 @@ fn local_entry(file: &str, cwd: &str) -> Result<Option<Json>, ()> {
         .cloned())
 }
 
-fn entry_command(entry: &Json) -> Option<&Json> {
-    entry.get("command")
-}
-
 /// why Claude Code's scp mount cannot wake this session, with the fix, else None; user, local and project scopes count
 pub fn mount_hint(env: &Env, cwd: &str) -> Option<String> {
     let file = mcp_file("claude", env);
@@ -313,14 +309,15 @@ pub fn mount_hint(env: &Env, cwd: &str) -> Option<String> {
         ));
     }
     let gone = |entry: &&Json| {
-        entry_command(entry)
+        entry
+            .get("command")
             .and_then(Json::as_str)
             .is_some_and(gone_command)
     };
     if channels.iter().all(gone) {
         return Some(format!(
             "{CLI_NAME} claude: the scp mount runs {}, which is gone (moved by an upgrade?); run {CLI_NAME} setup --write",
-            text(entry_command(channels[0]))
+            text(channels[0].get("command"))
         ));
     }
     None
@@ -436,7 +433,11 @@ fn prior_mount(args: &[String], env: &Env) -> Option<[(&'static str, String); 3]
     let short = target.get(..8).filter(|short| short_id(short))?;
     let bytes = std::fs::read(bg_dir(env).join(format!("{short}.json"))).ok()?;
     let config = Json::parse(String::from_utf8_lossy(&bytes).as_bytes())?;
-    let vars = config.get("mcpServers")?.get("scp")?.get_any("env")?;
+    let vars = config
+        .get("mcpServers")?
+        .get("scp")?
+        .get("env")
+        .filter(|vars| matches!(vars, Json::Obj(_) | Json::Arr(_)))?;
     let of = |key: &str| {
         vars.get(key)
             .and_then(Json::as_str)
@@ -448,18 +449,6 @@ fn prior_mount(args: &[String], env: &Env) -> Option<[(&'static str, String); 3]
         ("SCP_GRANT", of("SCP_GRANT")),
         ("SCP_UNDER", of("SCP_UNDER")),
     ])
-}
-
-trait AnyGet {
-    /// a field that is an object or an array
-    fn get_any(&self, key: &str) -> Option<&Json>;
-}
-
-impl AnyGet for Json {
-    fn get_any(&self, key: &str) -> Option<&Json> {
-        self.get(key)
-            .filter(|value| matches!(value, Json::Obj(_) | Json::Arr(_)))
-    }
 }
 
 /// whether claude's options resume or continue a stored session
