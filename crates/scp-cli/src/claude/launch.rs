@@ -22,7 +22,7 @@ use scp_mcp::membership::manual_join;
 use scp_mcp::ps::{Env, basename, join};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -556,17 +556,7 @@ fn run_claude(bin: &str, args: &[String], env: &Env, cwd: &str, pipe: bool) -> R
             Stdio::inherit()
         })
         .stderr(Stdio::inherit());
-    // SAFETY: only async-signal-safe calls between fork and exec
-    unsafe {
-        command.as_std_mut().pre_exec(|| {
-            for signal in 1..32 {
-                if signal != libc::SIGKILL && signal != libc::SIGSTOP {
-                    libc::signal(signal, libc::SIG_DFL);
-                }
-            }
-            Ok(())
-        });
-    }
+    crate::launch::channel::default_signals(command.as_std_mut());
     block_on(async move {
         let mut signals = Listener::new(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP]);
         let mut child = command.spawn().map_err(|error| {

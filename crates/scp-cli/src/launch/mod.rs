@@ -2,14 +2,25 @@
 //! without the login shell's PATH runs `swarm`.
 
 pub mod attribute;
+pub mod channel;
+pub mod codex;
+pub mod ws;
 
-use crate::Verb;
 use crate::spawn::argv::executable;
+use crate::{Run, Verb};
 use scp_mcp::ps::{Env, basename, dirname, join};
 use scp_mcp::render::js_space;
 use std::io::Read;
 
-pub const VERBS: &[Verb] = &[];
+pub const VERBS: &[Verb] = &[Verb {
+    name: "codex",
+    run: Run::Words(codex::codex),
+}];
+
+/// a child's exit as a launcher hands it on: its code, 1 when a signal ended it
+pub fn exit_code(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
+}
 
 /// how a harness started without the login shell's PATH runs `swarm`: `argv` is the prefix, `node` the interpreter when it needed one
 #[derive(Debug, Clone, PartialEq, Default)]
