@@ -2,6 +2,7 @@
 
 use super::muse::{MUSE_MODE, muse_mode_at};
 use crate::args::{js_string, tables};
+use crate::fleet::json::Json;
 use crate::{Fail, usage};
 use scp_core::protocol::{CLI_NAME, LIMITS};
 use scp_mcp::identity::home_dir;
@@ -154,7 +155,7 @@ fn entry_argv(entry: &Table) -> Vec<String> {
 }
 
 /// the words after `mcp` in a mount's command line, else `fallback`
-fn mcp_words(argv: &[String], fallback: &[String]) -> Vec<String> {
+pub fn mcp_words(argv: &[String], fallback: &[String]) -> Vec<String> {
     match argv.iter().position(|w| w == "mcp") {
         Some(at) => argv[at + 1..].to_vec(),
         None => fallback.to_vec(),
@@ -210,6 +211,39 @@ pub fn mount_with(bin: Option<&str>, launch: &[String], words: &[String], env: &
         env: vars,
         native: true,
     }
+}
+
+/// the variables a native mount sets, which a mount through Node drops
+pub const NATIVE_MOUNT_VARS: [&str; 3] = ["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_CLI_ARGV"];
+
+/// the mount that runs `swarm mcp <words>`: under `SCP_NATIVE=1` or `mcp` the native `swarm` itself, told the words that start the CLI
+/// (`launch`) and the mode; otherwise `launch` followed by `mcp`
+pub fn mcp_mount(launch: &[String], words: &[String], env: &Env) -> Mount {
+    mount_with(native_mount_bin(env).as_deref(), launch, words, env)
+}
+
+/// `vars` without the ones a native mount sets, then with `mount`'s
+pub fn mount_vars(vars: &Json, mount: &Mount) -> Json {
+    let mut out = Json::Obj(
+        vars.entries()
+            .into_iter()
+            .filter(|(key, _)| !NATIVE_MOUNT_VARS.contains(key))
+            .map(|(key, value)| (key.to_owned(), value.clone()))
+            .collect(),
+    );
+    for (key, value) in &mount.env {
+        out.set(key, Json::str(value.as_str()));
+    }
+    out
+}
+
+/// a kept mount's variables under `env`: with `SCP_NATIVE=mcp`, a saved `SCP_NATIVE=1` becomes mcp, so the mount never starts the native broker
+pub fn pin_mode(vars: &Json, env: &Env) -> Json {
+    let mut out = vars.clone();
+    if native_mode(env) == "mcp" && vars.get("SCP_NATIVE").and_then(Json::as_str) == Some("1") {
+        out.set("SCP_NATIVE", Json::str("mcp"));
+    }
+    out
 }
 
 /// whether `path` is an executable file

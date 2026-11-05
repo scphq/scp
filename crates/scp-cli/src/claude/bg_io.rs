@@ -39,7 +39,7 @@ const DRAIN_GRACE: Duration = Duration::from_secs(1);
 const MOUNT_VARS: [&str; 3] = ["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_CLI_ARGV"];
 const CLAUDE_MCP: [&str; 3] = ["--harness", "claude", "--channels"];
 /// a launcher's own identity, which claude's daemon must not keep for the sessions it starts later
-const LAUNCHER_IDENTITY: [&str; 18] = [
+pub(crate) const LAUNCHER_IDENTITY: [&str; 18] = [
     "CLAUDE_BG_SOURCE",
     "CLAUDE_CODE_SESSION_KIND",
     "CLAUDE_CODE_IS_COWORK",

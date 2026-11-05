@@ -146,28 +146,36 @@ pub fn main(args: &[String], host: &Host) -> i32 {
         return route::fallback(args, name, &reason, &env, host);
     }
     route::log(name, "native", "run");
+    match run_spec(spec, name, rest, &env, host) {
+        Ok(code) => code,
+        Err(Fail::Decline(reason)) => route::fallback(args, name, &reason, &env, host),
+        Err(fail) => report(fail),
+    }
+}
+
+fn run_spec(spec: &Verb, name: &str, rest: &[String], env: &Env, host: &Host) -> Done {
     let parsed = match &spec.run {
         Run::Words(_) => Parsed::default(),
-        _ => match args::parse_verb(name, rest) {
-            Ok(parsed) => parsed,
-            Err(message) => return report(Fail::Usage(message)),
-        },
+        _ => args::parse_verb(name, rest).map_err(Fail::Usage)?,
     };
     let call = Call {
         verb: name,
         parsed,
-        env: &env,
+        env,
         host,
     };
-    let done = match &spec.run {
+    match &spec.run {
         Run::Parsed(run) => run(&call),
         Run::Opened(run) => open::with_opened(&call, *run),
         Run::Words(run) => run(&call, rest),
-    };
-    match done {
-        Ok(code) => code,
-        Err(Fail::Decline(reason)) => route::fallback(args, name, &reason, &env, host),
-        Err(fail) => report(fail),
+    }
+}
+
+/// `swarm <name> <words>` run in this process, as the TypeScript CLI runs one verb from another: its failure returned, not printed
+pub fn run_verb(name: &str, words: &[String], env: &Env, host: &Host) -> Done {
+    match verb(name) {
+        Some(spec) => run_spec(spec, name, words, env, host),
+        None => Err(Fail::Decline("unported".into())),
     }
 }
 
@@ -207,7 +215,7 @@ fn registry(args: &[String]) -> i32 {
                 .collect::<Vec<_>>(),
         );
         let version = Value::from(VERSION);
-        let subverbs = serde_json::json!({ "claude": claude::CLAUDE_WORDS });
+        let subverbs = serde_json::json!({});
         term::json_entries(&[
             ("version", &version),
             ("verbs", &verbs),
