@@ -161,16 +161,21 @@ impl Json {
 
     /// `JSON.stringify(value, null, 2)`
     pub fn pretty(&self) -> String {
+        self.indented("  ")
+    }
+
+    /// `JSON.stringify(value, null, gap)` for a gap of at most ten characters
+    pub fn indented(&self, gap: &str) -> String {
         let mut text = String::new();
-        self.write(&mut text, Some(2), 0);
+        self.write(&mut text, Some(gap), 0);
         text
     }
 
-    fn write(&self, text: &mut String, indent: Option<usize>, depth: usize) {
+    fn write(&self, text: &mut String, indent: Option<&str>, depth: usize) {
         let open = |text: &mut String, depth: usize| {
-            if let Some(width) = indent {
+            if let Some(gap) = indent {
                 text.push('\n');
-                text.push_str(&" ".repeat(width * depth));
+                text.push_str(&gap.repeat(depth));
             }
         };
         match self {

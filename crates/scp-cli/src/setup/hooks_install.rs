@@ -290,14 +290,30 @@ pub fn lone_surrogate(text: &str) -> bool {
     false
 }
 
+/// why a file is left as it is rather than rewritten with a value changed: no Rust string keeps a lone surrogate
+pub const LONE_SURROGATE: &str =
+    "it has a lone surrogate escape, which rewriting it here would change";
+/// the same for bytes that are no UTF-8, which reading it as text would replace
+pub const NOT_UTF8: &str = "it is not valid UTF-8, which reading it as text would change";
+/// the same for a hooks key that a merge cannot carry over
+pub const PROTO_EVENT: &str = "its hooks have a __proto__ event, which a merge would lose";
+
 /// why the content of a hooks file could not be built
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookError {
     /// what JavaScript throws, as Node words it
     Thrown(String),
-    /// the TypeScript CLI has to write this file, for the reason given: a lone surrogate no Rust string keeps, or a `__proto__` event
-    /// its merge drops
-    Decline(&'static str),
+    /// the file is readable, and rewriting it would lose something in it
+    Refused(&'static str),
+}
+
+impl HookError {
+    pub fn message(&self) -> &str {
+        match self {
+            HookError::Thrown(message) => message,
+            HookError::Refused(reason) => reason,
+        }
+    }
 }
 
 impl From<String> for HookError {
@@ -306,20 +322,25 @@ impl From<String> for HookError {
     }
 }
 
-/// a settings file's text as `JSON.parse` reads it, refused when writing it back natively would change it
+/// a settings file's text as `JSON.parse` reads it, refused when writing it back would change it
 pub fn read_settings(text: &str) -> Result<Json, HookError> {
     let settings = parse_json(text)?;
     if lone_surrogate(text) {
-        return Err(HookError::Decline("surrogate"));
+        return Err(HookError::Refused(LONE_SURROGATE));
     }
     Ok(settings)
 }
 
+/// the text of a file about to be rewritten, refused when it is no UTF-8
+pub fn utf8_text(bytes: Vec<u8>) -> Result<String, HookError> {
+    String::from_utf8(bytes).map_err(|_| HookError::Refused(NOT_UTF8))
+}
+
 /// `settings` refused when its hooks hold a `__proto__` event: assigning one sets the merged object's prototype, so the event goes
-fn mergeable(settings: &Json) -> Result<(), HookError> {
+pub fn mergeable(settings: &Json) -> Result<(), HookError> {
     let hooks = settings.get("hooks");
     if hooks.is_some_and(|h| h.get("__proto__").is_some()) {
-        return Err(HookError::Decline("proto"));
+        return Err(HookError::Refused(PROTO_EVENT));
     }
     Ok(())
 }
@@ -402,7 +423,7 @@ pub fn desired_hooks(
     let file = resolved(target)?;
     let existing = if exists(&file) {
         let bytes = std::fs::read(&file).map_err(io("open", &file))?;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
+        Some(utf8_text(bytes)?)
     } else {
         None
     };
@@ -480,7 +501,7 @@ pub fn install_hooks(
                     })
                     .map_err(HookError::Thrown)
                     .and_then(|bytes| {
-                        let settings = read_settings(&String::from_utf8_lossy(&bytes))?;
+                        let settings = read_settings(&utf8_text(bytes)?)?;
                         if harness != "agy" {
                             mergeable(&settings)?;
                         }
@@ -490,7 +511,9 @@ pub fn install_hooks(
                     HookError::Thrown(error) => usage(format!(
                         "{target} is not valid JSON ({error}); fix it or add the hooks by hand"
                     )),
-                    HookError::Decline(reason) => Fail::Decline(reason.into()),
+                    HookError::Refused(reason) => usage(format!(
+                        "{target}: {reason}; fix it or add the hooks by hand"
+                    )),
                 })?;
             }
             let built = if harness == "agy" {
@@ -683,19 +706,19 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_file_with_a_lone_surrogate_is_left_to_typescript() {
+    fn a_settings_file_with_a_lone_surrogate_is_refused() {
         let read = read_settings(r#"{"keep":"\ud800"}"#);
-        assert_eq!(read, Err(HookError::Decline("surrogate")));
+        assert_eq!(read, Err(HookError::Refused(LONE_SURROGATE)));
         assert!(matches!(read_settings("{x"), Err(HookError::Thrown(_))));
     }
 
     #[test]
-    fn a_proto_event_is_left_to_typescript_and_only_for_a_merge() {
+    fn a_proto_event_is_refused_and_only_for_a_merge() {
         let text = r#"{"hooks":{"__proto__":[]}}"#;
         let launch = HookLaunch::default();
-        let declined = Err(HookError::Decline("proto"));
-        assert_eq!(hook_content("claude", Some(text), false, &launch), declined);
-        assert_eq!(hook_content("codex", Some(text), false, &launch), declined);
+        let refused = Err(HookError::Refused(PROTO_EVENT));
+        assert_eq!(hook_content("claude", Some(text), false, &launch), refused);
+        assert_eq!(hook_content("codex", Some(text), false, &launch), refused);
         assert!(hook_content("agy", Some(text), false, &launch).is_ok());
         let top = r#"{"__proto__":{"a":1},"k":1}"#;
         assert!(hook_content("claude", Some(top), false, &launch).is_ok());

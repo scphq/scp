@@ -74,13 +74,14 @@ fn read_json(file: &str) -> Result<Option<Json>, ()> {
     }
 }
 
-fn from_toml(value: &toml::Value) -> Json {
+/// a TOML value as `smol-toml` hands it over: a date is an object with no keys of its own, never a string
+pub(crate) fn from_toml(value: &toml::Value) -> Json {
     match value {
         toml::Value::String(s) => Json::Str(s.clone()),
         toml::Value::Integer(n) => Json::Num(*n as f64),
         toml::Value::Float(n) => Json::Num(*n),
         toml::Value::Boolean(on) => Json::Bool(*on),
-        toml::Value::Datetime(at) => Json::Str(at.to_string()),
+        toml::Value::Datetime(_) => Json::Obj(Vec::new()),
         toml::Value::Array(items) => Json::Arr(items.iter().map(from_toml).collect()),
         toml::Value::Table(table) => Json::Obj(
             table
