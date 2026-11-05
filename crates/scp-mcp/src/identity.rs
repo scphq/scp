@@ -516,10 +516,15 @@ fn system_hostname() -> String {
     String::from_utf8_lossy(&buffer[..end]).into_owned()
 }
 
+/// this machine's name, read once (`thisHostname`)
+pub fn this_hostname() -> &'static str {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(system_hostname)
+}
+
 /// the lowercased first label of this machine's name: agents' machine label
 pub fn short_hostname() -> String {
-    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let name = HOST.get_or_init(system_hostname);
+    let name = this_hostname();
     let first = name.split('.').next().unwrap_or("");
     let short = dash_runs(first, &|c| {
         c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c)

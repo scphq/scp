@@ -30,6 +30,7 @@ pub fn spawn_env<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, 
         if !call.parsed.positionals.is_empty() {
             return Err(usage(format!("{CLI_NAME} spawn-env takes only flags")));
         }
+        opened.local(call.verb)?;
         let params = grant_params(&call.parsed)?;
         let params = params
             .iter()

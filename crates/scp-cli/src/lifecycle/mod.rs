@@ -167,6 +167,10 @@ fn leave<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
 
 /// opens as the human at this terminal, with no lineage and none of `open()`'s identity checks (`openAdoptHuman`)
 async fn open_adopt_human(call: &Call<'_>) -> Result<Opened, Fail> {
+    if crate::open::cloud_transport(&call.parsed, call.env) {
+        let plan = crate::open::hub_human(&call.parsed, call.env)?;
+        return crate::open::open(call.verb, plan, call.env).await;
+    }
     if call.parsed.has("machine") {
         return Err(usage(
             "--machine names the machine of the cloud transport: add --cloud",
@@ -200,6 +204,7 @@ async fn open_adopt_human(call: &Call<'_>) -> Result<Opened, Fail> {
         broker: get(&hello, "broker").cloned().unwrap_or(Value::Null),
         bound: Some("human"),
         harness_pid: None,
+        hub: None,
     })
 }
 
@@ -211,6 +216,7 @@ fn adopt(call: &Call) -> Done {
     if let Ok(exe) = std::env::current_exe() {
         scp_mcp::spawn::set_native_daemon(exe);
     }
+    let hub = crate::open::cloud_transport(&call.parsed, call.env);
     let runtime = runtime()?;
     let local = tokio::task::LocalSet::new();
     let done = local.block_on(&runtime, async {
@@ -219,8 +225,7 @@ fn adopt(call: &Call) -> Done {
         opened.client.close();
         done
     });
-    drop(local);
-    runtime.shutdown_background();
+    crate::open::finish(runtime, local, hub);
     done
 }
 
