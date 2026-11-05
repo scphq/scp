@@ -542,7 +542,11 @@ describe.skipIf(noBinary)("setup on files it has to be careful with", () => {
       const content = file.endsWith(".toml") ? "" : "{}\n"
       same(linked(file, "dotfiles/real", content), [["setup", "--write"], ["setup"], ["setup", "--undo", "--write"]])
       same(linked(file, "dotfiles/absent"), [["setup"], ["setup", "--write"]])
-      same((dir) => symlinkSync(join(dir, "gone", "x"), (mkdirSync(dirname(join(dir, file)), { recursive: true }), join(dir, file))), [["setup"]])
+      const dangling = (dir: string) => {
+        mkdirSync(dirname(join(dir, file)), { recursive: true })
+        symlinkSync(join(dir, "gone", "x"), join(dir, file))
+      }
+      same(dangling, [["setup"]])
     }
     same(
       (dir) => {
@@ -877,5 +881,54 @@ describe.skipIf(noBinary)("setup through the router", () => {
     expect(lines).toContain("setup native run")
     expect(lines).toContain("setup ts forced")
     expect(lines).toContain("setup ts decline")
+  })
+})
+
+describe.skipIf(noBinary)("up, TypeScript against native", () => {
+  const HUB = `
+const server = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  fetch(request) {
+    if (request.headers.get("authorization") !== "Bearer scp_good") return Response.json({ error: "unauthorized" }, { status: 401 })
+    return Response.json({ kind: "human", email: "a@b.dev", org: "org_1", role: "owner", token: "scp_good" })
+  },
+})
+console.log(server.port)
+`
+
+  /** a hub in its own process, since the steps block this one, taking one token */
+  async function withHub<T>(steps: (url: string) => T): Promise<T> {
+    const script = join(root, "hub.ts")
+    writeFileSync(script, HUB)
+    const hub = Bun.spawn([process.execPath, "--no-env-file", script], { stdout: "pipe" })
+    try {
+      const { value } = await hub.stdout.getReader().read()
+      return steps(`http://127.0.0.1:${Buffer.from(value!).toString().trim()}`)
+    } finally {
+      hub.kill()
+    }
+  }
+
+  const steady = (text: string) => text.replaceAll(/http:\/\/127\.0\.0\.1:\d+/g, "<hub>").replace(/ as machine \S+ /, " as machine <host> ")
+
+  test("a headless up logs in, links, sets up and says what to run next", async () => {
+    const runs = await withHub((url) =>
+      [{ SCP_NATIVE_TS: "up,setup,cloud" }, { SCP_ROUTE_LOG: process.env.SCP_ROUTE_LOG ?? join(root, "up.log") }].map((route) => {
+        const dir = home()
+        const vars = { SCP_RELAY: url, SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary!, ...route }
+        const first = swarm("ts", dir, ["up", "--token", "scp_good", "--machine", "laptop", "--label", "t"], vars)
+        const second = swarm("ts", dir, ["up", "--machine", "laptop"], vars)
+        const bad = swarm("ts", dir, ["up", "--token", "scp_bad"], vars)
+        const stray = swarm("ts", dir, ["up", "stray"], vars)
+        swarm("ts", dir, ["daemon", "stop"], vars)
+        const { "cloud.json": _cloud, ...state } = files(join(dir, ".config", "scp"))
+        const shown = [first, second, bad, stray].map((step) => ({ ...step, stdout: steady(step.stdout), stderr: steady(step.stderr) }))
+        return { shown, state: Object.keys(state), mounts: files(dir)[".fake-calls"] }
+      }),
+    )
+    expect(runs[0]!.shown[0]!.code).toBe(0)
+    expect(runs[0]!.shown[0]!.stdout).toContain("next: start each agent session wake-enabled:")
+    expect(runs[1]).toEqual(runs[0]!)
   })
 })

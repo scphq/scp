@@ -34,7 +34,7 @@ export function nextSteps(installed: ReadonlySet<string>): string[] {
 }
 
 /** `swarm up`: log in when needed (`--token` or $SCP_TOKEN headless), link the broker to the hub, install hooks and MCP mounts, start the broker */
-export async function up(positionals: string[], values: UpValues, cwd: string, brokerStatus: () => Promise<BridgeStatus>): Promise<number> {
+export async function up(positionals: string[], values: UpValues, cwd: string, brokerStatus: () => Promise<BridgeStatus>, version?: string): Promise<number> {
   if (positionals.length) throw new RelayUsage(`${CLI_NAME} up takes only flags`)
   const out = (line: string) => process.stdout.write(`${line}\n`)
   const { url } = activeRelay(process.env)
@@ -49,7 +49,7 @@ export async function up(positionals: string[], values: UpValues, cwd: string, b
   } else out(`already logged in to ${url}`)
   const enabled = await (await import("./remote")).cloudMain(["enable"], values.machine !== undefined ? { machine: values.machine } : {}, brokerStatus)
   if (enabled !== 0) return enabled
-  const setup = (await import("./setup")).relaySetupCommand(["--write"], cwd, out)
+  const setup = (await import("./setup")).relaySetupCommand(["--write"], cwd, out, version)
   if (setup !== 0) return setup
   const broker = await brokerStatus()
   if (!broker.enabled) out(`the broker is still local-only; run \`${CLI_NAME} daemon restart\` to link it to ${url}`)
