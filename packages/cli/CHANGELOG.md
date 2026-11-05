@@ -1,5 +1,12 @@
 # @scp-dev/cli
 
+## 1.4.0
+
+### Minor Changes
+
+- 2ab14ce: Under `SCP_NATIVE=1` the native `swarm` also runs `relay`, `login`, `logout`, `cloud` and `machines`, and `--cloud` (or `SCP_TRANSPORT=cloud`) on every native verb talks to the hub directly instead of falling back to the TypeScript CLI. Credentials and cloud.json keep their format and private modes.
+- 6010c92: Under `SCP_NATIVE=1` the native `swarm` also runs `spawn-wake` and `codex-wake`, the broker's built-in `spawn` and `codex-queue` wakers, so waking a hibernated spawn worker or a Codex thread starts no Node process. `spawn --via` and `spawn --under` an agent on another machine run natively too, so every `spawn` now stays on the native `swarm`.
+
 ## 1.3.0
 
 ### Minor Changes
