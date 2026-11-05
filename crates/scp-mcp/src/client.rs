@@ -512,7 +512,15 @@ pub async fn connect_broker(dir: &Path, start: Option<Rc<dyn Fn()>>) -> Result<C
 
 /// [`connect_broker`] with a start that can fail, which ends the connect with its error
 pub async fn connect_or_start(dir: &Path, start: Option<Start>) -> Result<Client, CallError> {
-    let budget = CONNECT_BUDGET_MS;
+    connect_within(dir, start, CONNECT_BUDGET_MS).await
+}
+
+/// [`connect_or_start`], trying for `budget` ms
+pub async fn connect_within(
+    dir: &Path,
+    start: Option<Start>,
+    budget: u64,
+) -> Result<Client, CallError> {
     let path = socket_path(dir);
     let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let refuse = |code: &str| {

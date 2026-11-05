@@ -158,7 +158,7 @@ fn linked_under(values: &Parsed) -> bool {
 }
 
 /// this CLI as the words a codex mount falls back on: what the router named, else the CLI beside this package, else this binary, whose `mcp` runs without Node
-fn self_words(call: &Call, env: &Env) -> Vec<String> {
+pub(crate) fn self_words(call: &Call, env: &Env) -> Vec<String> {
     scp_mcp::spawn::named_launcher(env)
         .or_else(|| (call.host.beside)(env))
         .unwrap_or_else(|| {

@@ -387,10 +387,6 @@ pub async fn handshake(
     env: &Env,
     walk: &Value,
 ) -> String {
-    use std::os::fd::AsRawFd;
-    let Ok((read, write)) = pipe() else {
-        return String::new();
-    };
     let mut command = tokio::process::Command::new(&launch[0]);
     command
         .args(&launch[1..])
@@ -399,7 +395,18 @@ pub async fn handshake(
         .current_dir(cwd)
         .env_clear()
         .envs(env)
-        .env(SPAWN_RUNNER, walk.to_string())
+        .env(SPAWN_RUNNER, walk.to_string());
+    handshake_line(command).await
+}
+
+/// `command` started detached in its own session, stdio null and a pipe on fd 3: the first line it writes there, or what it wrote before
+/// it closed it; empty when it could not start
+pub async fn handshake_line(mut command: tokio::process::Command) -> String {
+    use std::os::fd::AsRawFd;
+    let Ok((read, write)) = pipe() else {
+        return String::new();
+    };
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
