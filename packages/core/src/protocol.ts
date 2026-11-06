@@ -313,6 +313,8 @@ export interface Claim {
    * holds, not even at that handle
    */
   derived?: boolean
+  /** a hook's: join or take back what this session owns, else claim nothing, as its tool surface makes the endpoint (SPEC section 6.4) */
+  join_only?: boolean
   /** the handle as named (`--as`): never suffixed; it takes over or joins that endpoint where the rules allow, else the claim is refused */
   exact?: boolean
   /**

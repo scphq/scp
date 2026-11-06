@@ -286,6 +286,7 @@ brokerSuite(
         expect(await shim.request("whoami")).toMatchObject({ presence: "online", wake: null });
         expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "while stopped" } }] });
         expect((await broker.hook({ handle: "claude-app", ...fork })).hello.endpoint).toMatchObject({ id: w1.id, address: `me/${name}` });
+        expect((await broker.observer({ self: [fork.process], lineage: [fork.process] })).hello.endpoint?.id).toBe(w1.id);
         const views = (await lead.request<{ endpoints: { id: string; presence: string }[] }>("list", { all: true })).endpoints;
         expect(views.find((view) => view.id === fresh.hello.endpoint?.id)?.presence ?? "offline").toBe("offline");
       });

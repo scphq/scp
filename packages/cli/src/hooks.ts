@@ -49,6 +49,7 @@ import {
   readPsTable,
   relayIdentity,
   sessionKey,
+  joinsOnly,
   unclaimedSpare,
 } from "./identity"
 import { safeCwd } from "./cwd"
@@ -749,6 +750,7 @@ export async function runHook(args: string[], options: HookOptions): Promise<str
   if (joined !== keyed) claim = identify(joined.handle)
   if (!validHandle(claim.handle)) return
   const format = hookFormat(claim.harness, harness)
+  if (joinsOnly(options.env, format)) claim = { ...claim, join_only: true }
   const transcript = "transcript_path" in payload ? payload.transcript_path : payload.transcriptPath
   if (transcript === null && format === "codex" && appServer((options.psTable ?? psTable)()?.get(pid)?.args)) return
   const named = eventName(asString(field(payload, "hook_event_name", "hookEventName")) ?? eventArg)
@@ -888,7 +890,7 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
   if ("dark" in joined) return
   const harnessSession = asString(field(payload, "session_id", "sessionId"))
   const psTable = options.psTable ?? readPsTable
-  const claim = relayIdentity({
+  const identity = relayIdentity({
     ...(joined.handle ? { as: joined.handle } : {}),
     ...(harnessSession ? { harnessSession } : {}),
     harness,
@@ -905,12 +907,17 @@ async function wakeHook(harnessArg: string | undefined, payload: Json, waitS: nu
     startOf: () => started,
     psTable,
   })
+  const claim = joinsOnly(options.env, hookFormat(identity.harness, harness)) ? { ...identity, join_only: true } : identity
   if (!validHandle(claim.handle)) return
   const waitMs = Math.min(waitS, LIMITS.waitMaxS) * 1000
   options.deadline?.(Date.now() - (options.began ?? Date.now()) + waitMs + PUSH_PRINT_MS + HOOK_AFTER_CONNECT_MS)
   const client = await options.connect(false, { ...hookRetry(options), env: options.env })
   try {
-    await client.hello({ transient: true, claim })
+    const hello = await client.hello({ transient: true, claim }).catch((error: unknown) => {
+      if ("join_only" in claim && error instanceof RelayError && error.code === "not_found") return undefined
+      throw error
+    })
+    if (!hello) return
     await client.request("wake", { via: OPENCODE_WAKE }).catch(() => {})
     const result = await client.request<Injected>("inject", { wait_s: waitMs / 1000 })
     if (!result.offered.length) return

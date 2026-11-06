@@ -36,6 +36,21 @@ brokerSuite("broker hook rpc", (start) => {
     expect(await observer.request("hook_commit", { commit: "unknown" })).toEqual({});
   });
 
+  test("a daemon-hosted session's hook registers nothing before its shim, and joins the shim's endpoint after", async () => {
+    const broker = await start();
+    const bg = { ...claude(broker), SCP_NAME: undefined, CLAUDE_CODE_SESSION_KIND: "bg" };
+    const listed = async () =>
+      (await (await broker.human()).request<{ endpoints: { address: string }[] }>("list", { all: true })).endpoints.map((view) => view.address);
+    await hookRpc(broker, ["claude"], event(broker, "SessionStart"), bg);
+    await hookRpc(broker, ["claude"], event(broker, "PostToolUse", { tool_name: "Bash" }), bg);
+    await hookRpc(broker, ["claude", "--wake", "1"], event(broker, "SessionStart"), bg);
+    expect((await listed()).filter((address) => address.startsWith("me/claude"))).toEqual([]);
+    const agent = await subject(broker);
+    await hookRpc(broker, ["claude"], event(broker, "PostToolUse", { tool_name: "Bash" }), bg);
+    expect((await listed()).filter((address) => address.startsWith("me/claude"))).toEqual([]);
+    expect(await agent.request("whoami")).toMatchObject({ address: "me/subject" });
+  });
+
   test("a prompt hook's mail is read only once its print is committed", async () => {
     const broker = await start();
     await subject(broker);

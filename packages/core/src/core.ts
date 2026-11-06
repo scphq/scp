@@ -575,6 +575,8 @@ interface Placement {
 interface ClaimScope {
   /** the handle the claim asked for */
   handle: string
+  /** a hook's claim that takes only what its session owns: no new row, none by handle search */
+  joinOnly?: true
   lineage: string[]
   /** the hash of the claim's grant, or of the grant bound to its lineage */
   grant: string | null
@@ -1013,6 +1015,7 @@ export class RelayCore {
     if (claim.harness_handoff !== undefined && typeof claim.harness_handoff !== "boolean")
       throw new RelayError("invalid_params", "harness_handoff is true or false")
     if (claim.derived !== undefined && typeof claim.derived !== "boolean") throw new RelayError("invalid_params", "derived is true or false")
+    if (claim.join_only !== undefined && typeof claim.join_only !== "boolean") throw new RelayError("invalid_params", "join_only is true or false")
     if (claim.grant !== undefined && (typeof claim.grant !== "string" || !GRANT_TOKEN.test(claim.grant)))
       throw new RelayError("invalid_params", "grant is a krt_ token")
     if (claim.ticket !== undefined && (typeof claim.ticket !== "string" || !WAKE_TICKET.test(claim.ticket)))
@@ -1026,6 +1029,7 @@ export class RelayCore {
       cwd: fields.cwd,
       exact: claim.exact === true && !subagent,
       ...(claim.derived === true ? { derived: true } : {}),
+      ...(claim.join_only === true && options.transient === true && !subagent ? { joinOnly: true } : {}),
       ...(claim.ticket !== undefined && !subagent ? { ticket: this.hash(claim.ticket) } : {}),
     }
     const self = lineageKeys(options.self)
@@ -1436,6 +1440,7 @@ export class RelayCore {
       row = resumed
       session = fields.session
     }
+    if (!row && scope.joinOnly) throw new RelayError("not_found", "this session has no endpoint yet: its tool surface makes it")
     let joined = row !== undefined && !resumed
     const bySession =
       joined && row!.token_hash === null && (!transient || row!.process === null || (fields.process !== null && sameHarness(row!.process, fields.process)))
@@ -1644,14 +1649,14 @@ export class RelayCore {
   }
 
   /**
-   * a session's hook endpoint left for `to`: its unread mail moves there and it lets go of the session and of the harness session it
-   * reported, so nothing takes it for that session's endpoint again; the moved seqs and its stop budget
+   * a session's hook endpoint left for `to`: its unread mail moves there and it lets go of the session, the harness session it reported and
+   * the harness process, so nothing takes it for that session's endpoint again and no lineage lands on it; the moved seqs and its stop budget
    */
   private leaveHooks(hooks: EndpointRow, to: string): { moved: number[]; stopBlocks: number } {
     const moved = this.sql
       .all<{ seq: number }>(`UPDATE deliveries SET endpoint = ? WHERE endpoint = ? AND acked_at IS NULL RETURNING seq`, to, hooks.id)
       .map((d) => d.seq)
-    this.sql.all(`UPDATE endpoints SET session = NULL, hook_seen = NULL, harness_session = NULL, harness_origin = NULL WHERE id = ?`, hooks.id)
+    this.sql.all(`UPDATE endpoints SET session = NULL, hook_seen = NULL, harness_session = NULL, harness_origin = NULL, process = NULL WHERE id = ?`, hooks.id)
     return { moved, stopBlocks: hooks.stop_blocks ?? 0 }
   }
 
@@ -1781,12 +1786,12 @@ export class RelayCore {
     return { parent: under!, grant, refused: null }
   }
 
-  /** the first lineage key some agent endpoint holds as its process, the shallowest (then oldest) of them; full keys only */
+  /** the first of {@link lineageRows}; full keys only */
   private lineageParent(lineage: string[], ...exclude: (EndpointRow | undefined)[]): EndpointRow | null {
     return this.lineageRows(lineage, ...exclude)[0] ?? null
   }
 
-  /** the agent endpoints holding the first lineage key any of them holds, shallowest (then oldest) first */
+  /** the agent endpoints holding the first lineage key any of them holds: a row its session still holds first, then shallowest, then oldest */
   private lineageRows(lineage: string[], ...exclude: (EndpointRow | undefined)[]): EndpointRow[] {
     const out = exclude.flatMap((row) => (row ? [row.id] : []))
     if (this.defaults().verifyLineage === true) return []
@@ -1794,7 +1799,8 @@ export class RelayCore {
       if (!PROCESS_KEY.test(key)) continue
       const rows = this.sql
         .all<EndpointRow>(
-          `SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}' ORDER BY COALESCE(depth, 0), created_at, id`,
+          `SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}'
+           ORDER BY connections > 0 OR (session IS NOT NULL AND substr(session, 1, 4) != 'sub:') DESC, COALESCE(depth, 0), created_at, id`,
           key,
         )
         .filter((row) => !out.length || (!out.includes(row.id) && !this.ancestorsOf(row).some((id) => out.includes(id))))
@@ -1814,9 +1820,9 @@ export class RelayCore {
   }
 
   /**
-   * whether a claim that walked to `row`, a released row, by its `n`th handle may take it over: a row of no other harness session (none
-   * reported on either side, the claim's own, or its origin), one at the claim's own handle that was given rather than derived, one whose grant the claim
-   * redeems, or one its own harness process holds. A handle collision alone never passes a session's endpoint to another
+   * whether a claim that walked to `row`, a released row, by its `n`th handle may take it over: one at the claim's own handle that was given
+   * rather than derived, the claim's own harness session's or its origin's, one its own harness process holds, one whose grant the claim
+   * redeems, or one of no other harness session that {@link keeps} nothing. A handle collision alone never passes a session's endpoint to another
    */
   private proven(
     row: EndpointRow,
@@ -1825,10 +1831,32 @@ export class RelayCore {
     claimant: { harness: string; cwd: string | null; process: string | null; harness_session?: string | null; harness_origin?: string | null },
     hooks?: EndpointRow,
   ): boolean {
-    if (!foreign(row, claimant)) return true
     if (n === 1 && scope.derived !== true) return true
+    if (row.harness_session !== null && [claimant.harness_session, claimant.harness_origin].includes(row.harness_session)) return true
     if (claimant.process !== null && row.process !== null && sameHarness(row.process, claimant.process)) return true
-    return this.redeems(row, scope, claimant, hooks)
+    if (this.redeems(row, scope, claimant, hooks)) return true
+    return !foreign(row, claimant) && !this.keeps(row, claimant)
+  }
+
+  /**
+   * what no claim without proof takes from `row`: a harness process still running its session, and, from a claim that reports a harness
+   * session `row` never did, its children, a worker it runs on another machine and its unread mail. A claim with no harness session cannot
+   * show a restart of its own session any other way, so it keeps those
+   */
+  private keeps(row: EndpointRow, claimant: { harness_session?: string | null }): boolean {
+    if (row.process !== null && row.hook_ended === null && this.running(row.process)) return true
+    if (!claimant.harness_session) return false
+    if (
+      one(
+        this.sql,
+        `SELECT 1 AS y WHERE EXISTS (SELECT 1 FROM endpoints WHERE parent_ep = ? AND substr(handle, 1, ${GONE_PREFIX.length}) != '${GONE_PREFIX}')
+         OR EXISTS (SELECT 1 FROM spawn_via WHERE spawner = ? AND ended_at IS NULL)`,
+        row.id,
+        row.id,
+      )
+    )
+      return true
+    return !!one(this.sql, `SELECT 1 AS y FROM deliveries WHERE endpoint = ? AND acked_at IS NULL AND expires_at > ? LIMIT 1`, row.id, this.now())
   }
 
   /**

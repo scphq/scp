@@ -1734,6 +1734,9 @@
         "derived": {
           "type": "boolean"
         },
+        "join_only": {
+          "type": "boolean"
+        },
         "lineage": {
           "type": "array",
           "items": {

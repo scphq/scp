@@ -171,6 +171,8 @@ pub(crate) struct Fields {
     pub(crate) under: Option<String>,
     /// the handle is the client's default for its harness and cwd, not a name given
     pub(crate) derived: bool,
+    /// a hook's claim that takes only what its session owns: no new row, none by handle search
+    pub(crate) join_only: bool,
 }
 #[derive(Clone)]
 pub(crate) struct Scope {
@@ -210,7 +212,7 @@ impl Core {
             return Ok(Vec::new());
         }
         for key in keys.iter().filter(|v| process_key(v, true)) {
-            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
+            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY connections > 0 OR (session IS NOT NULL AND substr(session,1,4) != 'sub:') DESC,COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
             let mut out = Vec::new();
             for row in rows {
                 if exclude.contains(&text(&row, "id").unwrap_or("")) {
@@ -405,9 +407,9 @@ impl Core {
         parent.and_then(|r| text(r, "id")) == text(row, "parent_ep")
             || (parent.is_none() && integer(row, "linked").is_some())
     }
-    /// whether a claim that walked to `row`, a released row, by its `n`th handle may take it over: a row of no other harness session (none
-    /// reported on either side, the claim's own, or its origin), one at the claim's own handle that was given rather than derived, one whose grant the
-    /// claim redeems, or one its own harness process holds. A handle collision alone never passes a session's endpoint to another
+    /// whether a claim that walked to `row`, a released row, by its `n`th handle may take it over: one at the claim's own handle that was given
+    /// rather than derived, the claim's own harness session's or its origin's, one its own harness process holds, one whose grant the claim
+    /// redeems, or one of no other harness session that `keeps` nothing. A handle collision alone never passes a session's endpoint to another
     async fn proven(
         &self,
         row: &Row,
@@ -418,11 +420,13 @@ impl Core {
         hooks: Option<&Row>,
     ) -> Result<bool, RpcError> {
         let reported = text(row, "harness_session");
-        let foreign = reported.is_some()
-            && fields.harness_session.is_some()
-            && reported != fields.harness_session.as_deref()
-            && reported != fields.harness_origin.as_deref();
-        if !foreign || (n == 1 && !fields.derived) {
+        if n == 1 && !fields.derived {
+            return Ok(true);
+        }
+        if reported.is_some()
+            && (reported == fields.harness_session.as_deref()
+                || reported == fields.harness_origin.as_deref())
+        {
             return Ok(true);
         }
         if fields
@@ -433,7 +437,45 @@ impl Core {
         {
             return Ok(true);
         }
-        self.redeems(row, scope, fields, harness, hooks).await
+        if self.redeems(row, scope, fields, harness, hooks).await? {
+            return Ok(true);
+        }
+        let foreign = reported.is_some() && fields.harness_session.is_some();
+        Ok(!foreign && !self.keeps(row, fields).await?)
+    }
+    /// what no claim without proof takes from `row`: a harness process still running its session, and, from a claim that reports a harness
+    /// session `row` never did, its children, a worker it runs on another machine and its unread mail. A claim with no harness session cannot
+    /// show a restart of its own session any other way, so it keeps those
+    async fn keeps(&self, row: &Row, fields: &Fields) -> Result<bool, RpcError> {
+        if integer(row, "hook_ended").is_none()
+            && let Some(key) = text(row, "process")
+            && self.procs.alive(key).await
+        {
+            return Ok(true);
+        }
+        if fields.harness_session.is_none() {
+            return Ok(false);
+        }
+        let id = opt(text(row, "id"));
+        if !self
+            .store
+            .all(
+                "SELECT 1 AS y WHERE EXISTS (SELECT 1 FROM endpoints WHERE parent_ep = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_') OR EXISTS (SELECT 1 FROM spawn_via WHERE spawner = ? AND ended_at IS NULL)",
+                &[id.clone(), id.clone()],
+            )
+            .await?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+        Ok(!self
+            .store
+            .all(
+                "SELECT 1 AS y FROM deliveries WHERE endpoint = ? AND acked_at IS NULL AND expires_at > ? LIMIT 1",
+                &[id, SqlValue::Int(now_ms())],
+            )
+            .await?
+            .is_empty())
     }
     async fn returns(
         &self,
@@ -792,6 +834,12 @@ impl Core {
                 }
             }
         }
+        if row.is_none() && fields.join_only {
+            return Err(RpcError::new(
+                ErrorCode::NotFound,
+                "this session has no endpoint yet: its tool surface makes it",
+            ));
+        }
         let mut joined = row.is_some() && !resumed;
         let mut created = false;
         let mut live = false;
@@ -925,7 +973,7 @@ impl Core {
                 .await?;
             self.store
                 .all(
-                    "UPDATE endpoints SET session = NULL,hook_seen = NULL,harness_session = NULL,harness_origin = NULL WHERE id = ?",
+                    "UPDATE endpoints SET session = NULL,hook_seen = NULL,harness_session = NULL,harness_origin = NULL,process = NULL WHERE id = ?",
                     &[opt(text(&hooks, "id"))],
                 )
                 .await?;
@@ -1373,6 +1421,9 @@ impl Core {
             harness_handoff: claim.get("harness_handoff") == Some(&Value::Bool(true)),
             under: clean_text(claim.get("under"), "under", 128)?.filter(|v| !v.is_empty()),
             derived: claim.get("derived") == Some(&Value::Bool(true)),
+            join_only: transient
+                && subagent.is_none()
+                && claim.get("join_only") == Some(&Value::Bool(true)),
         };
         if fields
             .process
@@ -1417,6 +1468,9 @@ impl Core {
             .is_some_and(|v| !v.is_boolean())
         {
             return Err(RpcError::invalid_params("harness_handoff is true or false"));
+        }
+        if claim.get("join_only").is_some_and(|v| !v.is_boolean()) {
+            return Err(RpcError::invalid_params("join_only is true or false"));
         }
         if claim.get("derived").is_some_and(|v| !v.is_boolean()) {
             return Err(RpcError::invalid_params("derived is true or false"));
