@@ -552,4 +552,157 @@ brokerSuite("broker resumed sessions", (start) => {
     expect(named.id).not.toBe(hooked.hello.endpoint?.id);
     expect(await holder.request("whoami")).toMatchObject({ address: "me/app" });
   });
+
+  /** session `lane` of the harness daemon, its hooks' default claim first, its shim then taking back the named worker `lead` launched: the way a stopped worker resumes under a new id */
+  const daemonSession = (pid: number, harness_session: string) => ({
+    process: `pid:${pid}:conformance`,
+    session: `pid:${pid}:conformance`,
+    lineage: [`pid:${pid}:conformance`, "pid:3:conformance"],
+    cwd: "/work",
+    harness_session,
+  });
+  const walk = (pid: number) => {
+    const shell = [`pid:${pid}:conformance`];
+    return { self: shell, lineage: shell };
+  };
+  async function resumedLane(start: Start) {
+    const broker = await start();
+    const lead = await broker.agent("lead", "claude-code", {}, session(process.pid));
+    const { token } = await lead.request<{ token: string }>("grant", { name: "lane-a" });
+    const first = daemonSession(process.pid, "lane-1");
+    const hook = await broker.hook({ handle: "claude-app", derived: true, ...first });
+    const lane = await broker.agent("lane-a", "claude-code", {}, { ...first, grant: token });
+    await hook.request("event", { kind: "tool", session_id: "lane-1" });
+    await lane.close();
+    await hook.request("event", { kind: "session_end" });
+    await hook.close();
+    const fork = daemonSession(process.ppid, "lane-2");
+    const left = await broker.hook({ handle: "claude-app", derived: true, ...fork });
+    expect(left.hello.endpoint?.id).not.toBe(lane.id);
+    await left.close();
+    const back = await broker.agent("lane-a", "claude-code", {}, { ...fork, harness_session: "lane-2", harness_origin: "lane-1" });
+    expect(back.hello.endpoint).toMatchObject({ id: lane.id, address: "me/lane-a", parent: "me/lead" });
+    return { broker, lead, lane: back, pid: process.ppid };
+  }
+
+  test("a shell in a resumed session binds its named endpoint, never the default row its hooks left", async () => {
+    const { broker, lane, pid } = await resumedLane(start);
+    const shell = await broker.observer(walk(pid));
+    expect(shell.hello.endpoint).toMatchObject({ id: lane.id, address: "me/lane-a" });
+  });
+
+  test("a worker spawned from a resumed session's shell sits under its named endpoint and its result reaches that endpoint", async () => {
+    const { broker, lane, pid } = await resumedLane(start);
+    const shell = await broker.observer(walk(pid));
+    const { token } = await shell.request<{ token: string }>("grant", { name: "lane-sol" });
+    const worker = await broker.agent("lane-sol", "codex", {}, { ...session(40), lineage: [key(40), `pid:${pid}:conformance`], grant: token });
+    expect(worker.hello.endpoint).toMatchObject({ address: "me/lane-sol", parent: "me/lane-a" });
+    await worker.request("send", { to: "lane-a", body: "finished" });
+    expect(await lane.request("inbox")).toMatchObject({ messages: [{ body: { text: "finished" } }] });
+  });
+
+  test("a row that lost the session but still names its harness process never outranks the row the session holds", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead", "claude-code", {}, session(process.pid));
+    const { token } = await lead.request<{ token: string }>("grant", { name: "lane-a", scope: "parent" });
+    const pid = process.ppid;
+    const lane = await broker.agent("lane-a", "claude-code", {}, { ...daemonSession(pid, "lane-1"), session: "shim-a", grant: token });
+    expect(lane.hello.endpoint).toMatchObject({ address: "me/lane-a", parent: "me/lead" });
+    const root = await broker.hook({ handle: "claude-app", derived: true, ...daemonSession(pid, "lane-1"), session: "hooks-a", lineage: [] });
+    expect(root.hello.endpoint).toMatchObject({ parent: null });
+    await root.request("event", { kind: "session_end" });
+    await root.close();
+    expect((await broker.observer(walk(pid))).hello.endpoint).toMatchObject({ id: lane.id, address: "me/lane-a" });
+  });
+
+  test("a session's hook or shim at a default name passes by an ended row that has children", async () => {
+    const broker = await start();
+    const old = await broker.hook({ handle: "claude-app", derived: true, ...session(2) });
+    const shell = await broker.observer({ self: [key(2)], lineage: [key(2)] });
+    expect(shell.hello.endpoint?.id).toBe(old.hello.endpoint?.id);
+    const { token } = await shell.request<{ token: string }>("grant", { name: "lane-sol", scope: "parent" });
+    const worker = await broker.agent("lane-sol", "codex", {}, { ...session(40), grant: token });
+    await old.request("event", { kind: "session_end" });
+    await old.close();
+    const parent = old.hello.endpoint?.address;
+    expect(worker.hello.endpoint?.parent).toBe(parent);
+    const hook = await broker.hook({ handle: "claude-app", derived: true, ...session(3), harness_session: "other-a" });
+    const shim = await broker.agent("claude-app", "claude-code", {}, { ...session(4), harness_session: "other-b", derived: true });
+    for (const claimed of [hook.hello.endpoint!, shim.hello.endpoint!]) expect(claimed.id).not.toBe(old.hello.endpoint?.id);
+    expect(await worker.request("whoami")).toMatchObject({ parent });
+  });
+
+  test("a claim of no harness session takes back a restarted row with children, as a harness that reports none restarts", async () => {
+    const broker = await start();
+    const old = await broker.hook({ handle: "muse-app", harness: "muse", derived: true, ...session(2) });
+    const shell = await broker.observer({ self: [key(2)], lineage: [key(2)] });
+    const { token } = await shell.request<{ token: string }>("grant", { name: "lane-sol" });
+    const worker = await broker.agent("lane-sol", "codex", {}, { ...session(40), grant: token });
+    await old.request("event", { kind: "session_end" });
+    await old.close();
+    const back = await broker.agent("muse-app", "muse", {}, { ...session(3), derived: true });
+    expect(back.id).toBe(old.hello.endpoint!.id);
+    expect(await worker.request("whoami")).toMatchObject({ parent: "me/muse-app" });
+  });
+
+  test("a default name's ended empty row of no session stays free, its unread mail does not pass", async () => {
+    const broker = await start();
+    const empty = await broker.hook({ handle: "claude-app", derived: true, ...session(2) });
+    await empty.request("event", { kind: "session_end" });
+    await empty.close();
+    const next = await broker.hook({ handle: "claude-app", derived: true, ...session(3), harness_session: "other-a" });
+    expect(next.hello.endpoint?.id).toBe(empty.hello.endpoint?.id);
+    await next.request("event", { kind: "session_end" });
+    await next.close();
+    const peer = await broker.agent("peer");
+    const human = await broker.human();
+    await human.request("rules_set", { endpoint: "peer", out: ["*"] });
+    await peer.request("send", { to: "claude-app", body: "for whoever ran here" });
+    const third = await broker.hook({ handle: "claude-app", derived: true, ...session(4), harness_session: "other-b" });
+    expect(third.hello.endpoint?.id).not.toBe(empty.hello.endpoint?.id);
+  });
+
+  test("an ended row with a worker on another machine is passed by at a default name", async () => {
+    const broker = await start();
+    const old = await broker.hook({ handle: "claude-app", derived: true, ...session(2) });
+    const shell = await broker.observer({ self: [key(2)], lineage: [key(2)] });
+    await shell.request("spawn_via", { name: "far-sol", runner: "box", address: "me/far/far-sol", machine: "far" });
+    await old.request("event", { kind: "session_end" });
+    await old.close();
+    const next = await broker.hook({ handle: "claude-app", derived: true, ...session(3), harness_session: "other-a" });
+    expect(next.hello.endpoint?.id).not.toBe(old.hello.endpoint?.id);
+  });
+
+  test("a join-only hook makes no endpoint before its session's shim, and joins it after", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead", "claude-code", {}, session(process.pid));
+    const { token } = await lead.request<{ token: string }>("grant", { name: "lane-a" });
+    const claim = { handle: "claude-app", derived: true, join_only: true, ...daemonSession(process.ppid, "lane-1") };
+    expect(await refusal(broker.hook(claim))).toBe("not_found");
+    expect((await broker.observer(walk(process.ppid))).hello.endpoint).toBeNull();
+    const lane = await broker.agent("lane-a", "claude-code", {}, { ...daemonSession(process.ppid, "lane-1"), grant: token });
+    expect(lane.hello.endpoint).toMatchObject({ address: "me/lane-a", parent: "me/lead" });
+    expect((await broker.hook(claim)).hello.endpoint?.id).toBe(lane.id);
+    expect((await broker.observer(walk(process.ppid))).hello.endpoint?.id).toBe(lane.id);
+    const human = await broker.human();
+    const { endpoints } = await human.request<{ endpoints: View[] }>("list", { all: true });
+    expect(endpoints.filter((view) => view.address.startsWith("me/claude-app"))).toEqual([]);
+  });
+
+  test("a join-only hook takes nothing by a default handle, and takes back its own session's row", async () => {
+    const broker = await start();
+    const empty = await broker.hook({ handle: "claude-app", derived: true, ...session(2) });
+    await empty.request("event", { kind: "tool", session_id: "own-a" });
+    await empty.request("event", { kind: "session_end" });
+    await empty.close();
+    const claim = (pid: number, harness_session: string) => ({ handle: "claude-app", derived: true, join_only: true, ...session(pid), harness_session });
+    expect(await refusal(broker.hook(claim(3, "other-a")))).toBe("not_found");
+    expect((await broker.hook(claim(4, "own-a"))).hello.endpoint?.id).toBe(empty.hello.endpoint?.id);
+  });
+
+  test("join_only is true or false", async () => {
+    const broker = await start();
+    const hello = { protocol: "scp/1", transient: true, claim: { handle: "claude-app", harness: "claude-code", join_only: "yes", ...session(2) } };
+    expect(await refusal((await broker.wire()).request("hello", hello, { unchecked: true }))).toBe("invalid_params");
+  });
 });

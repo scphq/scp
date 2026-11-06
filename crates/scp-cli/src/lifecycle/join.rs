@@ -10,7 +10,8 @@ use scp_core::protocol::{CLI_NAME, PROTOCOL};
 use scp_mcp::Claim;
 use scp_mcp::client::relay_dir;
 use scp_mcp::identity::{
-    CODEX_THREAD_KEY, IdentityInput, codex_shell, relay_identity, safe_cwd, session_key,
+    CODEX_THREAD_KEY, IdentityInput, codex_shell, hook_format, joins_only, relay_identity,
+    safe_cwd, session_key,
 };
 use scp_mcp::membership::read_session_marker;
 use scp_mcp::ps::{Env, SHELL_PS_TIMEOUT_MS, Table, harness_at, read_ps_table};
@@ -134,11 +135,18 @@ pub fn join(call: &Call) -> Done {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let claim = if keyed_session.starts_with(CODEX_THREAD_KEY) {
+    let mut claim = if keyed_session.starts_with(CODEX_THREAD_KEY) {
         identify(&session, marked(&keyed_session), call, &cwd)
     } else {
         keyed
     };
+    let harness = claim
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if joins_only(call.env, hook_format(harness, harness)) {
+        claim.insert("join_only".into(), Value::Bool(true));
+    }
     let mut joining = Map::new();
     if let Some(handle) = &handle {
         joining.insert("handle".into(), Value::from(handle.as_str()));

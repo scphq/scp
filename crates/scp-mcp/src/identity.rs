@@ -662,6 +662,12 @@ pub fn background_handoff(env: &Env) -> bool {
     is(env, "CLAUDE_CODE_SESSION_KIND", "bg") && is(env, "CLAUDE_BG_SOURCE", "slash")
 }
 
+/// whether a hook's or a join's claim only joins what its session owns: a daemon-hosted Claude Code session's hook has the daemon's environment
+/// and a command line that names no session, so it cannot tell whose endpoint it is, and its tool surface makes or takes it back
+pub fn joins_only(env: &Env, format: &str) -> bool {
+    is(env, "CLAUDE_CODE_SESSION_KIND", "bg") && format == "claude-code"
+}
+
 /// the claim a shim or hook makes for this harness session
 pub fn relay_identity(input: &IdentityInput) -> Claim {
     let env = &input.env;

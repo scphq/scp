@@ -1,7 +1,7 @@
 import { CLI_NAME } from "@scp-dev/core"
 import { readSessionMarker, relayDir } from "@scp-dev/broker"
 import { connectShell, localHandle, PS_UNREAD, RelayUsage, walkNow } from "./common"
-import { CODEX_THREAD_KEY, codexShell, harnessAt, readPsTable, relayIdentity, sessionKey, SHELL_PS_TIMEOUT_MS } from "./identity"
+import { CODEX_THREAD_KEY, codexShell, harnessAt, readPsTable, relayIdentity, sessionKey, SHELL_PS_TIMEOUT_MS, hookFormat, joinsOnly } from "./identity"
 
 type Values = { harness?: unknown; json?: unknown; under?: unknown }
 
@@ -39,7 +39,8 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
       lineageOf: () => keys.slice(Math.max(0, keys.indexOf(key!))),
     })
   const keyed = identify(readSessionMarker(dir, sessionKey(process.env, key!))?.handle)
-  const claim = keyed.session.startsWith(CODEX_THREAD_KEY) ? identify(readSessionMarker(dir, keyed.session)?.handle) : keyed
+  const identified = keyed.session.startsWith(CODEX_THREAD_KEY) ? identify(readSessionMarker(dir, keyed.session)?.handle) : keyed
+  const claim = joinsOnly(process.env, hookFormat(identified.harness, identified.harness)) ? { ...identified, join_only: true } : identified
   const client = await connectShell(dir, tool)
   try {
     const hello = await client.hello({ transient: true, claim, join: { ...(handle ? { handle } : {}), ...(under ? { under } : {}) } })

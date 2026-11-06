@@ -528,6 +528,9 @@ pub struct Claim {
     /// The handle is the client's default, not a name given: no other session's endpoint is taken for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived: Option<bool>,
+    /// A hook's: join or take back what this session owns, else claim nothing, as its tool surface makes the endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_only: Option<bool>,
     /// Ancestor process keys, nearest first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<Vec<String>>,

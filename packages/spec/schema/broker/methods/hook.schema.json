@@ -30,6 +30,9 @@
             "CLAUDECODE": {
               "type": "string"
             },
+            "CLAUDE_BG_SOURCE": {
+              "type": "string"
+            },
             "CLAUDE_CODE_ENTRYPOINT": {
               "type": "string"
             },
@@ -37,6 +40,9 @@
               "type": "string"
             },
             "CLAUDE_CODE_SESSION_ID": {
+              "type": "string"
+            },
+            "CLAUDE_CODE_SESSION_KIND": {
               "type": "string"
             },
             "CLAUDE_CODE_WORKSPACE_HOST_PATHS": {

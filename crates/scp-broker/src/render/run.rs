@@ -10,7 +10,7 @@ use scp_core::protocol::{ErrorCode, LIMITS};
 use scp_mcp::Membership;
 use scp_mcp::identity::{
     CODEX_THREAD_KEY, IdentityInput, cowork_live, detect_harness, field as claim_field,
-    hook_format, normalize_harness, relay_identity, session_key,
+    hook_format, joins_only, normalize_harness, relay_identity, session_key,
 };
 use scp_mcp::membership::membership;
 use scp_mcp::ps::{Parent, PsCommTable, PsEntry, app_server, harness_at, harness_pid, process_key};
@@ -301,6 +301,9 @@ fn speaker(hook: &Hook, harness: &str, event: &HookEvent, child: bool) -> Option
         return None;
     }
     let format = hook_format(claim_field(&claim, "harness"), harness).to_string();
+    if joins_only(&hook.env, &format) {
+        claim.insert("join_only".into(), Value::Bool(true));
+    }
     let transcript = if payload.contains_key("transcript_path") {
         payload.get("transcript_path")
     } else {
@@ -334,11 +337,14 @@ fn wake_speaker(hook: &Hook, harness: &str) -> Option<(Claim, String)> {
     let cwd = as_string(payload.get("cwd"))
         .map(String::from)
         .unwrap_or_else(|| hook.cwd.clone());
-    let claim = who.identify(handle_of(&joined), harness_session, &cwd);
+    let mut claim = who.identify(handle_of(&joined), harness_session, &cwd);
     if !valid_handle(claim_field(&claim, "handle")) {
         return None;
     }
     let format = hook_format(claim_field(&claim, "harness"), harness).to_string();
+    if joins_only(&hook.env, &format) {
+        claim.insert("join_only".into(), Value::Bool(true));
+    }
     Some((claim, format))
 }
 
@@ -742,9 +748,15 @@ async fn wake_hook(
     host.deadline(now() - hook.began + wait_ms + PUSH_PRINT_MS + HOOK_AFTER_CONNECT_MS);
     let client = host.connect().await;
     let client = client.as_ref();
-    client
+    let joins = claim.contains_key("join_only");
+    match client
         .hello(map(json!({"transient": true, "claim": claim})))
-        .await?;
+        .await
+    {
+        Ok(_) => {}
+        Err(error) if joins && not_found(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    }
     let _ = client
         .request("wake", map(json!({"via": OPENCODE_WAKE})))
         .await;
