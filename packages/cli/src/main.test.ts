@@ -453,6 +453,28 @@ describe("swarm", () => {
     expect((JSON.parse(asJson.stdout) as { pending: boolean; ended: unknown }).ended).toEqual([{ address: "me/ender", state: "blocked" }])
   })
 
+  test("a job acting as a root by name is told how to reach an agent below another root, and both ways it names work", async () => {
+    const lead = await RelayClient.connect(broker.socket)
+    await lead.hello({ claim: { handle: "job-lead", harness: "codex" } })
+    const { token } = await lead.request<{ token: string }>("grant", { name: "job-lane" })
+    const lane = await RelayClient.connect(broker.socket)
+    await lane.hello({ claim: { handle: "job-lane", harness: "codex", grant: token } })
+    const refused = "swarm: no endpoint job-lane that you can reach (swarm peers lists who you may message)\n"
+    const hint =
+      "me/job-lane-job is a root you act as by name (--as or $SCP_NAME): it reaches its own tree and the roots only. To reach an agent below another root, give the job a place under that agent: start it from the agent's shell with env $(swarm spawn-env --name <name>) <command>, or set SCP_UNDER=<agent> to link me/job-lane-job under it\n"
+    expect(await swarm(["--as", "job-lane-job", "send", "job-lane", "progress"])).toEqual({ code: 125, stdout: "", stderr: `${refused}${hint}` })
+    expect(await swarm(["ask", "job-lane", "progress?", "--wait", "1"], { SCP_NAME: "job-lane-job" })).toMatchObject({ code: 125, stderr: `${refused}${hint}` })
+    expect((await swarm(["--as", "job-lane-job", "send", "job-lane", "linked"], { SCP_UNDER: "job-lane" })).code).toBe(0)
+    expect((await swarm(["--as", "job-lane-job", "send", "nobody-here", "x"])).stderr).toBe(
+      "swarm: no endpoint nobody-here that you can reach (swarm peers lists who you may message)\n",
+    )
+    const { env } = await lane.request<{ env: Record<string, string> }>("grant", { name: "job-lane-script" })
+    expect((await swarm(["send", "job-lane", "placed"], env)).code).toBe(0)
+    expect((await lane.request<{ messages: { body: { text: string } }[] }>("inbox")).messages.map((m) => m.body.text)).toEqual(["linked", "placed"])
+    lead.close()
+    lane.close()
+  })
+
   test("a message carrying a credential is refused and nothing echoes it", async () => {
     const secret = `ghp_${"A1b2C3d4".repeat(5)}`
     const result = await swarm(["send", "me/", "-"], { SCP_NAME: "leaky" }, `the token is ${secret}\n`)
