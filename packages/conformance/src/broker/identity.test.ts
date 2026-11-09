@@ -321,6 +321,29 @@ brokerSuite("broker identity state", (start) => {
     expect(await child.request("whoami")).toMatchObject({ parent: "me/old", depth: 1 });
     expect(await fresh.request("inbox")).toMatchObject({ messages: [{ body: { text: "kept" } }] });
   });
+
+  test("a takeover of a spawned worker places the root where the grant placed it, with the grant's caps, never as a linked row", async () => {
+    const broker = await start();
+    const lead = await broker.agent("lead", "codex", {}, session(1));
+    await broker.agent("other", "codex", {}, session(9));
+    const { token } = await lead.request<{ token: string }>("grant", { name: "w1", scope: "parent" });
+    const worker = await broker.agent("w1", "codex", {}, { ...session(4), grant: token });
+    expect(worker.hello.endpoint).toMatchObject({ parent: "me/lead", depth: 1 });
+    const human = await broker.human();
+    await worker.close();
+    await waitFor(
+      async () => (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints.find((e) => e.id === worker.id)?.presence === "offline",
+      "w1 offline",
+    );
+    const fresh = await broker.agent("fresh", "codex", {}, session(5));
+    expect(await fresh.request("send", { to: "other", body: "as a root" })).toMatchObject({ deliveries: [{ address: "me/other" }] });
+    expect(await human.request("rename", { endpoint: "fresh", handle: "w1", take_over: true })).toMatchObject({ id: fresh.id, address: "me/w1" });
+    expect(await fresh.request("whoami")).toMatchObject({ parent: "me/lead", depth: 1 });
+    expect(await refusal(fresh.request("send", { to: "other", body: "past the grant's scope" }))).toBe("not_found");
+    expect(await fresh.request("send", { to: "lead", body: "to its parent" })).toMatchObject({ deliveries: [{ address: "me/lead" }] });
+    expect(await refusal(fresh.request("leave"))).toBe("scope_refused");
+    expect((await human.request<{ rows: { event: string }[] }>("log", { scope: true })).rows.map((r) => r.event)).not.toContain("adopt");
+  });
 });
 
 brokerSuite("broker resumed sessions", (start) => {
