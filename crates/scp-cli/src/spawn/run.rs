@@ -199,7 +199,8 @@ pub fn spawn(call: &Call, args: &[String]) -> Done {
         && (values.on("bg") || (!values.on("fg") && (!tty(1) || (!tty(0) && agent_shell(&env)))));
     open::block_on(async {
         if detach {
-            return detach_spawn(args, &cwd, &env).await;
+            let by = values.text("as").map(open::local_handle).transpose()?;
+            return detach_spawn(args, &cwd, &env, by.as_deref()).await;
         }
         let plan = match remote::linked_plan(&values, &command, &env).await {
             Ok(plan) => plan,

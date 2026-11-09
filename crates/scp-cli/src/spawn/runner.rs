@@ -109,8 +109,14 @@ pub fn read_reply(line: &str) -> Result<Reply, Fail> {
     }
 }
 
-/// Re-exec with the caller's walk and no caller stdio. Return once the private handshake confirms the harness started.
-pub async fn detach_spawn(args: &[String], cwd: &str, env: &Env) -> Result<i32, Fail> {
+/// Re-exec with the caller's walk and no caller stdio. Return once the private handshake confirms the harness started. A spawn `--as` a handle
+/// names it, since the result goes to it and a steer from a shell without it comes from the shell's own agent
+pub async fn detach_spawn(
+    args: &[String],
+    cwd: &str,
+    env: &Env,
+    by: Option<&str>,
+) -> Result<i32, Fail> {
     let table = read_ps_table(SHELL_PS_TIMEOUT_MS).map(Rc::new);
     let walk = walk_now(env, route::shell_pid(), table);
     let exe = std::env::current_exe().map_err(|_| ended())?;
@@ -120,8 +126,11 @@ pub async fn detach_spawn(args: &[String], cwd: &str, env: &Env) -> Result<i32, 
     let line = handshake(&launch, args, Path::new(cwd), &env, &walk).await;
     match read_reply(&line)? {
         Ok((name, pid)) => {
+            let (to, flag) = by.map_or((String::new(), String::new()), |by| {
+                (format!(" to me/{by}"), format!("--as {by} "))
+            });
             term::out(&format!(
-                "{name} started (pid {pid}) and runs in the background: its result arrives as a relay message by itself; steer it with {CLI_NAME} send {name} <text>"
+                "{name} started (pid {pid}) and runs in the background: its result arrives as a relay message{to} by itself; steer it with {CLI_NAME} {flag}send {name} <text>"
             ));
             Ok(0)
         }

@@ -721,7 +721,7 @@ A delivery point is a place where the harness lets the integration act at a turn
 | Prompt submit | none | Claim; record a prompt (section 8.5); offer the prompt's first line as an inferred title; inject, and MAY append a reminder to keep the now line current (section 11.1). |
 | After tool | `tool` (tool name at most 64 characters, summary) | Inject. |
 | Stop | `stop` | Offer the harness's own name for the session as an inferred title; stop handling (sections 8.5 to 8.7). |
-| Subagent tool | `tool`, labelled with the subagent, on the main endpoint (none for a child thread, section 6.9) | A separate subagent hook (a child thread's own hooks) claims the subagent's endpoint (section 6.9) and injects into it; on that endpoint's first claim it also tells the subagent its own address and how to act as it, since its shell otherwise acts as its parent. A child thread's prompt does the same. |
+| Subagent tool | `tool`, labelled with the subagent, on the main endpoint (none for a child thread, section 6.9) | A separate subagent hook (a child thread's own hooks) claims the subagent's endpoint (section 6.9) and injects into it; on that endpoint's first claim it also tells the subagent its own address and how to act as it, since its shell otherwise acts as its parent, and that what reaches it once it stops waits in its inbox, offered to the root to continue it with while the root has a live waker (section 6.9). A child thread's prompt does the same. |
 | Subagent stop | `stop` (none for a child thread) | Set the subagent endpoint `done`; no injection. |
 | Session end | `session_end`, status `done` | End the hook session. |
 
