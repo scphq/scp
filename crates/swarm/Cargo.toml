@@ -12,6 +12,9 @@ build = "build.rs"
 name = "swarm"
 path = "src/main.rs"
 
+[features]
+turso = ["scp-broker/turso"]
+
 [dependencies]
 clap.workspace = true
 libc = "=0.2.191"

@@ -173,6 +173,7 @@ const DAEMON_ENV = [
   "SCP_NATIVE",
   "SCP_SWARM_BIN",
   "SCP_CLAUDE_BG_EVERY_S",
+  "SCP_STORE",
 ]
 const LOG_MAX_BYTES = 1024 * 1024
 

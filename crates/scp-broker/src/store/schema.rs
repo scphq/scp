@@ -445,6 +445,7 @@ async fn migrate_schema(store: &dyn Storage, now_ms: i64) -> StoreResult<()> {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+            .replace(" (", "(")
     };
     if trigger
         .first()

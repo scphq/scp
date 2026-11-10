@@ -1,11 +1,26 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
-use scp_broker::store::{Row, SqlValue, sqlite::SqliteStore};
+use scp_broker::store::{Engine, Row, SqlValue, Storage, sqlite::SqliteStore};
 use serde_json::Value;
 
+/// the engine under test: `$SCP_TEST_STORE` (`sqlite` or `turso`), else sqlite
+pub fn engine() -> Engine {
+    std::env::var("SCP_TEST_STORE")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .map_or(Engine::Sqlite, |name| name.parse().expect("SCP_TEST_STORE"))
+}
+
+enum Typed {
+    Sqlite(Arc<SqliteStore>),
+    #[cfg(feature = "turso")]
+    Turso(Arc<scp_broker::store::turso::TursoStore>),
+}
+
 pub struct TempStore {
-    pub store: SqliteStore,
+    pub store: Arc<dyn Storage>,
     pub dir: PathBuf,
+    typed: Typed,
 }
 
 impl TempStore {
@@ -14,12 +29,44 @@ impl TempStore {
         tokio::fs::create_dir(&dir)
             .await
             .expect("temporary directory");
-        let store = SqliteStore::open(&dir.join("relay.db")).expect("store");
-        Self { store, dir }
+        let path = dir.join("relay.db");
+        let (store, typed): (Arc<dyn Storage>, Typed) = match engine() {
+            Engine::Sqlite => {
+                let store = Arc::new(SqliteStore::open(&path).expect("store"));
+                (store.clone(), Typed::Sqlite(store))
+            }
+            #[cfg(feature = "turso")]
+            Engine::Turso => {
+                let store =
+                    Arc::new(scp_broker::store::turso::TursoStore::open(&path).expect("store"));
+                (store.clone(), Typed::Turso(store))
+            }
+            #[cfg(not(feature = "turso"))]
+            Engine::Turso => panic!("SCP_TEST_STORE=turso needs the turso feature"),
+        };
+        Self { store, dir, typed }
     }
 
     pub async fn close(self) {
-        self.store.close().await.expect("close store");
+        drop(self.store);
+        match self.typed {
+            Typed::Sqlite(store) => {
+                Arc::try_unwrap(store)
+                    .ok()
+                    .expect("sole store")
+                    .close()
+                    .await
+            }
+            #[cfg(feature = "turso")]
+            Typed::Turso(store) => {
+                Arc::try_unwrap(store)
+                    .ok()
+                    .expect("sole store")
+                    .close()
+                    .await
+            }
+        }
+        .expect("close store");
         tokio::fs::remove_dir_all(self.dir)
             .await
             .expect("remove temporary directory");

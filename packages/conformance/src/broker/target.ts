@@ -19,14 +19,17 @@ export function socketPath(dir: string): string {
 export const cli = join(import.meta.dir, "../../../cli/dist/cli.js");
 
 /**
- * `ts` runs the built CLI's foreground broker under Bun, `ts-node` under Node, `rust` the engine named by SCP_BROKER_BIN, and
- * `ts-native` the built CLI's foreground broker under SCP_NATIVE=1, which runs the native swarm named by SCP_SWARM_BIN
+ * `ts` runs the built CLI's foreground broker under Bun, `ts-node` under Node, `rust` the engine named by SCP_BROKER_BIN,
+ * `rust-turso` the same engine on its experimental Turso store, and `ts-native` the built CLI's foreground broker under
+ * SCP_NATIVE=1, which runs the native swarm named by SCP_SWARM_BIN. `rust-turso` runs only when SCP_BROKER_TARGETS names it.
  */
-export const brokerTargetNames = ["ts", "ts-node", "rust", "ts-native"].filter((name) => !selectedBrokerTargets || selectedBrokerTargets.includes(name));
+export const brokerTargetNames = ["ts", "ts-node", "rust", "rust-turso", "ts-native"].filter((name) =>
+  selectedBrokerTargets ? selectedBrokerTargets.includes(name) : name !== "rust-turso",
+);
 export const brokerTargetEnabled = (name: string) =>
   name === "ts" ? true : name === "ts-node" ? !!brokerNode : name === "ts-native" ? !!swarmBinary : !!brokerBinary;
 /** the targets whose broker is the native engine */
-export const nativeBrokerTarget = (name: string) => name === "rust" || name === "ts-native";
+export const nativeBrokerTarget = (name: string) => name === "rust" || name === "rust-turso" || name === "ts-native";
 
 export type BrokerFiles = {
   limits?: Record<string, number | null>;
@@ -65,6 +68,7 @@ export class BrokerTarget {
       GEMINI_CLI_HOME: this.home,
     });
     if (name === "ts-native") Object.assign(this.env, { SCP_NATIVE: "1", SCP_SWARM_BIN: resolve(swarmBinary!) });
+    if (name === "rust-turso") this.env.SCP_STORE = "turso";
     if (files.limits !== undefined) this.env.SCP_LIMITS = JSON.stringify(files.limits);
     if (files.policy !== undefined) this.write(this.policyPath, typeof files.policy === "string" ? files.policy : JSON.stringify(files.policy));
     for (const [path, text] of Object.entries(files.files ?? {})) this.write(join(this.home, path), text);
@@ -78,7 +82,7 @@ export class BrokerTarget {
   }
   command(): string[] {
     const args = ["daemon", "--idle", "600", "--policy", this.policyPath];
-    if (this.name === "rust") return [resolve(brokerBinary!), ...args];
+    if (this.name === "rust" || this.name === "rust-turso") return [resolve(brokerBinary!), ...args];
     if (this.name === "ts-node") return [brokerNode === "1" ? "node" : brokerNode!, cli, ...args];
     return [process.execPath, "--no-env-file", cli, ...args];
   }

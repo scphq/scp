@@ -1,0 +1,75 @@
+name: Broker on Turso
+
+# Experimental: the native broker on its opt-in Turso store. Kept out of CI and
+# continue-on-error, so an engine gap never blocks main; see the rust-turso target
+# in packages/conformance/README.md.
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "packages/conformance/**"
+      - ".github/workflows/broker-turso.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broker-turso-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust-turso:
+    name: Broker conformance on Turso (experimental)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build packages
+        run: bun run build:packages
+
+      - name: Build the native broker with the Turso store
+        working-directory: crates
+        run: cargo build --locked -p scp-broker --features turso --bin scp-broker
+
+      - name: Clippy with the Turso store
+        working-directory: crates
+        run: cargo clippy --locked -p scp-broker --features turso --all-targets -- -D warnings
+
+      - name: Store tests on Turso
+        working-directory: crates
+        env:
+          SCP_TEST_STORE: turso
+        run: cargo test --locked -p scp-broker --features turso --test store_turso --test store_schema --test store_sqlite
+
+      - name: Broker conformance against rust-turso
+        env:
+          SCP_BROKER_BIN: ${{ github.workspace }}/crates/target/debug/scp-broker
+          SCP_BROKER_TARGETS: rust-turso
+          SCP_BROKER_WAKERS: "1"
+        run: bun test packages/conformance/src/broker
