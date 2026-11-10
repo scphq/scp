@@ -109,7 +109,11 @@ brokerSuite("broker hook rpc", (start) => {
     await subject(broker, "claude-code", { harness_session: "rpc-session" });
     const payload = event(broker, "PostToolUse", { tool_name: "Read", agent_id: "aceb553c19f223c70", agent_type: "Explore" });
     const first = await hookRpc(broker, ["claude", "--subagent"], payload, claude(broker));
-    expect(JSON.parse(first.stdout).hookSpecificOutput.additionalContext).toContain("you are a subagent with your own relay address me/subject-explore-aceb;");
+    const intro = JSON.parse(first.stdout).hookSpecificOutput.additionalContext;
+    expect(intro).toContain("you are a subagent with your own relay address me/subject-explore-aceb;");
+    expect(intro).toContain(
+      "Once you stop, a message to you, a worker's result too, waits in your inbox, offered to your parent session to continue you with while that session can be woken:",
+    );
     expect((await hookRpc(broker, ["claude", "--subagent"], payload, claude(broker))).stdout).toBe("");
     expect((await hookRpc(broker, ["claude", "--subagent"], event(broker, "PostToolUse", { tool_name: "Read" }), claude(broker))).stdout).toBe("");
   });

@@ -43,10 +43,11 @@ function env(extra: Record<string, string> = {}): Record<string, string> {
   return { ...base, SCP_DIR: join(root, "state"), ...extra }
 }
 
-/** a background session's process, with its key and a way to run a command in a shell of its own */
-async function spare(session: string) {
-  const child = Bun.spawn([join(bin, "claude"), join(root, "spare.ts"), "--bg-spare", "/tmp/none.claim.sock"], {
-    env: env({ CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: session, CLAUDE_CODE_SESSION_KIND: "bg" }),
+/** a background session's process, or with `foreground` a terminal session's, with its key and a way to run a command in a shell of its own */
+async function spare(session: string, foreground = false) {
+  const words = foreground ? [join(root, "spare.ts")] : [join(root, "spare.ts"), "--bg-spare", "/tmp/none.claim.sock"]
+  const child = Bun.spawn([join(bin, "claude"), ...words], {
+    env: env({ CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: session, ...(foreground ? {} : { CLAUDE_CODE_SESSION_KIND: "bg" }) }),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",
@@ -84,10 +85,11 @@ const claim = (key: string, extra: Record<string, unknown>) => ({
   ...extra,
 })
 
-/** session `session`'s real hook, run from its own shell with the daemon's environment: `swarm hook claude-code` on an event of `harnessSession` */
-async function hook(session: Awaited<ReturnType<typeof spare>>, name: string, harnessSession: string) {
-  const payload = JSON.stringify({ hook_event_name: name, session_id: harnessSession, cwd: root, tool_name: "Bash" })
-  return session.shell(`echo '${payload}' | CLAUDE_PID=$PPID ${quoted(SELF)} hook claude-code`)
+/** session `session`'s real hook, run from its own shell with the daemon's environment: `swarm hook claude-code` on an event of `harnessSession`, or of its subagent `agent` */
+async function hook(session: Awaited<ReturnType<typeof spare>>, name: string, harnessSession: string, agent?: string) {
+  const sub = agent === undefined ? {} : { agent_id: agent, agent_type: "general-purpose" }
+  const payload = JSON.stringify({ hook_event_name: name, session_id: harnessSession, cwd: root, tool_name: "Bash", ...sub })
+  return session.shell(`echo '${payload}' | CLAUDE_PID=$PPID ${quoted(SELF)} hook claude-code${agent === undefined ? "" : " --subagent"}`)
 }
 
 /** `name`, a worker of `lead` run in a background session that ended, resumed in a process of its own under a new id: its hooks run first */
@@ -178,5 +180,30 @@ describe("a command in a background session's shell", () => {
     )
     expect(text).not.toContain(row.address)
     expect(text).not.toContain("claude-")
+  })
+})
+
+describe("a subagent's shell", () => {
+  test("hears that what reaches it after it stops goes to its parent session, and a worker it spawns by --as reports to it", async () => {
+    const session = await spare("s-11", true)
+    const shim = await connect()
+    await shim.hello({ claim: claim(session.key, { handle: "orch", harness_session: "s-11" }) })
+    await hook(session, "PostToolUse", "s-11")
+    const intro = await hook(session, "PostToolUse", "s-11", "a266ffff0000")
+    const context = JSON.parse(intro.out).hookSpecificOutput.additionalContext as string
+    expect(context).toContain("you are a subagent with your own relay address me/orch-gp-a266;")
+    expect(context).toContain(
+      "Once you stop, a message to you, a worker's result too, waits in your inbox, offered to your parent session to continue you with while that session can be woken: to wait for one, keep running with swarm --as orch-gp-a266 inbox --wait <seconds>.",
+    )
+    const { out, code } = await session.shell(`${quoted(SELF)} --as orch-gp-a266 spawn --name sub-sol -- sh -c 'echo the-result'`)
+    expect(code).toBe(0)
+    expect(out).toMatch(
+      /^sub-sol started \(pid \d+\) and runs in the background: its result arrives as a relay message to me\/orch-gp-a266 by itself; steer it with swarm --as orch-gp-a266 send sub-sol <text>\n$/,
+    )
+    const read = await session.shell(`${quoted(SELF)} --as orch-gp-a266 inbox --json --wait 20`)
+    expect(JSON.parse(read.out).messages).toMatchObject([
+      { to: "me/orch-gp-a266", body: { text: "worker sub-sol finished (exit 0), not a relay agent\n\nthe-result" } },
+    ])
+    expect((await shim.request<{ messages: unknown[] }>("inbox")).messages).toEqual([])
   })
 })

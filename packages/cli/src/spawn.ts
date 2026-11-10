@@ -41,6 +41,7 @@ import {
   type Walk,
   grantParams,
   localClient,
+  localHandle,
   open,
   PS_UNREAD,
   RelayUsage,
@@ -1019,7 +1020,7 @@ export async function spawnCommand(args: string[], cwd: string): Promise<number>
     runner === undefined &&
     (values.bg === true || (values.fg !== true && (process.stdout.isTTY !== true || (process.stdin.isTTY !== true && agentShell(process.env)))))
   )
-    return detachSpawn(args, cwd)
+    return detachSpawn(args, cwd, typeof values.as === "string" ? localHandle(values.as) : undefined)
   const channel = runner === undefined ? undefined : handshakeChannel()
   const handshake =
     channel === undefined
@@ -1305,15 +1306,19 @@ function once<A extends unknown[]>(fn: (...args: A) => void): (...args: A) => vo
   }
 }
 
-/** Re-exec with the caller's walk and no caller stdio. Return once the private handshake confirms the harness started. */
-async function detachSpawn(args: string[], cwd: string): Promise<number> {
+/**
+ * Re-exec with the caller's walk and no caller stdio. Return once the private handshake confirms the harness started. A spawn `--as` a handle
+ * names it, since the result goes to it and a steer from a shell without it comes from the shell's own agent
+ */
+async function detachSpawn(args: string[], cwd: string, as?: string): Promise<number> {
   const reply = await detachedRunner(args, cwd)
   if ("error" in reply) {
     note(reply.error)
     return reply.code
   }
+  const [to, by] = as === undefined ? ["", ""] : [` to me/${as}`, `--as ${as} `]
   console.log(
-    `${reply.name} started (pid ${reply.pid}) and runs in the background: its result arrives as a relay message by itself; steer it with ${CLI_NAME} send ${reply.name} <text>`,
+    `${reply.name} started (pid ${reply.pid}) and runs in the background: its result arrives as a relay message${to} by itself; steer it with ${CLI_NAME} ${by}send ${reply.name} <text>`,
   )
   return 0
 }

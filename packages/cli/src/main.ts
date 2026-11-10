@@ -39,6 +39,7 @@ import {
 } from "@scp-dev/core"
 import { type Broker, type BrokerInfo, BrokerRunning, connectBroker, type RelayClient, relayDir, startBroker } from "@scp-dev/broker"
 import {
+  type Bound,
   brokerLine,
   localClient,
   startDaemon,
@@ -848,6 +849,16 @@ async function daemonControl(positionals: string[], values: Partial<Record<Optio
   return 0
 }
 
+/**
+ * a send refused `not_found` from an `--as` root, as a job a detached script runs becomes: a root reaches only its own tree and the roots,
+ * and acting as another endpoint needs proof a script cannot give, so the refusal says how such a job gets a place under the agent instead
+ */
+export function rootReach(error: unknown, me: EndpointView | null | undefined, bound: Bound | null): unknown {
+  if (!(error instanceof RelayError) || error.code !== "not_found" || bound !== "as" || me?.kind !== "agent" || me.parent !== null) return error
+  const hint = `${me.address} is a root you act as by name (--as or $SCP_NAME): it reaches its own tree and the roots only. To reach an agent below another root, give the job a place under that agent: start it from the agent's shell with env $(${CLI_NAME} spawn-env --name <name>) <command>, or set SCP_UNDER=<agent> to link ${me.address} under it`
+  return new RelayError(error.code, `${error.message}\n${hint}`, error.retryAfterS, error.detail)
+}
+
 async function runVerb(
   { client, me, broker, where, bound, harnessPid }: Opened,
   verb: string,
@@ -1006,7 +1017,9 @@ async function runVerb(
         ...(attachments.length ? { attachments } : {}),
       }
       if (verb === "send") {
-        const result = await client.request<SendResult>("send", { ...params, ...(values.live ? { live: true } : {}) })
+        const result = await client.request<SendResult>("send", { ...params, ...(values.live ? { live: true } : {}) }).catch((error: unknown) => {
+          throw rootReach(error, me, bound)
+        })
         if (asJson) json(result)
         else if (result.held) out(heldText(result.held))
         else {
@@ -1018,11 +1031,15 @@ async function runVerb(
         }
         return 0
       }
-      const result = await client.request<AskResult>("ask", {
-        ...params,
-        ...(values["require-reply"] ? { require_reply: true } : {}),
-        wait_s: waitArg(values.wait as string | undefined, 50),
-      })
+      const result = await client
+        .request<AskResult>("ask", {
+          ...params,
+          ...(values["require-reply"] ? { require_reply: true } : {}),
+          wait_s: waitArg(values.wait as string | undefined, 50),
+        })
+        .catch((error: unknown) => {
+          throw rootReach(error, me, bound)
+        })
       return printAsk(result, asJson, to.trim())
     }
     case "reply": {
