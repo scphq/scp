@@ -19,6 +19,8 @@ pub const SUBAGENT: &str = "--subagent";
 pub const PUSH_WAIT_DEFAULT_S: u32 = 600;
 /// an installed stop's timeout past its push wait, so the wait ends and the reply prints well before the harness kills the hook
 const PUSH_TIMEOUT_MARGIN_S: u32 = 30;
+/// an installed hook's timeout in seconds, well past the hook's 3500 ms deadline so a cold start on a loaded machine still ends in the hook's own fallback
+const HOOK_TIMEOUT_S: u32 = 10;
 pub const AGY_UNVERIFIED: &str =
     "agy support follows its docs and binary; not yet checked in a live session";
 /// the key of agy's hooks file that holds the set of ours
@@ -115,7 +117,7 @@ fn stop_args(block_stop: bool, push_wait: Option<u32>) -> (Vec<String>, u32, boo
     let timeout = if wait > 0 {
         wait + PUSH_TIMEOUT_MARGIN_S
     } else {
-        5
+        HOOK_TIMEOUT_S
     };
     (args, timeout, wait > 0)
 }
@@ -156,8 +158,8 @@ pub fn hook_entries(harness: &str, options: &HookOptions) -> Json {
         hook_command(&options.launch, &words)
     };
     let command = line(&[]);
-    let background = handler(&command, 5, true);
-    let foreground = handler(&command, 5, false);
+    let background = handler(&command, HOOK_TIMEOUT_S, true);
+    let foreground = handler(&command, HOOK_TIMEOUT_S, false);
     let subagent = claude.then(|| line(&[SUBAGENT.to_owned()]));
     let (stop, timeout, waits) = stop_args(options.block_stop, options.push_wait);
     let mut stop_handler = handler(&line(&stop), timeout, false);
@@ -166,7 +168,7 @@ pub fn hook_entries(harness: &str, options: &HookOptions) -> Json {
     }
     let post = {
         let mut hooks = vec![background.clone()];
-        hooks.extend(subagent.iter().map(|c| handler(c, 5, false)));
+        hooks.extend(subagent.iter().map(|c| handler(c, HOOK_TIMEOUT_S, false)));
         if claude {
             Json::object(vec![
                 ("matcher", Json::str("*")),
@@ -177,7 +179,7 @@ pub fn hook_entries(harness: &str, options: &HookOptions) -> Json {
         }
     };
     let mut subagent_stop = vec![background.clone()];
-    subagent_stop.extend(subagent.iter().map(|c| handler(c, 5, true)));
+    subagent_stop.extend(subagent.iter().map(|c| handler(c, HOOK_TIMEOUT_S, true)));
     Json::object(vec![
         ("SessionStart", Json::Arr(vec![group(vec![background])])),
         ("UserPromptSubmit", Json::Arr(vec![group(vec![foreground])])),
@@ -243,7 +245,7 @@ pub fn muse_plugin(options: &HookOptions) -> Json {
             ("id", Json::str(id)),
             ("event", Json::str(event)),
             ("command", argv(&[event.to_owned()])),
-            ("timeoutMs", num(5000)),
+            ("timeoutMs", num(HOOK_TIMEOUT_S * 1000)),
         ]);
         for (key, value) in extra {
             hook.set(key, value);

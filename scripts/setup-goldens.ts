@@ -181,6 +181,7 @@ const EXISTING = [
   "{x",
   '{"scp":1,"a":2}',
   "[]",
+  '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"swarm hook claude","timeout":5}]}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"swarm hook claude","timeout":5,"async":true},{"type":"command","command":"swarm hook claude --subagent","timeout":5}]}],"Stop":[{"hooks":[{"type":"command","command":"swarm hook claude --push-wait 0","timeout":5}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"swarm hook claude","timeout":2}]}]},"k":1}',
 ];
 const contents = (["claude", "codex", "agy", "opencode", "muse"] as const).flatMap((kind) =>
   (kind === "opencode" || kind === "muse" ? [undefined] : EXISTING).flatMap((existing) =>
