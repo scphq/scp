@@ -139,7 +139,7 @@ fn foreground(options: Daemon) -> i32 {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let runtime = match tokio::runtime::Runtime::new() {
+    let runtime = match scp_broker::daemon::runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("swarm broker: {error}");
