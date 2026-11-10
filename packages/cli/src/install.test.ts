@@ -61,13 +61,13 @@ describe("swarm hooks install", () => {
     install({ harness: "claude", scope: "project", write: true })
     const created = JSON.parse(readFileSync(file, "utf8"))
     expect(Object.keys(created.hooks)).toEqual(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SubagentStop", "SessionEnd"])
-    expect(created.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: "swarm hook claude", timeout: 5 }] }])
+    expect(created.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "command", command: "swarm hook claude", timeout: 10 }] }])
     expect(created.hooks.PostToolUse).toEqual([
       {
         matcher: "*",
         hooks: [
-          { type: "command", command: "swarm hook claude", timeout: 5, async: true },
-          { type: "command", command: `swarm hook claude ${SUBAGENT}`, timeout: 5 },
+          { type: "command", command: "swarm hook claude", timeout: 10, async: true },
+          { type: "command", command: `swarm hook claude ${SUBAGENT}`, timeout: 10 },
         ],
       },
     ])
@@ -215,8 +215,8 @@ describe("swarm hooks install", () => {
       { hooks: [{ type: "command", command: `swarm hook codex ${PUSH_WAIT} 600`, timeout: 630, statusMessage: "waiting for worker messages (swarm)" }] },
     ])
     expect(lines.join("\n")).toContain(`add ${BLOCK_STOP} to also hold it while messages are unread`)
-    expect(codex.hooks.PostToolUse).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 5, async: true }] }])
-    expect(codex.hooks.SubagentStop).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 5, async: true }] }])
+    expect(codex.hooks.PostToolUse).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 10, async: true }] }])
+    expect(codex.hooks.SubagentStop).toEqual([{ hooks: [{ type: "command", command: "swarm hook codex", timeout: 10, async: true }] }])
     expect(lines.join("\n")).toContain("/hooks")
     install({ harness: "opencode", write: true })
     expect(readFileSync(join(project, ".opencode", "plugin", "scp.ts"), "utf8")).toBe(opencodePlugin())
@@ -299,7 +299,7 @@ describe("swarm hooks install", () => {
   test("the stop hook runs in the foreground everywhere setup installs it, with or without the flag, saying what it waits for while it may", () => {
     for (const harness of ["claude", "codex"] as const) {
       expect(hookEntries(harness, { pushWait: 0 }).Stop).toEqual([
-        { hooks: [{ type: "command", command: `swarm hook ${harness} ${PUSH_WAIT} 0`, timeout: 5 }] },
+        { hooks: [{ type: "command", command: `swarm hook ${harness} ${PUSH_WAIT} 0`, timeout: 10 }] },
       ])
       expect(hookEntries(harness).Stop).toEqual([
         { hooks: [{ type: "command", command: `swarm hook ${harness} ${PUSH_WAIT} 600`, timeout: 630, statusMessage: "waiting for worker messages (swarm)" }] },

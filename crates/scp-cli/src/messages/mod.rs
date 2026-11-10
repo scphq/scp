@@ -241,6 +241,33 @@ fn attachments(paths: &[String]) -> Vec<Value> {
         .collect()
 }
 
+/// a send refused `not_found` from an `--as` root, as a job a detached script runs becomes: a root reaches only its own tree and the roots,
+/// and acting as another endpoint needs proof a script cannot give, so the refusal says how such a job gets a place under the agent instead
+fn root_reach(fail: Fail, opened: &Opened) -> Fail {
+    let Fail::Call(CallError::Relay {
+        code,
+        message,
+        retry_after_s,
+    }) = fail
+    else {
+        return fail;
+    };
+    let me = &opened.me;
+    let root = get(me, "kind").and_then(Value::as_str) == Some("agent")
+        && get(me, "parent").is_some_and(Value::is_null);
+    let message = match get(me, "address").and_then(Value::as_str) {
+        Some(address) if code == "not_found" && opened.bound == Some("as") && root => format!(
+            "{message}\n{address} is a root you act as by name (--as or $SCP_NAME): it reaches its own tree and the roots only. To reach an agent below another root, give the job a place under that agent: start it from the agent's shell with env $({CLI_NAME} spawn-env --name <name>) <command>, or set SCP_UNDER=<agent> to link {address} under it"
+        ),
+        _ => message,
+    };
+    Fail::Call(CallError::Relay {
+        code,
+        message,
+        retry_after_s,
+    })
+}
+
 fn send<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
     Box::pin(async move {
         let parsed = &call.parsed;
@@ -284,7 +311,9 @@ fn send<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
             if parsed.on("live") {
                 params.insert("live".into(), Value::Bool(true));
             }
-            let result = request(opened, "send", params).await?;
+            let result = request(opened, "send", params)
+                .await
+                .map_err(|fail| root_reach(fail, opened))?;
             if as_json {
                 out(&result.pretty());
             } else {
@@ -299,7 +328,9 @@ fn send<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         }
         let wait = wait_arg(parsed.text("wait"), 50.0)?;
         params.insert("wait_s".into(), number(wait));
-        let result = request(opened, "ask", params).await?;
+        let result = request(opened, "ask", params)
+            .await
+            .map_err(|fail| root_reach(fail, opened))?;
         Ok(print_ask(&result, as_json, js_trim(to)))
     })
 }

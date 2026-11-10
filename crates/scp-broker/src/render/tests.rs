@@ -422,7 +422,7 @@ fn pointers_nudges_and_intros() {
     assert!(intro_text("me/orch", None).contains("(relation=\"parent\")"));
     assert_eq!(
         subagent_intro("me/x-1"),
-        "swarm: you are a subagent with your own relay address me/x-1; messages to it reach you after your tool calls. Your shell is your parent session's: pass --as x-1 to every swarm command (swarm --as x-1 inbox), or it acts as your parent."
+        "swarm: you are a subagent with your own relay address me/x-1; messages to it reach you after your tool calls. Your shell is your parent session's: pass --as x-1 to every swarm command (swarm --as x-1 inbox), or it acts as your parent. Once you stop, a message to you, a worker's result too, waits in your inbox, offered to your parent session to continue you with while that session can be woken: to wait for one, keep running with swarm --as x-1 inbox --wait <seconds>."
     );
 }
 

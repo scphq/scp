@@ -1093,11 +1093,11 @@ pub fn record_agy_conversation(payload: &Json, env: &Env, allow_write: &dyn Fn(&
         .and_then(|mut f| std::io::Write::write_all(&mut f, id.as_bytes()));
 }
 
-/// what a subagent hears with its first tool event: its own address, and that its shell acts as its parent without --as
+/// what a subagent hears with its first tool event: its own address, that its shell acts as its parent without --as, and where what reaches it after it stops goes
 pub fn subagent_intro(address: &str) -> String {
     let handle = address.strip_prefix("me/").unwrap_or(address);
     format!(
-        "{CLI_NAME}: you are a subagent with your own relay address {address}; messages to it reach you after your tool calls. Your shell is your parent session's: pass --as {handle} to every {CLI_NAME} command ({CLI_NAME} --as {handle} inbox), or it acts as your parent."
+        "{CLI_NAME}: you are a subagent with your own relay address {address}; messages to it reach you after your tool calls. Your shell is your parent session's: pass --as {handle} to every {CLI_NAME} command ({CLI_NAME} --as {handle} inbox), or it acts as your parent. Once you stop, a message to you, a worker's result too, waits in your inbox, offered to your parent session to continue you with while that session can be woken: to wait for one, keep running with {CLI_NAME} --as {handle} inbox --wait <seconds>."
     )
 }
 

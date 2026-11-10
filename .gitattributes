@@ -1,0 +1,8 @@
+# GitHub's language bar counts shipped code: tests, conformance suites and dev scripts are left out, in both languages.
+*.test.ts linguist-detectable=false
+*.test.tsx linguist-detectable=false
+packages/cli/src/test-setup.ts linguist-detectable=false
+packages/conformance/** linguist-detectable=false
+scripts/** linguist-detectable=false
+crates/*/tests/** linguist-detectable=false
+crates/*/benches/** linguist-detectable=false

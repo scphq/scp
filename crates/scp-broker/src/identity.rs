@@ -292,6 +292,45 @@ impl Core {
         self.store.all(&format!("{below} UPDATE endpoints SET tree = ?,depth = depth + ? WHERE id IN (SELECT id FROM below)"),&[opt(Some(id)),opt(Some(tree)),SqlValue::Int(shift)]).await?;
         Ok(())
     }
+    /// `row`, a root, and its subtree moved to where a grant placed `held`: under its parent, bound by its caps as well as its own
+    async fn place_as(&self, row: &Row, held: &Row) -> Result<(), RpcError> {
+        let id = text(row, "id").ok_or_else(RpcError::internal)?;
+        if self.ancestors(held).await?.iter().any(|v| v == id) {
+            return Err(RpcError::new(
+                ErrorCode::ScopeRefused,
+                format!(
+                    "{} sits under {}: a session cannot go under its own descendant",
+                    address(held),
+                    address(row)
+                ),
+            ));
+        }
+        let depth = integer(held, "depth").unwrap_or(1);
+        let tree = text(held, "tree")
+            .or(text(held, "parent_ep"))
+            .ok_or_else(RpcError::internal)?;
+        self.shift_subtree(id, tree, depth - integer(row, "depth").unwrap_or(0))
+            .await?;
+        let mut caps = caps_of(row);
+        let its = caps_of(held);
+        caps.caps.extend(its.caps);
+        let mut allow = its.allow;
+        allow.extend(std::mem::take(&mut caps.allow));
+        caps.allow = allow;
+        self.store
+            .all(
+                "UPDATE endpoints SET tree = ?,parent_ep = ?,depth = ?,caps = ? WHERE id = ?",
+                &[
+                    opt(Some(tree)),
+                    opt(text(held, "parent_ep")),
+                    SqlValue::Int(depth),
+                    caps_json(&mut caps),
+                    opt(Some(id)),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn take_over(&self, row: &Row, held: &Row, by: &str) -> Result<String, RpcError> {
         let id = text(row, "id").ok_or_else(RpcError::internal)?;
         let retired = text(held, "id").ok_or_else(RpcError::internal)?;
@@ -302,21 +341,27 @@ impl Core {
             ));
         }
         if text(row, "parent_ep").is_none() && text(row, "parent_addr").is_none() {
-            if let Some(parent) = text(held, "parent_ep").map(str::to_owned)
-                && let Some(parent) = self.by_id(&parent).await?
-            {
-                self.link_endpoint(row, &parent, by).await?;
-            } else if text(held, "parent_addr").is_some() {
+            let parent = match text(held, "parent_ep") {
+                Some(parent) => self.by_id(parent).await?,
+                None => None,
+            };
+            if text(held, "parent_addr").is_some() {
                 self.store
                     .all(
                         "UPDATE endpoints SET parent_addr = ?,linked = ? WHERE id = ?",
                         &[
                             opt(text(held, "parent_addr")),
-                            SqlValue::Int(integer(held, "linked").unwrap_or(now_ms())),
+                            integer(held, "linked").map_or(SqlValue::Null, SqlValue::Int),
                             opt(Some(id)),
                         ],
                     )
                     .await?;
+            } else if let Some(parent) = parent {
+                if integer(held, "linked").is_some() {
+                    self.link_endpoint(row, &parent, by).await?;
+                } else {
+                    self.place_as(row, held).await?;
+                }
             }
         }
         let place = self.must_endpoint(id).await?;
