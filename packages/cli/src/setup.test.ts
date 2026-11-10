@@ -927,6 +927,35 @@ describe("relay setup installs hooks by default", () => {
     expect(text).toContain("muse hooks: installed (muse plugins list)")
   })
 
+  test("hooks from an earlier swarm with 5 s timeouts are outdated, recognized as ours and rewritten in place", () => {
+    const f = fixture()
+    expect(setup(f, { write: true }).code).toBe(0)
+    const earlier = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(earlier)
+        : typeof value === "object" && value !== null
+          ? Object.fromEntries(
+              Object.entries(value).map(([key, v]) => [key, key === "timeout" && v === 10 ? 5 : key === "timeoutMs" && v === 10_000 ? 5000 : earlier(v)]),
+            )
+          : value
+    for (const harness of ["claude", "codex"] as const) {
+      const old = earlier({ hooks: hookEntries(harness, { launcher: [f.swarm] }) })
+      expect(JSON.stringify(old)).toContain('"timeout":5,')
+      put(userHooks(f)[harness], `${JSON.stringify(old, null, 2)}\n`, 0o644)
+    }
+    const muse = earlier(musePlugin())
+    expect(JSON.stringify(muse)).toContain('"timeoutMs":5000')
+    put(userHooks(f).muse, `${JSON.stringify(muse, null, 2)}\n`, 0o644)
+    const dry = setup(f).text
+    expect(dry).toContain("hooks: merge the swarm hooks into ~/.claude/settings.json")
+    expect(dry).toContain("hooks: merge the swarm hooks into ~/.codex/hooks.json")
+    expect(dry).toContain("hooks: write the swarm plugin ~/.config/scp/muse-plugin/.muse-plugin/plugin.json")
+    expect(setup(f, { write: true }).code).toBe(0)
+    for (const harness of ["claude", "codex"] as const) expect(readJson(userHooks(f)[harness]).hooks).toEqual(hookEntries(harness, { launcher: [f.swarm] }))
+    expect(readJson(userHooks(f).muse)).toEqual(musePlugin())
+    expect(setup(f).text).not.toContain("hooks: merge the swarm hooks")
+  })
+
   test("the CLI flags: --no-hooks, --hooks kept as a no-op, both refused together", () => {
     expect(parseSetupArgs([])).toEqual({})
     expect(parseSetupArgs(["--hooks", "--write"])).toEqual({ write: true })
