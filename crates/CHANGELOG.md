@@ -1,5 +1,13 @@
 # scp-relay
 
+## 0.4.12
+
+### Patch Changes
+
+- 9ed1810: A send or ask refused as unreachable from a root you act as by name (`--as` or `$SCP_NAME`), as a job a detached script runs becomes, now says why and what to do: a root reaches its own tree and the roots only, and acting by name proves nothing about the agent that started the job, so the job needs a place under that agent, from a `spawn-env` grant minted in the agent's own shell or by linking with `SCP_UNDER`. The refusal itself is unchanged and still reads like an unknown address.
+- 9ed1810: A worker spawned `--as` a subagent's endpoint keeps reporting to that subagent, and both sides now say so. Its result was always addressed to the subagent; once the subagent had stopped, the broker offered it to the subagent's root session framed for that subagent, so a coordinator saw its subagents' workers' results by design. The spawn's started line now names the endpoint the result goes to and keeps `--as` in its steer command, where it used to suggest a plain `swarm send` that a subagent's shell sends as its parent session. A subagent also hears, with its own address, that what reaches it once it stops waits in its inbox, offered to its parent session to continue it with while that session can be woken, and how to wait for a result instead.
+- 9ed1810: The native broker's takeover of a spawned worker now places the taking endpoint as the TypeScript broker does: under the worker's parent with the grant's caps as well as its own, still a spawned child. It used to link it under that parent by hand instead, which dropped the grant's caps, added the child-default cap and let the endpoint leave, so the same rename, rehome or background hand-off gave different reach and leave rules on the two brokers. A takeover of a cross-machine child now also keeps that child's linked mark as it is.
+
 ## 0.4.11
 
 ### Patch Changes

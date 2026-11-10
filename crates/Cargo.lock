@@ -1678,7 +1678,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scp-broker"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "async-trait",
  "clap",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "scp-cli"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "futures-util",
  "indexmap",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "scp-dev-core"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "scp-mcp"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "hex",
  "libc",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-server"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "async-trait",
  "axum",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "scp-relay-store"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "async-trait",
  "rand 0.8.5",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "scp-swarm"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "clap",
  "libc",
