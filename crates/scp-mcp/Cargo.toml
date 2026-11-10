@@ -18,7 +18,7 @@ path = "src/bin/scp-mcp.rs"
 libc = "=0.2.191"
 rand.workspace = true
 hex.workspace = true
-scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.12" }
+scp-core = { package = "scp-dev-core", path = "../scp-core", version = "=0.4.13" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
