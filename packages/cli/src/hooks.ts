@@ -74,6 +74,8 @@ export const OPENCODE_WAKE = "opencode-plugin"
 export const PUSH_WAIT_DEFAULT_S = 600
 /** an installed stop's timeout past its push wait, so the wait ends and the reply prints well before the harness kills the hook */
 const PUSH_TIMEOUT_MARGIN_S = 30
+/** an installed hook's timeout in seconds, well past {@link HOOK_DEADLINE_MS} so a cold start on a loaded machine still ends in the hook's own fallback */
+const HOOK_TIMEOUT_S = 10
 /** the hook's deadline past the end of its push wait: time to print the reply and confirm it */
 const PUSH_PRINT_MS = 1000
 /** the harnesses whose stop takes a block's reason as the model's next input; agy and OpenCode go elsewhere */
@@ -1186,7 +1188,11 @@ export const STOP_STATUS = `waiting for worker messages (${CLI_NAME})`
 /** the stop's flags: the unread hold, then the push wait (always written, so 0 keeps it off), and its timeout in seconds */
 function stopArgs(options: { blockStop?: boolean; pushWait?: number }): { args: string[]; timeout: number; waits: boolean } {
   const wait = options.pushWait ?? PUSH_WAIT_DEFAULT_S
-  return { args: [...(options.blockStop ? [BLOCK_STOP] : []), PUSH_WAIT, String(wait)], timeout: wait > 0 ? wait + PUSH_TIMEOUT_MARGIN_S : 5, waits: wait > 0 }
+  return {
+    args: [...(options.blockStop ? [BLOCK_STOP] : []), PUSH_WAIT, String(wait)],
+    timeout: wait > 0 ? wait + PUSH_TIMEOUT_MARGIN_S : HOOK_TIMEOUT_S,
+    waits: wait > 0,
+  }
 }
 
 /** how a hook command starts this CLI: `launcher` (else `swarm` from PATH), behind the native hook client `native` when there is one */
@@ -1245,9 +1251,9 @@ export function hookEntries(
 ): Record<string, Group[]> {
   const line = (...extra: string[]) => hookCommand(options, ["hook", harness, ...(options.cowork ? ["--cowork-only"] : []), ...extra])
   const command = line()
-  const background: Handler = { type: "command", command, timeout: 5, async: true }
-  const foreground: Handler = { type: "command", command, timeout: 5 }
-  const subagent: Handler[] = harness === "claude" ? [{ type: "command", command: line(SUBAGENT), timeout: 5 }] : []
+  const background: Handler = { type: "command", command, timeout: HOOK_TIMEOUT_S, async: true }
+  const foreground: Handler = { type: "command", command, timeout: HOOK_TIMEOUT_S }
+  const subagent: Handler[] = harness === "claude" ? [{ type: "command", command: line(SUBAGENT), timeout: HOOK_TIMEOUT_S }] : []
   const stop = stopArgs(options)
   return {
     SessionStart: [{ hooks: [background] }],
@@ -1553,7 +1559,7 @@ export function musePlugin(options: { blockStop?: boolean; pushWait?: number } &
     id,
     event,
     command: hookArgv(options, ["hook", "muse", event]),
-    timeoutMs: 5000,
+    timeoutMs: HOOK_TIMEOUT_S * 1000,
     ...extra,
   })
   return {

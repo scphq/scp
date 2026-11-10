@@ -253,6 +253,26 @@ fn setup_hook_content_matches() {
     }
 }
 
+#[test]
+fn hooks_with_five_second_timeouts_are_ours_and_rewritten() {
+    let launch = HookLaunch::default();
+    for kind in ["claude", "codex"] {
+        let earlier = format!(
+            r#"{{"hooks":{{"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"swarm hook {kind}","timeout":5}}]}}],"PostToolUse":[{{"hooks":[{{"type":"command","command":"swarm hook {kind}","timeout":5,"async":true}},{{"type":"command","command":"swarm hook {kind} --subagent","timeout":5}}]}}]}}}}"#
+        );
+        let fresh = hook_content(kind, Some("{}"), false, &launch).unwrap();
+        let rewritten = hook_content(kind, Some(&earlier), false, &launch).unwrap();
+        assert_ne!(rewritten, earlier);
+        assert_eq!(
+            serde_json::from_str::<Value>(&rewritten).unwrap(),
+            serde_json::from_str::<Value>(&fresh).unwrap(),
+            "{kind}"
+        );
+        assert!(!rewritten.contains("\"timeout\": 5"), "{kind}");
+        assert!(rewritten.contains("\"timeout\": 10"), "{kind}");
+    }
+}
+
 struct Snapshot {
     files: BTreeMap<String, String>,
     modes: BTreeMap<String, u32>,

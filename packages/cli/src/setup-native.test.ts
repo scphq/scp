@@ -646,6 +646,20 @@ describe.skipIf(noBinary)("setup on files it has to be careful with", () => {
         '{"hooks": {"Stop": [{"hooks": [{"command": "[ -x /gone/scp-hook ] && exec /gone/scp-hook swarm hook codex || exec swarm hook codex"}]}]}}',
       )
     same(gone, [["setup", "--harness", "codex"]])
+    const fiveSeconds = (dir: string) => {
+      put(
+        join(dir, ".claude", "settings.json"),
+        '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "swarm hook claude", "timeout": 5}]}], "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "swarm hook claude", "timeout": 5, "async": true}, {"type": "command", "command": "swarm hook claude --subagent", "timeout": 5}]}]}}',
+      )
+      put(join(dir, ".codex", "hooks.json"), '{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "swarm hook codex", "timeout": 5}]}]}}')
+    }
+    const rewritten = same(fiveSeconds, [["setup"], ["setup", "--write"], ["setup"]])
+    expect(rewritten[0]!.stdout).toContain("hooks: merge the swarm hooks into ~/.claude/settings.json")
+    for (const rel of [".claude/settings.json", ".codex/hooks.json"]) {
+      expect(rewritten[1]!.files[rel]).not.toContain('"timeout": 5')
+      expect(rewritten[1]!.files[rel]).toContain('"timeout": 10')
+    }
+    expect(rewritten[2]!.stdout).toContain("everything is in place; nothing to do")
     const shadowed = (dir: string) => {
       put(join(dir, "work", ".claude", "settings.local.json"), '{"hooks": {"Stop": [{"hooks": [{"command": "swarm hook claude"}]}]}}')
       put(join(dir, "work", ".mcp.json"), '{"mcpServers": {"scp": {"command": "x"}}}')
