@@ -13,6 +13,14 @@ use crate::server::{Broker, BrokerOptions};
 
 pub const DEFAULT_IDLE_S: f64 = 1800.0;
 
+/// The broker's runtime: every request runs under the one core lock, so more worker threads only add cross-thread hand-offs.
+pub fn runtime() -> io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+}
+
 /// seconds from a bare number or a duration such as `90s`, `30m` or `1h30m`
 pub fn idle_seconds(raw: &str) -> Result<f64, String> {
     let text = raw.trim();

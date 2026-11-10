@@ -25,6 +25,8 @@ const PARTIAL_LINE_TIMEOUT: Duration = Duration::from_secs(30);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// how often the broker runs the wake hooks of hibernated endpoints and broker wakes that are due
 const PRESENCE_PASS: Duration = Duration::from_secs(60);
+/// how often held judge verdicts are swept
+const JUDGE_PASS: Duration = Duration::from_secs(2);
 
 pub struct BrokerOptions {
     pub paths: Paths,
@@ -161,10 +163,8 @@ impl Broker {
         let mut idle_since = Instant::now();
         let mut ownership = tokio::time::interval(Duration::from_secs(2));
         let restart = self.core.lock().await.federation.restart.clone();
-        let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
-        sweeper.tick().await;
         let wakers = crate::wake::attach(&self.core).await;
-        let mut presence = tokio::time::interval(PRESENCE_PASS);
+        let chores = tokio::spawn(chores(self.core.clone(), stopping.clone()));
         let running = crate::tasks::TaskPid::default();
         let tasks = self
             .task
@@ -182,24 +182,8 @@ impl Broker {
                 _ = &mut shutdown => break Ok(()),
                 _ = restart.notified() => break Ok(()),
                 _ = tokio::time::sleep_until(deadline), if users == 0 && !self.idle.is_zero() => break Ok(()),
-                _ = presence.tick() => {
-                    let core = self.core.lock().await;
-                    match core.wakeable().await {
-                        Ok(ids) => for id in ids { core.wakers.kick(&id); },
-                        Err(error) => tracing::error!(%error, "wake pass failed"),
-                    }
-                },
                 _ = ownership.tick() => {
                     if !self.owns_socket().await { break Ok(()); }
-                    if let Err(error) = self.core.lock().await.judge_sweep().await {
-                        tracing::error!(%error, "judge sweep failed");
-                    }
-                },
-                _ = sweeper.tick() => {
-                    let mut core = self.core.lock().await;
-                    if let Err(error) = core.sweep().await {
-                        tracing::error!(%error, "sweep failed");
-                    }
                 },
                 joined = connections.join_next_with_id(), if !connections.is_empty() => {
                     let id = match joined {
@@ -234,6 +218,7 @@ impl Broker {
             }
         }
         let _ = stop.send(true);
+        let _ = chores.await;
         wakers.abort();
         let _ = wakers.await;
         if let Some(tasks) = tasks {
@@ -258,6 +243,40 @@ impl Broker {
             let _ = tokio::fs::remove_dir(parent).await;
         }
         result
+    }
+}
+
+/// The broker's timed passes: due wakes, the judge sweep and retention. They take the core lock off the accept loop, so a busy core
+/// never keeps a connection waiting in the listen backlog.
+async fn chores(core: SharedCore, mut stopping: watch::Receiver<bool>) {
+    let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
+    sweeper.tick().await;
+    let mut presence = tokio::time::interval(PRESENCE_PASS);
+    let mut judge = tokio::time::interval(JUDGE_PASS);
+    loop {
+        tokio::select! {
+            _ = stopping.changed() => return,
+            _ = presence.tick() => {
+                let core = core.lock().await;
+                match core.wakeable().await {
+                    Ok(ids) => for id in ids { core.wakers.kick(&id); },
+                    Err(error) => tracing::error!(%error, "wake pass failed"),
+                }
+            },
+            _ = judge.tick() => {
+                if let Err(error) = core.lock().await.judge_sweep().await {
+                    tracing::error!(%error, "judge sweep failed");
+                }
+            },
+            _ = sweeper.tick() => {
+                if let Err(error) = core.lock().await.sweep().await {
+                    tracing::error!(%error, "sweep failed");
+                }
+            },
+        }
+        if *stopping.borrow() {
+            return;
+        }
     }
 }
 

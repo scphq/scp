@@ -18,6 +18,7 @@ pub type SharedCore = Arc<Mutex<Core>>;
 
 pub struct Core {
     pub store: Arc<dyn Storage>,
+    pub endpoints: crate::endpoints::Endpoints,
     pub limits: Limits,
     pub policy: Option<Value>,
     pub procs: Procs,
@@ -58,14 +59,13 @@ impl Core {
                 &[SqlValue::Int(now_ms())],
             )
             .await?;
+        let endpoints = crate::endpoints::Endpoints::track(store.as_ref()).await;
         let mut state = State::default();
-        for row in store.read("SELECT * FROM endpoints", &[]).await? {
-            if let Some(id) = text(&row, "id") {
-                state.presence.insert(id.to_owned(), 0);
-                state
-                    .addresses
-                    .insert(id.to_owned(), crate::views::address(&row));
-            }
+        for (id, row) in endpoints.snapshot(store.as_ref()).await?.rows.iter() {
+            state.presence.insert(id.clone(), 0);
+            state
+                .addresses
+                .insert(id.clone(), crate::views::address(row));
         }
         let judge = crate::judge::JudgeGate::new(&limits);
         let wakers = crate::wake::Wakers::new(
@@ -78,6 +78,7 @@ impl Core {
         let runners = Arc::new(crate::runners::Service::from_env(&policy_file));
         let mut core = Self {
             store,
+            endpoints,
             limits,
             policy: None,
             procs: Procs::new(),

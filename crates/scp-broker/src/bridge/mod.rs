@@ -39,6 +39,12 @@ struct Others {
 }
 
 static OTHERS: RwLock<Option<Others>> = RwLock::new(None);
+static OTHERS_MOVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// moves whenever another member's machines change, and with them the addresses [`remote_address`] renders
+pub fn others_moved() -> u64 {
+    OTHERS_MOVED.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// the account handle another member's machines render under; this member's own stay `me/<machine>/<handle>`
 pub fn set_others(account: &str, machines: impl IntoIterator<Item = String>) {
@@ -47,6 +53,7 @@ pub fn set_others(account: &str, machines: impl IntoIterator<Item = String>) {
             account: account.to_owned(),
             machines: machines.into_iter().collect(),
         });
+        OTHERS_MOVED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -59,6 +66,7 @@ pub fn set_other(machine: &str, other: bool) {
         } else {
             others.machines.remove(machine);
         }
+        OTHERS_MOVED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

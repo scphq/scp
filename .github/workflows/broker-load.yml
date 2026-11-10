@@ -1,0 +1,66 @@
+name: Broker load
+
+on:
+  workflow_dispatch:
+    inputs:
+      endpoints:
+        description: Endpoint rows seeded into the bench database
+        default: "8000"
+      clients:
+        description: Session clients
+        default: "60"
+      seconds:
+        description: Steady phase length
+        default: "45"
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    name: Broker load (ts and rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build packages
+        run: bun run build:packages
+
+      - name: Build the native broker
+        working-directory: crates
+        run: cargo build --locked --release -p scp-broker
+
+      - name: Load the ts broker
+        env:
+          ENDPOINTS: ${{ inputs.endpoints }}
+          CLIENTS: ${{ inputs.clients }}
+          SECONDS_STEADY: ${{ inputs.seconds }}
+        run: bun packages/conformance/src/bench/broker-load.ts --engine ts --seed "$ENDPOINTS" --clients "$CLIENTS" --seconds "$SECONDS_STEADY" --json load-ts.json
+
+      - name: Load the native broker
+        env:
+          ENDPOINTS: ${{ inputs.endpoints }}
+          CLIENTS: ${{ inputs.clients }}
+          SECONDS_STEADY: ${{ inputs.seconds }}
+        run: bun packages/conformance/src/bench/broker-load.ts --engine rust --bin crates/target/release/scp-broker --seed "$ENDPOINTS" --clients "$CLIENTS" --seconds "$SECONDS_STEADY" --json load-rust.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: broker-load
+          path: load-*.json

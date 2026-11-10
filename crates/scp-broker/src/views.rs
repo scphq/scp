@@ -51,7 +51,21 @@ pub fn session_presence(row: &Row, now: i64) -> &'static str {
     }
 }
 
+/// A local row's activity in SQL, as a view's `active_at` reads it.
+pub const ACTIVE_SQL: &str = "MAX(created_at, COALESCE(last_seen,0), COALESCE(hook_seen,0), COALESCE(last_received_at,0), COALESCE(mail_at,0))";
+
 impl Core {
+    /// The activity below which a local agent lists only with `all`: a day back, or historicAfterS unless `historic`.
+    pub fn active_floor(&self, historic: bool) -> i64 {
+        let now = now_ms();
+        let day = now - 86_400_000;
+        match self.limits.get("historicAfterS") {
+            Some(s) if !historic => day
+                .max(now.saturating_sub(i64::try_from(s).unwrap_or(i64::MAX).saturating_mul(1000))),
+            _ => day,
+        }
+    }
+
     pub async fn by_id(&self, id: &str) -> Result<Option<Row>, RpcError> {
         Ok(self
             .store
@@ -181,7 +195,7 @@ impl Core {
         let viewer_is_human = peeker
             .as_ref()
             .is_some_and(|row| viewer.is_some() && text(row, "kind") == Some("human"));
-        let rows = self.store.all("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (remote IS NULL OR substr(remote,1,1) != '@') ORDER BY created_at, id", &[]).await?;
+        let rows = self.store.all(&format!("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (remote IS NULL OR substr(remote,1,1) != '@') AND (? OR kind != 'agent' OR remote IS NOT NULL OR {ACTIVE_SQL} >= ?) ORDER BY created_at, id"), &[SqlValue::Int(i64::from(params.get("all") == Some(&Value::Bool(true)))), SqlValue::Int(self.active_floor(params.get("historic") == Some(&Value::Bool(true))))]).await?;
         let mut endpoints = Vec::new();
         for row in rows {
             if ["harness", "kind"].iter().any(|k| {

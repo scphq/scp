@@ -835,9 +835,10 @@ impl Core {
             .and_then(|(root, _)| text(&root, "id").map(str::to_owned)))
     }
 
-    /// the endpoints whose waker the periodic pass kicks: hibernated, or with a broker wake
+    /// the endpoints whose waker the periodic pass kicks: hibernated, or with a broker wake, and with unread mail or a revived session to
+    /// settle, the only ones [`Core::wake_due`] can act on
     pub async fn wakeable(&self) -> Result<Vec<String>, RpcError> {
-        Ok(self.store.all(&format!("SELECT id FROM endpoints WHERE kind = 'agent' AND (hibernate IS NOT NULL OR {BROKER_WAKE_SQL})"), &[]).await?
+        Ok(self.store.all(&format!("SELECT id FROM endpoints e WHERE kind = 'agent' AND (hibernate IS NOT NULL OR {BROKER_WAKE_SQL}) AND (EXISTS (SELECT 1 FROM deliveries d WHERE d.endpoint = e.id AND d.acked_at IS NULL AND d.expires_at > ?) OR (hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL AND hook_ended IS NULL AND hook_seen >= wake_tried))"), &[SqlValue::Int(now_ms())]).await?
             .iter().filter_map(|r| text(r, "id").map(str::to_owned)).collect())
     }
 

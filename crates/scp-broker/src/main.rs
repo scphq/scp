@@ -20,15 +20,17 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
     let Cli {
         command: Command::Daemon { idle, policy },
     } = Cli::parse();
-    if let Err(error) = daemon::run(idle, policy).await {
+    let result = daemon::runtime()
+        .map_err(Into::into)
+        .and_then(|runtime| runtime.block_on(daemon::run(idle, policy)));
+    if let Err(error) = result {
         eprintln!("scp-broker: {error}");
         std::process::exit(1);
     }
