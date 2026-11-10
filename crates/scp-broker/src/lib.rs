@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod claims;
 pub mod core;
 pub mod daemon;
+pub mod endpoints;
 pub mod grants;
 pub mod groups;
 pub mod hibernate;

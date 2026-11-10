@@ -188,23 +188,10 @@ impl Core {
 
     /// The scope state as one read snapshot.
     pub async fn world(&self) -> Result<World, RpcError> {
-        Ok(World::build(Tables {
-            endpoints: self.store.all("SELECT * FROM endpoints", &[]).await?,
-            groups: self.store.all("SELECT * FROM groups", &[]).await?,
-            members: self
-                .store
-                .all(
-                    "SELECT name, endpoint FROM group_members ORDER BY name",
-                    &[],
-                )
-                .await?,
-            admins: self
-                .store
-                .all(
-                    "SELECT * FROM admins WHERE revoked_at IS NULL ORDER BY granted_at",
-                    &[],
-                )
-                .await?,
+        let tables = Tables {
+            groups: Vec::new(),
+            members: Vec::new(),
+            admins: Vec::new(),
             policy: self.policy.clone(),
             binds: self.policy_binds.clone(),
             local_users: self
@@ -215,7 +202,8 @@ impl Core {
                 .chain(["me".to_owned(), "local".to_owned()])
                 .collect(),
             machine: self.federation.machine.clone(),
-        }))
+        };
+        Ok(self.endpoints.world(self.store.as_ref(), tables).await?)
     }
 
     /// Whether `row` got `message` since its last takeover.

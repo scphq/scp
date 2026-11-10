@@ -2,6 +2,7 @@
 //! with every endpoint's scope node derived once. Decisions run synchronously against it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use scp_core::protocol::{ScopeCap, ScopeDirection, ScopeEntry};
 use scp_core::scope::{
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::{integer, text};
+use crate::endpoints::Rows;
 use crate::store::Row;
 
 pub const GONE: &str = "_gone_";
@@ -104,9 +106,9 @@ impl Defaults {
     }
 }
 
-/// The raw tables a world is built from.
+/// The raw tables a world is built from, beside the endpoint rows.
+#[derive(Clone, PartialEq)]
 pub struct Tables {
-    pub endpoints: Vec<Row>,
     pub groups: Vec<Row>,
     pub members: Vec<Row>,
     pub admins: Vec<Row>,
@@ -116,17 +118,22 @@ pub struct Tables {
     pub machine: Option<String>,
 }
 
+/// What a world derives from its rows and tables, each part on first use: the listed order and every endpoint's subject and scope node.
+#[derive(Default)]
+pub struct Derived {
+    listed: OnceLock<Vec<String>>,
+    scope: HashMap<String, (OnceLock<PolicySubject>, OnceLock<ScopeNode>)>,
+}
+
 pub struct World {
-    rows: HashMap<String, Row>,
-    listed: Vec<String>,
+    rows: Rows,
+    derived: Arc<Derived>,
     runtime: BTreeMap<String, Group>,
     members: HashMap<String, Vec<String>>,
     admins: Vec<Admin>,
     pub policy: Option<Value>,
     binds: HashMap<String, String>,
     pub defaults: Defaults,
-    subjects: HashMap<String, PolicySubject>,
-    nodes: HashMap<String, ScopeNode>,
     viewer: Option<String>,
     shown: Option<HashSet<String>>,
     local_users: HashSet<String>,
@@ -183,26 +190,23 @@ fn group_of(row: &Row) -> Option<Group> {
 }
 
 impl World {
-    pub fn build(tables: Tables) -> Self {
-        let mut rows = HashMap::new();
-        let mut listed = Vec::new();
-        for row in tables.endpoints {
-            let id = text(&row, "id").unwrap_or_default().to_owned();
-            if text(&row, "kind") != Some("system") && !is_gone(&row) {
-                listed.push(id.clone());
-            }
-            rows.insert(id, row);
-        }
-        listed.sort_by(|a, b| {
-            let key = |id: &String| {
-                let row = &rows[id];
+    pub fn build(endpoints: Vec<Row>, tables: Tables) -> Self {
+        let rows = endpoints
+            .into_iter()
+            .map(|row| {
                 (
-                    std::cmp::Reverse(text(row, "kind").unwrap_or("").to_owned()),
-                    text(row, "handle").unwrap_or("").to_owned(),
+                    text(&row, "id").unwrap_or_default().to_owned(),
+                    Arc::new(row),
                 )
-            };
-            key(a).cmp(&key(b))
-        });
+            })
+            .collect();
+        let mut world = Self::assemble(Arc::new(rows), tables);
+        world.derive();
+        world
+    }
+
+    /// A world over `rows` whose derivation is still to run, or to be taken from one with the same inputs.
+    pub fn assemble(rows: Rows, tables: Tables) -> Self {
         let runtime = tables
             .groups
             .iter()
@@ -235,37 +239,61 @@ impl World {
             })
             .collect();
         let defaults = Defaults::of(tables.policy.as_ref());
-        let mut world = Self {
+        Self {
             rows,
-            listed,
+            derived: Arc::default(),
             runtime,
             members,
             admins,
             policy: tables.policy,
             binds: tables.binds,
             defaults,
-            subjects: HashMap::new(),
-            nodes: HashMap::new(),
             viewer: None,
             shown: None,
             local_users: tables.local_users,
             machine: tables.machine,
-        };
-        world.derive();
-        world
+        }
     }
 
-    fn derive(&mut self) {
-        let ids: Vec<String> = self.rows.keys().cloned().collect();
-        for id in &ids {
-            let subject = self.subject_now(&self.rows[id]);
-            self.subjects.insert(id.clone(), subject);
-        }
-        let mut limited = HashMap::new();
-        for id in &ids {
-            let node = self.node_now(&self.rows[id], &mut limited);
-            self.nodes.insert(id.clone(), node);
-        }
+    pub fn derived(&self) -> Arc<Derived> {
+        self.derived.clone()
+    }
+
+    /// Takes a derivation made over the same inputs.
+    pub fn with_derived(mut self, derived: Arc<Derived>) -> Self {
+        self.derived = derived;
+        self
+    }
+
+    /// Starts a derivation over the rows now: the listed order and each endpoint's subject and node are worked out on first use.
+    pub fn derive(&mut self) {
+        self.derived = Arc::new(Derived {
+            listed: OnceLock::new(),
+            scope: self
+                .rows
+                .keys()
+                .map(|id| (id.clone(), Default::default()))
+                .collect(),
+        });
+    }
+
+    fn listed_ids(&self) -> &[String] {
+        self.derived.listed.get_or_init(|| {
+            let mut listed: Vec<(std::cmp::Reverse<&str>, &str, &String)> = self
+                .rows
+                .iter()
+                .filter(|(_, row)| text(row, "kind") != Some("system") && !is_gone(row))
+                .map(|(id, row)| {
+                    (
+                        std::cmp::Reverse(text(row, "kind").unwrap_or("")),
+                        text(row, "handle").unwrap_or(""),
+                        id,
+                    )
+                })
+                .collect();
+            listed.sort_unstable();
+            listed.into_iter().map(|(_, _, id)| id.clone()).collect()
+        })
     }
 
     /// Reasons are written for `viewer`; with `hide`, a widener it does not see is named only as an ancestor or admin.
@@ -278,12 +306,13 @@ impl World {
     }
 
     pub fn row(&self, id: &str) -> Option<&Row> {
-        self.rows.get(id)
+        self.rows.get(id).map(Arc::as_ref)
     }
 
     pub fn by_handle(&self, handle: &str) -> Option<&Row> {
         self.rows
             .values()
+            .map(Arc::as_ref)
             .find(|row| text(row, "handle") == Some(handle))
     }
 
@@ -292,25 +321,28 @@ impl World {
     }
 
     pub fn listed(&self) -> impl Iterator<Item = &Row> {
-        self.listed.iter().map(|id| &self.rows[id])
+        self.listed_ids().iter().map(|id| self.rows[id].as_ref())
     }
 
     pub fn agents(&self) -> impl Iterator<Item = &Row> {
         self.rows
             .values()
+            .map(Arc::as_ref)
             .filter(|row| text(row, "kind") == Some("agent") && !is_gone(row))
     }
 
     pub fn node_of(&self, id: &str) -> Option<&ScopeNode> {
-        self.nodes.get(id)
+        let (_, node) = self.derived.scope.get(id)?;
+        Some(node.get_or_init(|| self.node_now(&self.rows[id], &mut HashMap::new())))
     }
 
     pub fn subject(&self, id: &str) -> Option<&PolicySubject> {
-        self.subjects.get(id)
+        let (subject, _) = self.derived.scope.get(id)?;
+        Some(subject.get_or_init(|| self.subject_now(&self.rows[id])))
     }
 
     pub fn scope_subject(&self, id: &str) -> Option<&ScopeSubject> {
-        self.subjects.get(id).and_then(|s| s.scope.as_ref())
+        self.subject(id).and_then(|s| s.scope.as_ref())
     }
 
     pub fn groups_of(&self, id: &str) -> Vec<String> {
@@ -412,7 +444,7 @@ impl World {
         let root = if tree == id {
             Some(row)
         } else {
-            self.rows.get(&tree)
+            self.rows.get(&tree).map(Arc::as_ref)
         };
         let fixed: Vec<&str> = self
             .fixed_groups()
@@ -464,7 +496,7 @@ impl World {
 
     fn node_now(&self, row: &Row, limited: &mut HashMap<String, bool>) -> ScopeNode {
         let id = text(row, "id").unwrap_or_default().to_owned();
-        let subject = self.subjects.get(&id).cloned().unwrap_or_default();
+        let subject = self.subject(&id).cloned().unwrap_or_default();
         if let Some(remote) = text(row, "remote") {
             let foreign = crate::bridge::is_foreign(remote);
             let machine = crate::bridge::machine_part(remote);
@@ -574,7 +606,7 @@ impl World {
         }
         let result = depth > DEPTH_MAX + 1 || {
             let caps = caps_of(row);
-            let subject = self.subjects.get(&id);
+            let subject = self.subject(&id);
             !caps.caps.is_empty()
                 || subject.and_then(|s| s.scope.as_ref()).is_some_and(|s| {
                     s.groups
@@ -649,7 +681,7 @@ impl World {
             .members
             .iter()
             .filter(|(_, names)| names.iter().any(|n| n == name))
-            .filter_map(|(id, _)| self.rows.get(id))
+            .filter_map(|(id, _)| self.row(id))
             .filter(|row| !is_gone(row))
             .collect();
         rows.sort_by_key(|row| text(row, "handle").unwrap_or_default().to_owned());
@@ -769,7 +801,7 @@ impl World {
     }
 
     pub fn policy_refusal(&self, from: &str, to: &str) -> Option<String> {
-        let (a, b) = (self.subjects.get(from)?, self.subjects.get(to)?);
+        let (a, b) = (self.subject(from)?, self.subject(to)?);
         self.policy_refusal_of(a, b)
     }
 
@@ -787,8 +819,8 @@ impl World {
                 if crate::bridge::across::linked_across(x, y, self.machine.as_deref()));
         scope_decision(
             self,
-            self.nodes.get(a).unwrap_or(&blank),
-            self.nodes.get(b).unwrap_or(&blank),
+            self.node_of(a).unwrap_or(&blank),
+            self.node_of(b).unwrap_or(&blank),
             ScopeDecisionOptions {
                 human_always: self.defaults.human_always,
                 solicited,
@@ -814,7 +846,7 @@ impl World {
         if self.may_message(a, b, false, false) {
             return true;
         }
-        let (Some(na), Some(nb)) = (self.nodes.get(a), self.nodes.get(b)) else {
+        let (Some(na), Some(nb)) = (self.node_of(a), self.node_of(b)) else {
             return false;
         };
         (has_scope(nb) || is_root(nb) || !cross_fleet(na, nb))
@@ -845,7 +877,7 @@ impl World {
     /// The ids `me` sees: those it may message or be messaged by, and itself.
     pub fn visible(&self, me: &Row) -> HashSet<String> {
         let me = text(me, "id").unwrap_or_default();
-        self.listed
+        self.listed_ids()
             .iter()
             .filter(|id| self.visible_row(me, id))
             .cloned()
@@ -1023,7 +1055,7 @@ impl ScopeWorld for World {
         self.rows
             .get(id)
             .filter(|row| !is_gone(row))
-            .and_then(|_| self.nodes.get(id))
+            .and_then(|_| self.node_of(id))
     }
     fn administers(&self, w: &str, x: &ScopeNode) -> bool {
         x.subject
@@ -1081,16 +1113,18 @@ mod tests {
         human.insert("labels".into(), SqlValue::Text("{}".into()));
         let mut rows = endpoints;
         rows.push(human);
-        World::build(Tables {
-            endpoints: rows,
-            groups: vec![],
-            members: vec![],
-            admins: vec![],
-            policy,
-            binds: HashMap::new(),
-            local_users: HashSet::new(),
-            machine: None,
-        })
+        World::build(
+            rows,
+            Tables {
+                groups: vec![],
+                members: vec![],
+                admins: vec![],
+                policy,
+                binds: HashMap::new(),
+                local_users: HashSet::new(),
+                machine: None,
+            },
+        )
     }
 
     #[test]

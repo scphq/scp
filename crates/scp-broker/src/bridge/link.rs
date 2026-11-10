@@ -903,12 +903,27 @@ impl Bridge {
             .into_iter()
             .filter(|(row, _)| core.mirrored(&self.config.mirror, row))
             .collect();
-        let all: Vec<(Row, Value)> = core
-            .local_rows(true)
-            .await?
-            .into_iter()
-            .filter(|(row, _)| core.mirrored(&self.config.mirror, row))
-            .collect();
+        let mut all: Vec<(Row, Value)> = Vec::new();
+        let mut walked: HashSet<String> = HashSet::new();
+        for (_, view) in rows.iter().filter(|(_, view)| reachable(view)) {
+            let mut at = view["parent"].as_str().map(str::to_owned);
+            while let Some(address) = at.take() {
+                if !walked.insert(address.clone()) {
+                    break;
+                }
+                if let Some((_, view)) = rows.iter().find(|(_, v)| v["address"] == address.as_str())
+                {
+                    at = view["parent"].as_str().map(str::to_owned);
+                } else if let Some(found) = core
+                    .local_row_at(&address)
+                    .await?
+                    .filter(|(row, _)| core.mirrored(&self.config.mirror, row))
+                {
+                    at = found.1["parent"].as_str().map(str::to_owned);
+                    all.push(found);
+                }
+            }
+        }
         let known = self.link().known.clone();
         let index = |address: &str| -> Option<(bool, usize)> {
             rows.iter()
@@ -998,12 +1013,13 @@ impl Bridge {
             .map(str::to_owned)
             .filter(|parent| reach && !self.link().known.contains(handle_in(parent)));
         if let Some(parent) = parent {
-            let all = core.local_rows(true).await?;
             let mut at = Some(parent);
             while let Some(address) = at {
-                let Some((row, view)) = all.iter().find(|(r, v)| {
-                    v["address"] == address.as_str() && core.mirrored(&self.config.mirror, r)
-                }) else {
+                let Some((row, view)) = core
+                    .local_row_at(&address)
+                    .await?
+                    .filter(|(r, _)| core.mirrored(&self.config.mirror, r))
+                else {
                     break;
                 };
                 let handle = handle_in(&address).to_owned();
@@ -1013,8 +1029,8 @@ impl Bridge {
                     break;
                 }
                 self.link().known.insert(handle);
-                chain.insert(0, (row.clone(), view.clone()));
                 at = view["parent"].as_str().map(str::to_owned);
+                chain.insert(0, (row, view));
             }
         }
         let mut out = Vec::new();

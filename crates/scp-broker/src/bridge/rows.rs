@@ -1475,8 +1475,8 @@ impl Core {
         let rows = self
             .store
             .all(
-                "SELECT * FROM endpoints WHERE remote IS NULL AND kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY created_at, id",
-                &[],
+                &format!("SELECT * FROM endpoints WHERE remote IS NULL AND kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (? OR kind != 'agent' OR {} >= ?) ORDER BY created_at, id", crate::views::ACTIVE_SQL),
+                &[SqlValue::Int(i64::from(historic)), SqlValue::Int(now_ms() - 86_400_000)],
             )
             .await?;
         let mut out = Vec::new();
@@ -1491,6 +1491,26 @@ impl Core {
             out.push((row, view));
         }
         Ok(out)
+    }
+
+    /// the row of [`Core::local_rows`] whose view has `address`, with that view
+    pub async fn local_row_at(&self, address: &str) -> Result<Option<(Row, Value)>, RpcError> {
+        let handle = match address.strip_prefix("me/") {
+            Some("") => crate::world::HUMAN_HANDLE,
+            Some(crate::world::HUMAN_HANDLE) | None => return Ok(None),
+            Some(handle) => handle,
+        };
+        let Some(row) = self.by_handle(handle).await? else {
+            return Ok(None);
+        };
+        if text(&row, "remote").is_some()
+            || text(&row, "kind") == Some("system")
+            || crate::world::is_gone(&row)
+        {
+            return Ok(None);
+        }
+        let view = self.view(&row).await?;
+        Ok((view["address"] == address).then_some((row, view)))
     }
 
     /// the causal hop a send of `endpoint` carries: one past the last it received within the window
