@@ -1,7 +1,7 @@
 #[path = "fixtures/store_support.rs"]
 mod support;
 
-use scp_broker::store::{SqlValue, Storage};
+use scp_broker::store::SqlValue;
 use support::{TempStore, json_rows};
 
 #[tokio::test]
@@ -10,7 +10,7 @@ async fn transactions_roll_back_errors_and_cancellation_before_reusing_writer() 
     use std::sync::Arc;
 
     let temp = TempStore::new().await;
-    let store = Arc::new(temp.store);
+    let store = temp.store.clone();
     store
         .all("CREATE TABLE counts (value INTEGER)", &[])
         .await
@@ -65,13 +65,8 @@ async fn transactions_roll_back_errors_and_cancellation_before_reusing_writer() 
             .expect("count")[0]["n"],
         SqlValue::Int(1)
     );
-    Arc::try_unwrap(store)
-        .ok()
-        .expect("sole store")
-        .close()
-        .await
-        .expect("close");
-    tokio::fs::remove_dir_all(temp.dir).await.expect("cleanup");
+    drop(store);
+    temp.close().await;
 }
 
 #[tokio::test]
@@ -217,6 +212,9 @@ async fn concurrent_writes_serialize_on_one_connection() {
 #[tokio::test]
 async fn opens_with_reference_pragmas_and_private_file_modes() {
     let temp = TempStore::new().await;
+    if support::engine() != scp_broker::store::Engine::Sqlite {
+        return temp.close().await;
+    }
     for (pragma, expected) in [
         ("journal_mode", SqlValue::Text("wal".into())),
         ("busy_timeout", SqlValue::Int(5000)),

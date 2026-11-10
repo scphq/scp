@@ -2,7 +2,7 @@
 mod support;
 
 use scp_broker::store::{
-    SqlValue, Storage,
+    Engine, SqlValue,
     schema::{migrate, prune_audit},
 };
 use serde_json::{Value, json};
@@ -58,6 +58,51 @@ fn expected_schema() -> Value {
     json!(rows)
 }
 
+/// the schema as the engine under test keeps it: Turso stores its own normalised DDL and sequence tables, so it is compared by object
+fn engine_schema(rows: Value) -> Value {
+    if support::engine() == Engine::Sqlite {
+        return rows;
+    }
+    Value::Array(
+        rows.as_array()
+            .expect("schema rows")
+            .iter()
+            .filter(|row| {
+                let name = row["name"].as_str().unwrap_or_default();
+                !name.starts_with("__turso_internal_") && name != "sqlite_sequence"
+            })
+            .map(|row| {
+                let sql = if row["type"] == "table" {
+                    Value::Null
+                } else {
+                    flat_sql(&row["sql"])
+                };
+                json!({"type": row["type"], "name": row["name"], "tbl_name": row["tbl_name"], "sql": sql})
+            })
+            .collect(),
+    )
+}
+
+/// DDL text, without the spacing and `IF NOT EXISTS` Turso adds when it is the engine under test
+fn flat_sql(sql: &Value) -> Value {
+    if support::engine() == Engine::Sqlite {
+        return sql.clone();
+    }
+    let Some(sql) = sql.as_str() else {
+        return sql.clone();
+    };
+    let flat = sql
+        .replacen("IF NOT EXISTS ", "", 1)
+        .replace('"', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" (", "(")
+        .replace("( ", "(")
+        .replace(" )", ")");
+    json!(flat)
+}
+
 fn sql_value(value: &Value) -> SqlValue {
     match value {
         Value::Null => SqlValue::Null,
@@ -84,10 +129,12 @@ fn normalize(mut rows: Value) -> Value {
 #[tokio::test]
 async fn fresh_schema_matches_reference_with_judge_tables() {
     let temp = TempStore::new().await;
-    migrate(&temp.store, NOW).await.expect("migrate");
-    let expected = expected_schema();
+    migrate(temp.store.as_ref(), NOW).await.expect("migrate");
+    let expected = engine_schema(expected_schema());
     assert_eq!(
-        json_rows(temp.store.read(MASTER, &[]).await.expect("schema")),
+        engine_schema(json_rows(
+            temp.store.read(MASTER, &[]).await.expect("schema")
+        )),
         expected
     );
     let builtins = temp
@@ -144,12 +191,12 @@ async fn reference_database_adds_judge_tables_without_changing_rows() {
                 .expect("fixture data");
         }
     }
-    let (store, schema) = (&temp.store, &schema);
+    let (store, schema) = (temp.store.as_ref(), &schema);
     let snapshot = |pass: i64| async move {
         let mut result = serde_json::Map::new();
         result.insert(
             "schema".into(),
-            json_rows(store.all(MASTER, &[]).await.expect("schema")),
+            engine_schema(json_rows(store.all(MASTER, &[]).await.expect("schema"))),
         );
         for entry in schema {
             if entry["type"] == "table" {
@@ -171,14 +218,14 @@ async fn reference_database_adds_judge_tables_without_changing_rows() {
         Value::Object(result)
     };
     let mut before = snapshot(0).await;
-    before["schema"] = expected_schema();
+    before["schema"] = engine_schema(expected_schema());
     for row in before["endpoints"].as_array_mut().expect("endpoint rows") {
         for (column, _) in FEDERATED {
             row[column] = Value::Null;
         }
     }
     for now in [NOW + 1, NOW + 2] {
-        migrate(&temp.store, now)
+        migrate(temp.store.as_ref(), now)
             .await
             .expect("idempotent migration");
         assert_eq!(snapshot(now).await, before);
@@ -189,7 +236,7 @@ async fn reference_database_adds_judge_tables_without_changing_rows() {
 #[tokio::test]
 async fn tree_preset_rewrite_and_audits_match_reference() {
     let temp = TempStore::new().await;
-    migrate(&temp.store, NOW).await.expect("migrate");
+    migrate(temp.store.as_ref(), NOW).await.expect("migrate");
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/ts-tree.json")).expect("tree fixture");
     for seed in fixture["seed"].as_array().expect("seed") {
@@ -204,7 +251,9 @@ async fn tree_preset_rewrite_and_audits_match_reference() {
             .await
             .expect("seed statement");
     }
-    migrate(&temp.store, NOW).await.expect("tree migration");
+    migrate(temp.store.as_ref(), NOW)
+        .await
+        .expect("tree migration");
     for (table, query) in [
         (
             "endpoints",
@@ -227,7 +276,7 @@ async fn tree_preset_rewrite_and_audits_match_reference() {
             expected,
             "{table}"
         );
-        migrate(&temp.store, NOW + 1)
+        migrate(temp.store.as_ref(), NOW + 1)
             .await
             .expect("idempotent rewrite");
         assert_eq!(
@@ -244,7 +293,7 @@ async fn tree_preset_rewrite_and_audits_match_reference() {
 #[tokio::test]
 async fn older_schema_columns_data_and_trigger_upgrade() {
     let temp = TempStore::new().await;
-    migrate(&temp.store, NOW).await.expect("migrate");
+    migrate(temp.store.as_ref(), NOW).await.expect("migrate");
     for index in ["endpoints_process", "endpoints_hooked", "grants_bound"] {
         temp.store
             .all(&format!("DROP INDEX {index}"), &[])
@@ -277,7 +326,7 @@ async fn older_schema_columns_data_and_trigger_upgrade() {
         .await
         .expect("drop trigger");
     temp.store.all("CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'old trigger'); END", &[]).await.expect("old trigger");
-    migrate(&temp.store, NOW).await.expect("upgrade");
+    migrate(temp.store.as_ref(), NOW).await.expect("upgrade");
     assert_eq!(
         temp.store
             .read("SELECT process FROM endpoints WHERE id = 'ep_legacy'", &[])
@@ -309,20 +358,23 @@ async fn older_schema_columns_data_and_trigger_upgrade() {
         .iter()
         .find(|entry| entry["name"] == "audit_no_delete")
         .expect("expected trigger");
-    assert_eq!(json_rows(trigger)[0]["sql"], expected["sql"]);
+    assert_eq!(
+        flat_sql(&json_rows(trigger)[0]["sql"]),
+        flat_sql(&expected["sql"])
+    );
     temp.close().await;
 }
 
 #[tokio::test]
 async fn failed_tree_rewrite_rolls_back_data_and_audits() {
     let temp = TempStore::new().await;
-    migrate(&temp.store, NOW).await.expect("migrate");
+    migrate(temp.store.as_ref(), NOW).await.expect("migrate");
     temp.store
         .all("DELETE FROM relay_migrations", &[])
         .await
         .expect("reset marker");
     temp.store.all("INSERT INTO endpoints (id, handle, kind, rules, created_at) VALUES ('ep_valid', 'valid', 'agent', '{\"in\":[\"tree:self\"]}', 0), ('ep_invalid', 'invalid', 'agent', 'invalid json', 0)", &[]).await.expect("seed");
-    assert!(migrate(&temp.store, NOW).await.is_err());
+    assert!(migrate(temp.store.as_ref(), NOW).await.is_err());
     assert_eq!(
         temp.store
             .read("SELECT rules FROM endpoints WHERE id = 'ep_valid'", &[])
@@ -354,7 +406,7 @@ async fn audit_retention_honors_forever_noise_limit_and_append_only_trigger() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_millis() as i64;
-    migrate(&temp.store, now).await.expect("migrate");
+    migrate(temp.store.as_ref(), now).await.expect("migrate");
     let day = 86_400_000;
     for (at, event) in [
         (now - 31 * day, "expired"),
@@ -371,25 +423,25 @@ async fn audit_retention_honors_forever_noise_limit_and_append_only_trigger() {
     }
     temp.store.all("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5001) INSERT INTO audit (at, event) SELECT ?, 'scope_refused' FROM n", &[SqlValue::Int(now - 2 * day)]).await.expect("noise backlog");
     assert_eq!(
-        prune_audit(&temp.store, now, None)
+        prune_audit(temp.store.as_ref(), now, None)
             .await
             .expect("keep forever"),
         0
     );
     assert_eq!(
-        prune_audit(&temp.store, now, Some(30 * 86_400))
+        prune_audit(temp.store.as_ref(), now, Some(30 * 86_400))
             .await
             .expect("first prune"),
         5001
     );
     assert_eq!(
-        prune_audit(&temp.store, now, Some(30 * 86_400))
+        prune_audit(temp.store.as_ref(), now, Some(30 * 86_400))
             .await
             .expect("second prune"),
         1
     );
     assert_eq!(
-        prune_audit(&temp.store, now, Some(30 * 86_400))
+        prune_audit(temp.store.as_ref(), now, Some(30 * 86_400))
             .await
             .expect("empty prune"),
         0

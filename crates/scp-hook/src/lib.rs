@@ -55,6 +55,7 @@ const DAEMON_ENV: &[&str] = &[
     "SCP_NATIVE",
     "SCP_SWARM_BIN",
     "SCP_CLAUDE_BG_EVERY_S",
+    "SCP_STORE",
 ];
 
 pub fn now() -> u64 {
@@ -979,8 +980,8 @@ mod tests {
     use super::DAEMON_ENV;
 
     #[test]
-    fn a_started_broker_keeps_the_native_mode() {
-        for key in ["SCP_NATIVE", "SCP_SWARM_BIN"] {
+    fn a_started_broker_keeps_the_native_mode_and_store() {
+        for key in ["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_STORE"] {
             assert!(DAEMON_ENV.contains(&key), "{key}");
         }
     }

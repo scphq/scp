@@ -17,7 +17,6 @@ use crate::core::{Core, SharedCore};
 use crate::hooks::{HookCalls, HookHandler};
 use crate::paths::{BrokerLock, Paths};
 use crate::proto::{Limits, RpcError};
-use crate::store::sqlite::SqliteStore;
 
 pub const MAX_LINE: usize = 256 * 1024;
 const MAX_PENDING: usize = 32;
@@ -35,6 +34,7 @@ pub struct BrokerOptions {
     pub policy_file: PathBuf,
     pub idle: Duration,
     pub env: std::collections::BTreeMap<String, String>,
+    pub engine: crate::store::Engine,
 }
 
 pub struct Broker {
@@ -87,9 +87,12 @@ impl Broker {
         u64,
         Option<crate::tasks::Task>,
     )> {
-        let store = SqliteStore::open(&options.paths.database).map_err(io::Error::other)?;
+        let store = options
+            .engine
+            .open(&options.paths.database)
+            .map_err(io::Error::other)?;
         let mut core = Core::new(
-            Arc::new(store),
+            store,
             options.limits,
             options.paths.clone(),
             options.policy_file,
@@ -554,6 +557,7 @@ pub(crate) async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::sqlite::SqliteStore;
     use crate::store::{Row, SqlValue, Storage, StoreResult, Transaction};
     use async_trait::async_trait;
     use std::sync::atomic::AtomicBool;

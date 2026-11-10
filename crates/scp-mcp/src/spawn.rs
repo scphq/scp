@@ -23,7 +23,7 @@ pub const SPAWN_RUNNER: &str = "SCP_SPAWN_RUNNER";
 /// this CLI as a command line, as a JSON array of words
 pub const CLI_ARGV: &str = "SCP_CLI_ARGV";
 
-const DAEMON_ENV: [&str; 23] = [
+const DAEMON_ENV: [&str; 24] = [
     "PATH",
     "LANG",
     "LC_ALL",
@@ -47,6 +47,7 @@ const DAEMON_ENV: [&str; 23] = [
     "SCP_NATIVE",
     "SCP_SWARM_BIN",
     "SCP_CLAUDE_BG_EVERY_S",
+    "SCP_STORE",
 ];
 const LOG_MAX_BYTES: u64 = 1024 * 1024;
 

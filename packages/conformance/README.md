@@ -121,6 +121,9 @@ same broker under Node when `SCP_BROKER_NODE` names a Node binary. `rust` runs t
 foreground broker with `SCP_NATIVE=1`, so the CLI runs the native `swarm` at `SCP_SWARM_BIN`;
 it is explicitly skipped without it and fails when the CLI falls back to its own broker.
 `SCP_BROKER_TARGETS` is a comma-separated target filter.
+`rust-turso` runs the same `SCP_BROKER_BIN` engine with `SCP_STORE=turso`, its experimental Turso store; the binary
+must be built with the `turso` feature (`cargo build -p scp-broker --features turso`). It runs only when
+`SCP_BROKER_TARGETS` names it, and the optional `Broker on Turso` workflow runs it without blocking CI.
 
 The native engine in `crates/scp-broker` (`cargo build -p scp-broker`, binary `scp-broker`) is
 the `rust` engine. Suites it does not implement yet are listed in `rustPending` in

@@ -32,4 +32,8 @@ tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+turso_core = { version = "=0.8.3", default-features = false, features = ["fs", "json", "time", "uuid"], optional = true }
+
+[features]
+turso = ["dep:turso_core"]
 

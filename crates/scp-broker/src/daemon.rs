@@ -123,6 +123,7 @@ pub async fn run(idle: f64, policy: Option<PathBuf>) -> Result<(), Box<dyn std::
     if let Some(value) = historic_after_s(&env, &config_dir) {
         limits.0.insert("historicAfterS".into(), value);
     }
+    let engine = crate::store::Engine::configured(&env, &config_dir).map_err(io::Error::other)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let dir = paths.dir.clone();
@@ -132,6 +133,7 @@ pub async fn run(idle: f64, policy: Option<PathBuf>) -> Result<(), Box<dyn std::
         policy_file,
         idle: Duration::from_secs_f64(idle),
         env,
+        engine,
     })
     .await?
     .with_hook(Arc::new(Renderer::new(dir, config_dir)));
