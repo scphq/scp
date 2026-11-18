@@ -596,6 +596,8 @@ interface ClaimScope {
   hooks?: EndpointRow
   /** a hook's claim for a subagent of the endpoint `root` */
   subagent?: { id: string; type?: string; stop?: true; root: string }
+  /** the agent the claim asks to be linked under */
+  under?: string
 }
 
 const GRANT_TOKEN = /^krt_[0-9a-f]{64}$/
@@ -1030,6 +1032,7 @@ export class RelayCore {
       groups: groupNames(claim.groups, "groups"),
       cwd: fields.cwd,
       exact: claim.exact === true && !subagent,
+      ...(under !== null && !subagent ? { under } : {}),
       ...(claim.derived === true ? { derived: true } : {}),
       ...(claim.join_only === true && options.transient === true && !subagent ? { joinOnly: true } : {}),
       ...(claim.ticket !== undefined && !subagent ? { ticket: this.hash(claim.ticket) } : {}),
@@ -1503,8 +1506,10 @@ export class RelayCore {
         n--
       }
     }
-    if (!row)
-      throw scope.exact ? this.exactRefusal(this.byHandle(wanted)!, wanted, harness, now) : new RelayError("invalid_params", `no free handle for ${wanted}`)
+    const held = !row && scope.exact ? this.byHandle(wanted) : undefined
+    const rehome = held ? this.rehomes(held, harness, scope, now) : undefined
+    if (rehome) row = held
+    if (!row) throw scope.exact ? this.exactRefusal(held!, wanted, harness, now) : new RelayError("invalid_params", `no free handle for ${wanted}`)
     if (exactFrom && exactFrom.id !== row.id) ({ moved, stopBlocks } = this.leaveHooks(exactFrom, row.id))
     const fresh = created || joined || resumed ? null : this.incarnates(row, scope, fields.process, now)
     const token = transient || live ? undefined : `kre_${randomHex(32)}`
@@ -1557,9 +1562,23 @@ export class RelayCore {
         ...sub,
       })
     }
+    if (rehome) this.audit("claim_rehome", row.id, null, { target: this.address(row), parent: this.address(rehome.parent) })
     if (fresh) this.reset(row, scope, fresh, moved, now)
     if (created || fresh === "grant") this.place(this.byId(row.id)!, scope, now)
-    else if (scope.grant !== null) this.redeem(this.byId(row.id)!, scope, now, bySession)
+    else if (rehome?.placed) {
+      const placed = this.byId(row.id)!
+      this.place(placed, { ...scope, rules: json<ScopeRules>(placed.rules, scope.rules) }, now)
+    } else if (scope.grant !== null) this.redeem(this.byId(row.id)!, scope, now, bySession)
+    if (rehome && !rehome.placed) {
+      const me = this.byId(row.id)!
+      try {
+        if (!this.mayLinkUnder(me, rehome.parent)) throw unreachable(this.address(rehome.parent))
+        this.link(me, rehome.parent, { by: this.address(me), auth: "session" })
+      } catch (error) {
+        if (error instanceof RelayError) throw this.exactRefusal(held!, wanted, harness, now)
+        throw error
+      }
+    }
     if (scope.grant !== null) this.takePending(row.id)
     if (!transient) this.wakeDone(row.id, "claim")
     return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
@@ -1751,10 +1770,52 @@ export class RelayCore {
     })
   }
 
+  /**
+   * the agent an exact claim with `under` that no other rule lets take `held` re-homes it under, as a new endpoint of the claim would sit
+   * there: `held` is a root only `--as` claims held (a resume token, no trace of a harness session's hooks, process or waker,
+   * {@link unplaced}, no child on another machine nor worker there), released and of a fitting harness, and the claim's own placement puts it
+   * under that agent (`placed`) or nowhere, from where it links under it or the claim is refused
+   */
+  private rehomes(held: EndpointRow, harness: string, scope: ClaimScope, now: number): { parent: EndpointRow; placed: boolean } | undefined {
+    if (scope.under === undefined || revivable(held) || held.hibernate !== null || held.token_hash === null) return undefined
+    if (held.process !== null || held.session !== null || held.harness_session !== null || held.harness_origin !== null) return undefined
+    if (held.hook_seen !== null || held.hook_ended !== null || held.wake !== null || held.wakers > 0) return undefined
+    if (!this.released(held, now) || !this.unplaced(held)) return undefined
+    if ((held.last_seen ?? held.created_at) < now - LIMITS.handleBoundS * 1000) return undefined
+    if (
+      one(
+        this.sql,
+        `SELECT 1 AS y WHERE EXISTS (SELECT 1 FROM endpoints WHERE parent_addr = ? OR substr(parent_addr, length(parent_addr) - length(?)) = ?)
+         OR EXISTS (SELECT 1 FROM spawn_via WHERE spawner = ? AND ended_at IS NULL)`,
+        held.handle,
+        held.handle,
+        `/${held.handle}`,
+        held.id,
+      )
+    )
+      return undefined
+    if (!harnessFits(held.harness, harness) && !sameProvider(held.harness, harness)) return undefined
+    const placement = this.placement(scope, now, held)
+    if (placement.refused || placement.grant) return undefined
+    let parent: EndpointRow
+    try {
+      parent = this.resolve(scope.under)
+    } catch (error) {
+      if (error instanceof RelayError) return undefined
+      throw error
+    }
+    if (parent.kind !== "agent" || parent.id === held.id) return undefined
+    if (placement.parent) return placement.parent.id === parent.id ? { parent, placed: true } : undefined
+    return this.mayLinkUnder(held, parent) ? { parent, placed: false } : undefined
+  }
+
   /** why an exact claim of `handle`, which `held` holds, is refused */
   protected exactRefusal(held: EndpointRow, handle: string, harness: string, now: number): RelayError {
     if ((held.session !== null || held.process !== null) && presenceOf(held, now) !== "offline") {
-      return new RelayError("unauthorized", `${handle} is held by a live ${held.harness} session: act as it from that session's own shell, no --as needed`)
+      return new RelayError(
+        "unauthorized",
+        `me/${handle} is held by a live session; a detached job can't act as it. Give the job its own name, e.g. SCP_UNDER=${handle} ${CLI_NAME} send --as ${handle}-wake ...`,
+      )
     }
     if (!harnessFits(held.harness, harness)) return new RelayError("unauthorized", `${handle} is a ${held.harness} endpoint: pass --harness ${held.harness}`)
     return new RelayError("unauthorized", `${handle} is placed in another tree or under another parent than this shell`)
