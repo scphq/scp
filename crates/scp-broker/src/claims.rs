@@ -155,6 +155,7 @@ struct Claimed {
     retired: Option<String>,
     created: bool,
     subagent: bool,
+    superseded: bool,
 }
 
 #[derive(Clone)]
@@ -173,6 +174,10 @@ pub(crate) struct Fields {
     pub(crate) derived: bool,
     /// a hook's claim that takes only what its session owns: no new row, none by handle search
     pub(crate) join_only: bool,
+    /// the connecting tool surface's own id: a claim with it supersedes the older surfaces of its harness session (rule 1)
+    pub(crate) instance: Option<String>,
+    /// a connecting claim, not a hook's
+    pub(crate) connecting: bool,
 }
 #[derive(Clone)]
 pub(crate) struct Scope {
@@ -585,6 +590,15 @@ impl Core {
             {
                 continue;
             }
+            if stored_elsewhere(
+                &row,
+                Some(session),
+                fields,
+                older_surface(fields, scope),
+                false,
+            ) {
+                continue;
+            }
             if self.released(&row).await
                 && self
                     .returns(
@@ -783,8 +797,14 @@ impl Core {
             Some(ticket) if !transient => Some(self.ticketed(ticket, harness).await?),
             _ => None,
         };
-        let mut row = if let Some(session) = fields.session.as_ref().filter(|_| ticketed.is_none())
-        {
+        let surfaced = if transient || ticketed.is_some() {
+            None
+        } else {
+            self.surfaced_row(harness, fields, scope).await?
+        };
+        let mut row = if surfaced.is_some() {
+            surfaced.clone()
+        } else if let Some(session) = fields.session.as_ref().filter(|_| ticketed.is_none()) {
             self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR harness IN ('cli','hook','mcp','shell')) AND session = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY COALESCE(last_seen,created_at) DESC LIMIT 1",&[opt(Some(harness)),opt(Some(session))]).await?.into_iter().next()
         } else {
             None
@@ -792,7 +812,16 @@ impl Core {
         let open = row
             .as_ref()
             .is_none_or(|r| presence(r, now_ms()) == "offline");
-        let mut session = fields.session.clone();
+        let superseded = match &row {
+            Some(held) if !transient && !open => {
+                self.supersedes(held, harness, fields, scope, ticketed.is_some())?
+            }
+            _ => false,
+        };
+        let mut session = match &surfaced {
+            Some(held) => text(held, "session").map(str::to_owned),
+            None => fields.session.clone(),
+        };
         if let Some(held) = &row {
             if presence(held, now_ms()) == "offline" {
                 self.store
@@ -803,12 +832,13 @@ impl Core {
                     .await?;
                 row = None;
             } else if !transient {
+                let other = self.other_surface(held, fields);
                 let same = fields
                     .process
                     .as_deref()
                     .zip(text(held, "process"))
                     .is_some_and(|(a, b)| {
-                        (integer(held, "connections").unwrap_or(0) == 0
+                        ((integer(held, "connections").unwrap_or(0) == 0
                             && if text(held, "token_hash").is_none() {
                                 same_harness(a, b)
                             } else {
@@ -817,9 +847,10 @@ impl Core {
                             || (text(held, "handle") == Some(scope.handle.as_str())
                                 && integer(held, "connections").unwrap_or(0) > 0
                                 && a == b
-                                && process_key(a, true))
+                                && process_key(a, true)))
+                            && !other
                     });
-                if !same {
+                if !same && !superseded {
                     row = None;
                     session = None;
                 }
@@ -837,6 +868,7 @@ impl Core {
         }
         let mut back = None;
         if !transient
+            && !superseded
             && let Some(hooks) = row.clone()
             && text(&hooks, "token_hash").is_none()
             && integer(&hooks, "named").is_none()
@@ -975,11 +1007,22 @@ impl Core {
                             v.starts_with("sub:") && Some(v) != fields.session.as_deref()
                         })
                 });
+                let kept = stored_elsewhere(
+                    &held,
+                    fields.harness_session.as_deref(),
+                    fields,
+                    older_surface(fields, scope),
+                    fields.derived
+                        && scope.grant.is_none()
+                        && !scope.exact
+                        && scope.subagent.is_none(),
+                );
                 if text(&held, "kind") == Some("agent")
                     && !revivable(&held)
                     && (self.released(&held).await || (!transient && outlived))
                     && harness_fits(text(&held, "harness"), harness)
                     && !other_session
+                    && !kept
                     && !foreign_sub
                 {
                     let mine = transient
@@ -1123,7 +1166,7 @@ impl Core {
         }
         let labels = fields.labels.to_string();
         let query = format!(
-            "UPDATE endpoints SET harness = ?,model = {},cwd = {},parent = {},labels = {},session = ?,harness_origin = {},process = {},token_hash = {},connections = connections + ?,last_seen = ?,hook_seen = CASE WHEN ? IS NOT NULL AND (hook_ended IS NULL OR hook_ended < ?) THEN ? ELSE hook_seen END WHERE id = ?",
+            "UPDATE endpoints SET harness = ?,model = {},cwd = {},parent = {},labels = {},session = ?,harness_origin = {},process = {},token_hash = {},connections = connections + ?,last_seen = ?,hook_seen = CASE WHEN ? IS NOT NULL AND (hook_ended IS NULL OR hook_ended < ?) THEN ? ELSE hook_seen END,surface = CASE WHEN ? = 1 THEN ? ELSE surface END WHERE id = ?",
             field("model"),
             field("cwd"),
             field("parent"),
@@ -1159,6 +1202,13 @@ impl Core {
             },
             SqlValue::Int(now_ms() - 30_000),
             SqlValue::Int(now_ms()),
+            SqlValue::Int(i64::from(
+                !transient && !scope.exact && scope.subagent.is_none(),
+            )),
+            match &fields.instance {
+                Some(_) => opt(fields.harness_session.as_deref()),
+                None => SqlValue::Null,
+            },
             opt(Some(id)),
         ]);
         self.store.all(&query, &args).await?;
@@ -1172,6 +1222,9 @@ impl Core {
         }
         if !(transient && joined) {
             let mut detail = json!({"handle":text(&row,"handle"),"harness":harness,"joined":joined,"resumed":resumed,"transient":transient});
+            if superseded {
+                detail["superseded"] = json!(true);
+            }
             if let Some(sub) = &scope.subagent {
                 detail["subagent"] = json!(sub.kind.as_deref().unwrap_or("agent"));
                 detail["parent"] = json!(self.address_of(&sub.root).await?);
@@ -1269,7 +1322,117 @@ impl Core {
             retired,
             created,
             subagent: scope.subagent.is_some(),
+            superseded,
         })
+    }
+    /// the live endpoint a tool surface of the claim's harness instance holds with the claim's harness session, for a tool surface's claim:
+    /// its session's own endpoint even where the session key names another session's, as in a process that hosts several
+    async fn surfaced_row(
+        &self,
+        harness: &str,
+        fields: &Fields,
+        scope: &Scope,
+    ) -> Result<Option<Row>, RpcError> {
+        let (Some(session), Some(process)) =
+            (fields.harness_session.as_deref(), fields.process.as_deref())
+        else {
+            return Ok(None);
+        };
+        if fields.instance.is_none()
+            || scope.exact
+            || scope.subagent.is_some()
+            || !process_key(process, true)
+        {
+            return Ok(None);
+        }
+        for id in self.state.holders(process, session) {
+            if let Some(row) = self.by_id(&id).await?
+                && text(&row, "kind") == Some("agent")
+                && integer(&row, "connections").unwrap_or(0) > 0
+                && text(&row, "process") == Some(process)
+                && text(&row, "harness") == Some(harness)
+            {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
+    }
+    /// whether `row` is another harness session's of the claim's harness instance: the tool surfaces of that instance holding it recorded
+    /// only other sessions, or, with none recorded, it stored another one that its hooks did not report as the claim's since
+    fn other_surface(&self, row: &Row, fields: &Fields) -> bool {
+        let (Some(session), Some(process)) =
+            (fields.harness_session.as_deref(), fields.process.as_deref())
+        else {
+            return false;
+        };
+        let surfaces: Vec<_> = self
+            .state
+            .surfaces(text(row, "id").unwrap_or(""), 0)
+            .into_iter()
+            .filter(|s| s.process.as_deref() == Some(process) && s.harness_session.is_some())
+            .collect();
+        if !surfaces.is_empty() {
+            return !surfaces
+                .iter()
+                .any(|s| s.harness_session.as_deref() == Some(session));
+        }
+        text(row, "surface").is_some_and(|stored| stored != session)
+            && text(row, "harness_session") != Some(session)
+    }
+    /// whether a connecting claim takes the live `row` its session holds from the older tool surfaces of its harness session (rule 1): a tool
+    /// surface's claim with an instance, a harness session and a full harness-instance key, neither exact, a subagent's nor ticketed, of the
+    /// row's harness and its very harness instance, where the row's hooks reported that harness session or a surface holding it claimed with
+    /// it. A claim with no instance that such a surface holds the row for is refused `superseded`: it is an older surface of that session
+    fn supersedes(
+        &self,
+        row: &Row,
+        harness: &str,
+        fields: &Fields,
+        scope: &Scope,
+        ticketed: bool,
+    ) -> Result<bool, RpcError> {
+        let (Some(session), Some(process)) =
+            (fields.harness_session.as_deref(), fields.process.as_deref())
+        else {
+            return Ok(false);
+        };
+        if scope.exact || scope.subagent.is_some() || ticketed || !process_key(process, true) {
+            return Ok(false);
+        }
+        if text(row, "kind") != Some("agent")
+            || text(row, "process") != Some(process)
+            || text(row, "harness") != Some(harness)
+        {
+            return Ok(false);
+        }
+        let surfaces: Vec<_> = self
+            .state
+            .surfaces(text(row, "id").unwrap_or(""), 0)
+            .into_iter()
+            .filter(|s| s.process.as_deref() == Some(process) && s.harness_session.is_some())
+            .collect();
+        let claimed = surfaces
+            .iter()
+            .any(|s| s.harness_session.as_deref() == Some(session));
+        if fields.instance.is_none() {
+            if claimed || text(row, "surface") == Some(session) {
+                return Err(RpcError::new(
+                    ErrorCode::Superseded,
+                    format!(
+                        "a newer tool surface of this session holds {}",
+                        address(row)
+                    ),
+                ));
+            }
+            return Ok(false);
+        }
+        if integer(row, "connections").unwrap_or(0) == 0 {
+            return Ok(false);
+        }
+        if !surfaces.is_empty() {
+            return Ok(claimed);
+        }
+        Ok(text(row, "surface").or_else(|| text(row, "harness_session")) == Some(session))
     }
     async fn hand_off(
         &mut self,
@@ -1528,6 +1691,7 @@ impl Core {
         claim: &Map<String, Value>,
         transient: bool,
         self_keys: Option<&Value>,
+        instance: Option<&str>,
     ) -> Result<Claimed, RpcError> {
         let subagent = subagent_of(claim.get("subagent"))?;
         let harness =
@@ -1557,6 +1721,8 @@ impl Core {
             join_only: transient
                 && subagent.is_none()
                 && claim.get("join_only") == Some(&Value::Bool(true)),
+            instance: instance.map(str::to_owned),
+            connecting: !transient,
         };
         if fields
             .process
@@ -1776,6 +1942,32 @@ pub fn subagent_handle(root: &str, id: &str, kind: Option<&str>) -> String {
 }
 
 /// why an exact claim of `handle`, which `held` holds, is refused
+/// whether a released `held` is kept from a claim of harness session `session` by the one its last tool surface stored: for a claim with
+/// neither a name nor a grant (`derived`), another one its hooks did not report as the claim's since; for an older surface's claim (`older`)
+/// from its harness instance, the claim's own
+fn stored_elsewhere(
+    held: &Row,
+    session: Option<&str>,
+    fields: &Fields,
+    older: bool,
+    derived: bool,
+) -> bool {
+    let (Some(session), Some(stored)) = (session, text(held, "surface")) else {
+        return false;
+    };
+    if stored != session {
+        return derived && text(held, "harness_session") != Some(session);
+    }
+    older && fields.process.is_some() && text(held, "process") == fields.process.as_deref()
+}
+/// whether the claim is a connecting one with no instance, as an older tool surface makes it
+fn older_surface(fields: &Fields, scope: &Scope) -> bool {
+    fields.connecting
+        && fields.instance.is_none()
+        && !scope.exact
+        && scope.subagent.is_none()
+        && scope.ticket.is_none()
+}
 fn exact_refusal(held: &Row, handle: &str, harness: &str) -> RpcError {
     let seen = integer(held, "connections").unwrap_or(0) > 0
         || integer(held, "hook_seen").is_some_and(|seen| seen >= now_ms() - 1_800_000);
@@ -1875,6 +2067,25 @@ pub async fn hello_claim(
         }
         return Ok(core.hello_result(Value::Null, None));
     }
+    let instance = if transient {
+        None
+    } else {
+        params.get("instance")
+    };
+    if let Some(value) = instance {
+        let valid = value.as_str().filter(|v| harness_session(v));
+        let Some(value) = valid else {
+            return Err(RpcError::invalid_params(
+                "instance is an id of letters, digits, . _ : -",
+            ));
+        };
+        if core.state.superseded.iter().any(|v| v == value) {
+            return Err(RpcError::new(
+                ErrorCode::Superseded,
+                "a newer tool surface of this session took over its endpoint",
+            ));
+        }
+    }
     if !transient && !params.contains_key("resume") {
         if params.get("human") == Some(&Value::Bool(true)) {
             if let Some(id) = core
@@ -1936,6 +2147,47 @@ pub async fn hello_claim(
         Mode::Agent
     };
     core.state.bind(conn, Some(id.clone()), mode);
+    if let Some(instance) = instance.and_then(Value::as_str)
+        && text(&row, "kind") == Some("agent")
+    {
+        let claim = params.get("claim");
+        let field = |name: &str| {
+            claim
+                .and_then(|c| c.get(name))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let surface = if params.contains_key("resume") {
+            Some(crate::state::Surface {
+                instance: instance.to_owned(),
+                process: text(&row, "process").map(str::to_owned),
+                harness_session: params
+                    .get("harness_session")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            })
+        } else if claim.and_then(|c| c.get("exact")) != Some(&Value::Bool(true))
+            && !claimed.subagent
+        {
+            Some(crate::state::Surface {
+                instance: instance.to_owned(),
+                process: field("process"),
+                harness_session: field("harness_session"),
+            })
+        } else {
+            None
+        };
+        if let Some(c) = core.state.connections.get_mut(&conn) {
+            c.surface = surface;
+        }
+    }
+    if claimed.superseded {
+        let process = params
+            .get("claim")
+            .and_then(|c| c.get("process"))
+            .and_then(Value::as_str);
+        core.state.supersede(&id, &address(&row), process, conn);
+    }
     if let Some(retired) = claimed.retired {
         core.state.close_endpoint(&retired, conn);
     }
@@ -2008,6 +2260,7 @@ async fn hello_transaction(
                 retired: None,
                 created: false,
                 subagent: false,
+                superseded: false,
             });
         }
         if params.get("human") == Some(&Value::Bool(true)) {
@@ -2019,6 +2272,7 @@ async fn hello_transaction(
                 retired: None,
                 created: false,
                 subagent: false,
+                superseded: false,
             });
         }
     }
@@ -2031,7 +2285,7 @@ async fn hello_transaction(
         let join = join
             .as_object()
             .ok_or_else(|| RpcError::invalid_params("join is {handle?, under?}"))?;
-        let claimed = core.claim_agent(claim, true, None).await?;
+        let claimed = core.claim_agent(claim, true, None, None).await?;
         let row = &claimed.row;
         if let Some(handle) = join
             .get("handle")
@@ -2074,9 +2328,16 @@ async fn hello_transaction(
             retired: claimed.retired,
             created: claimed.created,
             subagent: false,
+            superseded: false,
         });
     }
-    core.claim_agent(claim, transient, params.get("self")).await
+    core.claim_agent(
+        claim,
+        transient,
+        params.get("self"),
+        params.get("instance").and_then(Value::as_str),
+    )
+    .await
 }
 
 /// a claim's link under a parent that was refused and is tried again: the address it asked for, and why it is refused

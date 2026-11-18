@@ -108,6 +108,8 @@ export interface RelayMcpOptions {
   /** diagnostics, never stdout */
   log?: (line: string) => void
   heartbeatMs?: number
+  /** this server's own id, which its hellos carry so a newer server of the session supersedes it (default a fresh random one; none for an exact claim, which names its endpoint itself, nor for a deferred or thread-bound shim, several of which may serve one thread at once) */
+  instance?: string
 }
 
 /**
@@ -250,6 +252,12 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   let bound: Claim | undefined = options.deferClaim ? undefined : options.claim
   /** whether a call naming another session than the bound one was logged */
   let rebound = false
+  const instance =
+    options.threadClaim || options.deferClaim || options.claim.exact === true || options.claim.subagent !== undefined
+      ? undefined
+      : (options.instance ?? `mcp-${crypto.randomUUID()}`)
+  /** why this server stopped for good: a newer server of its session took its endpoint over */
+  let retired: string | undefined
 
   const write = (message: Json) => {
     if (!stopped) options.output(`${JSON.stringify(message)}\n`)
@@ -287,7 +295,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
    * longer hibernated, as when a revived session's shim restarts) and the claim went on without it
    */
   async function claimHello(next: RelayClient, claim: Claim): Promise<HelloResult> {
-    const cwd = claim.cwd === undefined ? {} : { cwd: claim.cwd }
+    const cwd = { ...(instance === undefined ? {} : { instance }), ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }) }
     if (claim.ticket === undefined) return next.hello({ claim, ...cwd })
     const { ticket: _, ...plain } = claim
     const spend = () => {
@@ -307,16 +315,35 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     return next.hello({ claim: plain, ...cwd })
   }
 
+  /** a newer server of this session took the endpoint over: this one makes no more broker calls, and its tools say so */
+  function retire(endpoint: unknown) {
+    if (retired) return
+    retired = `a newer relay MCP server of this session took ${typeof endpoint === "string" && endpoint ? endpoint : "its endpoint"} over: this one is retired and makes no relay calls, so use the relay tools of the session's current server`
+    log(`${CLI_NAME} mcp: ${retired}`)
+    clearInterval(heartbeat)
+    client = undefined
+  }
+
   async function open(): Promise<RelayClient> {
+    if (retired) throw new RelayError("superseded", retired)
     const claim = sessionClaim()
     const next = await options.connect()
+    next.onNotification((method, params) => {
+      if (method === "superseded") retire((params as { endpoint?: unknown } | undefined)?.endpoint)
+    })
     try {
       let hello: HelloResult | undefined
       if (token) {
         try {
-          hello = await next.hello({ resume: token, ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }) })
+          hello = await next.hello({
+            resume: token,
+            ...(instance === undefined ? {} : { instance }),
+            ...(instance === undefined || claim.harness_session === undefined ? {} : { harness_session: claim.harness_session }),
+            ...(claim.cwd === undefined ? {} : { cwd: claim.cwd }),
+          })
         } catch (error) {
           if (!(error instanceof RelayError)) throw error
+          if (error.code === "superseded") throw error
         }
       }
       hello ??= await claimHello(next, claim)
@@ -328,10 +355,15 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
       }
     } catch (error) {
       next.close()
+      if (error instanceof RelayError && error.code === "superseded") {
+        retire(undefined)
+        throw new RelayError("superseded", retired!)
+      }
       throw error
     }
-    if (stopped) {
+    if (stopped || retired) {
       next.close()
+      if (retired) throw new RelayError("superseded", retired)
       throw new Error("the relay MCP shim is stopping")
     }
     client = next
@@ -349,6 +381,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
   }
 
   function ensure(): Promise<RelayClient> {
+    if (retired) return Promise.reject(new RelayError("superseded", retired))
     if (client) return Promise.resolve(client)
     connecting ??= open().finally(() => (connecting = undefined))
     return connecting
@@ -652,6 +685,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
     const name = params.name
     const args = params.arguments ?? {}
     if (typeof args !== "object" || args === null || Array.isArray(args)) return text("invalid_params: arguments must be an object", true)
+    if (retired) return text(`superseded: ${retired}`, true)
     try {
       return await tool(String(name), args as Json)
     } catch (error) {
@@ -663,7 +697,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
 
   async function pushChannel(): Promise<void> {
     let failures = 0
-    while (!stopped && (channelClient || inbox)) {
+    while (!stopped && !retired && (channelClient || inbox)) {
       try {
         const { messages, hold } = await call<{ messages: Envelope[]; hold?: string | null }>("inbox", { wait_s: LIMITS.injectHoldS, offer: true })
         failures = 0
@@ -699,7 +733,7 @@ export async function runRelayMcp(options: RelayMcpOptions): Promise<void> {
         const pushed = messages.flatMap((message) => (message.seq !== undefined && channelPushed.has(message.seq) ? [message.seq] : []))
         if (pushed.length) await call("injected", { seqs: pushed, hold })
       } catch (error) {
-        if (stopped) return
+        if (stopped || retired) return
         log(`${CLI_NAME} mcp: channel poll failed: ${error instanceof Error ? error.message : String(error)}`)
         await sleep(channelRetryMs(error, failures++))
       }

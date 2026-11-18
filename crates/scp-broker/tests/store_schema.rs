@@ -10,7 +10,7 @@ use support::{TempStore, json_rows};
 
 const NOW: i64 = 1_700_000_000_000;
 const MASTER: &str = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name";
-const FEDERATED: [(&str, &str); 9] = [
+const FEDERATED: [(&str, &str); 10] = [
     ("remote", "TEXT"),
     ("auth", "TEXT"),
     ("incarnation", "TEXT"),
@@ -20,6 +20,7 @@ const FEDERATED: [(&str, &str); 9] = [
     ("waking_until", "INTEGER"),
     ("mirrored_active", "INTEGER"),
     ("link_under", "TEXT"),
+    ("surface", "TEXT"),
 ];
 
 fn expected_schema() -> Value {

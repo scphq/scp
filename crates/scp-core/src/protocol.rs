@@ -53,6 +53,7 @@ self::string_enum!(ErrorCode, ERROR_CODES {
     Unavailable = "unavailable",
     JudgeRefused = "judge_refused",
     NotLive = "not_live",
+    Superseded = "superseded",
 });
 
 /// A refusal with its wire code; `detail` holds structured fields a client may show, never a message body.
