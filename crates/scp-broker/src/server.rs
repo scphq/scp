@@ -357,6 +357,8 @@ struct Output {
     tx: mpsc::UnboundedSender<Vec<u8>>,
     queued: Arc<AtomicUsize>,
     failed: Arc<Notify>,
+    /// the last frame went: whatever a request still in flight answers is dropped; held while a frame is queued
+    sealed: Arc<std::sync::Mutex<bool>>,
 }
 
 impl Output {
@@ -384,6 +386,22 @@ impl Output {
     }
 
     fn send(&self, frame: Value) {
+        let sealed = self.sealed.lock().unwrap_or_else(|e| e.into_inner());
+        if !*sealed {
+            self.enqueue(frame);
+        }
+    }
+
+    /// queues `frame` as the connection's last: nothing after it is sent
+    fn seal(&self, frame: Value) {
+        let mut sealed = self.sealed.lock().unwrap_or_else(|e| e.into_inner());
+        if !*sealed {
+            self.enqueue(frame);
+            *sealed = true;
+        }
+    }
+
+    fn enqueue(&self, frame: Value) {
         let Ok(mut bytes) = serde_json::to_vec(&frame) else {
             return;
         };
@@ -432,6 +450,7 @@ pub(crate) async fn serve_connection(
         tx,
         queued: queued.clone(),
         failed: failed.clone(),
+        sealed: Arc::new(std::sync::Mutex::new(false)),
     };
     let writer_failed = failed.clone();
     let writer_task = tokio::spawn(async move {
@@ -541,6 +560,16 @@ pub(crate) async fn serve_connection(
     }
     if let Some(calls) = &hooks {
         calls.close();
+    }
+    let farewell = core
+        .lock()
+        .await
+        .state
+        .connections
+        .get_mut(&conn)
+        .and_then(|c| c.farewell.take());
+    if let Some(frame) = farewell {
+        output.seal(frame);
     }
     core.lock().await.disconnect(conn).await;
     while requests.join_next().await.is_some() {}

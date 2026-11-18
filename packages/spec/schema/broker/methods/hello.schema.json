@@ -63,6 +63,9 @@
         "harness_session": {
           "type": "string"
         },
+        "instance": {
+          "type": "string"
+        },
         "cwd": {
           "type": "string"
         }

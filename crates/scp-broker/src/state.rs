@@ -45,7 +45,22 @@ pub struct Connection {
     pub ended: bool,
     /// the broker's own task process, matched by peer pid at accept
     pub task: bool,
+    /// the connection holds its endpoint as a harness session's tool surface, which a newer one of that session supersedes
+    pub surface: Option<Surface>,
+    /// the frame the connection sends as the broker closes it
+    pub farewell: Option<Value>,
 }
+
+/// a tool surface: its own id, the harness-instance key and the harness session id it claimed with
+#[derive(Debug, Clone, Default)]
+pub struct Surface {
+    pub instance: String,
+    pub process: Option<String>,
+    pub harness_session: Option<String>,
+}
+
+/// superseded tool surfaces the broker keeps refusing, newest kept
+const SUPERSEDED_KEPT: usize = 1024;
 
 impl Connection {
     pub fn bound(&self) -> bool {
@@ -70,6 +85,8 @@ pub struct State {
     pub deferred: Option<(Option<String>, Value)>,
     /// the presence and address last reported to watchers, by endpoint id
     pub known: HashMap<String, (String, String)>,
+    /// the instances of superseded tool surfaces, oldest first
+    pub superseded: VecDeque<String>,
     next_id: ConnectionId,
 }
 
@@ -121,6 +138,64 @@ impl State {
             {
                 *self.presence.entry(endpoint.clone()).or_default() += 1;
             }
+        }
+    }
+
+    /// the tool surfaces connections other than `except` hold `endpoint` with
+    pub fn surfaces(&self, endpoint: &str, except: ConnectionId) -> Vec<Surface> {
+        self.connections
+            .values()
+            .filter(|c| c.id != except && c.endpoint.as_deref() == Some(endpoint))
+            .filter_map(|c| c.surface.clone())
+            .collect()
+    }
+
+    /// the endpoints connections hold as tool surfaces of harness instance `process` and harness session `session`
+    pub fn holders(&self, process: &str, session: &str) -> Vec<String> {
+        self.connections
+            .values()
+            .filter(|c| {
+                c.surface.as_ref().is_some_and(|s| {
+                    s.process.as_deref() == Some(process)
+                        && s.harness_session.as_deref() == Some(session)
+                })
+            })
+            .filter_map(|c| c.endpoint.clone())
+            .collect()
+    }
+
+    /// tells the tool surfaces of `process` other than `except` holding `endpoint` (at `address`) that a newer one took it over, closes
+    /// them, and refuses their instances from now on
+    pub fn supersede(
+        &mut self,
+        endpoint: &str,
+        address: &str,
+        process: Option<&str>,
+        except: ConnectionId,
+    ) {
+        let mut retired = Vec::new();
+        for connection in self.connections.values_mut() {
+            let Some(surface) = &connection.surface else {
+                continue;
+            };
+            if connection.id == except
+                || connection.endpoint.as_deref() != Some(endpoint)
+                || surface.process.as_deref() != process
+            {
+                continue;
+            }
+            retired.push(surface.instance.clone());
+            connection.farewell = Some(
+                json!({"jsonrpc": "2.0", "method": "superseded", "params": {"endpoint": address}}),
+            );
+            connection.closed.notify_waiters();
+        }
+        for instance in retired {
+            self.superseded.retain(|v| *v != instance);
+            self.superseded.push_back(instance);
+        }
+        while self.superseded.len() > SUPERSEDED_KEPT {
+            self.superseded.pop_front();
         }
     }
 

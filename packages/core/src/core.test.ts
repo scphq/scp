@@ -2014,6 +2014,25 @@ describe("spawn bindings", () => {
     expect([next.id, next.address, next.parent]).toEqual([first.id, "me/wm1", "me/main"])
   })
 
+  test("a tool surface's ended worker of a bound grant is taken by another session's surface that the grant names it", () => {
+    const { core, actor, clock } = spawned()
+    const surface = (pid: number, session: string, lineage: string[]) => ({
+      handle: "muse-work",
+      harness: "muse",
+      process: key(pid),
+      session: key(pid),
+      lineage: [key(pid), ...lineage],
+      harness_session: session,
+      derived: true,
+    })
+    const first = core.claim(surface(6, "worker-a", [key(5), key(1)]), { instance: "surface-1" }).endpoint
+    core.disconnect(first.id)
+    clock.now += (LIMITS.restartGraceS + 1) * 1000
+    core.grant(actor, { name: "wm1", scope: "parent", bind_process: key(8) })
+    const next = core.claim(surface(9, "worker-c", [key(8), key(1)]), { instance: "surface-3" }).endpoint
+    expect([next.id, next.address, next.parent]).toEqual([first.id, "me/wm1", "me/main"])
+  })
+
   test("a claim without the key, a claim with its own grant and an exact claim leave the bound grant alone", () => {
     const { core, actor, shim, used } = spawned()
     expect(core.claim({ handle: "muse-work", harness: "muse", process: key(7), lineage: [key(7), key(1)] }).endpoint.address).toBe("me/muse-work")

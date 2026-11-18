@@ -1096,6 +1096,55 @@ describe.each(serverModes)("relay MCP shim, in process (%s)", (mode) => {
     }
   })
 
+  test("a server that a newer one of its session supersedes refuses its tools and never reconnects", async () => {
+    const claim = { session: "pid:4242:Mon-supersede", process: "pid:4242:Mon-supersede", harness_session: "session-supersede" }
+    let connects = 0
+    const first = shim(broker, {
+      handle: "supersede-a",
+      claim,
+      extra: { heartbeatMs: 50 },
+      ...(native
+        ? {}
+        : {
+            connect: () => {
+              connects++
+              return RelayClient.connect(broker.socket)
+            },
+          }),
+    })
+    const opened = () => (native ? first.logged.filter((line) => line === "test: connect").length : connects)
+    try {
+      expect(textOf(await first.call("relay_whoami"))).toContain("address: me/supersede-a")
+      const second = shim(broker, { handle: "supersede-b", claim })
+      try {
+        expect(textOf(await second.call("relay_whoami"))).toContain("address: me/supersede-a")
+        let refused = ""
+        for (let i = 0; i < 200 && !refused.startsWith("superseded:"); i++) {
+          refused = textOf(await first.call("relay_whoami"))
+          if (!refused.startsWith("superseded:")) await Bun.sleep(10)
+        }
+        expect(refused).toStartWith("superseded: a newer relay MCP server of this session took me/supersede-a over")
+        const before = opened()
+        await Bun.sleep(400)
+        expect(opened()).toBe(before)
+        expect(textOf(await first.call("relay_inbox"))).toStartWith("superseded: ")
+        expect(textOf(await second.call("relay_whoami"))).toContain("address: me/supersede-a")
+        expect(
+          broker.core
+            .list({ all: true })
+            .filter((e) => e.address.startsWith("me/supersede-"))
+            .map((e) => e.address),
+        ).toEqual(["me/supersede-a"])
+      } finally {
+        second.close()
+        await second.done
+      }
+    } finally {
+      first.close()
+      await first.done
+    }
+  })
+
   test("relay_set_now sets a one-line now under the current state, and relay_list and relay_peers show it with the title", async () => {
     const a = shim(broker, { handle: "now-mcp" })
     const b = shim(broker, { handle: "now-peer" })

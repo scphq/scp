@@ -19,6 +19,7 @@ export {
   type MessageRow,
   type LinkPending,
   type Relinked,
+  type Surface,
   type WakeJob,
 } from "./core"
 export * from "./protocol"

@@ -289,6 +289,8 @@ export interface EndpointRow {
   parent_addr: string | null
   /** JSON {@link LinkPending}: the parent a claim asked for under that was refused, tried again until it links */
   link_under: string | null
+  /** the harness session id the tool surface that last claimed the row reported, null when a claim without an instance did */
+  surface: string | null
   depth: number | null
   /** JSON {@link ScopeRules} */
   rules: string | null
@@ -598,6 +600,18 @@ interface ClaimScope {
   subagent?: { id: string; type?: string; stop?: true; root: string }
   /** the agent the claim asks to be linked under */
   under?: string
+  /** the connecting tool surface's own id: a claim with it supersedes the older surfaces of its harness session (rule 1) */
+  instance?: string
+  /** the tool surfaces other connections hold an endpoint with */
+  surfaces?: (endpoint: string) => Surface[]
+  /** the endpoints other connections hold as tool surfaces of a harness instance and session */
+  holders?: (process: string, harnessSession: string) => string[]
+}
+
+/** a connection that holds an endpoint as a tool surface of a harness session: its harness-instance key and harness session id */
+export interface Surface {
+  process: string | null
+  harness_session: string | null
 }
 
 const GRANT_TOKEN = /^krt_[0-9a-f]{64}$/
@@ -779,6 +793,7 @@ export class RelayCore {
       ["parent_ep", "TEXT"],
       ["parent_addr", "TEXT"],
       ["link_under", "TEXT"],
+      ["surface", "TEXT"],
       ["depth", "INTEGER"],
       ["rules", "TEXT"],
       ["caps", "TEXT"],
@@ -982,11 +997,18 @@ export class RelayCore {
    */
   claim(
     claim: Claim,
-    options: { transient?: boolean; self?: unknown } = {},
+    options: {
+      transient?: boolean
+      self?: unknown
+      instance?: string
+      surfaces?: (endpoint: string) => Surface[]
+      holders?: (process: string, harnessSession: string) => string[]
+    } = {},
   ): {
     endpoint: EndpointView
     token?: string
     created?: true
+    superseded?: true
     subagent?: true
     rehomed?: { from: string }
     handedOff?: { from: string; retired: string }
@@ -1036,6 +1058,9 @@ export class RelayCore {
       ...(claim.derived === true ? { derived: true } : {}),
       ...(claim.join_only === true && options.transient === true && !subagent ? { joinOnly: true } : {}),
       ...(claim.ticket !== undefined && !subagent ? { ticket: this.hash(claim.ticket) } : {}),
+      ...(options.instance !== undefined && !subagent ? { instance: options.instance } : {}),
+      ...(options.surfaces ? { surfaces: options.surfaces } : {}),
+      ...(options.holders ? { holders: options.holders } : {}),
     }
     const self = lineageKeys(options.self)
     const nearest = self.at(-1)
@@ -1356,13 +1381,15 @@ export class RelayCore {
     },
     transient: boolean,
     scope: ClaimScope = { handle: wanted, lineage: [], grant: null, rules: {}, groups: [], cwd: fields.cwd },
-  ): { endpoint: EndpointView; token?: string; created?: true } {
+  ): { endpoint: EndpointView; token?: string; created?: true; superseded?: true } {
     const now = this.now()
     this.endExited(now)
     const ticketed = !transient && scope.ticket !== undefined ? this.ticketed(scope.ticket, harness) : undefined
     const bare = transient && fields.session !== null && BARE_PID_KEY.test(fields.session)
+    const surfaced = transient || ticketed ? undefined : this.surfacedRow(harness, fields, scope)
     let row =
-      fields.session && !ticketed
+      surfaced ??
+      (fields.session && !ticketed
         ? one<EndpointRow>(
             this.sql,
             `SELECT * FROM endpoints WHERE kind = 'agent' AND (harness = ? OR ${GENERIC_SQL})
@@ -1375,10 +1402,18 @@ export class RelayCore {
             `${fields.session}:`,
             now - LIMITS.hookOnlineS * 1000,
           )
+        : undefined)
+    const reviving =
+      row &&
+      revivable(row) &&
+      this.localRow(row) &&
+      row.connections === 0 &&
+      !this.otherSurface(row, fields, scope) &&
+      !storedElsewhere(row, fields, this.olderSurface(scope, transient), false)
+        ? row
         : undefined
-    const reviving = row && revivable(row) && this.localRow(row) && row.connections === 0 ? row : undefined
     if (row && !transient && row.token_hash === null && row.session === fields.session) scope.hooks = row
-    let session = fields.session
+    let session = surfaced ? surfaced.session : fields.session
     let stopBlocks: number | null = null
     let moved: number[] = []
     let exactFrom: EndpointRow | undefined
@@ -1387,13 +1422,19 @@ export class RelayCore {
     const hooksLeft = ticketed ? this.ticketHooks(ticketed, harness, fields) : undefined
     if (hooksLeft) ({ moved, stopBlocks } = this.leaveHooks(hooksLeft, ticketed!.id))
     const open = !row || presenceOf(row, now) === "offline"
+    const superseded = row && !transient && !open ? this.supersedes(row, harness, fields, scope, !!ticketed) : false
     if (row && presenceOf(row, now) === "offline") {
       this.sql.all(`UPDATE endpoints SET session = NULL WHERE id = ?`, row.id)
       row = undefined
-    } else if (row && !transient && !sameProcess(row, fields.process) && !(row.handle === wanted && reclaims(row, fields.process))) {
+    } else if (
+      row &&
+      !transient &&
+      !superseded &&
+      !((sameProcess(row, fields.process) || (row.handle === wanted && reclaims(row, fields.process))) && !this.otherSurface(row, fields, scope))
+    ) {
       row = undefined
       session = null
-    } else if (row && !reviving && !transient && row.token_hash === null && row.named === null && row.handle !== wanted) {
+    } else if (row && !superseded && !reviving && !transient && row.token_hash === null && row.named === null && row.handle !== wanted) {
       const hooks = row
       back = scope.exact ? undefined : this.resumedFor(wanted, harness, scope, fields, now, hooks)
       let settled = back !== undefined || row.handle.startsWith(`${wanted.slice(0, 58)}-`)
@@ -1466,6 +1507,12 @@ export class RelayCore {
         ((held.connections === 0 && this.released(held, now)) || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
         !otherSession(held, fields.harness_session, fields.process) &&
+        !storedElsewhere(
+          held,
+          fields,
+          this.olderSurface(scope, transient),
+          scope.derived === true && scope.grant === null && !scope.exact && !scope.subagent,
+        ) &&
         held.id !== scope.subagent?.root &&
         !(scope.subagent && held.session?.startsWith("sub:") && held.session !== fields.session)
       ) {
@@ -1523,7 +1570,8 @@ export class RelayCore {
        hook_seen = CASE WHEN ? IS NOT NULL AND (hook_ended IS NULL OR hook_ended < ?) THEN ? ELSE hook_seen END,
        stop_blocks = CASE WHEN ? IS NOT NULL THEN ? WHEN ? IS NOT NULL AND session IS NOT ? THEN 0 ELSE stop_blocks END,
        briefed = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE briefed END, introduced = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE introduced END,
-       directive_holds = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE directive_holds END WHERE id = ?`,
+       directive_holds = CASE WHEN ? IS NOT NULL AND session IS NOT ? THEN NULL ELSE directive_holds END,
+       surface = CASE WHEN ? = 1 THEN ? ELSE surface END WHERE id = ?`,
       keptHarness(row.harness, harness),
       fields.model,
       fields.cwd,
@@ -1548,6 +1596,8 @@ export class RelayCore {
       session,
       session,
       session,
+      !transient && !scope.exact && !scope.subagent ? 1 : 0,
+      scope.instance === undefined ? null : (fields.harness_session ?? null),
       row.id,
     )
     if (!transient && fields.cwd !== null) this.sql.all(`UPDATE grants SET spent_cwd = ? WHERE used_by = ?`, fields.cwd, row.id)
@@ -1559,6 +1609,7 @@ export class RelayCore {
         ...(joined ? { joined: true } : {}),
         ...(resumed ? { resumed: true } : {}),
         ...(transient ? { transient: true } : {}),
+        ...(superseded ? { superseded: true } : {}),
         ...sub,
       })
     }
@@ -1581,7 +1632,76 @@ export class RelayCore {
     }
     if (scope.grant !== null) this.takePending(row.id)
     if (!transient) this.wakeDone(row.id, "claim")
-    return { endpoint: this.view(this.byId(row.id)!), ...(token ? { token } : {}), ...(created ? { created: true as const } : {}) }
+    return {
+      endpoint: this.view(this.byId(row.id)!),
+      ...(token ? { token } : {}),
+      ...(created ? { created: true as const } : {}),
+      ...(superseded ? { superseded: true as const } : {}),
+    }
+  }
+
+  /**
+   * whether a connecting claim takes the live `row` its session holds from the older tool surfaces of its harness session (rule 1): a tool
+   * surface's claim with an instance, a harness session and a full harness-instance key, neither exact, a subagent's nor ticketed, of the
+   * row's harness and its very harness instance, where the row's hooks reported that harness session or a surface holding it claimed with
+   * it. A claim with no instance that such a surface holds the row for is refused `superseded`: it is an older surface of that session
+   */
+  private supersedes(
+    row: EndpointRow,
+    harness: string,
+    fields: { process: string | null; harness_session?: string | null },
+    scope: ClaimScope,
+    ticketed: boolean,
+  ): boolean {
+    const session = fields.harness_session ?? null
+    if (scope.exact || scope.subagent || ticketed || session === null || fields.process === null || !PROCESS_KEY.test(fields.process)) return false
+    if (row.kind !== "agent" || row.process !== fields.process || row.harness !== harness) return false
+    const surfaces = (scope.surfaces?.(row.id) ?? []).filter((surface) => surface.process === fields.process && surface.harness_session !== null)
+    if (scope.instance === undefined) {
+      if (row.surface === session || surfaces.some((surface) => surface.harness_session === session))
+        throw new RelayError("superseded", `a newer tool surface of this session holds ${this.address(row)}`)
+      return false
+    }
+    if (row.connections === 0) return false
+    if (surfaces.length) return surfaces.some((surface) => surface.harness_session === session)
+    return (row.surface ?? row.harness_session) === session
+  }
+
+  /**
+   * whether `row` is another harness session's of the claim's harness instance: the tool surfaces of that instance holding it recorded only
+   * other sessions, or, with none recorded, it stored another one that its hooks did not report as the claim's since
+   */
+  private otherSurface(row: EndpointRow, fields: { process: string | null; harness_session?: string | null }, scope: ClaimScope): boolean {
+    const session = fields.harness_session ?? null
+    if (session === null || fields.process === null) return false
+    const surfaces = (scope.surfaces?.(row.id) ?? []).filter((surface) => surface.process === fields.process && surface.harness_session !== null)
+    if (surfaces.length) return !surfaces.some((surface) => surface.harness_session === session)
+    return row.surface !== null && row.surface !== session && row.harness_session !== session
+  }
+
+  /**
+   * the live endpoint a tool surface of the claim's harness instance holds with the claim's harness session, for a tool surface's claim: its
+   * session's own endpoint even where the session key names another session's, as in a process that hosts several
+   */
+  private surfacedRow(harness: string, fields: { process: string | null; harness_session?: string | null }, scope: ClaimScope): EndpointRow | undefined {
+    const session = fields.harness_session ?? null
+    if (scope.instance === undefined || scope.exact || scope.subagent || session === null || fields.process === null || !PROCESS_KEY.test(fields.process))
+      return undefined
+    for (const id of scope.holders?.(fields.process, session) ?? []) {
+      const row = this.byId(id)
+      if (row && row.kind === "agent" && row.connections > 0 && row.process === fields.process && row.harness === harness) return row
+    }
+    return undefined
+  }
+
+  /** whether the claim is a connecting one with no instance, as an older tool surface makes it */
+  private olderSurface(scope: ClaimScope, transient: boolean): boolean {
+    return !transient && scope.instance === undefined && !scope.exact && !scope.subagent && scope.ticket === undefined
+  }
+
+  /** the harness-instance key an endpoint was last claimed from */
+  processOf(id: string): string | null {
+    return this.byId(id)?.process ?? null
   }
 
   /**
@@ -1653,6 +1773,7 @@ export class RelayCore {
         row.id !== instead?.id &&
         (instead === undefined || row.created_at <= instead.created_at) &&
         (spender === null || spender === row.id) &&
+        !storedElsewhere(row, { harness_session: harnessSession, process: fields.process }, this.olderSurface(scope, transient), false) &&
         this.localRow(row) &&
         (harnessFits(row.harness, harness) || sameProvider(row.harness, harness)) &&
         ((transient && revivable(row)) ||
@@ -7683,6 +7804,18 @@ function brokerWake(row: EndpointRow): boolean {
  * a row kept for another harness session than `harnessSession`, by its broker wake or because the claim's harness instance `process` holds
  * it (another thread of a shared app server): a claim never takes it by its handle
  */
+/**
+ * whether a released `held` is kept from a claim by the harness session its last tool surface stored: for a claim with neither a name nor a
+ * grant (`derived`), another one its hooks did not report as the claim's since; for an older surface's claim (`older`) from its harness
+ * instance, the claim's own
+ */
+function storedElsewhere(held: EndpointRow, fields: { harness_session?: string | null; process: string | null }, older: boolean, derived: boolean): boolean {
+  const session = fields.harness_session ?? null
+  if (session === null || held.surface === null) return false
+  if (held.surface !== session) return derived && held.harness_session !== session
+  return older && fields.process !== null && held.process === fields.process
+}
+
 function otherSession(row: EndpointRow, harnessSession: string | null | undefined, process: string | null): boolean {
   if (row.harness_session === null || !harnessSession || row.harness_session === harnessSession) return false
   return brokerWake(row) || (process !== null && row.process !== null && sameHarness(row.process, process))

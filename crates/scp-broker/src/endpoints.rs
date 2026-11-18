@@ -34,6 +34,7 @@ const ADMINS: &str = "SELECT * FROM admins WHERE revoked_at IS NULL ORDER BY gra
 
 /// Columns no scope derivation reads: a change to only these keeps the derived scope.
 const VOLATILE: &[&str] = &[
+    "surface",
     "model",
     "cwd",
     "parent",
