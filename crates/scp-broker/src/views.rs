@@ -87,26 +87,25 @@ impl Core {
         params: &[SqlValue],
     ) -> Result<Vec<Arc<Row>>, RpcError> {
         let ids = self.store.all(statement, params).await?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let rows = self.endpoints.snapshot(self.store.as_ref()).await?.rows;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids.iter().filter_map(|row| text(row, "id")) {
             match rows.get(id) {
                 Some(row) => out.push(row.clone()),
-                None => out.extend(self.by_id(id).await?.map(Arc::new)),
+                None => out.extend(self.endpoint(id).await?),
             }
         }
         Ok(out)
     }
+    /// the endpoint's row as the in-memory table holds it
+    pub async fn endpoint(&self, id: &str) -> Result<Option<Arc<Row>>, RpcError> {
+        Ok(self.endpoints.row(self.store.as_ref(), id).await?)
+    }
     pub async fn by_id(&self, id: &str) -> Result<Option<Row>, RpcError> {
-        Ok(self
-            .store
-            .all(
-                "SELECT * FROM endpoints WHERE id = ?",
-                &[SqlValue::Text(id.into())],
-            )
-            .await?
-            .into_iter()
-            .next())
+        Ok(self.endpoint(id).await?.map(Arc::unwrap_or_clone))
     }
     pub async fn by_handle(&self, handle: &str) -> Result<Option<Row>, RpcError> {
         Ok(self
@@ -171,9 +170,9 @@ impl Core {
         }
         if let Some(parent) = text(row, "parent_ep") {
             view["parent"] = self
-                .by_id(parent)
+                .endpoint(parent)
                 .await?
-                .as_ref()
+                .as_deref()
                 .map(address)
                 .map_or(Value::Null, Value::String);
         } else if text(row, "kind") == Some("agent") && text(row, "parent_addr").is_some() {
@@ -199,7 +198,7 @@ impl Core {
             }
             out.push(id.clone());
             next = self
-                .by_id(&id)
+                .endpoint(&id)
                 .await?
                 .and_then(|r| text(&r, "parent_ep").map(str::to_owned));
         }
@@ -707,13 +706,12 @@ impl Core {
         let mut world = self.world().await?;
         world.view_as(Some(&viewer), true);
         let mut peers = Vec::new();
-        let rows: Vec<Row> = world.listed().cloned().collect();
-        for row in rows {
-            let id = text(&row, "id").unwrap_or_default();
+        for row in world.listed() {
+            let id = text(row, "id").unwrap_or_default();
             if id == viewer || !world.may_message(&viewer, id, unverified, false) {
                 continue;
             }
-            let view = self.view(&row).await?;
+            let view = self.view(row).await?;
             if !historic && view.get("historic") == Some(&Value::Bool(true)) {
                 continue;
             }
@@ -734,11 +732,11 @@ impl Core {
                 }
             };
             let mut peer = json!({"address": view["address"], "kind": view["kind"], "presence": view["presence"], "title": view["title"], "status": view["status"], "reason": reason});
-            if let Some(level) = text(&row, "peek").filter(|_| {
+            if let Some(level) = text(row, "peek").filter(|_| {
                 crate::peek::may_peek_world(
                     &world,
                     &me,
-                    &row,
+                    row,
                     text(&me, "kind") == Some("human") && !unverified,
                 )
             }) {

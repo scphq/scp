@@ -8,6 +8,7 @@ use scp_core::protocol::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 pub fn valid_handle(value: &str) -> bool {
     !matches!(value, "user" | "me" | "relay") && valid_name(value, 63, b"._-")
@@ -202,7 +203,7 @@ impl Core {
         &self,
         keys: &[String],
         exclude: &[&str],
-    ) -> Result<Vec<Row>, RpcError> {
+    ) -> Result<Vec<Arc<Row>>, RpcError> {
         if self
             .policy
             .as_ref()
@@ -212,17 +213,18 @@ impl Core {
             return Ok(Vec::new());
         }
         for key in keys.iter().filter(|v| process_key(v, true)) {
-            let rows=self.store.all("SELECT * FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY connections > 0 OR (session IS NOT NULL AND substr(session,1,4) != 'sub:') DESC,COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
+            let rows=self.rows_by_id("SELECT id FROM endpoints WHERE kind = 'agent' AND process = ? AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' ORDER BY connections > 0 OR (session IS NOT NULL AND substr(session,1,4) != 'sub:') DESC,COALESCE(depth,0),created_at,id", &[opt(Some(key))]).await?;
             let mut out = Vec::new();
             for row in rows {
                 if exclude.contains(&text(&row, "id").unwrap_or("")) {
                     continue;
                 }
-                if self
-                    .ancestors(&row)
-                    .await?
-                    .iter()
-                    .any(|id| exclude.contains(&id.as_str()))
+                if !exclude.is_empty()
+                    && self
+                        .ancestors(&row)
+                        .await?
+                        .iter()
+                        .any(|id| exclude.contains(&id.as_str()))
                 {
                     continue;
                 }
@@ -253,7 +255,7 @@ impl Core {
         Ok(found.and_then(|r| text(r, "id")).map(str::to_owned))
     }
     pub async fn end_exited(&self) -> Result<(), RpcError> {
-        let rows=self.store.all("SELECT id,process FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL",&[]).await?;
+        let rows=self.store.all("SELECT DISTINCT process FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL",&[]).await?;
         let mut alive = std::collections::HashMap::new();
         for row in rows {
             let Some(pid) = text(&row, "process")
@@ -274,7 +276,7 @@ impl Core {
                 }
             };
             if !running {
-                self.store.all("UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL WHERE id = ? AND connections = 0", &[SqlValue::Int(now_ms()),opt(text(&row,"id"))]).await?;
+                self.store.all("UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process = ?", &[SqlValue::Int(now_ms()),opt(text(&row,"process"))]).await?;
             }
         }
         Ok(())
@@ -313,7 +315,8 @@ impl Core {
             .lineage_rows(&scope.lineage, &out)
             .await?
             .into_iter()
-            .next();
+            .next()
+            .map(Arc::unwrap_or_clone);
         let Some(grant_hash) = &scope.grant else {
             return Ok(plain(lineage));
         };
@@ -1382,7 +1385,8 @@ impl Core {
                 .lineage_rows(&scope.lineage, &[])
                 .await?
                 .into_iter()
-                .next(),
+                .next()
+                .map(Arc::unwrap_or_clone),
         };
         if let Some(root) = &root
             && transient

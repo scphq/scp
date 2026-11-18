@@ -2,7 +2,9 @@
 //! a snapshot drains those ids and re-reads only their rows, so a scope read no longer scans the whole table. A rollback undoes the
 //! notes with the writes, so ids drained inside [`crate::store::transaction`] stay due until a snapshot outside one; a snapshot that
 //! fails or is cancelled part way reloads the whole table next time. A raw `SAVEPOINT` must run inside that wrapper. Writes to the
-//! groups, memberships and admin grants note a NULL id, and those small tables are read again whole.
+//! groups, memberships and admin grants note a NULL id, and those small tables are read again whole. While the store's write count
+//! ([`Storage::writes`]) has not moved since the last refresh, a snapshot runs no statement at all, unless the rows hold reads of an
+//! open transaction and the caller is outside it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -113,6 +115,8 @@ struct Cache {
     unsure: HashSet<String>,
     /// the scope tables were read inside an open transaction
     scope_unsure: bool,
+    /// the store's write count once the last refresh was done: while it holds, the rows are current
+    current: Option<u64>,
 }
 
 /// The endpoint rows, current as of the last snapshot, and the scope derived from them.
@@ -173,9 +177,37 @@ impl Endpoints {
         Ok(world)
     }
 
+    /// one endpoint's row, as [`Self::snapshot`] holds it
+    pub async fn row(&self, store: &dyn Storage, id: &str) -> StoreResult<Option<Arc<Row>>> {
+        if !self.tracked {
+            let rows = store
+                .all(
+                    "SELECT * FROM endpoints WHERE id = ?",
+                    &[SqlValue::Text(id.to_owned())],
+                )
+                .await?;
+            return Ok(rows.into_iter().next().map(Arc::new));
+        }
+        Ok(self.snapshot(store).await?.rows.get(id).cloned())
+    }
+
     pub async fn snapshot(&self, store: &dyn Storage) -> StoreResult<Snapshot> {
         let mut cache = self.cache.lock().await;
+        let writes = store.writes();
         let open = crate::store::active(store).is_some();
+        if self.tracked
+            && cache.loaded
+            && writes.is_some()
+            && writes == cache.current
+            && (open || (cache.unsure.is_empty() && !cache.scope_unsure))
+        {
+            return Ok(Snapshot {
+                rows: cache.rows.clone(),
+                scope: cache.scope.clone(),
+                epoch: cache.epoch,
+            });
+        }
+        cache.current = None;
         if !self.tracked || !cache.loaded {
             if self.tracked {
                 store.all("DELETE FROM endpoints_touched", &[]).await?;
@@ -191,6 +223,7 @@ impl Endpoints {
             cache.unsure.clear();
             cache.scope_unsure = false;
             cache.epoch += 1;
+            cache.current = writes.map(|writes| writes + 1);
             return Ok(Snapshot {
                 rows: cache.rows.clone(),
                 scope: cache.scope.clone(),
@@ -252,6 +285,7 @@ impl Endpoints {
             }
         }
         cache.loaded = true;
+        cache.current = writes.map(|writes| writes + 1);
         Ok(Snapshot {
             rows: cache.rows.clone(),
             scope: cache.scope.clone(),

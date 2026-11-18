@@ -15,11 +15,12 @@ use sqlx::{
 };
 use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard};
 
-use super::{Row, SqlValue, Storage, StoreError, StoreResult};
+use super::{Row, SqlValue, Storage, StoreError, StoreResult, Writes};
 
 pub struct SqliteStore {
     path: PathBuf,
     connections: OnceCell<Connections>,
+    writes: Writes,
 }
 
 struct Connections {
@@ -36,6 +37,7 @@ impl SqliteStore {
         Ok(Self {
             path: path.to_owned(),
             connections: OnceCell::new(),
+            writes: Writes::default(),
         })
     }
 
@@ -144,6 +146,7 @@ impl Storage for SqliteStore {
             return transaction.lock().await.all(statement, params).await;
         }
         let mut writer = self.connections().await?.writer.lock().await;
+        let _bump = self.writes.after(statement);
         rows(
             query(statement, params)
                 .fetch_all(&mut *writer)
@@ -167,6 +170,7 @@ impl Storage for SqliteStore {
         let mut transaction = SqliteTransaction {
             writer: Mutex::new(writer),
             open: true,
+            writes: self.writes.clone(),
         };
         SqliteTransactionManager::begin(
             transaction.writer.get_mut(),
@@ -176,17 +180,23 @@ impl Storage for SqliteStore {
         .map_err(database)?;
         Ok(Box::new(transaction))
     }
+
+    fn writes(&self) -> Option<u64> {
+        Some(self.writes.now())
+    }
 }
 
 struct SqliteTransaction {
     writer: Mutex<OwnedMutexGuard<SqliteConnection>>,
     open: bool,
+    writes: Writes,
 }
 
 #[async_trait]
 impl super::Transaction for SqliteTransaction {
     async fn all(&self, statement: &str, params: &[SqlValue]) -> StoreResult<Vec<Row>> {
         let mut writer = self.writer.lock().await;
+        let _bump = self.writes.after(statement);
         rows(
             query(statement, params)
                 .fetch_all(&mut **writer)
@@ -196,6 +206,7 @@ impl super::Transaction for SqliteTransaction {
     }
 
     async fn commit(&mut self) -> StoreResult<()> {
+        let _bump = self.writes.guard();
         SqliteTransactionManager::commit(self.writer.get_mut())
             .await
             .map_err(database)?;
@@ -208,6 +219,7 @@ impl Drop for SqliteTransaction {
     fn drop(&mut self) {
         if self.open {
             SqliteTransactionManager::start_rollback(self.writer.get_mut());
+            self.writes.bump();
         }
     }
 }

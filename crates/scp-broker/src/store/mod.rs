@@ -9,6 +9,7 @@ pub mod turso;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -98,6 +99,47 @@ pub trait Storage: Send + Sync {
     async fn read(&self, query: &str, params: &[SqlValue]) -> StoreResult<Vec<Row>>;
     /// owns the writer until commit or rollback on drop
     async fn begin(&self) -> StoreResult<Box<dyn Transaction>>;
+    /// a count that moves after every statement on the writer that may change data and after every commit or rollback;
+    /// a store that does not keep one answers `None`
+    fn writes(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// The count behind [`Storage::writes`].
+#[derive(Clone, Default)]
+pub(crate) struct Writes(Arc<AtomicU64>);
+
+impl Writes {
+    pub(crate) fn now(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn bump(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// moves the count when dropped, so also when the work it guards fails or is cancelled
+    pub(crate) fn guard(&self) -> Bump<'_> {
+        Bump(self)
+    }
+
+    /// a guard for `statement`, unless it is one plain SELECT
+    pub(crate) fn after(&self, statement: &str) -> Option<Bump<'_>> {
+        let select = statement
+            .trim_start()
+            .get(..6)
+            .is_some_and(|head| head.eq_ignore_ascii_case("select"));
+        (!select || statement.contains(';')).then(|| self.guard())
+    }
+}
+
+pub(crate) struct Bump<'a>(&'a Writes);
+
+impl Drop for Bump<'_> {
+    fn drop(&mut self) {
+        self.0.bump();
+    }
 }
 
 #[async_trait]

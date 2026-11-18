@@ -193,7 +193,8 @@ impl Core {
             .lineage_rows(&scope.lineage, &[])
             .await?
             .into_iter()
-            .next();
+            .next()
+            .map(std::sync::Arc::unwrap_or_clone);
         for key in scope.lineage.iter().filter(|v| process_key(v, true)) {
             let rows = self.store.all("SELECT * FROM grants WHERE bound_process = ? AND revoked_at IS NULL AND (used_by IS NOT NULL OR expires_at > ?) ORDER BY created_at DESC, rowid DESC",&[opt(Some(key)),SqlValue::Int(now_ms())]).await?;
             if rows.is_empty() {
