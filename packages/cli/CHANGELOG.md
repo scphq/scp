@@ -1,5 +1,15 @@
 # @scp-dev/cli
 
+## 1.8.1
+
+### Patch Changes
+
+- Updated dependencies [928a464]
+  - @scp-dev/broker@0.13.14
+  - @scp-dev/core@0.18.14
+  - @scp-dev/mcp@0.5.23
+  - @scp-dev/hub@0.13.14
+
 ## 1.8.0
 
 ### Minor Changes
