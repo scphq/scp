@@ -81,6 +81,9 @@
         },
         {
           "$ref": "#/$defs/HookDeadlineNotification"
+        },
+        {
+          "$ref": "#/$defs/SupersededNotification"
         }
       ]
     },
@@ -289,6 +292,35 @@
       ],
       "additionalProperties": false
     },
+    "SupersededNotification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "superseded"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "endpoint"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
     "HookDeadlineNotification": {
       "type": "object",
       "properties": {
@@ -388,7 +420,8 @@
         "scope_refused",
         "unavailable",
         "judge_refused",
-        "not_live"
+        "not_live",
+        "superseded"
       ]
     }
   }

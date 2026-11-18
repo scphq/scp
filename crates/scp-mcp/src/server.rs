@@ -341,6 +341,11 @@ struct Shim {
     bound: RefCell<Option<Claim>>,
     rebound: Cell<bool>,
     in_flight: watch::Sender<usize>,
+    /// this server's own id, which its hellos carry so a newer server of the session supersedes it; none for an exact claim, which names
+    /// its endpoint itself, nor for a deferred or thread-bound shim, several of which may serve one thread at once
+    instance: Option<String>,
+    /// why this server stopped for good: a newer server of its session took its endpoint over
+    retired: RefCell<Option<String>>,
 }
 
 impl Shim {
@@ -414,11 +419,48 @@ impl Shim {
         fields
     }
 
+    /// a newer server of this session took the endpoint over: this one makes no more broker calls, and its tools say so
+    fn retire(&self, endpoint: Option<&str>) {
+        if self.retired.borrow().is_some() {
+            return;
+        }
+        let why = format!(
+            "a newer relay MCP server of this session took {} over: this one is retired and makes no relay calls, so use the relay tools of the session's current server",
+            endpoint.filter(|e| !e.is_empty()).unwrap_or("its endpoint")
+        );
+        self.log(&format!("{CLI_NAME} mcp: {why}"));
+        *self.retired.borrow_mut() = Some(why);
+        if let Some(client) = self.client.borrow_mut().take() {
+            client.close();
+        }
+    }
+
+    fn superseded(&self) -> Option<CallError> {
+        self.retired
+            .borrow()
+            .clone()
+            .map(|why| CallError::relay("superseded", why))
+    }
+
+    /// marks the server retired when `error` is the broker's refusal of a superseded server
+    fn refused(&self, error: CallError) -> CallError {
+        if matches!(&error, CallError::Relay { code, .. } if code == "superseded") {
+            self.retire(None);
+            return self.superseded().unwrap_or(error);
+        }
+        error
+    }
+
     /// a claim's hello; a wake ticket is good once, so the shim drops it once a claim took it or the broker refused it
     async fn claim_hello(&self, next: &Client, claim: &Claim) -> Result<Value, CallError> {
         let hello = |claim: Claim| {
             let mut fields = Map::new();
             fields.insert("claim".into(), Value::Object(claim.clone()));
+            put(
+                &mut fields,
+                "instance",
+                self.instance.clone().map(Value::String),
+            );
             fields.extend(Self::cwd_of(&claim));
             fields
         };
@@ -449,17 +491,48 @@ impl Shim {
     }
 
     async fn open(self: &Rc<Self>) -> Result<Rc<Client>, CallError> {
+        if let Some(error) = self.superseded() {
+            return Err(error);
+        }
         let claim = self.session_claim()?;
         let next = Rc::new((self.options.connect)().await?);
+        let mut notes = next.notifications();
+        let weak = Rc::downgrade(self);
+        tokio::task::spawn_local(async move {
+            while let Some(line) = notes.recv().await {
+                let Ok(note) = serde_json::from_slice::<Value>(&line) else {
+                    continue;
+                };
+                if get(&note, "method").and_then(Value::as_str) == Some("superseded")
+                    && let Some(shim) = weak.upgrade()
+                {
+                    let endpoint = get(&note, "params")
+                        .and_then(|p| get(p, "endpoint"))
+                        .and_then(Value::as_str);
+                    shim.retire(endpoint);
+                }
+            }
+        });
         let opened: Result<(), CallError> = async {
             let mut hello = None;
             let token = self.token.borrow().clone();
             if let Some(token) = token {
                 let mut fields = Map::new();
                 fields.insert("resume".into(), Value::String(token));
+                if let Some(instance) = &self.instance {
+                    fields.insert("instance".into(), Value::String(instance.clone()));
+                    put(
+                        &mut fields,
+                        "harness_session",
+                        claim.get("harness_session").cloned(),
+                    );
+                }
                 fields.extend(Self::cwd_of(&claim));
                 match next.hello(fields).await {
                     Ok(result) => hello = Some(result),
+                    Err(CallError::Relay { code, .. }) if code == "superseded" => {
+                        return Err(CallError::relay("superseded", ""));
+                    }
                     Err(error) if error.is_relay() => {}
                     Err(error) => return Err(error),
                 }
@@ -481,6 +554,10 @@ impl Shim {
         }
         .await;
         if let Err(error) = opened {
+            next.close();
+            return Err(self.refused(error));
+        }
+        if let Some(error) = self.superseded() {
             next.close();
             return Err(error);
         }
@@ -518,6 +595,9 @@ impl Shim {
     }
 
     async fn ensure(self: &Rc<Self>) -> Result<Rc<Client>, CallError> {
+        if let Some(error) = self.superseded() {
+            return Err(error);
+        }
         if let Some(client) = self.client.borrow().clone() {
             return Ok(client);
         }
@@ -1177,6 +1257,9 @@ impl Shim {
             Some(Value::Object(args)) => args.clone(),
             Some(_) => return text("invalid_params: arguments must be an object", true),
         };
+        if let Some(why) = self.retired.borrow().clone() {
+            return text(&format!("superseded: {why}"), true);
+        }
         match self.tool(&name, &args).await {
             Ok(result) => result,
             Err(ToolError::Input(message)) => text(&format!("invalid_params: {message}"), true),
@@ -1200,9 +1283,12 @@ impl Shim {
 
     async fn push_channel(self: Rc<Self>) {
         let mut failures = 0u32;
-        while !self.stopped.get() && (self.channel_client.get() || self.inbox.borrow().is_some()) {
+        while !self.stopped.get()
+            && self.retired.borrow().is_none()
+            && (self.channel_client.get() || self.inbox.borrow().is_some())
+        {
             if let Err(error) = self.push_round(&mut failures).await {
-                if self.stopped.get() {
+                if self.stopped.get() || self.retired.borrow().is_some() {
                     break;
                 }
                 self.log(&format!(
@@ -1501,6 +1587,11 @@ where
 {
     let heartbeat_ms = options.heartbeat_ms.max(1);
     let bound = (!options.defer_claim).then(|| options.claim.clone());
+    let instance = (!options.defer_claim
+        && options.thread_claim.is_none()
+        && options.claim.get("exact") != Some(&Value::Bool(true))
+        && !options.claim.contains_key("subagent"))
+    .then(|| format!("mcp-{}", hex::encode(rand::random::<[u8; 16]>())));
     let shim = Rc::new(Shim {
         spawns: options.spawn.is_some(),
         home: options.env.get("HOME").cloned(),
@@ -1523,6 +1614,8 @@ where
         bound: RefCell::new(bound),
         rebound: Cell::new(false),
         in_flight: watch::Sender::new(0),
+        instance,
+        retired: RefCell::new(None),
     });
     if shim.session_claim().is_ok() {
         let first = shim.clone();
@@ -1541,6 +1634,9 @@ where
         let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             ticks.tick().await;
+            if beat.retired.borrow().is_some() {
+                break;
+            }
             let shim = beat.clone();
             tokio::task::spawn_local(async move {
                 let _ = shim.call("whoami", json!({})).await;

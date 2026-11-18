@@ -44,8 +44,10 @@ export interface Hello {
   self?: string[]
   /** a spawn-env grant from a shell with no name: the hello binds only to the endpoint that spent it, or one below it */
   grant?: string
-  /** with `self` or `lineage`: the caller's harness session id, which picks among the endpoints one harness instance holds */
+  /** with `self` or `lineage`: the caller's harness session id, which picks among the endpoints one harness instance holds; with `resume` and `instance`, the tool surface's */
   harness_session?: string
+  /** a tool surface's own id on a claim or resume: a newer surface of its harness session supersedes it */
+  instance?: string
   /** with `observe`: a broker wake's waker run binds to its endpoint, as that endpoint, with the wake ticket the run got */
   ticket?: string
   cwd?: string

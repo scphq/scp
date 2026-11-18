@@ -723,6 +723,147 @@ brokerSuite("broker resumed sessions", (start) => {
     expect((await broker.hook(claim(4, "own-a"))).hello.endpoint?.id).toBe(empty.hello.endpoint?.id);
   });
 
+  const surface = (harness_session: string) => ({ ...session(process.pid), harness_session, derived: true });
+
+  test("a newer tool surface of a harness session takes over its endpoint, and the older one is told, closed and refused", async () => {
+    const broker = await start();
+    const human = await broker.human();
+    const first = await broker.agent("claude-app", "claude-code", { instance: "surface-1" }, surface("surface-a"));
+    await first.request("rename", { handle: "lead" });
+    await first.request("title", { text: "the lead" });
+    const child = await broker.agent("worker", "codex", {}, { ...session(40), lineage: [key(40), key(process.pid)] });
+    await human.request("send", { to: "lead", body: "offered" });
+    expect((await first.request<{ messages: unknown[] }>("inbox", { offer: true })).messages).toHaveLength(1);
+    await human.request("send", { to: "lead", body: "pushed" });
+    const pushed = await first.request<{ messages: { seq: number }[]; hold: string }>("inbox", { offer: true });
+    await first.request("injected", { seqs: pushed.messages.map((m) => m.seq), hold: pushed.hold });
+    const second = await broker.agent("claude-app", "claude-code", { instance: "surface-2" }, surface("surface-a"));
+    expect(second.hello.endpoint).toMatchObject({ id: first.id, address: "me/lead", title: "the lead" });
+    await waitFor(() => first.closed, "superseded connection closed");
+    expect(first.frames.filter((f) => f.method === "superseded").map((f) => f.params)).toEqual([{ endpoint: "me/lead" }]);
+    expect(await child.request("whoami")).toMatchObject({ parent: "me/lead" });
+    const unread = await second.request<{ messages: { body: { text: string } }[] }>("inbox");
+    expect(unread.messages.map((m) => m.body.text)).toEqual(["offered", "pushed"]);
+    const resumed = { resume: first.hello.token, instance: "surface-1", harness_session: "surface-a" };
+    expect(await refusal((await broker.wire()).hello(resumed))).toBe("superseded");
+    expect(await refusal(broker.agent("claude-app", "claude-code", { instance: "surface-1" }, surface("surface-a")))).toBe("superseded");
+    expect(await refusal(broker.agent("claude-app", "claude-code", {}, surface("surface-a")))).toBe("superseded");
+    expect(second.closed).toBe(false);
+    expect(await second.request("whoami")).toMatchObject({ id: first.id, address: "me/lead" });
+  });
+
+  test("a tool surface takes over the endpoint its session's hooks reported from an older surface that names no instance", async () => {
+    const broker = await start();
+    const old = await broker.agent("claude-app", "claude-code", {}, surface("surface-a"));
+    const hook = await broker.hook({ handle: "claude-app", ...surface("surface-a") });
+    await hook.request("event", { kind: "tool", session_id: "surface-a" });
+    await hook.close();
+    await old.request("rename", { handle: "lead" });
+    const next = await broker.agent("claude-app", "claude-code", { instance: "surface-2" }, surface("surface-a"));
+    expect(next.hello.endpoint).toMatchObject({ id: old.id, address: "me/lead" });
+    const other = await broker.agent("claude-app", "claude-code", { instance: "surface-3" }, surface("surface-b"));
+    expect(other.id).not.toBe(old.id);
+  });
+
+  test("another harness session of the same harness instance keeps its own endpoint and supersedes nothing", async () => {
+    const broker = await start();
+    const first = await broker.agent("claude-app", "claude-code", { instance: "surface-a" }, surface("session-a"));
+    const other = await broker.agent("claude-app", "claude-code", { instance: "surface-b" }, surface("session-b"));
+    expect(other.id).not.toBe(first.id);
+    await first.request("rename", { handle: "lead" });
+    const third = await broker.agent("claude-app", "claude-code", { instance: "surface-c" }, surface("session-c"));
+    expect([first.id, other.id]).not.toContain(third.id);
+    const hook = await broker.hook({ handle: "claude-app", ...surface("session-d") });
+    expect(hook.hello.endpoint?.id).toBe(first.id);
+    await hook.request("event", { kind: "tool", session_id: "session-d" });
+    await hook.close();
+    const fourth = await broker.agent("claude-app", "claude-code", { instance: "surface-d" }, surface("session-d"));
+    expect([first.id, other.id, third.id]).not.toContain(fourth.id);
+    await Bun.sleep(50);
+    for (const wire of [first, other]) {
+      expect(wire.closed).toBe(false);
+      expect(wire.frames.some((f) => f.method === "superseded")).toBe(false);
+    }
+    expect(await first.request("whoami")).toMatchObject({ id: first.id, address: "me/lead" });
+  });
+
+  test("a newer surface of the second harness session of a harness instance takes over that session's endpoint, never the first's", async () => {
+    const broker = await start();
+    const a = await broker.agent("claude-app", "claude-code", { instance: "surface-a1" }, surface("session-a"));
+    const b = await broker.agent("claude-app", "claude-code", { instance: "surface-b1" }, surface("session-b"));
+    expect(b.id).not.toBe(a.id);
+    const next = await broker.agent("claude-app", "claude-code", { instance: "surface-b2" }, surface("session-b"));
+    expect(next.id).toBe(b.id);
+    await waitFor(() => b.closed, "superseded connection closed");
+    expect(a.closed).toBe(false);
+    expect(a.frames.some((f) => f.method === "superseded")).toBe(false);
+    expect((await broker.hook({ handle: "claude-app", ...surface("session-a") })).hello.endpoint?.id).toBe(a.id);
+  });
+
+  test("after a broker restart neither an older surface that names no instance nor another harness session takes the endpoint", async () => {
+    const broker = await start();
+    const first = await broker.agent("claude-app", "claude-code", { instance: "surface-1" }, surface("surface-a"));
+    await first.request("rename", { handle: "lead" });
+    const hook = await broker.hook({ handle: "claude-app", ...surface("surface-a") });
+    await hook.request("event", { kind: "tool", session_id: "surface-a" });
+    await broker.restart();
+    const other = await broker.agent("claude-app", "claude-code", { instance: "surface-2" }, surface("surface-b"));
+    expect(other.id).not.toBe(first.id);
+    expect(await refusal(broker.agent("claude-app", "claude-code", {}, surface("surface-a")))).toBe("superseded");
+    const back = await (await broker.wire()).hello({ resume: first.hello.token, instance: "surface-1", harness_session: "surface-a" });
+    expect(back.endpoint).toMatchObject({ id: first.id, address: "me/lead" });
+  });
+
+  test("a released endpoint is passed by for another harness session and for an older surface of the one its tool surface stored", async () => {
+    const broker = await start();
+    const first = await broker.agent("claude-app", "claude-code", { instance: "surface-1" }, surface("surface-a"));
+    await first.close();
+    const other = await broker.agent("claude-app", "claude-code", { instance: "surface-2" }, surface("surface-b"));
+    expect(other.id).not.toBe(first.id);
+    const older = await broker.agent("claude-app", "claude-code", {}, surface("surface-a"));
+    expect(older.id).not.toBe(first.id);
+    await other.close();
+    await older.close();
+    const back = await broker.agent("claude-app", "claude-code", { instance: "surface-3" }, surface("surface-a"));
+    expect(back.id).toBe(first.id);
+  });
+
+  test("an older surface that names no instance never resumes the endpoint its session's newer surface stored", async () => {
+    const broker = await start();
+    const first = await broker.agent("claude-app", "claude-code", { instance: "surface-1" }, surface("surface-a"));
+    await first.request("rename", { handle: "lead" });
+    const hook = await broker.hook({ handle: "claude-app", ...surface("surface-a") });
+    await hook.request("event", { kind: "tool", session_id: "surface-a" });
+    await hook.request("event", { kind: "session_end" });
+    await hook.close();
+    await first.close();
+    const older = await broker.agent("claude-app", "claude-code", {}, surface("surface-a"));
+    expect(older.id).not.toBe(first.id);
+    await older.close();
+    const back = await broker.agent("claude-app", "claude-code", { instance: "surface-2" }, surface("surface-a"));
+    expect(back.hello.endpoint).toMatchObject({ id: first.id, address: "me/lead" });
+  });
+
+  test("a hook's or an exact claim from the session's harness instance never supersedes its tool surface", async () => {
+    const broker = await start();
+    const first = await broker.agent("claude-app", "claude-code", { instance: "surface-1" }, surface("surface-a"));
+    await first.request("rename", { handle: "lead" });
+    const hook = await broker.hook({ handle: "claude-app", ...surface("surface-a") });
+    expect(hook.hello.endpoint?.id).toBe(first.id);
+    const exact = await broker.agent("lead", "claude-code", { instance: "surface-2" }, { ...surface("surface-a"), derived: false, exact: true });
+    expect(exact.id).toBe(first.id);
+    await Bun.sleep(50);
+    expect(first.closed).toBe(false);
+    expect(first.frames.some((f) => f.method === "superseded")).toBe(false);
+    expect(await first.request("whoami")).toMatchObject({ id: first.id, address: "me/lead" });
+  });
+
+  test("instance is an id", async () => {
+    const broker = await start();
+    const hello = { protocol: "scp/1", instance: "bad id", claim: { handle: "claude-app", harness: "claude-code", ...surface("surface-a") } };
+    expect(await refusal((await broker.wire()).request("hello", hello, { unchecked: true }))).toBe("invalid_params");
+  });
+
   test("join_only is true or false", async () => {
     const broker = await start();
     const hello = { protocol: "scp/1", transient: true, claim: { handle: "claude-app", harness: "claude-code", join_only: "yes", ...session(2) } };

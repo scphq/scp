@@ -29,6 +29,7 @@ import {
   type Sql,
   type StopWaitResult,
   stripControl,
+  type Surface,
   type Wake,
 } from "@scp-dev/core"
 import { FederatedCore, type JudgeLimits } from "@scp-dev/hub"
@@ -165,6 +166,8 @@ interface Connection {
   lineTimer?: ReturnType<typeof setTimeout> | undefined
   /** a line passed the cap: what follows is discarded, and too_large goes once the lines before it are answered */
   tooLarge?: boolean
+  /** the connection holds its endpoint as a harness session's tool surface, which a newer one of that session supersedes */
+  surface?: Surface & { instance: string }
 }
 
 const SWEEP_MS = 10 * 60_000
@@ -172,6 +175,9 @@ const PRESENCE_MS = 60_000
 /** how long a broker wake's run holds what it was offered: past the time its harness takes to queue it */
 const TICKET_HOLD_S = 180
 const OWNERSHIP_MS = 2_000
+/** superseded tool surfaces the broker keeps refusing, newest kept */
+const SUPERSEDED_KEPT = 1024
+const INSTANCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 /** pending connects the socket queues before refusing more: hooks of many sessions arrive in bursts */
 const LISTEN_BACKLOG = 1024
 /** how long a hibernate waits for the hub to take its mirror */
@@ -444,6 +450,7 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     } catch {}
   }, SWEEP_MS)
   const known = new Map<string, Presence>()
+  const superseded = new Set<string>()
   const wakes = new Map<string, string | null | undefined>()
   for (const view of localViews()) {
     known.set(view.id, view.presence)
@@ -687,6 +694,36 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
     notifyFleet({ type: "presence", endpoint: view.address, presence: view.presence, harness: view.harness, labels: view.labels })
     if (was !== undefined && was !== handle) bridge?.renamed(view.id, was)
     else bridge?.changed(view.id)
+  }
+
+  /** the tool surfaces other connections than `s` hold `endpoint` with */
+  function surfacesOf(s: Conn<Connection>, endpoint: string): Surface[] {
+    const found: Surface[] = []
+    for (const c of connections) if (c !== s && !c.data.closed && c.data.endpoint === endpoint && c.data.surface) found.push(c.data.surface)
+    return found
+  }
+
+  /** the endpoints other connections than `s` hold as tool surfaces of harness instance `process` and harness session `session` */
+  function holdersOf(s: Conn<Connection>, process: string, session: string): string[] {
+    const found: string[] = []
+    for (const c of connections) {
+      const surface = c.data.surface
+      if (c !== s && !c.data.closed && c.data.endpoint && surface?.process === process && surface.harness_session === session) found.push(c.data.endpoint)
+    }
+    return found
+  }
+
+  /** a newer tool surface took `view` over: the older surfaces of its harness instance are told so, closed, and refused from now on */
+  function supersede(s: Conn<Connection>, view: EndpointView, process: string | undefined) {
+    for (const c of connections) {
+      const surface = c.data.surface
+      if (c === s || c.data.endpoint !== view.id || !surface || surface.process !== (process ?? null)) continue
+      superseded.delete(surface.instance)
+      superseded.add(surface.instance)
+      if (superseded.size > SUPERSEDED_KEPT) superseded.delete(superseded.values().next().value!)
+      write(c, { jsonrpc: "2.0", method: "superseded", params: { endpoint: view.address } })
+      c.end()
+    }
   }
 
   /** a background session took over its origin's endpoint: the session marker follows the handle and the origin's old connections close */
@@ -1117,6 +1154,10 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
           broker: brokerInfo(),
         }
       }
+      const instance = params.instance
+      if (instance !== undefined && (typeof instance !== "string" || !INSTANCE.test(instance)))
+        throw new RelayError("invalid_params", "instance is an id of letters, digits, . _ : -")
+      if (instance !== undefined && superseded.has(instance)) throw new RelayError("superseded", "a newer tool surface of this session took over its endpoint")
       const claim = params.claim as Claim | undefined
       if (params.human === true && params.resume === undefined && params.lineage !== undefined) {
         const placed = core.placeLineage(params.lineage, undefined, params.harness_session)
@@ -1133,19 +1174,35 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
       let token: string | undefined
       let endpoint: EndpointView
       let handedOff: { from: string; retired: string } | undefined
+      let surface: Surface | undefined
+      let tookOver = false
       const before =
         params.resume === undefined ? core.claimViews(params.human === true ? undefined : params.claim, params.human === true) : new Map<string, EndpointView>()
-      if (typeof params.resume === "string") endpoint = core.resume(params.resume)
-      else if (params.human === true) {
+      if (typeof params.resume === "string") {
+        endpoint = core.resume(params.resume)
+        if (instance !== undefined && endpoint.kind === "agent")
+          surface = { process: core.processOf(endpoint.id), harness_session: typeof params.harness_session === "string" ? params.harness_session : null }
+      } else if (params.human === true) {
         s.data.tty = params.tty === true
         endpoint = core.claimHuman(s.data.tty)
       } else {
         const claim = (params.claim ?? {}) as Claim
-        const claimed = core.claim(claim, { self: params.self })
+        const claimed = core.claim(claim, {
+          self: params.self,
+          ...(instance !== undefined ? { instance } : {}),
+          surfaces: (endpoint) => surfacesOf(s, endpoint),
+          holders: (process, session) => holdersOf(s, process, session),
+        })
         s.data.holder = typeof claim.grant === "string" || typeof claim.ticket === "string"
         endpoint = claimed.endpoint
         token = claimed.token
         handedOff = claimed.handedOff
+        tookOver = claimed.superseded === true
+        if (instance !== undefined && claim.exact !== true && claim.subagent === undefined && endpoint.kind === "agent")
+          surface = {
+            process: typeof claim.process === "string" ? claim.process : null,
+            harness_session: typeof claim.harness_session === "string" ? claim.harness_session : null,
+          }
         if (claimed.linkRefused) {
           const { under, code, message } = claimed.linkRefused
           log(
@@ -1154,6 +1211,8 @@ export async function startBroker(options: BrokerOptions): Promise<Broker> {
         }
       }
       s.data.endpoint = endpoint.id
+      if (surface && typeof instance === "string") s.data.surface = { ...surface, instance }
+      if (tookOver) supersede(s, endpoint, (params.claim as Claim).process)
       if (handedOff) {
         handOver(s, endpoint, handedOff)
         bridge?.resync()

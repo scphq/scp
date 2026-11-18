@@ -140,6 +140,7 @@ export type ErrorCode =
   | "unavailable"
   | "judge_refused"
   | "not_live"
+  | "superseded"
 
 export class RelayError extends Error {
   constructor(
