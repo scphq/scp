@@ -2,7 +2,7 @@ import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { decide, declined, gives, loadRegistry, REGISTRY_FILE, type Registry, verbOf } from "./route"
+import { decide, declined, gives, loadRegistry, nativeAsked, nativeMode, REGISTRY_FILE, type Registry, verbOf } from "./route"
 import { swarmBinary } from "./test-setup"
 
 setDefaultTimeout(60_000)
@@ -42,24 +42,16 @@ describe("the routing decision", () => {
       return decision.engine === "ts" ? decision.reason : "native"
     }
     expect(reason({ SCP_ROUTED: "ts" }, ["whoami"])).toBe("routed")
-    expect(
-      decide(
-        ["whoami"],
-        {},
-        pkg.version,
-        () => "/bin/swarm",
-        () => registry(["whoami"]),
-      ),
-    ).toEqual({ engine: "ts", reason: "off" })
-    expect(
-      decide(
-        ["whoami"],
-        { SCP_NATIVE: "mcp" },
-        pkg.version,
-        () => "/bin/swarm",
-        () => registry(["whoami"]),
-      ),
-    ).toEqual({ engine: "ts", reason: "off" })
+    for (const value of ["0", "mcp"])
+      expect(
+        decide(
+          ["whoami"],
+          { SCP_NATIVE: value },
+          pkg.version,
+          () => "/bin/swarm",
+          () => registry(["whoami"]),
+        ),
+      ).toEqual({ engine: "ts", reason: "off" })
     expect(reason({}, ["hook", "claude"], registry(["hook", "whoami"]))).toBe("native")
     expect(reason({ SCP_ROUTE_EXEC: "spawn" }, ["hook", "claude"], registry(["hook", "whoami"]))).toBe("spawn")
     expect(reason({}, ["mcp"], registry(["mcp"]))).toBe("native")
@@ -101,6 +93,54 @@ describe("the routing decision", () => {
         () => "slow",
       ),
     ).toEqual({ engine: "ts", reason: "slow", bin: "/bin/swarm" })
+  })
+
+  test("unset is native: a registered verb goes to the native swarm, and without one the command stays here", () => {
+    expect([nativeMode({}), nativeMode({ SCP_NATIVE: "" }), nativeMode({ SCP_NATIVE: "1" }), nativeMode({ SCP_NATIVE: "yes" })]).toEqual([
+      "all",
+      "all",
+      "all",
+      "all",
+    ])
+    expect([nativeMode({ SCP_NATIVE: "0" }), nativeMode({ SCP_NATIVE: "mcp" })]).toEqual(["off", "mcp"])
+    expect([nativeAsked({}), nativeAsked({ SCP_NATIVE: "" }), nativeAsked({ SCP_NATIVE: "1" }), nativeAsked({ SCP_NATIVE: "0" })]).toEqual([
+      false,
+      false,
+      true,
+      true,
+    ])
+    for (const env of [{}, { SCP_NATIVE: "" }])
+      expect(
+        decide(
+          ["whoami"],
+          env,
+          pkg.version,
+          () => "/bin/swarm",
+          () => registry(["whoami"]),
+        ),
+      ).toMatchObject({ engine: "native", bin: "/bin/swarm" })
+    expect(decide(["whoami"], {}, pkg.version, () => undefined)).toEqual({ engine: "ts", reason: "missing" })
+  })
+
+  test("by default a runtime without execve keeps the command here, where SCP_NATIVE=1 hands it on as a child", () => {
+    const own = Object.getOwnPropertyDescriptor(process, "execve")
+    Object.defineProperty(process, "execve", { value: undefined, configurable: true, writable: true })
+    try {
+      const run = (env: Record<string, string>, verb = "whoami") =>
+        decide(
+          [verb],
+          env,
+          pkg.version,
+          () => "/bin/swarm",
+          () => registry(["whoami", "hook"]),
+        )
+      expect(run({})).toEqual({ engine: "ts", reason: "noexecve" })
+      expect(run({ SCP_NATIVE: "1" })).toMatchObject({ engine: "native" })
+      expect(run({ SCP_NATIVE: "1" }, "hook")).toEqual({ engine: "ts", reason: "spawn" })
+    } finally {
+      if (own) Object.defineProperty(process, "execve", own)
+      else delete (process as { execve?: unknown }).execve
+    }
   })
 
   test("the registry beside the binary spares the probe, and only an unusable one falls back to it", () => {
@@ -245,6 +285,19 @@ describe("the hand-off", () => {
     expect(origin).toBeGreaterThan(before - 60_000)
     expect(origin).toBeLessThanOrEqual(Date.now())
     expect((await cli(["whoami"], fake())).out).toStartWith("origin= ")
+  })
+
+  test("unset hands a registered verb to the native swarm; 0 keeps it here, and so does a missing binary, quietly", async () => {
+    rmSync(log, { force: true })
+    const { SCP_NATIVE: _, ...unset } = fake()
+    const routed = await cli(["whoami"], unset)
+    expect(routed.code).toBe(7)
+    expect(routed.out).toContain("args=whoami ")
+    const off = await cli(["whoami", "--bogus"], fake({ SCP_NATIVE: "0" }))
+    expect([off.code, off.err]).toEqual([125, expect.stringContaining("Unknown option '--bogus'")])
+    const missing = await cli(["--version"], { ...unset, SCP_SWARM_BIN: join(root, "nowhere", "swarm") })
+    expect([missing.code, missing.out, missing.err]).toEqual([0, `${pkg.version}\n`, ""])
+    expect(logLines(log)).toEqual(["whoami native execve", "--version ts missing"])
   })
 
   test("a probe that never answers says so and logs why, then the command runs here", async () => {

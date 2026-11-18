@@ -20,8 +20,9 @@ export const cli = join(import.meta.dir, "../../../cli/dist/cli.js");
 
 /**
  * `ts` runs the built CLI's foreground broker under Bun, `ts-node` under Node, `rust` the engine named by SCP_BROKER_BIN,
- * `rust-turso` the same engine on its experimental Turso store, and `ts-native` the built CLI's foreground broker under
- * SCP_NATIVE=1, which runs the native swarm named by SCP_SWARM_BIN. `rust-turso` runs only when SCP_BROKER_TARGETS names it.
+ * `rust-turso` the same engine on its experimental Turso store, and `ts-native` the built CLI's foreground broker with
+ * SCP_NATIVE unset, the default, which runs the native swarm named by SCP_SWARM_BIN. `ts` and `ts-node` set SCP_NATIVE=0.
+ * `rust-turso` runs only when SCP_BROKER_TARGETS names it.
  */
 export const brokerTargetNames = ["ts", "ts-node", "rust", "rust-turso", "ts-native"].filter((name) =>
   selectedBrokerTargets ? selectedBrokerTargets.includes(name) : name !== "rust-turso",
@@ -67,7 +68,8 @@ export class BrokerTarget {
       CLAUDE_CONFIG_DIR: join(this.home, "claude"),
       GEMINI_CLI_HOME: this.home,
     });
-    if (name === "ts-native") Object.assign(this.env, { SCP_NATIVE: "1", SCP_SWARM_BIN: resolve(swarmBinary!) });
+    if (name === "ts-native") this.env.SCP_SWARM_BIN = resolve(swarmBinary!);
+    else this.env.SCP_NATIVE = "0";
     if (name === "rust-turso") this.env.SCP_STORE = "turso";
     if (files.limits !== undefined) this.env.SCP_LIMITS = JSON.stringify(files.limits);
     if (files.policy !== undefined) this.write(this.policyPath, typeof files.policy === "string" ? files.policy : JSON.stringify(files.policy));

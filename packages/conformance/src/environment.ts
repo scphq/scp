@@ -8,7 +8,7 @@ export const brokerBinary = process.env.SCP_BROKER_BIN;
 /** the native MCP server binary: packages/mcp tests run each server test against it too */
 export const mcpBinary = process.env.SCP_MCP_BIN;
 export const brokerNode = process.env.SCP_BROKER_NODE;
-/** the native `swarm` the `ts-native` broker target runs through the CLI under SCP_NATIVE=1 */
+/** the native `swarm` the `ts-native` broker target runs through the CLI, which picks it by default */
 export const swarmBinary = process.env.SCP_SWARM_BIN;
 export const selectedBrokerTargets = process.env.SCP_BROKER_TARGETS?.split(",").map((name) => name.trim());
 export const brokerReferenceWakers = process.env.SCP_BROKER_WAKERS === "1";
@@ -16,7 +16,7 @@ export const compatConformance = process.env.SCP_CONFORMANCE_COMPAT === "1";
 export const compatDirectory = process.env.SCP_COMPAT_DIR;
 /** `rust` runs every machine fixture's broker on SCP_BROKER_BIN, `mixed` every other one, so native and ts brokers bridge together */
 export const machineBrokers = process.env.SCP_MACHINE_BROKERS;
-/** `native` runs every machine fixture's CLI under Node with SCP_NATIVE=1 and SCP_SWARM_BIN, so its verbs route to the native swarm */
+/** `native` runs every machine fixture's CLI under Node with SCP_SWARM_BIN and SCP_NATIVE unset, so by default its verbs route to the native swarm */
 export const machineProgram = process.env.SCP_MACHINE_PROGRAM;
 /** where the routed CLI logs each routing decision */
 export const routeLog = process.env.SCP_ROUTE_LOG;

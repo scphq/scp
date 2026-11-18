@@ -1,4 +1,4 @@
-//! The swarm CLI verbs, natively: what the TypeScript router hands the `swarm` binary under `SCP_NATIVE=1`.
+//! The swarm CLI verbs, natively: what the TypeScript router hands the `swarm` binary unless `SCP_NATIVE` is 0 or mcp.
 //!
 //! Each area owns a module and lists its verbs in `VERBS`; the registry (`swarm __verbs --json`) is their union. Only `route::TS_VERBS`
 //! go to the TypeScript CLI (`SCP_CLI_ARGV`, else the one beside the native package).

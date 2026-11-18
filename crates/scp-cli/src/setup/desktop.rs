@@ -6,9 +6,10 @@ use super::harness::{not_on_path, tools};
 use super::hook_cmd::shell_quote;
 use crate::args::parse_flags;
 use crate::fleet::json::Json;
-use crate::fleet::mounts::native_mode;
 use crate::launch::launcher;
-use crate::spawn::argv::{Mount, executable, mount_with, native_swarm, which_on_path};
+use crate::spawn::argv::{
+    Mount, executable, mount_with, native_asked, native_mode, native_swarm, which_on_path,
+};
 use crate::term::out;
 use crate::{Done, Fail, usage};
 use scp_core::protocol::CLI_NAME;
@@ -213,14 +214,17 @@ pub fn mcpb_bundle(launch: &[String], version: &str, native: Option<&Mount>) -> 
     ])
 }
 
-/// under `SCP_NATIVE=1` or `mcp`, the native mount of `swarm mcp <words>` a host-path launcher runs; a missing native `swarm` is noted
-/// and None
+/// unless `SCP_NATIVE=0`, the native mount of `swarm mcp <words>` a host-path launcher runs; without a native `swarm` None, noted when
+/// `SCP_NATIVE` asked for one
 pub fn native_server_mount(launch: &[String], words: &[String], env: &Env) -> Option<Mount> {
-    let given = env.get("SCP_NATIVE").map(String::as_str);
-    if native_mode(given) == "off" {
+    if native_mode(env) == "off" {
         return None;
     }
+    let given = env.get("SCP_NATIVE").map(String::as_str);
     let Some(bin) = native_swarm(env) else {
+        if !native_asked(env) {
+            return None;
+        }
         out(&format!(
             "! SCP_NATIVE={} but no native swarm {} (install the native package for this platform or set SCP_SWARM_BIN): it runs {CLI_NAME} mcp through node",
             given.unwrap_or_default(),

@@ -1606,20 +1606,62 @@ describe("native MCP mounts", () => {
     expect(mountEngines(f.env).every((mount) => mount.engine === "node" && mount.mode === "off")).toBe(true)
   })
 
-  test("without SCP_NATIVE a native mount goes back to the node one, dropping only the native variables", () => {
+  test("unset, a matching native swarm is mounted as under SCP_NATIVE=1, saying it is the default", () => {
+    const f = fixture()
+    const bin = nativeSwarm(f)
+    const env = { ...f.env, SCP_SWARM_BIN: bin }
+    const vars = { SCP_NATIVE: "1", SCP_SWARM_BIN: bin, SCP_CLI_ARGV: JSON.stringify([f.swarm]) }
+    const dry = setup(f, {}, fakeRun(f), undefined, env).text
+    expect(dry).toContain(
+      "native MCP: the mounts run ~/native/swarm mcp directly (the default, SCP_NATIVE=0 opts out, version 0.0.0), told to start swarm as above and the native broker",
+    )
+    expect(setup(f, { write: true }, fakeRun(f), undefined, env).code).toBe(0)
+    expect(readJson(f.files.claude).mcpServers[SERVER]).toEqual({ type: "stdio", command: bin, args: ["mcp", "--harness", "claude", "--channels"], env: vars })
+    expect(codexEntry(f)).toEqual({ command: bin, args: ["mcp", "--harness", "codex"], env: vars })
+    expect(mountEngines(f.env).every((mount) => mount.engine === "native" && mount.mode === "all")).toBe(true)
+    f.calls.length = 0
+    expect(setup(f, { write: true }, fakeRun(f), undefined, nativeEnv(f, bin)).text).toContain("everything is in place; nothing to do")
+    expect(mutating(f)).toEqual([])
+  })
+
+  test("unset, a missing or mismatched native swarm leaves the node mounts without a word, as SCP_NATIVE=0 does", () => {
+    for (const bin of [(f: Fixture) => nativeSwarm(f, "9.9.9"), (f: Fixture) => join(f.home, "missing", "swarm")]) {
+      const f = fixture()
+      const quiet = setup(f, { write: true }, fakeRun(f), undefined, { ...f.env, SCP_SWARM_BIN: bin(f) })
+      expect(quiet.code).toBe(0)
+      expect(quiet.text).not.toContain("native")
+      expect(quiet.text).not.toContain("SCP_NATIVE")
+      expect(readJson(f.files.claude).mcpServers[SERVER]).toEqual({
+        type: "stdio",
+        command: f.swarm,
+        args: ["mcp", "--harness", "claude", "--channels"],
+        env: {},
+      })
+      expect(codexEntry(f)).toEqual({ command: f.swarm, args: ["mcp", "--harness", "codex"] })
+      const hooks = readFileSync(join(f.home, ".claude", "settings.json"), "utf8")
+      expect(hooks).toContain(`${f.swarm} hook claude`)
+      expect(hooks).not.toContain("[ -x")
+      const g = fixture()
+      expect(setup(g, { write: true }, fakeRun(g), undefined, { ...g.env, SCP_NATIVE: "0" }).text.replaceAll(g.home, "<home>")).toBe(
+        quiet.text.replaceAll(f.home, "<home>"),
+      )
+    }
+  })
+
+  test("with SCP_NATIVE=0 a native mount goes back to the node one, dropping only the native variables", () => {
     const f = fixture()
     lived(f)
     const bin = nativeSwarm(f)
-    expect(setup(f, { write: true }, fakeRun(f), undefined, nativeEnv(f, bin)).code).toBe(0)
+    expect(setup(f, { write: true }, fakeRun(f), undefined, { ...f.env, SCP_SWARM_BIN: bin }).code).toBe(0)
     expect(readJson(f.files.claude).mcpServers[SERVER].env).toMatchObject({ SCP_NAME: "cc-secret-name", SCP_NATIVE: "1" })
-    expect(setup(f, { write: true }).code).toBe(0)
+    expect(setup(f, { write: true }, fakeRun(f), undefined, { ...f.env, SCP_NATIVE: "0", SCP_SWARM_BIN: bin }).code).toBe(0)
     const claude = readJson(f.files.claude).mcpServers[SERVER]
     expect([claude.command, claude.env]).toEqual([f.swarm, { SCP_NAME: "cc-secret-name" }])
     expect(codexEntry(f)).toEqual({ command: f.swarm, args: ["mcp", "--harness", "codex"], env: { SCP_NAME: "cx-secret-name" } })
     expect(readJson(f.files.opencode).mcp[SERVER].environment).toEqual({ SCP_NAME: "oc-secret-name" })
     expect(readJson(f.files.muse).mcpServers[SERVER]).toMatchObject({ command: f.swarm, env: { A: "b" } })
     expect(readJson(f.files.agy).mcpServers[SERVER]).toEqual({ args: ["mcp", "--harness", "agy"], command: f.swarm, disabled: false })
-    expect(setup(f).text).toContain("everything is in place; nothing to do")
+    expect(setup(f, {}, fakeRun(f), undefined, { ...f.env, SCP_NATIVE: "0", SCP_SWARM_BIN: bin }).text).toContain("everything is in place; nothing to do")
   })
 
   test("under SCP_NATIVE=mcp a kept mount that says SCP_NATIVE=1 gets mcp, also without a native swarm", () => {

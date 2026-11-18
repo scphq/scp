@@ -30,8 +30,8 @@ pub fn broker_engine(pid: &Json) -> Option<&'static str> {
     })
 }
 
-/// what `SCP_NATIVE` runs natively: `all` for `1`, `mcp` for `mcp`, else `off`
-pub fn native_mode(value: Option<&str>) -> &'static str {
+/// the mode a saved mount's `SCP_NATIVE` keeps: `all` for `1`, `mcp` for `mcp`, else `off`, a mount through Node
+pub fn mount_mode(value: Option<&str>) -> &'static str {
     match value {
         Some("1") => "all",
         Some("mcp") => "mcp",
@@ -212,7 +212,7 @@ pub fn mount_engines(env: &Env) -> Vec<MountEngine> {
             let entry = mounted_entry(harness, &mcp_file(harness, env))
                 .ok()
                 .flatten()?;
-            let mode = native_mode(entry_native(harness, &entry));
+            let mode = mount_mode(entry_native(harness, &entry));
             let native = entry_argv(harness, &entry).get(1).map(String::as_str) == Some("mcp")
                 && mode != "off";
             Some(MountEngine {
@@ -226,10 +226,7 @@ pub fn mount_engines(env: &Env) -> Vec<MountEngine> {
 
 pub fn mounts_json(env: &Env, mounts: &[MountEngine]) -> Json {
     Json::object(vec![
-        (
-            "mode",
-            Json::str(native_mode(env.get("SCP_NATIVE").map(String::as_str))),
-        ),
+        ("mode", Json::str(scp_mcp::spawn::native_mode(env))),
         (
             "mounts",
             Json::Arr(

@@ -53,14 +53,30 @@ const LOG_MAX_BYTES: u64 = 1024 * 1024;
 
 static NATIVE_DAEMON: OnceLock<PathBuf> = OnceLock::new();
 
-/// names the native `swarm` this server runs in, which then starts the broker itself (`<exe> daemon`) under `SCP_NATIVE=1`
+/// what `SCP_NATIVE` runs natively: `off` for 0 (the TypeScript CLI, broker and MCP server), `mcp` for mcp (the MCP server alone, on
+/// the TypeScript broker), else `all`, unset included
+pub fn native_mode(env: &Env) -> &'static str {
+    match env.get("SCP_NATIVE").map(String::as_str) {
+        Some("0") => "off",
+        Some("mcp") => "mcp",
+        _ => "all",
+    }
+}
+
+/// whether `SCP_NATIVE` has a value: a missing native swarm is then noted, where by default the TypeScript CLI stands in quietly
+pub fn native_asked(env: &Env) -> bool {
+    env.get("SCP_NATIVE").is_some_and(|value| !value.is_empty())
+}
+
+/// names the native `swarm` this server runs in, which then starts the broker itself (`<exe> daemon`) unless `SCP_NATIVE` is 0 or mcp
 pub fn set_native_daemon(exe: PathBuf) {
     let _ = NATIVE_DAEMON.set(exe);
 }
 
-/// the native `swarm` that starts the broker for `env`: `exe` under `SCP_NATIVE=1`; under `SCP_NATIVE=mcp`, as without it, the launcher starts the TypeScript broker
+/// the native `swarm` that starts the broker for `env`: `exe` unless `SCP_NATIVE` is 0 or mcp, where the launcher starts the TypeScript
+/// broker
 fn native_daemon<'a>(env: &Env, exe: Option<&'a Path>) -> Option<&'a Path> {
-    exe.filter(|_| env.get("SCP_NATIVE").is_some_and(|v| v == "1"))
+    exe.filter(|_| native_mode(env) == "all")
 }
 
 /// the broker command: `native daemon` when there is one, else the launcher's `daemon`; under `SCP_NATIVE=mcp` only a launcher
@@ -555,24 +571,51 @@ mod tests {
     }
 
     #[test]
-    fn the_broker_is_native_only_under_scp_native() {
+    fn the_broker_is_native_unless_scp_native_is_0_or_mcp() {
         let exe = Path::new("/opt/native/swarm");
         let mut env = Env::new();
         env.insert(CLI_ARGV.into(), r#"["/bin/node","/x/cli.js"]"#.into());
-        assert_eq!(native_daemon(&env, Some(exe)), None);
+        assert_eq!(native_daemon(&env, Some(exe)), Some(exe));
+        assert_eq!(native_daemon(&env, None), None);
         assert_eq!(
             daemon_argv(&env, None).unwrap(),
             vec!["/bin/node", "/x/cli.js", "daemon"]
         );
-        env.insert("SCP_NATIVE".into(), "1".into());
-        assert_eq!(native_daemon(&env, None), None);
-        assert_eq!(native_daemon(&env, Some(exe)), Some(exe));
+        for value in ["1", "", "yes"] {
+            env.insert("SCP_NATIVE".into(), value.into());
+            assert_eq!(native_daemon(&env, None), None);
+            assert_eq!(native_daemon(&env, Some(exe)), Some(exe), "{value:?}");
+        }
         assert_eq!(
             daemon_argv(&env, Some(exe)).unwrap(),
             vec!["/opt/native/swarm", "daemon"]
         );
         env.insert("SCP_NATIVE".into(), "0".into());
         assert_eq!(native_daemon(&env, Some(exe)), None);
+        assert_eq!(
+            daemon_argv(&env, None).unwrap(),
+            vec!["/bin/node", "/x/cli.js", "daemon"]
+        );
+    }
+
+    #[test]
+    fn native_mode_and_whether_it_was_asked() {
+        let mut env = Env::new();
+        assert_eq!((native_mode(&env), native_asked(&env)), ("all", false));
+        for (value, mode, asked) in [
+            ("", "all", false),
+            ("1", "all", true),
+            ("mcp", "mcp", true),
+            ("0", "off", true),
+            ("MCP", "all", true),
+        ] {
+            env.insert("SCP_NATIVE".into(), value.into());
+            assert_eq!(
+                (native_mode(&env), native_asked(&env)),
+                (mode, asked),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

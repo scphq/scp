@@ -118,8 +118,9 @@ SCP_SWARM_BIN=./swarm bun test packages/conformance/src/broker
 `ts` runs the built CLI's foreground broker under Bun and always runs. `ts-node` runs the
 same broker under Node when `SCP_BROKER_NODE` names a Node binary. `rust` runs the engine at
 `SCP_BROKER_BIN` and is explicitly skipped without it. `ts-native` runs the built CLI's
-foreground broker with `SCP_NATIVE=1`, so the CLI runs the native `swarm` at `SCP_SWARM_BIN`;
-it is explicitly skipped without it and fails when the CLI falls back to its own broker.
+foreground broker with `SCP_NATIVE` unset, so by default the CLI runs the native `swarm` at
+`SCP_SWARM_BIN`; it is explicitly skipped without it and fails when the CLI falls back to its
+own broker. `ts` and `ts-node` set `SCP_NATIVE=0`.
 `SCP_BROKER_TARGETS` is a comma-separated target filter.
 `rust-turso` runs the same `SCP_BROKER_BIN` engine with `SCP_STORE=turso`, its experimental Turso store; the binary
 must be built with the `turso` feature (`cargo build -p scp-broker --features turso`). It runs only when

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { accessSync, constants, statSync } from "node:fs"
 import { isAbsolute } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { nativeKey, nativeMode, nativeSwarm } from "./native"
+import { nativeAsked, nativeKey, nativeMode, nativeSwarm } from "./native"
 import { FAILED, note, SELF } from "./term"
 
 type Env = Record<string, string | undefined>
@@ -11,8 +11,8 @@ type Env = Record<string, string | undefined>
 export type NativeMcp = { bin: string; words: string[] }
 
 /**
- * with $SCP_NATIVE=1 or mcp, the native MCP server: $SCP_MCP_BIN when set (an executable file, run with the words as is), else the native
- * `swarm` that matches this CLI (run as `swarm mcp`); undefined, with a note, when there is none
+ * unless $SCP_NATIVE=0, the native MCP server: $SCP_MCP_BIN when set (an executable file, run with the words as is), else the native
+ * `swarm` that matches this CLI (run as `swarm mcp`); undefined when there is none, with a note when $SCP_NATIVE or $SCP_MCP_BIN asked for one
  */
 export function nativeMcp(env: Env, version = pkg.version): NativeMcp | undefined {
   if (nativeMode(env) === "off") return undefined
@@ -20,6 +20,7 @@ export function nativeMcp(env: Env, version = pkg.version): NativeMcp | undefine
   if (bin === undefined) {
     const swarm = nativeSwarm(env, version)
     if (swarm) return { bin: swarm, words: ["mcp"] }
+    if (!nativeAsked(env)) return undefined
     const key = nativeKey()
     note(
       `no usable native MCP server (no native swarm ${version}: ${key ? `install @scp-dev/native-${key}, ` : ""}set SCP_SWARM_BIN or SCP_MCP_BIN); the built-in one serves this session`,

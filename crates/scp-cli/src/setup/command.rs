@@ -17,9 +17,8 @@ use super::verify::{agy_rules_present, cache_claude_version, verify_mount, verif
 use crate::account::relay::{config_file, read_object, write_private_json};
 use crate::args::{Opt, Options, parse_flags};
 use crate::fleet::json::Json;
-use crate::fleet::mounts::native_mode;
 use crate::launch::launcher;
-use crate::spawn::argv::{executable, native_swarm, which_on_path};
+use crate::spawn::argv::{executable, native_asked, native_mode, native_swarm, which_on_path};
 use crate::term::out as print;
 use crate::{Call, Done, Fail, help, usage};
 use scp_core::protocol::CLI_NAME;
@@ -345,24 +344,29 @@ pub fn relay_setup(options: &SetupOptions, env: Env, cwd: &str) -> Done {
                 "! {problem}: a harness started without your PATH may not start the mount"
             ));
         }
-        let given = env.get("SCP_NATIVE");
-        let mode = native_mode(given.map(String::as_str));
+        let mode = native_mode(&env);
         if mode != "off" {
             let broker = if mode == "all" {
                 "the native broker"
             } else {
                 "the TypeScript broker"
             };
-            let shown = or_empty(given);
+            let shown = or_empty(env.get("SCP_NATIVE"));
+            let given = if native_asked(&env) {
+                format!("SCP_NATIVE={shown}")
+            } else {
+                "the default, SCP_NATIVE=0 opts out".to_owned()
+            };
             native_server = native_swarm(&env);
-            out(&match &native_server {
-                Some(server) => format!(
-                    "native MCP: the mounts run {server} mcp directly (SCP_NATIVE={shown}, version {version}), told to start {CLI_NAME} as above and {broker}; rerun setup after an upgrade that moves it"
-                ),
-                None => format!(
+            match &native_server {
+                Some(server) => out(&format!(
+                    "native MCP: the mounts run {server} mcp directly ({given}, version {version}), told to start {CLI_NAME} as above and {broker}; rerun setup after an upgrade that moves it"
+                )),
+                None if native_asked(&env) => out(&format!(
                     "! SCP_NATIVE={shown} but no native swarm {version} (install the native package for this platform or set SCP_SWARM_BIN): the mounts run {CLI_NAME} mcp through node"
-                ),
-            });
+                )),
+                None => {}
+            }
         }
         let help_words = ["help".to_owned(), "--all".to_owned()];
         let help_of = |prefix: &[String]| {

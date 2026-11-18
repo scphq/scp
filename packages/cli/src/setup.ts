@@ -40,7 +40,7 @@ import {
 } from "./hooks"
 import { goneClientLine, goneClients, hooksTarget } from "./install"
 import { gitToplevel } from "./identity"
-import { type Mount, type NativeMode, mountVars, mountWith, nativeHook, nativeMode, nativeSwarm, pinMode } from "./native"
+import { type Mount, type NativeMode, mountMode, mountVars, mountWith, nativeAsked, nativeHook, nativeMode, nativeSwarm, pinMode } from "./native"
 import { launcher } from "./launcher"
 import { coworkSetup } from "./cowork"
 import { CLAUDE_DESKTOP_HELP, claudeDesktopSetup, parseClaudeDesktopArgs } from "./mcpb"
@@ -71,10 +71,10 @@ export const SETUP_HELP = `${CLI_NAME} setup [--cowork] [--write] [--no-hooks] [
   until it runs ${CLI_NAME} join <name> (or calls relay_join); saved in ~/.config/scp/config.json with --write.
   --engine auto uses a matching native hook client when installed; ts forces Node, native requires it.
   SCP_ENGINE sets the default engine; SCP_HOOK_BIN overrides the native binary path.
-  With SCP_NATIVE=1 every mount runs the native swarm's mcp directly (no node stays resident), when one matching this
-  CLI is installed or SCP_SWARM_BIN names it, and the broker it starts is the native one; SCP_NATIVE=mcp mounts the
-  same native server but keeps the TypeScript broker. Without a native swarm the mounts run through node, as without
-  SCP_NATIVE.
+  Every mount runs the native swarm's mcp directly (no node stays resident) when one matching this CLI is installed or
+  SCP_SWARM_BIN names it, and the broker it starts is the native one; without one the mounts run through node.
+  SCP_NATIVE=0 keeps the node mounts and the TypeScript broker; SCP_NATIVE=mcp mounts the native server but keeps the
+  TypeScript broker.
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
   The Claude Code and codex hooks and every mount run ${CLI_NAME} by absolute paths (a node script as absolute node plus its
   real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or ${CLI_NAME}.
@@ -267,13 +267,13 @@ function entryVars(harness: SetupHarness, entry: Json | undefined): Record<strin
   return isObject(vars) ? Object.fromEntries(Object.entries(vars).filter((pair): pair is [string, string] => typeof pair[1] === "string")) : {}
 }
 
-/** whether an entry's variables are the ones a native mount sets: setup wrote it under SCP_NATIVE=1 or mcp */
-const nativeVars = (vars: Record<string, string>): boolean => nativeMode(vars) !== "off" && vars.SCP_CLI_ARGV !== undefined
+/** whether an entry's variables are the ones a native mount sets: SCP_NATIVE=1 or mcp, with SCP_CLI_ARGV */
+const nativeVars = (vars: Record<string, string>): boolean => mountMode(vars) !== "off" && vars.SCP_CLI_ARGV !== undefined
 
 /** the MCP server a harness's user mount runs: `native` with the SCP_NATIVE mode it keeps, else `node` */
 export type MountEngine = { harness: SetupHarness; engine: "native" | "node"; mode: NativeMode }
 
-/** the engine of each harness's user mount (native: its command is the server, `<bin> mcp`, under SCP_NATIVE=1 or mcp), leaving out harnesses with none or an unreadable file */
+/** the engine of each harness's user mount (native: its command is the server, `<bin> mcp`, with SCP_NATIVE=1 or mcp), leaving out harnesses with none or an unreadable file */
 export function mountEngines(env: Env): MountEngine[] {
   return SETUP_HARNESSES.flatMap((harness) => {
     let entry: Json | undefined
@@ -284,8 +284,8 @@ export function mountEngines(env: Env): MountEngine[] {
     }
     if (!entry) return []
     const vars = entryVars(harness, entry)
-    const native = entryArgv(harness, entry)[1] === "mcp" && nativeMode(vars) !== "off"
-    return [{ harness, engine: native ? "native" : "node", mode: native ? nativeMode(vars) : "off" }]
+    const native = entryArgv(harness, entry)[1] === "mcp" && mountMode(vars) !== "off"
+    return [{ harness, engine: native ? "native" : "node", mode: native ? mountMode(vars) : "off" }]
   })
 }
 
@@ -1354,12 +1354,16 @@ export function relaySetup(options: SetupOptions, deps: SetupDeps): number {
     if (mode !== "off") {
       const version = deps.version ?? "0.0.0"
       const broker = mode === "all" ? "the native broker" : "the TypeScript broker"
+      const given = nativeAsked(env) ? `SCP_NATIVE=${env.SCP_NATIVE}` : "the default, SCP_NATIVE=0 opts out"
       nativeServer = nativeSwarm(env, version)
-      out(
-        nativeServer
-          ? `native MCP: the mounts run ${nativeServer} mcp directly (SCP_NATIVE=${env.SCP_NATIVE}, version ${version}), told to start ${CLI_NAME} as above and ${broker}; rerun setup after an upgrade that moves it`
-          : `! SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): the mounts run ${CLI_NAME} mcp through node`,
-      )
+      if (nativeServer)
+        out(
+          `native MCP: the mounts run ${nativeServer} mcp directly (${given}, version ${version}), told to start ${CLI_NAME} as above and ${broker}; rerun setup after an upgrade that moves it`,
+        )
+      else if (nativeAsked(env))
+        out(
+          `! SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): the mounts run ${CLI_NAME} mcp through node`,
+        )
     }
     const help = run([...mounts.argv, "help", "--all"]).output
     if (!help.includes(`${CLI_NAME} mcp`)) {

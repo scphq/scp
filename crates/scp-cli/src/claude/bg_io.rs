@@ -1032,8 +1032,8 @@ fn gone_command(command: Option<&Json>) -> bool {
         .is_some_and(|command| command.starts_with('/') && !executable(Path::new(command)))
 }
 
-/// the mount a session whose command is gone runs instead: the native `swarm` under `SCP_NATIVE=1` or `mcp`, told the words that start
-/// the CLI when there is one, else the CLI, else this executable
+/// the mount a session whose command is gone runs instead: unless `SCP_NATIVE=0` the native `swarm`, told the words that start the CLI
+/// when there is one; under 0 the CLI, else this executable
 fn fresh_mount(
     words: Vec<String>,
     env: &Env,
@@ -1043,9 +1043,9 @@ fn fresh_mount(
         .map(|exe| exe.to_string_lossy().into_owned())
         .unwrap_or_else(|_| CLI_NAME.to_owned());
     let cli = scp_mcp::spawn::named_launcher(env).or_else(|| (host.beside)(env));
-    let mode = env.get("SCP_NATIVE").map(String::as_str);
+    let mode = crate::spawn::argv::native_mode(env);
     let tail = std::iter::once("mcp".to_owned()).chain(words);
-    if !matches!(mode, Some("1" | "mcp")) {
+    if mode == "off" {
         let launch = cli.unwrap_or_else(|| vec![exe]);
         return (launch.into_iter().chain(tail).collect(), Vec::new());
     }
@@ -1056,7 +1056,7 @@ fn fresh_mount(
         .unwrap_or(exe);
     let mut vars = vec![(
         "SCP_NATIVE",
-        if mode == Some("mcp") { "mcp" } else { "1" }.to_owned(),
+        if mode == "mcp" { "mcp" } else { "1" }.to_owned(),
     )];
     if named.is_some() {
         vars.push(("SCP_SWARM_BIN", bin.clone()));

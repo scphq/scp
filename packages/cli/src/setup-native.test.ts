@@ -51,10 +51,11 @@ function swarm(engine: Engine, dir: string, args: string[], vars: Vars = {}) {
     XDG_DATA_HOME: join(dir, ".local", "share"),
     SCP_DIR: join(dir, ".scp"),
     SCP_HOOK_BIN: join(dir, "no-such-hook"),
+    SCP_NATIVE: "0",
     PATH: `${join(dir, "bin")}:/usr/bin:/bin`,
     ...vars,
   })
-  if (vars.SCP_HOOK_BIN === "<unset>") delete env.SCP_HOOK_BIN
+  for (const [key, value] of Object.entries(vars)) if (value === "<unset>") delete env[key]
   const argv = engine === "ts" ? [process.execPath, "--no-env-file", entry, ...args] : [swarmBinary!, ...args]
   const result = Bun.spawnSync(argv, { env, cwd: join(dir, "work"), stdout: "pipe", stderr: "pipe" })
   const strip = (text: string) =>
@@ -112,7 +113,7 @@ function same(prepare: (dir: string) => void, steps: Step[], options: { installe
     prepare(dir)
     return steps.map((step) => {
       const { args, vars } = Array.isArray(step) ? { args: step, vars: {} } : step
-      const result = swarm(engine, dir, args, { ...options.vars, ...vars })
+      const result = swarm(engine, dir, args, { ...options.vars, ...vars, ...(engine === "ts" ? { SCP_ROUTED: "ts" } : {}) })
       return { ...result, stdout: plain(result.stdout), stderr: plain(result.stderr), files: files(dir) }
     })
   })
@@ -284,11 +285,15 @@ describe.skipIf(noBinary)("setup, TypeScript against native", () => {
       { args: ["setup", "--write"], vars: { ...nativeVars, SCP_NATIVE: "1" } },
       { args: ["setup"], vars: { ...nativeVars, SCP_NATIVE: "mcp" } },
       { args: ["setup", "--write"], vars: { ...nativeVars, SCP_NATIVE: "mcp" } },
-      { args: ["setup"], vars: nativeVars },
-      { args: ["setup", "--write"], vars: nativeVars },
+      { args: ["setup"], vars: { ...nativeVars, SCP_NATIVE: "0" } },
+      { args: ["setup", "--write"], vars: { ...nativeVars, SCP_NATIVE: "0" } },
+      { args: ["setup"], vars: { ...nativeVars, SCP_NATIVE: "<unset>" } },
+      { args: ["setup", "--write"], vars: { ...nativeVars, SCP_NATIVE: "<unset>" } },
+      { args: ["setup"], vars: { ...nativeVars, SCP_NATIVE: "1" } },
       ["setup", "--undo", "--write"],
     ])
     same(nothing, [{ args: ["setup"], vars: { SCP_NATIVE: "1", SCP_SWARM_BIN: "/no/such/swarm" } }])
+    same(nothing, [{ args: ["setup", "--write"], vars: { SCP_NATIVE: "<unset>", SCP_SWARM_BIN: "/no/such/swarm" } }])
     same(nothing, [{ args: ["setup", "--write"], vars: { SCP_HOOK_BIN: "<unset>" } }])
     same(
       nothing,
@@ -780,7 +785,7 @@ describe.skipIf(noBinary)("setup claude-desktop and --cowork, TypeScript against
   const build = (engine: Engine, dir: string, args: string[], vars: Vars) => {
     rmSync(join(dir, ".scp"), { recursive: true, force: true })
     rmSync(join(dir, ".config", "scp"), { recursive: true, force: true })
-    const result = swarm(engine, dir, args, vars)
+    const result = swarm(engine, dir, args, engine === "ts" ? { ...vars, SCP_ROUTED: "ts" } : vars)
     const read = (file: string) => (existsSync(file) ? readFileSync(file) : undefined)
     const tree: Record<string, string> = {}
     const plugin = join(dir, ".scp", "cowork-plugin")
@@ -807,6 +812,9 @@ describe.skipIf(noBinary)("setup claude-desktop and --cowork, TypeScript against
     { vars: { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary ?? "" } },
     { vars: { SCP_NATIVE: "mcp", SCP_SWARM_BIN: swarmBinary ?? "" } },
     { vars: { SCP_NATIVE: "1", SCP_SWARM_BIN: "/no/such/swarm" } },
+    { vars: { SCP_NATIVE: "<unset>", SCP_SWARM_BIN: swarmBinary ?? "" } },
+    { vars: { SCP_NATIVE: "<unset>", SCP_SWARM_BIN: "/no/such/swarm" } },
+    { vars: { SCP_NATIVE: "0", SCP_SWARM_BIN: swarmBinary ?? "" } },
   ]
 
   test("the extension is the same bytes", () => {

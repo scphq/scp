@@ -405,6 +405,8 @@ const NATIVE: Env[] = [
   { SCP_NATIVE: "1", SCP_SWARM_BIN: SWARM },
   { SCP_NATIVE: "mcp", SCP_SWARM_BIN: SWARM },
   { SCP_NATIVE: "0", SCP_SWARM_BIN: SWARM },
+  { SCP_SWARM_BIN: SWARM },
+  { SCP_SWARM_BIN: NO_SWARM },
 ];
 for (const home of ["none", "node", "gone", "present", "nomcp", "kept", "native", "weird", "crlf"])
   for (const native of NATIVE) add("codexOverrides", { env: { ...SHIM, ...native, CODEX_HOME: `${F}/codex/${home}` } });
@@ -505,6 +507,8 @@ const HARNESS: { command: string[]; env?: Env; cwd?: string; probe?: boolean }[]
   { command: ["codex", "exec", "hi"], env: baseEnv({ CODEX_HOME: `${F}/codex/kept`, SCP_NATIVE: "mcp", SCP_SWARM_BIN: SWARM }) },
   { command: ["codex", "exec", "hi"], env: baseEnv({ CODEX_HOME: `${F}/codex/present`, SCP_NATIVE: "1", SCP_SWARM_BIN: SWARM }) },
   { command: ["codex"], env: baseEnv({ SCP_NATIVE: "1", SCP_SWARM_BIN: SWARM }) },
+  { command: ["codex"], env: baseEnv({ SCP_SWARM_BIN: SWARM }) },
+  { command: ["codex", "exec", "hi"], env: baseEnv({ CODEX_HOME: `${F}/codex/kept`, SCP_NATIVE: "0", SCP_SWARM_BIN: SWARM }) },
   { command: ["codex", "exec", "hi"], env: { CODEX_HOME: `${F}/codex/none` } },
 ];
 for (const { command, env, cwd, probe } of HARNESS) add("harnessArgv", { command, env: env ?? baseEnv(), cwd: cwd ?? "/", probe: probe ?? false });

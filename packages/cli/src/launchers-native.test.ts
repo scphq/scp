@@ -175,6 +175,7 @@ function machine(engine: Engine) {
     XDG_STATE_HOME: join(root, ".state"),
     SCP_DIR: join(root, "relay"),
     SCP_HARNESS_DETECT: "0",
+    SCP_NATIVE: "0",
     SCP_CLI_ARGV: JSON.stringify(SELF),
     FAKE_ROOT: root,
     ...(process.env.SCP_ROUTE_LOG ? { SCP_ROUTE_LOG: process.env.SCP_ROUTE_LOG } : {}),

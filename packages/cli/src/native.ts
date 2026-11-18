@@ -4,12 +4,12 @@ import { createRequire } from "node:module"
 import { constants as osConstants } from "node:os"
 import { basename, isAbsolute, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
-import { nativeKey } from "./route"
+import { type NativeMode, nativeAsked, nativeKey, nativeMode } from "./route"
 import { capture, note, SELF } from "./term"
 
 const require = createRequire(import.meta.url)
 
-export { nativeKey } from "./route"
+export { type NativeMode, nativeAsked, nativeKey, nativeMode } from "./route"
 
 /** `override`, else `name` from this platform's native package, when it is an executable file whose `--version` prints `<name> <version>` */
 function nativeBinary(
@@ -48,21 +48,22 @@ export function nativeDaemonEnv(base: Record<string, string | undefined>): Recor
   return env
 }
 
-/** what `SCP_NATIVE` runs natively: `all` for `1` (the broker and the MCP server), `mcp` for `mcp` (the MCP server on the TypeScript broker), else `off` */
-export type NativeMode = "all" | "mcp" | "off"
-
-export function nativeMode(env: Record<string, string | undefined>): NativeMode {
-  return env.SCP_NATIVE === "1" ? "all" : env.SCP_NATIVE === "mcp" ? "mcp" : "off"
+/** the mode a saved mount's `SCP_NATIVE` keeps: `all` for 1, `mcp` for mcp, else `off`, a mount through Node */
+export function mountMode(vars: Record<string, string | undefined>): NativeMode {
+  return vars.SCP_NATIVE === "1" ? "all" : vars.SCP_NATIVE === "mcp" ? "mcp" : "off"
 }
 
-/** with `SCP_NATIVE=1`, the native `swarm` that runs the broker, else undefined; a missing or mismatched one is noted and the TypeScript broker runs */
+/**
+ * unless `SCP_NATIVE` is 0 or mcp, the native `swarm` that runs the broker, else undefined; without a matching one the TypeScript broker
+ * runs, noted when `SCP_NATIVE` asked for native
+ */
 export function nativeBroker(env: Record<string, string | undefined> = process.env, version = pkg.version): string | undefined {
   if (nativeMode(env) !== "all") return undefined
   const bin = nativeSwarm(env, version)
-  if (!bin) {
+  if (!bin && nativeAsked(env)) {
     const key = nativeKey()
     const fix = key ? `install @scp-dev/native-${key} or set SCP_SWARM_BIN` : "set SCP_SWARM_BIN"
-    note(`SCP_NATIVE=1 but no native swarm ${version} binary for ${process.platform}-${process.arch} (${fix}); starting the TypeScript broker`)
+    note(`SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} binary for ${process.platform}-${process.arch} (${fix}); starting the TypeScript broker`)
   }
   return bin
 }
@@ -110,11 +111,14 @@ export const resetMountNote = (): void => {
   mountNoted = false
 }
 
-/** with `SCP_NATIVE=1` or `mcp`, the native `swarm` whose `swarm mcp` a mount runs directly, else undefined; a missing or mismatched one is noted once and mounts run through Node */
+/**
+ * unless `SCP_NATIVE=0`, the native `swarm` whose `swarm mcp` a mount runs directly, else undefined; without a matching one mounts run
+ * through Node, noted once when `SCP_NATIVE` asked for native
+ */
 export function nativeMountBin(env: Record<string, string | undefined>, version = pkg.version): string | undefined {
   if (nativeMode(env) === "off") return undefined
   const bin = nativeSwarm(env, version)
-  if (!bin && !mountNoted) {
+  if (!bin && nativeAsked(env) && !mountNoted) {
     mountNoted = true
     const key = nativeKey()
     const fix = key ? `install @scp-dev/native-${key} or set SCP_SWARM_BIN` : "set SCP_SWARM_BIN"
@@ -126,7 +130,7 @@ export function nativeMountBin(env: Record<string, string | undefined>, version 
 }
 
 /**
- * the mount that runs `swarm mcp <words>`: under `SCP_NATIVE=1` or `mcp` the native `swarm` itself, told the words that start this CLI
+ * the mount that runs `swarm mcp <words>`: unless `SCP_NATIVE=0`, the native `swarm` itself, told the words that start this CLI
  * (`launch`) and the mode, so no Node process stays resident and the broker it starts is the one the mode names; otherwise `launch` followed by `mcp`
  */
 export function mcpMount(launch: string[], words: string[], env: Record<string, string | undefined>, version = pkg.version): Mount {

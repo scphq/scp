@@ -8,7 +8,7 @@ import { TOOLS } from "@scp-dev/mcp"
 import { RelayUsage } from "./common"
 import { shellQuote } from "./hooks"
 import { launcher } from "./launcher"
-import { type Mount, mountWith, nativeMode, nativeSwarm } from "./native"
+import { type Mount, mountWith, nativeAsked, nativeMode, nativeSwarm } from "./native"
 
 type Env = Record<string, string | undefined>
 
@@ -20,7 +20,7 @@ export const CLAUDE_DESKTOP_HELP = `${CLI_NAME} setup claude-desktop [--out FILE
   builds scp.mcpb, a Claude desktop extension that mounts the relay MCP shim in the app's chat (harness ${CHAT_HARNESS}),
   at ~/.config/scp/scp.mcpb or --out. It runs the ${CLI_NAME} PATH finds (or --bin) by absolute paths, a node script by
   absolute node and its real path, since the app does not start it with your shell's PATH; rebuild it after moving or
-  upgrading either. With SCP_NATIVE=1 or mcp it runs the native ${CLI_NAME} mcp while that binary is there, as the setup mounts
+  upgrading either. Unless SCP_NATIVE=0 it runs the native ${CLI_NAME} mcp while that binary is there, as the setup mounts
   do. Install it by opening the file (double-click, or --open). Chat is pull only: the model reads new
   messages when it calls relay_inbox; nothing wakes it. The app's Code tab is Claude Code and uses ${CLI_NAME} setup.
   claude_desktop_config.json is never edited.`
@@ -201,14 +201,15 @@ export function claudeDesktopSetup(options: ClaudeDesktopOptions, deps: ClaudeDe
   return 0
 }
 
-/** under `SCP_NATIVE=1` or `mcp`, the native mount of `swarm mcp <words>` a host-path launcher runs; a missing native `swarm` is noted and undefined */
+/** unless `SCP_NATIVE=0`, the native mount of `swarm mcp <words>` a host-path launcher runs; without a native `swarm` undefined, noted when `SCP_NATIVE` asked for one */
 export function nativeServerMount(launch: string[], words: string[], env: Env, version: string, out: (line: string) => void): Mount | undefined {
   if (nativeMode(env) === "off") return undefined
   const bin = nativeSwarm(env, version)
   if (!bin) {
-    out(
-      `! SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): it runs ${CLI_NAME} mcp through node`,
-    )
+    if (nativeAsked(env))
+      out(
+        `! SCP_NATIVE=${env.SCP_NATIVE} but no native swarm ${version} (install the native package for this platform or set SCP_SWARM_BIN): it runs ${CLI_NAME} mcp through node`,
+      )
     return undefined
   }
   return mountWith(bin, launch, words, env)

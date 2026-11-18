@@ -162,9 +162,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   may always reply in the thread to a message it got; a reply to another message of the thread is checked as a send.
   swarm daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground (it otherwise starts on demand)
   swarm daemon stop|restart                stop the running broker, or replace it with a fresh one
-  $SCP_NATIVE=1 runs the native broker and MCP server, and the mounts swarm writes run the native swarm mcp directly;
-  $SCP_NATIVE=mcp runs only the native MCP server, on the TypeScript broker; swarm status names the broker's engine
-  and each harness mount's MCP engine
+  with the native swarm installed it runs the commands, the broker and the MCP server, and the mounts swarm writes run
+  its mcp directly; $SCP_NATIVE=0 keeps all of them on TypeScript, $SCP_NATIVE=mcp only the MCP server native, on the
+  TypeScript broker; swarm status names the broker's engine and each harness mount's MCP engine
 
 agent sessions:
   swarm mcp [--as NAME] [--harness H] [--channels] [--cowork-only]   the MCP shim a harness mounts: relay tools for one agent, never me/

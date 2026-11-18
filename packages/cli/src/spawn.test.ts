@@ -1221,16 +1221,16 @@ describe("harness argv and environment", () => {
       "mcp_servers.scp.command": bin,
       "mcp_servers.scp.args": ["mcp", "--harness", "codex", "--as", "w"],
     })
-    const gone = parsed(
-      codexOverrides({ ...env, SCP_NATIVE: undefined }, { command: join(dir, "removed", "swarm"), args: ["mcp", "--harness", "codex"] }, launch),
-    )
+    const gone = parsed(codexOverrides({ ...env, SCP_NATIVE: "0" }, { command: join(dir, "removed", "swarm"), args: ["mcp", "--harness", "codex"] }, launch))
     expect([gone["mcp_servers.scp.command"], gone["mcp_servers.scp.args"]]).toEqual(["/opt/node", ["/opt/cli.js", "mcp", "--harness", "codex"]])
     const saved = { command: bin, args: ["mcp", "--harness", "codex"], env: { SCP_NATIVE: "1", SCP_CLI_ARGV: "[]" } }
     const pinned = parsed(codexOverrides({ ...env, SCP_NATIVE: "mcp", SCP_SWARM_BIN: join(dir, "missing") }, saved, launch))
     expect([pinned["mcp_servers.scp.command"], pinned["mcp_servers.scp.env.SCP_NATIVE"]]).toEqual([undefined, "mcp"])
-    expect(parsed(codexOverrides({ ...env, SCP_NATIVE: undefined }, saved, launch))["mcp_servers.scp.env.SCP_NATIVE"]).toBeUndefined()
+    expect(parsed(codexOverrides({ ...env, SCP_NATIVE: "0" }, saved, launch))["mcp_servers.scp.env.SCP_NATIVE"]).toBeUndefined()
+    expect(parsed(codexOverrides({ ...env, SCP_NATIVE: undefined }, undefined, launch))["mcp_servers.scp.env.SCP_NATIVE"]).toBe("1")
     for (const off of [
-      { ...env, SCP_NATIVE: undefined },
+      { ...env, SCP_NATIVE: "0" },
+      { ...env, SCP_NATIVE: undefined, SCP_SWARM_BIN: join(dir, "missing") },
       { ...env, SCP_SWARM_BIN: join(dir, "missing") },
     ]) {
       const keys = Object.keys(parsed(codexOverrides(off, undefined, launch)))

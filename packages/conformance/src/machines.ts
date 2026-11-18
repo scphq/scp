@@ -50,10 +50,12 @@ export class Machine {
       CODEX_HOME: join(this.root, "codex"),
       CLAUDE_CONFIG_DIR: join(this.root, "harness"),
       GEMINI_CLI_HOME: this.root,
+      SCP_NATIVE: "0",
       ...(mcpBinary ? { SCP_NATIVE: "1", SCP_MCP_BIN: mcpBinary } : {}),
       ...(this.native && swarmBinary ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary } : {}),
-      ...(routed ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary, ...(routeLog ? { SCP_ROUTE_LOG: routeLog } : {}) } : {}),
+      ...(routed ? { SCP_SWARM_BIN: swarmBinary, ...(routeLog ? { SCP_ROUTE_LOG: routeLog } : {}) } : {}),
     });
+    if (routed) delete this.env.SCP_NATIVE;
     this.assertIsolated();
     mkdirSync(this.env.SCP_DIR!, { recursive: true });
     mkdirSync(join(this.env.XDG_CONFIG_HOME!, "scp"), { recursive: true });

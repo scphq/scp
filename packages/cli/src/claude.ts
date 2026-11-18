@@ -101,7 +101,7 @@ export const bgDir = (env: Env): string => join(relayDir(env as NodeJS.ProcessEn
 
 /**
  * the scp server of a background session: the user's mount with `--channels`, else this CLI's, with the name, parent request and grant in its env, and
- * the session a resume continues as `SCP_HARNESS_ORIGIN`. Under SCP_NATIVE=1 it runs the native `swarm mcp` directly, with the user's mount's words
+ * the session a resume continues as `SCP_HARNESS_ORIGIN`. With a native swarm it runs the native `swarm mcp` directly, with the user's mount's words
  * when it has `--channels`, as it does through Node when the mount's command is gone. It has the mount's name, so it replaces the mount for that
  * session; the grant is set even when empty, so one in the daemon's environment never applies
  */

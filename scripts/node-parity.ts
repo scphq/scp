@@ -52,7 +52,7 @@ function homes() {
     return home;
   };
   return {
-    ts: baseEnv(make("ts")),
+    ts: { ...baseEnv(make("ts")), SCP_NATIVE: "0" },
     native: { ...baseEnv(make("native")), SCP_NATIVE: "1", SCP_SWARM_BIN: bin, SCP_ROUTE_LOG: log },
   };
 }
@@ -135,6 +135,21 @@ expectEqual("the spawn hand-off under Node", spawned.lines, ["nope native spawn"
 expectEqual("its exit code", spawned.run.code, 125);
 expectEqual("forced under Node", decision({ SCP_NATIVE_TS: "*" }).lines, ["--version ts forced"]);
 expectEqual("no binary under Node", decision({ SCP_SWARM_BIN: join(root, "missing") }).lines, ["--version ts missing"]);
+const { SCP_NATIVE: _asked, ...unset } = env.native;
+rmSync(log, { force: true });
+const byDefault = swarm(unset, ["--version"]);
+expectEqual(
+  "unset under Node",
+  [byDefault.stdout, byDefault.stderr, logged()],
+  [`${version}\n`, "", execve ? ["--version native execve", "--version native run"] : ["--version ts noexecve"]],
+);
+rmSync(log, { force: true });
+const quiet = swarm({ ...unset, SCP_SWARM_BIN: join(root, "missing") }, ["--version"]);
+expectEqual(
+  "unset with no binary under Node",
+  [quiet.stdout, quiet.stderr, logged()],
+  [`${version}\n`, "", [execve ? "--version ts missing" : "--version ts noexecve"]],
+);
 
 function fake(name: string, script: string): string {
   const path = join(root, name);

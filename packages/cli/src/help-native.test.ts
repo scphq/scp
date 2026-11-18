@@ -107,7 +107,7 @@ async function swarm(engine: "ts" | "native", args: string[], dir: string) {
     SCP_DIR: dir,
     SCP_HARNESS_DETECT: "0",
     PATH: "/usr/bin:/bin",
-    ...(engine === "native" ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary!, SCP_ROUTE_LOG: log } : {}),
+    ...(engine === "native" ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary!, SCP_ROUTE_LOG: log } : { SCP_NATIVE: "0" }),
   })
   const child = Bun.spawn([process.execPath, "--no-env-file", entry, ...args], { env, cwd: root, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])

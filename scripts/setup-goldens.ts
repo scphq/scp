@@ -428,7 +428,14 @@ const mcp = HARNESSES.flatMap((harness) =>
   }),
 );
 
-const MOUNT_ENVS = [{}, { SCP_NATIVE: "1" }, { SCP_NATIVE: "mcp" }, { SCP_SWARM_BIN: "/x/swarm" }, { SCP_SWARM_BIN: "", SCP_NATIVE: "mcp" }];
+const MOUNT_ENVS = [
+  {},
+  { SCP_NATIVE: "1" },
+  { SCP_NATIVE: "mcp" },
+  { SCP_NATIVE: "0" },
+  { SCP_SWARM_BIN: "/x/swarm" },
+  { SCP_SWARM_BIN: "", SCP_NATIVE: "mcp" },
+];
 const mounts = [undefined, "/pkg/bin/swarm"].flatMap((bin) =>
   MOUNT_ENVS.map((env) => ({
     bin: bin ?? null,
