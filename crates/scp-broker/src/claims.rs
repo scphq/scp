@@ -597,6 +597,88 @@ impl Core {
         }
         Ok(None)
     }
+    /// the agent an exact claim with `under` that no other rule lets take `held` re-homes it under, as a new endpoint of the claim would sit
+    /// there: `held` is a root only `--as` claims held (a resume token, no trace of a harness session's hooks, process or waker, unplaced, no
+    /// child on another machine nor worker there), released and of a fitting harness, and the claim's own placement puts it under that agent
+    /// (placed) or nowhere, from where it links under it or the claim is refused
+    async fn rehomes(
+        &self,
+        held: &Row,
+        harness: &str,
+        fields: &Fields,
+        scope: &Scope,
+    ) -> Result<Option<(Row, bool)>, RpcError> {
+        let Some(under) = fields.under.as_deref() else {
+            return Ok(None);
+        };
+        let handle = text(held, "handle").unwrap_or_default();
+        let bound_ms = i64::try_from(
+            self.limits
+                .get("handleBoundS")
+                .unwrap_or(scp_core::protocol::LIMITS.handle_bound_s),
+        )
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1000);
+        if revivable(held)
+            || text(held, "token_hash").is_none()
+            || [
+                "hibernate",
+                "process",
+                "session",
+                "harness_session",
+                "harness_origin",
+                "wake",
+            ]
+            .iter()
+            .any(|column| text(held, column).is_some())
+            || ["hook_seen", "hook_ended"]
+                .iter()
+                .any(|column| integer(held, column).is_some())
+            || integer(held, "wakers").unwrap_or(0) > 0
+            || !Core::is_local_row(held)
+            || integer(held, "last_seen")
+                .or_else(|| integer(held, "created_at"))
+                .unwrap_or(0)
+                < now_ms().saturating_sub(bound_ms)
+            || !self.released(held).await
+            || !self.unplaced(held).await?
+            || !(harness_fits(text(held, "harness"), harness)
+                || same_provider(text(held, "harness"), harness))
+            || !self
+                .store
+                .all(
+                    "SELECT 1 AS y WHERE EXISTS (SELECT 1 FROM endpoints WHERE parent_addr = ? OR substr(parent_addr, length(parent_addr) - length(?)) = ?) OR EXISTS (SELECT 1 FROM spawn_via WHERE spawner = ? AND ended_at IS NULL)",
+                    &[
+                        opt(Some(handle)),
+                        opt(Some(handle)),
+                        opt(Some(&format!("/{handle}"))),
+                        opt(text(held, "id")),
+                    ],
+                )
+                .await?
+                .is_empty()
+        {
+            return Ok(None);
+        }
+        let placement = self.placement(scope, Some(held), None).await?;
+        if placement.refused.is_some() || placement.grant.is_some() {
+            return Ok(None);
+        }
+        let parent = match self.lookup(under).await {
+            Ok(parent) => parent,
+            Err(_) => return Ok(None),
+        };
+        if text(&parent, "kind") != Some("agent") || text(&parent, "id") == text(held, "id") {
+            return Ok(None);
+        }
+        Ok(match &placement.parent {
+            Some(placed) => (text(placed, "id") == text(&parent, "id")).then_some((parent, true)),
+            None => self
+                .may_link_under(held, &parent)
+                .await?
+                .then_some((parent, false)),
+        })
+    }
     /// a new row's tree, caps (besides those a reset kept), own rules and the grant's groups
     pub(crate) async fn place(
         &mut self,
@@ -942,16 +1024,32 @@ impl Core {
                 }
             }
         }
-        let row = row.ok_or_else(|| {
-            RpcError::new(
-                if exact {
-                    ErrorCode::Unauthorized
-                } else {
-                    ErrorCode::InvalidParams
-                },
-                format!("no available endpoint for {}", scope.handle),
-            )
-        })?;
+        let held = if row.is_none() && exact {
+            self.by_handle(&scope.handle).await?
+        } else {
+            None
+        };
+        let rehome = match &held {
+            Some(held) => self.rehomes(held, harness, fields, scope).await?,
+            None => None,
+        };
+        if rehome.is_some() {
+            row = held.clone();
+        }
+        let row = match (row, &held) {
+            (Some(row), _) => row,
+            (None, Some(held)) => return Err(exact_refusal(held, &scope.handle, harness)),
+            (None, None) => {
+                return Err(RpcError::new(
+                    if exact {
+                        ErrorCode::Unauthorized
+                    } else {
+                        ErrorCode::InvalidParams
+                    },
+                    format!("no free handle for {}", scope.handle),
+                ));
+            }
+        };
         let id = text(&row, "id").ok_or_else(RpcError::internal)?;
         let mut moved = Vec::new();
         if let Some(hooks) = moved_hooks {
@@ -1072,15 +1170,42 @@ impl Core {
             }
             self.audit("claim", Some(id), None, detail).await?;
         }
+        if let Some((parent, _)) = &rehome {
+            self.audit(
+                "claim_rehome",
+                Some(id),
+                None,
+                json!({"target": address(&row), "parent": address(parent)}),
+            )
+            .await?;
+        }
         if let Some(kind) = fresh {
             self.reset(&row, scope, kind, &moved).await?;
         }
         if created || fresh == Some("grant") {
             self.place(&self.must_endpoint(id).await?, scope, fields)
                 .await?;
+        } else if let Some((_, true)) = &rehome {
+            let placed = self.must_endpoint(id).await?;
+            let scope = Scope {
+                rules: crate::grants::json_column(&placed, "rules", scope.rules.clone()),
+                ..scope.clone()
+            };
+            self.place(&placed, &scope, fields).await?;
         } else if scope.grant.is_some() {
             self.redeem(&self.must_endpoint(id).await?, scope, fields, by_session)
                 .await?;
+        }
+        if let (Some((parent, false)), Some(held)) = (&rehome, &held) {
+            let me = self.must_endpoint(id).await?;
+            let linked = if self.may_link_under(&me, parent).await? {
+                self.link_endpoint(&me, parent, "session").await
+            } else {
+                Err(unreachable(&address(parent)))
+            };
+            if linked.is_err() {
+                return Err(exact_refusal(held, &scope.handle, harness));
+            }
         }
         if scope.grant.is_some() {
             self.take_pending(id).await?;
@@ -1642,6 +1767,23 @@ pub fn subagent_handle(root: &str, id: &str, kind: Option<&str>) -> String {
     format!("{}{tail}", head.trim_end_matches(['-', '.']))
 }
 
+/// why an exact claim of `handle`, which `held` holds, is refused
+fn exact_refusal(held: &Row, handle: &str, harness: &str) -> RpcError {
+    let seen = integer(held, "connections").unwrap_or(0) > 0
+        || integer(held, "hook_seen").is_some_and(|seen| seen >= now_ms() - 1_800_000);
+    let message = if (text(held, "session").is_some() || text(held, "process").is_some()) && seen {
+        format!(
+            "me/{handle} is held by a live session; a detached job can't act as it. Give the job its own name, e.g. SCP_UNDER={handle} {} send --as {handle}-wake ...",
+            scp_core::protocol::CLI_NAME
+        )
+    } else if !harness_fits(text(held, "harness"), harness) {
+        let held = text(held, "harness").unwrap_or_default();
+        format!("{handle} is a {held} endpoint: pass --harness {held}")
+    } else {
+        format!("{handle} is placed in another tree or under another parent than this shell")
+    };
+    RpcError::new(ErrorCode::Unauthorized, message)
+}
 pub fn unreachable(value: &str) -> RpcError {
     RpcError::new(
         ErrorCode::NotFound,
@@ -1983,6 +2125,94 @@ mod link_pending_tests {
         );
         assert_eq!(LinkPending::parse(Some("not json")), None);
         assert_eq!(LinkPending::parse(None), None);
+    }
+}
+
+#[cfg(test)]
+mod exact_refusal_tests {
+    use super::exact_refusal;
+    use crate::core::now_ms;
+    use crate::store::{Row, SqlValue};
+    use scp_core::protocol::ErrorCode;
+
+    fn row(texts: &[(&str, &str)], ints: &[(&str, i64)]) -> Row {
+        texts
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), SqlValue::Text((*v).into())))
+            .chain(
+                ints.iter()
+                    .map(|(k, v)| ((*k).to_owned(), SqlValue::Int(*v))),
+            )
+            .collect()
+    }
+
+    fn refused(held: &Row, harness: &str) -> (ErrorCode, String) {
+        let error = exact_refusal(held, "lane", harness);
+        (error.data.map(|d| d.code).unwrap(), error.message)
+    }
+
+    #[test]
+    fn a_live_session_holding_the_row_is_named_with_a_name_the_job_can_take() {
+        let live = row(
+            &[("harness", "codex"), ("process", "pid:4242")],
+            &[("hook_seen", now_ms())],
+        );
+        assert_eq!(
+            refused(&live, "codex"),
+            (
+                ErrorCode::Unauthorized,
+                "me/lane is held by a live session; a detached job can't act as it. Give the job its own name, e.g. SCP_UNDER=lane swarm send --as lane-wake ...".into()
+            )
+        );
+        let connected = row(
+            &[("harness", "codex"), ("session", "pid:4242")],
+            &[("connections", 1), ("last_seen", now_ms())],
+        );
+        assert!(
+            refused(&connected, "cli")
+                .1
+                .contains("held by a live session")
+        );
+    }
+
+    #[test]
+    fn an_offline_row_is_refused_for_its_harness_or_its_place() {
+        let ended = row(
+            &[("harness", "codex"), ("process", "pid:4242")],
+            &[("hook_seen", now_ms() - 3_600_000)],
+        );
+        assert_eq!(
+            refused(&ended, "claude-code"),
+            (
+                ErrorCode::Unauthorized,
+                "lane is a codex endpoint: pass --harness codex".into()
+            )
+        );
+        assert_eq!(
+            refused(&ended, "codex").1,
+            "lane is placed in another tree or under another parent than this shell"
+        );
+        let job = row(&[("harness", "cli")], &[("connections", 1)]);
+        assert_eq!(
+            refused(&job, "codex").1,
+            "lane is placed in another tree or under another parent than this shell"
+        );
+    }
+
+    #[test]
+    fn a_waker_alone_does_not_make_the_session_live() {
+        let woken = row(
+            &[
+                ("harness", "codex"),
+                ("session", "pid:4242"),
+                ("wake", "codex-queue"),
+            ],
+            &[("wakers", 1), ("hook_seen", now_ms() - 3_600_000)],
+        );
+        assert_eq!(
+            refused(&woken, "codex").1,
+            "lane is placed in another tree or under another parent than this shell"
+        );
     }
 }
 

@@ -1507,7 +1507,7 @@ describe("broker, self bind and titles", () => {
     })
     const elsewhere = await connect(broker)
     const refused = elsewhere.hello({ claim: { handle: "bo", harness: "cli", lineage: [key(900)], exact: true }, brief: true })
-    await expect(refused).rejects.toThrow(/live claude-code session/)
+    await expect(refused).rejects.toThrow(/^me\/bo is held by a live session; a detached job can't act as it/)
     expect(await code(elsewhere.hello({ claim: { handle: "bo", harness: "cli", lineage: [key(900)], exact: true }, brief: true }))).toBe("unauthorized")
     const own = await connect(broker)
     expect(
