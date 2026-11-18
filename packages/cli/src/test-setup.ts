@@ -19,6 +19,8 @@ export const nativeCli = process.env.SCP_CLI_NATIVE === "1" && swarmBinary !== u
 const routeLog = process.env.SCP_ROUTE_LOG
 for (const key of Object.keys(process.env)) if (key.startsWith("SCP_")) delete process.env[key]
 process.env.SCP_HARNESS_DETECT = "0"
+// Unset runs native wherever a native swarm resolves, so the TypeScript runs say so; tests of the default unset it themselves.
+process.env.SCP_NATIVE = "0"
 // With a native MCP server binary given, every `swarm mcp` the tests start runs on it.
 if (nativeMcp) Object.assign(process.env, { SCP_NATIVE: "1", SCP_MCP_BIN: nativeMcp })
 if (nativeCli) Object.assign(process.env, { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary, ...(routeLog ? { SCP_ROUTE_LOG: routeLog } : {}) })

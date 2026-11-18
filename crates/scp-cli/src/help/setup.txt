@@ -12,10 +12,10 @@ swarm setup [--cowork] [--write] [--no-hooks] [--block-stop-on-unread] [--join a
   until it runs swarm join <name> (or calls relay_join); saved in ~/.config/scp/config.json with --write.
   --engine auto uses a matching native hook client when installed; ts forces Node, native requires it.
   SCP_ENGINE sets the default engine; SCP_HOOK_BIN overrides the native binary path.
-  With SCP_NATIVE=1 every mount runs the native swarm's mcp directly (no node stays resident), when one matching this
-  CLI is installed or SCP_SWARM_BIN names it, and the broker it starts is the native one; SCP_NATIVE=mcp mounts the
-  same native server but keeps the TypeScript broker. Without a native swarm the mounts run through node, as without
-  SCP_NATIVE.
+  Every mount runs the native swarm's mcp directly (no node stays resident) when one matching this CLI is installed or
+  SCP_SWARM_BIN names it, and the broker it starts is the native one; without one the mounts run through node.
+  SCP_NATIVE=0 keeps the node mounts and the TypeScript broker; SCP_NATIVE=mcp mounts the native server but keeps the
+  TypeScript broker.
   --undo removes only what setup added (it keeps a list in ~/.config/scp/setup.json), its hooks too unless --no-hooks.
   The Claude Code and codex hooks and every mount run swarm by absolute paths (a node script as absolute node plus its
   real path), since desktop apps start them without your shell's PATH; rerun setup after moving or upgrading node or swarm.

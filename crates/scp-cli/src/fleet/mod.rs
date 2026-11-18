@@ -528,7 +528,7 @@ fn status<'a>(call: &'a Call<'a>, opened: &'a Opened) -> LocalFuture<'a, Done> {
         }
         if engine == Some("native") && mounted.iter().any(|m| m.mode == "mcp") {
             note(&format!(
-                "! the broker is the native one, but mounts with SCP_NATIVE=mcp run on the TypeScript broker: {CLI_NAME} daemon restart without SCP_NATIVE=1 replaces it"
+                "! the broker is the native one, but mounts with SCP_NATIVE=mcp run on the TypeScript broker: SCP_NATIVE=mcp {CLI_NAME} daemon restart replaces it"
             ));
         }
         if let Err(fail) = reading(snapshot.get("endpoints"), "snapshot.endpoints", "filter") {

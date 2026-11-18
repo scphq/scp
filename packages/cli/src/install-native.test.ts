@@ -36,7 +36,7 @@ function swarm(engine: "ts" | "native", dir: string, args: string[], log?: strin
     CODEX_HOME: join(dir, ".codex"),
     XDG_CONFIG_HOME: join(dir, ".config"),
     PATH: `${bin}:${env.PATH}`,
-    ...(engine === "native" ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary!, ...(log ? { SCP_ROUTE_LOG: log } : {}) } : {}),
+    ...(engine === "native" ? { SCP_NATIVE: "1", SCP_SWARM_BIN: swarmBinary!, ...(log ? { SCP_ROUTE_LOG: log } : {}) } : { SCP_NATIVE: "0" }),
   })
   const result = Bun.spawnSync([process.execPath, "--no-env-file", entry, ...args], { env, cwd: join(dir, "proj"), stdout: "pipe", stderr: "pipe" })
   const strip = (text: string) => text.replaceAll(dir, "<home>").replace(/\.bak-\d{14}/g, ".bak-<stamp>")

@@ -184,7 +184,7 @@ export function daemonEnv(dir: string, base: Record<string, string | undefined> 
   return env
 }
 
-/** the broker for `dir`, detached, with a fixed environment and its stderr in broker.log; the native one under SCP_NATIVE=1 */
+/** the broker for `dir`, detached, with a fixed environment and its stderr in broker.log; the native one unless SCP_NATIVE is 0 or mcp */
 export function startDaemon(dir: string): void {
   privateDir(dir)
   const logFile = join(dir, "broker.log")

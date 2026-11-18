@@ -27,12 +27,14 @@ const root = mkdtempSync(join(process.env.HOME!, "native-"))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 
 const entry = join(import.meta.dir, "cli.ts")
-async function swarm(args: string[], env: Record<string, string>) {
+/** `swarm <args>` with `env` over this process's, a variable given as undefined left out */
+async function swarm(args: string[], env: Record<string, string | undefined>) {
+  const merged = Object.entries({ ...process.env, ...env }).filter((pair): pair is [string, string] => pair[1] !== undefined)
   const child = Bun.spawn([process.execPath, "--no-env-file", entry, ...args], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...env },
+    env: Object.fromEntries(merged),
   })
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { stdout, stderr, code }
@@ -84,21 +86,21 @@ describe("nativeSwarm", () => {
 })
 
 describe("SCP_NATIVE", () => {
-  test("only 1 turns it on: any other value runs nothing native, not even a version check", () => {
+  test("0 turns it off, running nothing native, not even a version check; unset, 1 and any other value turn it on", () => {
     const { bin, calls } = fakeSwarm("off", pkg.version)
-    for (const value of [undefined, "", "0", "true", "yes", " 1"]) expect(nativeBroker({ SCP_NATIVE: value, SCP_SWARM_BIN: bin })).toBeUndefined()
+    expect(nativeBroker({ SCP_NATIVE: "0", SCP_SWARM_BIN: bin })).toBeUndefined()
     expect(existsSync(calls)).toBe(false)
-    expect(nativeBroker({ SCP_NATIVE: "1", SCP_SWARM_BIN: bin })).toBe(bin)
-    expect(readFileSync(calls, "utf8")).toBe("--version\n")
+    for (const value of [undefined, "", "1", "true", " 1"]) expect(nativeBroker({ SCP_NATIVE: value, SCP_SWARM_BIN: bin })).toBe(bin)
+    expect(readFileSync(calls, "utf8")).toBe("--version\n".repeat(5))
   })
 
   test("mcp names the MCP server only: the broker stays the TypeScript one, with no version check", () => {
     const { bin, calls } = fakeSwarm("mcp-only", pkg.version)
-    expect([nativeMode({ SCP_NATIVE: "1" }), nativeMode({ SCP_NATIVE: "mcp" }), nativeMode({ SCP_NATIVE: "MCP" }), nativeMode({})]).toEqual([
+    expect([nativeMode({ SCP_NATIVE: "1" }), nativeMode({ SCP_NATIVE: "mcp" }), nativeMode({ SCP_NATIVE: "0" }), nativeMode({})]).toEqual([
       "all",
       "mcp",
       "off",
-      "off",
+      "all",
     ])
     expect(nativeBroker({ SCP_NATIVE: "mcp", SCP_SWARM_BIN: bin })).toBeUndefined()
     expect(existsSync(calls)).toBe(false)
@@ -132,9 +134,9 @@ describe("SCP_NATIVE", () => {
     }
   })
 
-  test("without it the on-demand broker is the TypeScript one, whatever SCP_SWARM_BIN names", async () => {
+  test("with SCP_NATIVE=0 the on-demand broker is the TypeScript one, whatever SCP_SWARM_BIN names", async () => {
     const { bin, calls } = fakeSwarm("unused", pkg.version)
-    const env = { SCP_DIR: join(root, "off-relay"), SCP_IDLE: "30s", SCP_SWARM_BIN: bin, SCP_NATIVE: "" }
+    const env = { SCP_DIR: join(root, "off-relay"), SCP_IDLE: "30s", SCP_SWARM_BIN: bin, SCP_NATIVE: "0" }
     try {
       const human = await swarm(["whoami", "--human"], env)
       expect([human.code, human.stderr]).toEqual([0, ""])
@@ -155,6 +157,19 @@ describe("SCP_NATIVE", () => {
       expect(human.stderr.match(new RegExp(FALLBACK.source, "gm"))).toHaveLength(1)
       const status = await swarm(["status"], env)
       expect(status.stdout).toContain(`(pid ${lockPid(env.SCP_DIR)}, engine ts)`)
+    } finally {
+      expect((await swarm(["daemon", "stop"], env)).code).toBe(0)
+    }
+  })
+
+  test("unset, a missing native binary falls back to the TypeScript broker without a word", async () => {
+    const env = { SCP_DIR: join(root, "quiet-relay"), SCP_IDLE: "30s", SCP_NATIVE: "", SCP_SWARM_BIN: join(root, "nowhere", "swarm"), SCP_ROUTE_LOG: "" }
+    try {
+      const human = await swarm(["whoami", "--human"], env)
+      expect([human.code, human.stderr]).toEqual([0, ""])
+      expect(human.stdout.split("\n")[0]).toBe("me/ (human, human)")
+      const status = await swarm(["status"], env)
+      expect([status.stdout.includes(`(pid ${lockPid(env.SCP_DIR)}, engine ts)`), status.stderr]).toEqual([true, ""])
     } finally {
       expect((await swarm(["daemon", "stop"], env)).code).toBe(0)
     }
@@ -182,11 +197,33 @@ describe("MCP mounts", () => {
   const launch = ["/opt/node", "/opt/swarm/cli.js"]
   const words = ["--harness", "claude", "--channels"]
 
-  test("without SCP_NATIVE=1 a mount runs swarm mcp through the launch and checks no binary", () => {
+  test("with SCP_NATIVE=0 a mount runs swarm mcp through the launch and checks no binary", () => {
     const { bin, calls } = fakeSwarm("mount-off", pkg.version)
-    for (const value of [undefined, "", "0", "true"])
-      expect(mcpMount(launch, words, { SCP_NATIVE: value, SCP_SWARM_BIN: bin })).toEqual({ argv: [...launch, "mcp", ...words], env: {}, native: false })
+    expect(mcpMount(launch, words, { SCP_NATIVE: "0", SCP_SWARM_BIN: bin })).toEqual({ argv: [...launch, "mcp", ...words], env: {}, native: false })
     expect(existsSync(calls)).toBe(false)
+  })
+
+  test("unset, a mount runs a matching native swarm directly and pins SCP_NATIVE=1; without one it runs through the launch, quietly", () => {
+    const { bin } = fakeSwarm("mount-default", pkg.version)
+    for (const value of [undefined, ""])
+      expect(mcpMount(launch, words, { SCP_NATIVE: value, SCP_SWARM_BIN: bin })).toEqual({
+        argv: [bin, "mcp", ...words],
+        env: { SCP_NATIVE: "1", SCP_SWARM_BIN: bin, SCP_CLI_ARGV: JSON.stringify(launch) },
+        native: true,
+      })
+    resetMountNote()
+    const notes: string[] = []
+    const write = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      notes.push(String(chunk))
+      return true
+    })
+    try {
+      expect(mcpMount(launch, words, { SCP_SWARM_BIN: join(root, "nowhere", "swarm") })).toEqual({ argv: [...launch, "mcp", ...words], env: {}, native: false })
+      expect(nativeBroker({ SCP_SWARM_BIN: join(root, "nowhere", "swarm") })).toBeUndefined()
+    } finally {
+      write.mockRestore()
+    }
+    expect(notes).toEqual([])
   })
 
   test("with SCP_NATIVE=1 and a matching native swarm the mount runs it directly, told the launch", () => {
@@ -298,6 +335,56 @@ describe.skipIf(!swarmBinary)("SCP_NATIVE=1 with the native swarm in SCP_SWARM_B
       expect(status.endpoints.find((e) => e.address === "me/lane")!.status).toEqual({ state: "blocked", note: "native" })
       expect((await swarm(["status"], env)).stdout).toContain(`(pid ${pid}, engine native)`)
       expect((await swarm(["daemon", "stop"], env)).stdout).toContain(`stopped the relay broker (pid ${pid})`)
+      expect(alive(pid)).toBe(false)
+    } finally {
+      if (pid !== undefined) stopStarted(pid)
+    }
+  })
+
+  test("unset, a command starts the native broker on demand, and SCP_NATIVE=0 commands talk to it", async () => {
+    const env = { SCP_DIR: join(root, "default-relay"), SCP_IDLE: "30s", SCP_NATIVE: undefined, SCP_SWARM_BIN: swarmBinary! }
+    let pid: number | undefined
+    try {
+      const human = await swarm(["whoami", "--human"], env)
+      expect([human.code, human.stderr]).toEqual([0, ""])
+      pid = lockPid(env.SCP_DIR)
+      expect(brokerEngine(pid)).toBe("native")
+      const ts = { ...env, SCP_NATIVE: "0" }
+      expect((await swarm(["set-status", "waiting", "native", "--as", "b"], env)).code).toBe(0)
+      expect((await swarm(["send", "--as", "a", "b", "from ts"], ts)).code).toBe(0)
+      const inbox = JSON.parse((await swarm(["inbox", "--as", "b", "--json"], env)).stdout) as { messages: { body: { text: string } }[] }
+      expect(inbox.messages.map((m) => m.body.text)).toEqual(["from ts"])
+      const status = JSON.parse((await swarm(["status", "--json"], ts)).stdout) as { broker: { pid: number; engine: string } }
+      expect(status.broker).toMatchObject({ pid, engine: "native" })
+    } finally {
+      if (pid !== undefined) {
+        await swarm(["daemon", "stop"], env)
+        stopStarted(pid)
+      }
+    }
+  })
+
+  test("a TypeScript broker started under SCP_NATIVE=0, as before an upgrade, keeps serving commands that run native by default", async () => {
+    const env = { SCP_DIR: join(root, "kept-ts-relay"), SCP_IDLE: "30s", SCP_SWARM_BIN: swarmBinary! }
+    let pid: number | undefined
+    try {
+      const started = await swarm(["whoami", "--human"], { ...env, SCP_NATIVE: "0" })
+      expect([started.code, started.stderr]).toEqual([0, ""])
+      pid = lockPid(env.SCP_DIR)
+      expect(brokerEngine(pid)).toBe("ts")
+      const unset = { ...env, SCP_NATIVE: undefined }
+      expect((await swarm(["set-status", "blocked", "kept", "--as", "lane"], unset)).code).toBe(0)
+      expect((await swarm(["send", "--as", "a", "lane", "after the upgrade"], unset)).code).toBe(0)
+      const inbox = JSON.parse((await swarm(["inbox", "--as", "lane", "--json"], unset)).stdout) as { messages: { body: { text: string } }[] }
+      expect(inbox.messages.map((m) => m.body.text)).toEqual(["after the upgrade"])
+      const status = JSON.parse((await swarm(["status", "--json"], unset)).stdout) as {
+        broker: { pid: number; engine: string }
+        endpoints: { address: string; status: { state: string; note: string } | null }[]
+      }
+      expect(status.broker).toMatchObject({ pid, engine: "ts" })
+      expect(status.endpoints.find((e) => e.address === "me/lane")!.status).toEqual({ state: "blocked", note: "kept" })
+      expect(lockPid(env.SCP_DIR)).toBe(pid)
+      expect((await swarm(["daemon", "stop"], unset)).stdout).toContain(`stopped the relay broker (pid ${pid})`)
       expect(alive(pid)).toBe(false)
     } finally {
       if (pid !== undefined) stopStarted(pid)

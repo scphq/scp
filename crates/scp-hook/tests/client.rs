@@ -676,9 +676,21 @@ fn native_broker_starts_directly() {
         hook::native_broker(&env(&[("SCP_NATIVE", "1")]), Some(own.clone())),
         Some(own)
     );
+    assert_eq!(
+        hook::native_broker(&env(&[("SCP_SWARM_BIN", bin)]), None),
+        Some(swarm.clone())
+    );
+    assert_eq!(
+        hook::native_broker(&env(&[]), Some(temp.0.join("scp-hook"))),
+        Some(swarm.clone())
+    );
+    assert_eq!(
+        hook::native_broker(&env(&[]), Some(temp.0.join("nowhere").join("scp-hook"))),
+        None
+    );
     for pairs in [
         vec![("SCP_NATIVE", "mcp"), ("SCP_SWARM_BIN", bin)],
-        vec![("SCP_SWARM_BIN", bin)],
+        vec![("SCP_NATIVE", "0"), ("SCP_SWARM_BIN", bin)],
         vec![
             ("SCP_NATIVE", "1"),
             ("SCP_SWARM_BIN", launcher.to_str().unwrap()),
@@ -752,7 +764,12 @@ fn native_broker_starts_directly() {
         ),
         None
     );
-    for (mode, first) in [("1", "native daemon"), ("mcp", "launcher prefix daemon")] {
+    for (mode, first) in [
+        (Some("1"), "native daemon"),
+        (None, "native daemon"),
+        (Some("mcp"), "launcher prefix daemon"),
+        (Some("0"), "launcher prefix daemon"),
+    ] {
         let _ = fs::remove_file(temp.0.join("broker.log"));
         let _ = fs::remove_file(temp.0.join("relay.sock"));
         let dir = temp.0.clone();
@@ -784,19 +801,21 @@ fn native_broker_starts_directly() {
             ])
             .env_clear()
             .env("SCP_DIR", &temp.0)
-            .env("SCP_NATIVE", mode)
             .env("SCP_SWARM_BIN", &swarm)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(mode) = mode {
+            command.env("SCP_NATIVE", mode);
+        }
         assert_eq!(finish(command, b"{}").stdout, b"started\n");
         server.join().unwrap();
-        if mode == "1" {
+        if first == "native daemon" {
             let log = fs::read_to_string(temp.0.join("broker.log")).unwrap();
             let lines: Vec<_> = log.lines().collect();
             let argv: Vec<String> = serde_json::from_str(lines[1]).unwrap();
             assert_eq!(argv, ["/bin/sh", launcher.to_str().unwrap(), "prefix"]);
-            assert_eq!(&lines[2..4], ["1", bin]);
+            assert_eq!(&lines[2..4], [mode.unwrap_or_default(), bin]);
         }
     }
 }

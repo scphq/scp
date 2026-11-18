@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use toml::{Table, Value as Toml};
 
-pub use scp_mcp::spawn::program_at;
+pub use scp_mcp::spawn::{native_asked, native_mode, program_at};
 
 const SERVER: &str = "scp";
 /// the words of Codex's `swarm mcp` mount
@@ -162,15 +162,6 @@ pub fn mcp_words(argv: &[String], fallback: &[String]) -> Vec<String> {
     }
 }
 
-/// what `SCP_NATIVE` runs natively: `all` for 1, `mcp` for mcp, else off
-pub fn native_mode(env: &Env) -> &'static str {
-    match env.get("SCP_NATIVE").map(String::as_str) {
-        Some("1") => "all",
-        Some("mcp") => "mcp",
-        _ => "off",
-    }
-}
-
 /// an MCP server a harness runs: its command line and the variables the mount adds to its environment
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mount {
@@ -216,7 +207,7 @@ pub fn mount_with(bin: Option<&str>, launch: &[String], words: &[String], env: &
 /// the variables a native mount sets, which a mount through Node drops
 pub const NATIVE_MOUNT_VARS: [&str; 3] = ["SCP_NATIVE", "SCP_SWARM_BIN", "SCP_CLI_ARGV"];
 
-/// the mount that runs `swarm mcp <words>`: under `SCP_NATIVE=1` or `mcp` the native `swarm` itself, told the words that start this CLI
+/// the mount that runs `swarm mcp <words>`: unless `SCP_NATIVE=0`, the native `swarm` itself, told the words that start this CLI
 /// (`launch`) and the mode; otherwise `launch` followed by `mcp`
 pub fn mcp_mount(launch: &[String], words: &[String], env: &Env) -> Mount {
     mount_with(native_mount_bin(env).as_deref(), launch, words, env)
@@ -311,13 +302,14 @@ fn platform() -> (&'static str, &'static str, Option<String>) {
 
 static MOUNT_NOTED: AtomicBool = AtomicBool::new(false);
 
-/// with `SCP_NATIVE=1` or `mcp`, the native `swarm` whose `swarm mcp` a mount runs directly; a missing or mismatched one is noted once and mounts run through Node
+/// unless `SCP_NATIVE=0`, the native `swarm` whose `swarm mcp` a mount runs directly; without a matching one mounts run through Node,
+/// noted once when `SCP_NATIVE` asked for native
 pub fn native_mount_bin(env: &Env) -> Option<String> {
     if native_mode(env) == "off" {
         return None;
     }
     let bin = native_swarm(env);
-    if bin.is_none() && !MOUNT_NOTED.swap(true, Ordering::Relaxed) {
+    if bin.is_none() && native_asked(env) && !MOUNT_NOTED.swap(true, Ordering::Relaxed) {
         let (os, arch, key) = platform();
         let fix = match key {
             Some(key) => format!("install @scp-dev/native-{key} or set SCP_SWARM_BIN"),
@@ -363,8 +355,8 @@ fn pinned_mode(mount: Option<&Table>, env: &Env) -> Vec<(String, String)> {
     }
 }
 
-/// Pass shim variables by name to keep the grant out of argv. Headless Codex needs tool approval unless the mount sets it. Under
-/// SCP_NATIVE=1 or mcp the server is the native `bin`'s `swarm mcp`, with the mount's words when there is one; a mount whose command is
+/// Pass shim variables by name to keep the grant out of argv. Headless Codex needs tool approval unless the mount sets it. Unless
+/// SCP_NATIVE=0 the server is the native `bin`'s `swarm mcp`, with the mount's words when there is one; a mount whose command is
 /// gone runs this CLI's instead.
 pub fn codex_overrides(
     env: &Env,

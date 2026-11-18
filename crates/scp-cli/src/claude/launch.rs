@@ -163,7 +163,7 @@ fn as_object(vars: &Json) -> Json {
 }
 
 /// The scp server of a background session: the user's mount with `--channels`, else this CLI's (`launch`), with the name, parent
-/// request and grant in its env, and the session a resume continues as `SCP_HARNESS_ORIGIN`. Under SCP_NATIVE=1 it runs the native
+/// request and grant in its env, and the session a resume continues as `SCP_HARNESS_ORIGIN`. Unless SCP_NATIVE=0 it runs the native
 /// `swarm mcp` directly, with the user's mount's words when it has `--channels`, as it does through Node when the mount's command is
 /// gone. It has the mount's name, so it replaces the mount for that session; the grant is set even when empty, so one in the daemon's
 /// environment never applies

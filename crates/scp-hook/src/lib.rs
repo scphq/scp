@@ -314,10 +314,13 @@ fn executable_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.mode() & 0o111 != 0)
 }
 
-/// under `SCP_NATIVE=1`, the native `swarm` that runs the broker itself: `$SCP_SWARM_BIN`, else this executable when it is
-/// `swarm`, else the `swarm` next to it in the native package, when its `--version` is this hook's
+/// unless `SCP_NATIVE` is 0 or mcp, the native `swarm` that runs the broker itself: `$SCP_SWARM_BIN`, else this executable when it
+/// is `swarm`, else the `swarm` next to it in the native package, when its `--version` is this hook's
 pub fn native_broker(env: &HashMap<String, String>, exe: Option<PathBuf>) -> Option<PathBuf> {
-    if env.get("SCP_NATIVE").is_none_or(|mode| mode != "1") {
+    if env
+        .get("SCP_NATIVE")
+        .is_some_and(|mode| mode == "0" || mode == "mcp")
+    {
         return None;
     }
     let bin = match nonempty(env, "SCP_SWARM_BIN") {

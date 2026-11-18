@@ -44,6 +44,16 @@ function linuxGlibc(): boolean {
   return Boolean(header?.glibcVersionRuntime)
 }
 
+/** what `SCP_NATIVE` runs natively: `off` for 0 (this CLI, its broker and MCP server), `mcp` for mcp (the MCP server alone, on this CLI's broker), else `all`, unset included */
+export type NativeMode = "all" | "mcp" | "off"
+
+export function nativeMode(env: Env): NativeMode {
+  return env.SCP_NATIVE === "0" ? "off" : env.SCP_NATIVE === "mcp" ? "mcp" : "all"
+}
+
+/** whether `SCP_NATIVE` has a value: a missing native swarm is then noted, where by default this CLI stands in for it quietly */
+export const nativeAsked = (env: Env): boolean => Boolean(env.SCP_NATIVE)
+
 /** the verb of `argv`, past the `--as X`, `--as=X` and `--human` the CLI moves after it */
 export function verbOf(argv: string[]): string | undefined {
   let i = 0
@@ -125,12 +135,14 @@ function execveOf(env: Env): Execve | undefined {
 /** which CLI runs `argv`: the native swarm for a verb it registers, else this one, saying why */
 export function decide(argv: string[], env: Env, version = pkg.version, locate = nativeBin, load = loadRegistry): Decision {
   if (env.SCP_ROUTED === "ts") return { engine: "ts", reason: "routed" }
-  if (env.SCP_NATIVE !== "1") return { engine: "ts", reason: "off" }
+  if (nativeMode(env) !== "all") return { engine: "ts", reason: "off" }
   const verb = verbOf(argv) ?? "help"
   const forced = (env.SCP_NATIVE_TS ?? "").split(/[\s,]+/).filter(Boolean)
   if (forced.includes("*") || forced.includes(verb)) return { engine: "ts", reason: "forced" }
   // a native hook gives way to this CLI on a broker that runs no hooks, whose walk would start at a router still standing above it
   if (verb === "hook" && !execveOf(env)) return { engine: "ts", reason: "spawn" }
+  // by default a runtime without execve keeps the command here rather than stay resident above the native swarm
+  if (!nativeAsked(env) && typeof (process as { execve?: unknown }).execve !== "function") return { engine: "ts", reason: "noexecve" }
   const bin = locate(env)
   if (!bin) return { engine: "ts", reason: "missing" }
   const registry = load(bin, env, verb === "hook" ? HOOK_PROBE_MS : PROBE_MS)
@@ -211,7 +223,7 @@ function handOff(bin: string, argv: string[], env: Env): Promise<never> {
 }
 
 /**
- * under `SCP_NATIVE=1`, hands a verb the native swarm registers to it: in place of this process (`process.execve`) where the runtime has
+ * unless `SCP_NATIVE` is 0 or mcp, hands a verb the native swarm registers to it: in place of this process (`process.execve`) where the runtime has
  * it, else as a child; returns when this CLI runs the command. `SCP_ROUTE_EXEC=spawn` takes the child path where execve exists too.
  */
 export async function route(argv: string[] = process.argv.slice(2), env: Env = process.env): Promise<void> {

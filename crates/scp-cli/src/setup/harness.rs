@@ -5,7 +5,7 @@ use super::files::{
     WriteOptions, exists, fs_error, read_json, read_rewritable_json, read_toml, write_file,
 };
 use crate::fleet::json::Json;
-use crate::fleet::mounts::{entry_argv, native_mode};
+use crate::fleet::mounts::{entry_argv, mount_mode};
 use crate::spawn::argv::{Mount, executable, mount_with};
 use scp_core::protocol::CLI_NAME;
 use scp_mcp::identity::home_dir;
@@ -167,9 +167,9 @@ pub fn entry_vars(harness: &str, entry: Option<&Json>) -> Json {
     )
 }
 
-/// whether an entry's variables are the ones a native mount sets: setup wrote it under SCP_NATIVE=1 or mcp
+/// whether an entry's variables are the ones a native mount sets: SCP_NATIVE=1 or mcp, with SCP_CLI_ARGV
 pub fn native_vars(vars: &Json) -> bool {
-    native_mode(vars.get("SCP_NATIVE").and_then(Json::as_str)) != "off"
+    mount_mode(vars.get("SCP_NATIVE").and_then(Json::as_str)) != "off"
         && vars.get("SCP_CLI_ARGV").is_some()
 }
 

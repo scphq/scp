@@ -134,6 +134,7 @@ fn mcp_serves_stdio_in_process() {
     let mut command = temp.swarm(&["mcp", "--harness", "claude"]);
     command
         .env("SCP_CLI_ARGV", r#"["/usr/bin/false"]"#)
+        .env("SCP_NATIVE", "0")
         .env("SCP_HARNESS_DETECT", "0");
     let mut child = command.spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -494,7 +495,7 @@ fn a_broker_with_no_cli_runs_the_claude_bg_task_itself() {
     assert!(listed, "no claude-bg task ran");
 }
 
-fn cold_start(temp: &Temp, mode: &str) -> Option<String> {
+fn cold_start(temp: &Temp, mode: Option<&str>) -> Option<String> {
     let script = temp.0.join("cli.sh");
     let started = temp.0.join("started");
     fs::write(
@@ -509,8 +510,10 @@ fn cold_start(temp: &Temp, mode: &str) -> Option<String> {
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let mut command = temp.swarm(&["mcp", "--harness", "claude"]);
+    if let Some(mode) = mode {
+        command.env("SCP_NATIVE", mode);
+    }
     command
-        .env("SCP_NATIVE", mode)
         .env(
             "SCP_CLI_ARGV",
             serde_json::to_string(&[script.to_str().unwrap()]).unwrap(),
@@ -548,7 +551,7 @@ fn cold_start(temp: &Temp, mode: &str) -> Option<String> {
 #[test]
 fn scp_native_mcp_cold_starts_the_cli_broker_and_never_a_native_one() {
     let temp = Temp::new();
-    assert_eq!(cold_start(&temp, "mcp").as_deref(), Some("daemon"));
+    assert_eq!(cold_start(&temp, Some("mcp")).as_deref(), Some("daemon"));
     assert!(!temp.0.join("r/broker.lock").exists());
     for args in [
         &["daemon"][..],
@@ -567,6 +570,16 @@ fn scp_native_mcp_cold_starts_the_cli_broker_and_never_a_native_one() {
 #[test]
 fn scp_native_1_cold_starts_the_native_broker() {
     let temp = Temp::new();
-    assert_eq!(cold_start(&temp, "1"), None);
+    assert_eq!(cold_start(&temp, Some("1")), None);
     assert!(temp.0.join("r/broker.lock").exists());
+}
+
+#[test]
+fn unset_scp_native_cold_starts_the_native_broker_and_0_the_cli_one() {
+    let temp = Temp::new();
+    assert_eq!(cold_start(&temp, None), None);
+    assert!(temp.0.join("r/broker.lock").exists());
+    let temp = Temp::new();
+    assert_eq!(cold_start(&temp, Some("0")).as_deref(), Some("daemon"));
+    assert!(!temp.0.join("r/broker.lock").exists());
 }

@@ -268,9 +268,9 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
   may always reply in the thread to a message it got; a reply to another message of the thread is checked as a send.
   ${CLI_NAME} daemon [--idle DURATION] [--policy FILE]   run the broker in the foreground (it otherwise starts on demand)
   ${CLI_NAME} daemon stop|restart                stop the running broker, or replace it with a fresh one
-  $SCP_NATIVE=1 runs the native broker and MCP server, and the mounts ${CLI_NAME} writes run the native ${CLI_NAME} mcp directly;
-  $SCP_NATIVE=mcp runs only the native MCP server, on the TypeScript broker; ${CLI_NAME} status names the broker's engine
-  and each harness mount's MCP engine
+  with the native ${CLI_NAME} installed it runs the commands, the broker and the MCP server, and the mounts ${CLI_NAME} writes run
+  its mcp directly; $SCP_NATIVE=0 keeps all of them on TypeScript, $SCP_NATIVE=mcp only the MCP server native, on the
+  TypeScript broker; ${CLI_NAME} status names the broker's engine and each harness mount's MCP engine
 
 agent sessions:
   ${CLI_NAME} mcp [--as NAME] [--harness H] [--channels] [--cowork-only]   the MCP shim a harness mounts: relay tools for one agent, never me/
@@ -1155,7 +1155,7 @@ async function runVerb(
       if (line) out(line)
       if (engine === "native" && mcp.mounts.some((mount) => mount.mode === "mcp"))
         note(
-          `! the broker is the native one, but mounts with SCP_NATIVE=mcp run on the TypeScript broker: ${CLI_NAME} daemon restart without SCP_NATIVE=1 replaces it`,
+          `! the broker is the native one, but mounts with SCP_NATIVE=mcp run on the TypeScript broker: SCP_NATIVE=mcp ${CLI_NAME} daemon restart replaces it`,
         )
       const quotedAgents = printSummary(snapshot, me, values.all === true)
       const activity = values.activity === true && snapshot.activity.length > 0

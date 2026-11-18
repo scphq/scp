@@ -119,8 +119,8 @@ export function toml(value: unknown): string {
 }
 
 /**
- * Pass shim variables by name to keep the grant out of argv. Headless Codex needs tool approval unless the mount sets it. Under SCP_NATIVE=1
- * the server is the native `swarm mcp`, with the mount's words when there is one; a mount whose command is gone runs this CLI's instead.
+ * Pass shim variables by name to keep the grant out of argv. Headless Codex needs tool approval unless the mount sets it. With a native
+ * swarm the server is the native `swarm mcp`, with the mount's words when there is one; a mount whose command is gone runs this CLI's instead.
  */
 export function codexOverrides(env: Env, mount: Json | undefined, self: string[]): string[] {
   const kept = Array.isArray(mount?.env_vars) ? (mount.env_vars as unknown[]) : []

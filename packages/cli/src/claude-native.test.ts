@@ -47,6 +47,7 @@ function machine(engine: Engine, mount?: string[]) {
     XDG_STATE_HOME: join(root, ".state"),
     SCP_DIR: join(root, "relay"),
     SCP_HARNESS_DETECT: "0",
+    SCP_NATIVE: "0",
     SCP_CLI_ARGV: JSON.stringify(SELF),
     ...(process.env.SCP_ROUTE_LOG ? { SCP_ROUTE_LOG: process.env.SCP_ROUTE_LOG } : {}),
   }
@@ -61,7 +62,7 @@ async function run(m: Machine, args: string[], extra: Record<string, string> = {
   const program = m.engine === "native" ? [resolve(swarmBinary!), "claude", ...args] : [process.execPath, "--no-env-file", entry, "claude", ...args]
   const env = { ...m.env, ...extra }
   if (m.engine === "routed") Object.assign(env, { SCP_NATIVE: "1", SCP_SWARM_BIN: resolve(swarmBinary!) })
-  if (m.engine === "ts" && env.SCP_NATIVE) env.SCP_NATIVE_TS = "claude"
+  if (m.engine === "ts") env.SCP_NATIVE_TS = "claude"
   const shell = Bun.spawn(["sh", "-c", 'read go; "$0" "$@"; exit $?', ...program], { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe", env })
   const held = agent && broker ? await RelayClient.connect(broker.socket) : undefined
   const key = processKey(shell.pid)
