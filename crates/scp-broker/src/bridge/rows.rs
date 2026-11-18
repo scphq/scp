@@ -1473,14 +1473,14 @@ impl Core {
     /// the local rows the bridge may mirror, oldest first, with their views
     pub async fn local_rows(&self, historic: bool) -> Result<Vec<(Row, Value)>, RpcError> {
         let rows = self
-            .store
-            .all(
-                &format!("SELECT * FROM endpoints WHERE remote IS NULL AND kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (? OR kind != 'agent' OR {} >= ?) ORDER BY created_at, id", crate::views::ACTIVE_SQL),
+            .rows_by_id(
+                &format!("SELECT id FROM endpoints WHERE remote IS NULL AND kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (? OR kind != 'agent' OR {} >= ?) ORDER BY created_at, id", crate::views::ACTIVE_SQL),
                 &[SqlValue::Int(i64::from(historic)), SqlValue::Int(now_ms() - 86_400_000)],
             )
             .await?;
         let mut out = Vec::new();
         for row in rows {
+            let row = std::sync::Arc::unwrap_or_clone(row);
             let view = self.view(&row).await?;
             if !historic
                 && view["kind"] == "agent"

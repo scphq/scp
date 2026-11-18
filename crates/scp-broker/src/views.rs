@@ -5,6 +5,7 @@ use crate::claims::valid_handle;
 use crate::core::{Core, integer, now_ms, text, timestamp};
 use crate::proto::RpcError;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::authority::Actor;
 use crate::state::ConnectionId;
@@ -51,6 +52,19 @@ pub fn session_presence(row: &Row, now: i64) -> &'static str {
     }
 }
 
+/// whether the in-process subagent `row` belongs to its root's current session (`sub:<id>:<root session>`)
+fn current_subagent(row: &Row, root: Option<&Row>) -> bool {
+    let (Some(session), Some(root)) = (text(row, "session"), root) else {
+        return false;
+    };
+    let owner = session
+        .get(4..)
+        .and_then(|rest| rest.find(':').map(|at| &rest[at + 1..]))
+        .unwrap_or(session);
+    let key = text(root, "session").or(text(root, "id")).unwrap_or("");
+    owner == key || (session.chars().count() == 128 && key.starts_with(owner))
+}
+
 /// A local row's activity in SQL, as a view's `active_at` reads it.
 pub const ACTIVE_SQL: &str = "MAX(created_at, COALESCE(last_seen,0), COALESCE(hook_seen,0), COALESCE(last_received_at,0), COALESCE(mail_at,0))";
 
@@ -66,6 +80,23 @@ impl Core {
         }
     }
 
+    /// the rows of the endpoints whose ids `statement` selects, in its order, taken from the in-memory table
+    pub async fn rows_by_id(
+        &self,
+        statement: &str,
+        params: &[SqlValue],
+    ) -> Result<Vec<Arc<Row>>, RpcError> {
+        let ids = self.store.all(statement, params).await?;
+        let rows = self.endpoints.snapshot(self.store.as_ref()).await?.rows;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids.iter().filter_map(|row| text(row, "id")) {
+            match rows.get(id) {
+                Some(row) => out.push(row.clone()),
+                None => out.extend(self.by_id(id).await?.map(Arc::new)),
+            }
+        }
+        Ok(out)
+    }
     pub async fn by_id(&self, id: &str) -> Result<Option<Row>, RpcError> {
         Ok(self
             .store
@@ -195,9 +226,10 @@ impl Core {
         let viewer_is_human = peeker
             .as_ref()
             .is_some_and(|row| viewer.is_some() && text(row, "kind") == Some("human"));
-        let rows = self.store.all(&format!("SELECT * FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (remote IS NULL OR substr(remote,1,1) != '@') AND (? OR kind != 'agent' OR remote IS NOT NULL OR {ACTIVE_SQL} >= ?) ORDER BY created_at, id"), &[SqlValue::Int(i64::from(params.get("all") == Some(&Value::Bool(true)))), SqlValue::Int(self.active_floor(params.get("historic") == Some(&Value::Bool(true))))]).await?;
+        let rows = self.rows_by_id(&format!("SELECT id FROM endpoints WHERE kind != 'system' AND substr(handle,1,5) != 'gone:' AND substr(handle,1,6) != '_gone_' AND (remote IS NULL OR substr(remote,1,1) != '@') AND (? OR kind != 'agent' OR remote IS NOT NULL OR {ACTIVE_SQL} >= ?) ORDER BY created_at, id"), &[SqlValue::Int(i64::from(params.get("all") == Some(&Value::Bool(true)))), SqlValue::Int(self.active_floor(params.get("historic") == Some(&Value::Bool(true))))]).await?;
         let mut endpoints = Vec::new();
         for row in rows {
+            let row = Arc::unwrap_or_clone(row);
             if ["harness", "kind"].iter().any(|k| {
                 params
                     .get(*k)
@@ -472,9 +504,9 @@ impl Core {
         let now = now_ms();
         let live = crate::world::LIVE_HANDLE;
         let rows = self
-            .store
-            .all(&format!("SELECT * FROM endpoints WHERE kind = 'agent' AND {live} AND remote IS NULL AND (session IS NULL OR substr(session,1,4) != 'sub:') ORDER BY handle"), &[])
+            .rows_by_id(&format!("SELECT id FROM endpoints WHERE kind = 'agent' AND {live} AND remote IS NULL AND (session IS NULL OR substr(session,1,4) != 'sub:') ORDER BY handle"), &[])
             .await?;
+        let all = self.endpoints.snapshot(self.store.as_ref()).await?.rows;
         let mut children = std::collections::HashMap::new();
         for row in self.store.all(&format!("SELECT parent_ep AS parent, COUNT(*) AS n FROM endpoints WHERE parent_ep IS NOT NULL AND {live} AND (session IS NULL OR substr(session,1,4) != 'sub:') GROUP BY parent_ep"), &[]).await? {
             if let (Some(parent), Some(n)) = (text(&row, "parent"), integer(&row, "n")) {
@@ -482,9 +514,13 @@ impl Core {
             }
         }
         let mut subagents = std::collections::HashMap::<String, i64>::new();
-        for row in self.store.all(&format!("SELECT * FROM endpoints WHERE kind = 'agent' AND parent_ep IS NOT NULL AND substr(session,1,4) = 'sub:' AND {live} AND (status_state IS NULL OR status_state != 'done')"), &[]).await? {
+        for row in self.rows_by_id(&format!("SELECT id FROM endpoints WHERE kind = 'agent' AND parent_ep IS NOT NULL AND substr(session,1,4) = 'sub:' AND {live} AND (status_state IS NULL OR status_state != 'done')"), &[]).await? {
             let Some(parent) = text(&row, "parent_ep") else { continue };
-            if self.current_subagent(&row, parent).await? {
+            let root = match all.get(parent) {
+                Some(root) => Some(root.clone()),
+                None => self.by_id(parent).await?.map(Arc::new),
+            };
+            if current_subagent(&row, root.as_deref()) {
                 *subagents.entry(parent.to_owned()).or_default() += 1;
             }
         }
@@ -499,9 +535,13 @@ impl Core {
         let historic_after = self.limits.get("historicAfterS");
         let mut agents = Vec::with_capacity(rows.len());
         for row in &rows {
+            let row = row.as_ref();
             let id = text(row, "id").unwrap_or_default();
             let parent = match text(row, "parent_ep") {
-                Some(parent) => self.by_id(parent).await?.as_ref().map(address),
+                Some(parent) => match all.get(parent) {
+                    Some(parent) => Some(address(parent)),
+                    None => self.by_id(parent).await?.as_ref().map(address),
+                },
                 None => text(row, "parent_addr").map(str::to_owned),
             };
             let at = |key: &str| integer(row, key).unwrap_or(0);
@@ -535,22 +575,6 @@ impl Core {
             }));
         }
         Ok(json!({"agents": agents}))
-    }
-
-    /// whether the in-process subagent `row` belongs to its root `parent`'s current session (`sub:<id>:<root session>`)
-    async fn current_subagent(&self, row: &Row, parent: &str) -> Result<bool, RpcError> {
-        let Some(session) = text(row, "session") else {
-            return Ok(false);
-        };
-        let Some(root) = self.by_id(parent).await? else {
-            return Ok(false);
-        };
-        let owner = session
-            .get(4..)
-            .and_then(|rest| rest.find(':').map(|at| &rest[at + 1..]))
-            .unwrap_or(session);
-        let key = text(&root, "session").or(text(&root, "id")).unwrap_or("");
-        Ok(owner == key || (session.chars().count() == 128 && key.starts_with(owner)))
     }
 
     pub async fn log_for(
