@@ -37,6 +37,12 @@
   },
   {
     "type": "index",
+    "name": "endpoints_harness_session",
+    "tbl_name": "endpoints",
+    "sql": "CREATE INDEX endpoints_harness_session ON endpoints (harness_session) WHERE harness_session IS NOT NULL"
+  },
+  {
+    "type": "index",
     "name": "endpoints_hooked",
     "tbl_name": "endpoints",
     "sql": "CREATE INDEX endpoints_hooked ON endpoints (process) WHERE hook_seen IS NOT NULL AND process IS NOT NULL"
@@ -118,6 +124,12 @@
     "name": "messages_created",
     "tbl_name": "messages",
     "sql": "CREATE INDEX messages_created ON messages (created_at)"
+  },
+  {
+    "type": "index",
+    "name": "messages_expires",
+    "tbl_name": "messages",
+    "sql": "CREATE INDEX messages_expires ON messages (expires_at)"
   },
   {
     "type": "index",

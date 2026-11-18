@@ -254,18 +254,26 @@ impl Core {
     }
     pub async fn end_exited(&self) -> Result<(), RpcError> {
         let rows=self.store.all("SELECT id,process FROM endpoints WHERE kind = 'agent' AND connections = 0 AND hook_seen IS NOT NULL AND process IS NOT NULL",&[]).await?;
+        let mut alive = std::collections::HashMap::new();
         for row in rows {
-            if let Some(key) = text(&row, "process")
-                && let Some(pid) = key
-                    .strip_prefix("pid:")
-                    .and_then(|key| key.split(':').next())
-                    .filter(|pid| {
-                        !pid.is_empty()
-                            && pid.bytes().all(|byte| byte.is_ascii_digit())
-                            && *pid != "0"
-                    })
-                && !self.procs.alive(&format!("pid:{pid}")).await
-            {
+            let Some(pid) = text(&row, "process")
+                .and_then(|key| key.strip_prefix("pid:"))
+                .and_then(|key| key.split(':').next())
+                .filter(|pid| {
+                    !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()) && *pid != "0"
+                })
+            else {
+                continue;
+            };
+            let running = match alive.get(pid) {
+                Some(running) => *running,
+                None => {
+                    let running = self.procs.alive(&format!("pid:{pid}")).await;
+                    alive.insert(pid.to_owned(), running);
+                    running
+                }
+            };
+            if !running {
                 self.store.all("UPDATE endpoints SET hook_seen = NULL, hook_ended = ?, session = NULL WHERE id = ? AND connections = 0", &[SqlValue::Int(now_ms()),opt(text(&row,"id"))]).await?;
             }
         }
