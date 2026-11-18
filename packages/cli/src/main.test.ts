@@ -1695,7 +1695,9 @@ describe("swarm, from a hooks-only session's shell", () => {
     const before = addresses()
     const refused = await swarm(["whoami", "--as", "other-lane"], env)
     expect(refused.code).not.toBe(0)
-    expect(refused.stderr).toContain("held by a live claude-code session")
+    expect(refused.stderr).toContain(
+      "me/other-lane is held by a live session; a detached job can't act as it. Give the job its own name, e.g. SCP_UNDER=other-lane swarm send --as other-lane-wake ...",
+    )
     expect(addresses()).toEqual(before)
     session.kill()
   })

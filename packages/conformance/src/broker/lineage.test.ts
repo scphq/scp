@@ -1,7 +1,7 @@
 import { expect } from "bun:test";
 import { waitFor } from "../targets";
 import { type BrokerFixture, brokerSuite, test } from "./suite";
-import { refusal, type View } from "./wire";
+import { refusal, type View, WireError } from "./wire";
 
 const key = (pid: number) => `pid:${pid}:Thu-Oct-15-10:00:00-2026`;
 const claim = (pid: number) => ({ process: key(pid), session: key(pid), lineage: [key(pid)] });
@@ -147,6 +147,77 @@ brokerSuite("broker lineage", (start) => {
     expect(lone.hello.endpoint?.parent).toBeNull();
     const rows = await (await broker.human()).request<{ rows: { event: string }[] }>("log");
     expect(rows.rows.filter((r) => r.event === "claim_under_refused")).not.toHaveLength(0);
+  });
+
+  const job = (broker: BrokerFixture, handle: string, harness: string, lineage: number[], under?: string) =>
+    broker.agent(handle, harness, { brief: true }, { exact: true, lineage: lineage.map(key), ...(under ? { under } : {}) });
+  const refused = async (promise: Promise<unknown>) => {
+    try {
+      await promise;
+    } catch (error) {
+      if (error instanceof WireError) return [error.code, error.frame.error?.message];
+      throw error;
+    }
+    return undefined;
+  };
+
+  test("an exact claim with under re-homes a root only --as claims held where a new endpoint of the claim would sit, audited", async () => {
+    const broker = await start();
+    await broker.agent("lead", "claude-code", {}, claim(1));
+    const lane = await broker.agent("lane", "codex", {}, { ...claim(2), lineage: [key(2), key(1)] });
+    expect(lane.hello.endpoint).toMatchObject({ parent: "me/lead", depth: 1 });
+    const placed = await job(broker, "lane-job", "codex", [900]);
+    expect(placed.hello.endpoint).toMatchObject({ parent: null, depth: 0 });
+    await placed.request("rules_set", { out: ["tree:parent"] });
+    const narrowed = await (await broker.human()).request<{ rules: unknown }>("rules", { endpoint: "lane-job" });
+    expect(narrowed.rules).toMatchObject({ out: ["tree:parent"] });
+    await placed.close();
+    expect((await job(broker, "lane-job", "codex", [901, 2], "me/lane")).hello.endpoint).toMatchObject({ id: placed.id, parent: "me/lane", depth: 2 });
+    expect(await (await broker.human()).request("rules", { endpoint: "lane-job" })).toMatchObject({ rules: narrowed.rules });
+    const linked = await job(broker, "lane-cron", "codex", [902]);
+    await linked.close();
+    expect((await job(broker, "lane-cron", "codex-desktop", [903], "me/lane")).hello.endpoint).toMatchObject({ id: linked.id, parent: "me/lane", depth: 2 });
+    const human = await broker.human();
+    const log = await human.request<{ rows: { event: string; detail: Record<string, unknown> }[] }>("log");
+    expect(log.rows.filter((row) => row.event === "claim_rehome").map((row) => row.detail)).toEqual([
+      { target: "me/lane-job", parent: "me/lane" },
+      { target: "me/lane-cron", parent: "me/lane" },
+    ]);
+  });
+
+  test("an exact claim with under re-homes no row a session holds, nor one placed elsewhere, nor under an agent it may not link under", async () => {
+    const broker = await start();
+    await broker.agent("lead", "claude-code", {}, claim(1));
+    const lane = await broker.agent("lane", "codex", {}, { ...claim(2), lineage: [key(2), key(1)] });
+    const running = `pid:${process.ppid}`;
+    const busy = await broker.hook({ handle: "busy", harness: "codex", process: running, session: running, lineage: [running] });
+    await busy.request("event", { kind: "tool" });
+    await busy.close();
+    expect(await refused(job(broker, "busy", "codex", [900], "me/lane"))).toEqual([
+      "unauthorized",
+      "me/busy is held by a live session; a detached job can't act as it. Give the job its own name, e.g. SCP_UNDER=busy swarm send --as busy-wake ...",
+    ]);
+    const held = await job(broker, "held-job", "codex", [901]);
+    expect(await refusal(job(broker, "held-job", "codex", [902, 2], "me/lane"))).toBe("unauthorized");
+    expect(await held.request("whoami")).toMatchObject({ parent: null, depth: 0 });
+    const other = await job(broker, "other-job", "claude-code", [903]);
+    await other.close();
+    expect(await refusal(job(broker, "other-job", "codex", [904, 2], "me/lane"))).toBe("unauthorized");
+    const kid = await job(broker, "kid-job", "codex", [905]);
+    await kid.close();
+    await broker.agent("kid-worker", "codex", {}, claim(6));
+    await (await broker.human()).request("adopt", { endpoint: "kid-worker", parent: "kid-job" });
+    expect(await refusal(job(broker, "kid-job", "codex", [906, 2], "me/lane"))).toBe("unauthorized");
+    const away = await job(broker, "away-job", "codex", [907]);
+    await away.close();
+    await broker.agent("peer", "codex", {}, claim(8));
+    expect(await refusal(job(broker, "away-job", "codex", [908, 8], "me/lane"))).toBe("unauthorized");
+    await lane.request("rules_set", { in: [] });
+    const hidden = await job(broker, "hidden-job", "codex", [909]);
+    await hidden.close();
+    expect(await refusal(job(broker, "hidden-job", "codex-desktop", [910], "me/lane"))).toBe("unauthorized");
+    const log = await (await broker.human()).request<{ rows: { event: string }[] }>("log");
+    expect(log.rows.filter((row) => row.event === "claim_rehome")).toEqual([]);
   });
 
   test("join under applies inherited reach and refuses a parent it cannot reach atomically", async () => {

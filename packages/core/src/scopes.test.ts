@@ -2781,7 +2781,11 @@ describe("exact claims", () => {
       expect(code(() => exact(core, handle, lineage))).toBe("unauthorized")
       expect(() => exact(core, handle, lineage)).toThrow(reason)
     }
-    refused("bo", [60], /live claude-code session/)
+    refused(
+      "bo",
+      [60],
+      /^me\/bo is held by a live session; a detached job can't act as it\. Give the job its own name, e\.g\. SCP_UNDER=bo swarm send --as bo-wake \.\.\.$/,
+    )
     refused("cx", [8, 1], /codex endpoint.*--harness/)
     refused("lane", [70], /another tree or under another parent/)
     refused("lane", [6, 2, 1], /another tree or under another parent/)
