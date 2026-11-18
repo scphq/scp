@@ -622,6 +622,7 @@ fn session_start_daemon_environment() {
         ])
         .env_clear()
         .env("SCP_DIR", &temp.0)
+        .env("SCP_NATIVE", "0")
         .env("HOME", "/home/test")
         .env("PRIVATE_SECRET", "hidden")
         .stdin(Stdio::piped())
