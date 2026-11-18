@@ -1,6 +1,6 @@
 /**
  * Broker load bench: one broker engine over a copy of a relay database, N session clients reconnecting at once, then a steady mix of
- * hook runs, inbox, list, status, send and whoami calls. Reports connect and per-method latency percentiles, refused connects, and the
+ * hook runs, inbox, list, status, send and whoami calls, and the human's agents listing. Reports connect and per-method latency percentiles, refused connects, and the
  * broker's CPU and RSS.
  *
  *   bun packages/conformance/src/bench/broker-load.ts --engine rust --bin crates/target/release/scp-broker --db relay.db
@@ -264,6 +264,9 @@ async function main() {
   const stormBegan = performance.now();
   await Promise.all(sessions.map(claim));
   const stormMs = performance.now() - stormBegan;
+  const human = await connect(socket);
+  if (human) await timed("hello_human", human, "hello", { protocol: "scp/1", human: true, tty: false });
+  let listing = false;
 
   const hook = async (session: (typeof sessions)[number], event: string) => {
     const conn = await connect(socket);
@@ -304,6 +307,15 @@ async function main() {
     ],
     [1, (s) => timed("list", s.conn!, "list", {})],
     [1, (s) => timed("peers", s.conn!, "peers", {})],
+    [
+      1,
+      async () => {
+        if (!human || human.closed || listing) return;
+        listing = true;
+        await timed("agents", human, "agents");
+        listing = false;
+      },
+    ],
   ];
   const weight = ops.reduce((total, [w]) => total + w, 0);
   const pick = () => {
@@ -332,6 +344,7 @@ async function main() {
   );
   clearInterval(sampler);
   for (const session of sessions) session.conn?.close();
+  human?.close();
   await terminate(child!);
   const mean = (list: number[]) => (list.length ? list.reduce((a, b) => a + b, 0) / list.length : 0);
   const report = {

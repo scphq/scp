@@ -144,6 +144,8 @@ const HOT_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS endpoints_wake ON endpoints (waker_left) WHERE wake IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS endpoints_status ON endpoints (status_state) WHERE status_state IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS endpoints_revive ON endpoints (wake_tried) WHERE hibernate IS NOT NULL AND revive IS NOT NULL AND wake_ticket IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS messages_expires ON messages (expires_at)",
+    "CREATE INDEX IF NOT EXISTS endpoints_harness_session ON endpoints (harness_session) WHERE harness_session IS NOT NULL",
 ];
 
 const ENDPOINT_COLUMNS: &[(&str, &str)] = &[
