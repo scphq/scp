@@ -51,6 +51,13 @@ jobs:
       - name: Check relay versions
         run: bun scripts/relay-version.ts --check
 
+      - name: Check native changes bump the CLI
+        if: github.event_name == 'pull_request'
+        run: |
+          base=$(git cat-file -p HEAD | awk '/^parent/{print $2; exit}')
+          git fetch --no-tags --depth=1 origin "$base"
+          bun scripts/native-changeset.ts --base "$base"
+
       - name: Check the native CLI goldens
         run: bun scripts/cli-goldens.ts --check
 
