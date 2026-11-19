@@ -4,6 +4,7 @@
 use super::bg_cmd::backgrounded;
 use super::bg_io::LAUNCHER_IDENTITY;
 use super::bg_state::{bg_dir, private_dir};
+use super::start::{CRITICAL_MEMORY_PCT, memory_free_pct, memory_hint, signal_name, start_failure};
 use crate::fleet::json::Json;
 use crate::fleet::mounts::{entry_argv, gone_command, mcp_file, mounted_entry};
 use crate::fleet::view::text;
@@ -495,9 +496,11 @@ fn signal_code(signal: i32) -> i32 {
     }
 }
 
-/// a finished claude run: its exit code, and with its stdout piped what it printed and the tee still writing it
+/// a finished claude run: its exit code, the signal that killed it, and with its stdout piped what it printed and the tee still
+/// writing it
 struct Ran {
     code: i32,
+    signal: Option<i32>,
     printed: Vec<u8>,
     tee: Option<Spool>,
 }
@@ -551,13 +554,19 @@ fn run_claude(bin: &str, args: &[String], env: &Env, cwd: &str, pipe: bool) -> R
                 }
             }
         }
-        let code = match status {
-            Some(Ok(status)) => status
-                .code()
-                .unwrap_or_else(|| status.signal().map_or(1, signal_code)),
-            _ => 1,
+        let (code, signal) = match status {
+            Some(Ok(status)) => match status.code() {
+                Some(code) => (code, None),
+                None => (status.signal().map_or(1, signal_code), status.signal()),
+            },
+            _ => (1, None),
         };
-        Ok(Ran { code, printed, tee })
+        Ok(Ran {
+            code,
+            signal,
+            printed,
+            tee,
+        })
     })?
 }
 
@@ -609,6 +618,11 @@ impl Launch<'_> {
         attribution: Option<&Attribution>,
     ) -> Done {
         let handle = name.or_else(|| set(env, "SCP_NAME")).map(str::to_owned);
+        if let Some(free) = memory_free_pct(env).filter(|free| *free < CRITICAL_MEMORY_PCT) {
+            term::err(&format!(
+                "{CLI_NAME} claude: free memory is at {free}%, so the background session may be killed as it starts"
+            ));
+        }
         let dir = bg_dir(env);
         private_dir(&dir).map_err(|message| Fail::Call(CallError::Io(message)))?;
         let random: [u8; 8] = rand::random();
@@ -643,7 +657,12 @@ impl Launch<'_> {
             file.to_string_lossy().into_owned(),
         ]);
         let clean = without(env, &LAUNCHER_IDENTITY);
-        let Ran { code, printed, tee } = run_claude(
+        let Ran {
+            code,
+            signal,
+            printed,
+            tee,
+        } = run_claude(
             &self.bin,
             &before_dashes(args, added),
             &clean,
@@ -651,8 +670,22 @@ impl Launch<'_> {
             true,
         )?;
         let printed = String::from_utf8_lossy(&printed);
+        let ended = match signal {
+            Some(signal) => Some(format!("was killed by {}", signal_name(signal))),
+            None if code != 0 => Some(format!("exited with code {code}")),
+            None => None,
+        };
         let Some(id) = backgrounded(&printed) else {
             std::fs::remove_file(&file).map_err(|error| io_fail(&error, "unlink", &file))?;
+            term::err(&match &ended {
+                Some(ended) => format!(
+                    "{CLI_NAME} claude: claude --bg {ended} before it started a background session{}",
+                    memory_hint(env)
+                ),
+                None => format!(
+                    "{CLI_NAME} claude: claude --bg exited without starting a background session"
+                ),
+            });
             return Ok(if code == 0 { 1 } else { code });
         };
         let link = dir.join(format!("{id}.json"));
@@ -670,10 +703,19 @@ impl Launch<'_> {
             });
             Fail::Call(CallError::Io(words.unwrap_or_else(|| error.to_string())))
         })?;
-        let address = format!(
-            "me/{}",
-            handle.unwrap_or_else(|| derive_handle("claude-code", &self.cwd))
-        );
+        let claimed = handle.unwrap_or_else(|| derive_handle("claude-code", &self.cwd));
+        if let Some(died) = block_on(start_failure(id, &claimed, env))? {
+            drop(tee);
+            term::err(&format!(
+                "{CLI_NAME} claude: background session {id} died as it started: {died}{}{}",
+                ended
+                    .map(|ended| format!("; claude --bg {ended}"))
+                    .unwrap_or_default(),
+                memory_hint(env)
+            ));
+            return Ok(1);
+        }
+        let address = format!("me/{claimed}");
         let line = format!(
             "{CLI_NAME} claude: background session {id} is {address} on SCP{}; messages wake it through its inbox. {CLI_NAME} claude attach {id} opens it\n",
             under_text(attribution)

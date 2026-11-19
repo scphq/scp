@@ -224,7 +224,7 @@ pub fn parse_seconds(text: &str, flag: &str) -> Result<f64, String> {
 }
 
 /// idle seconds from a variable: a number, a duration such as 30m, or Infinity
-fn seconds_text(value: &str) -> Option<f64> {
+pub(crate) fn seconds_text(value: &str) -> Option<f64> {
     if value == "Infinity" {
         return Some(f64::INFINITY);
     }

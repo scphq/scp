@@ -22,9 +22,13 @@ let broker: Broker
 beforeAll(async () => {
   mkdirSync(join(project, ".git"), { recursive: true })
   mkdirSync(bin)
-  writeFileSync(join(bin, "claude"), ["#!/bin/sh", `printf '%s\\n' "$@" > "${record}"`, "echo 'backgrounded · 1a2b3c4d (idle)'", ""].join("\n"), {
-    mode: 0o755,
-  })
+  writeFileSync(
+    join(bin, "claude"),
+    ["#!/bin/sh", `[ "$1" = agents ] && { echo '[]'; exit 0; }`, `printf '%s\\n' "$@" > "${record}"`, "echo 'backgrounded · 1a2b3c4d (idle)'", ""].join("\n"),
+    {
+      mode: 0o755,
+    },
+  )
   broker = await startBroker({ dir, idleMs: 0, policyPath: join(root, "policy.json"), log: () => {} })
 })
 afterAll(async () => {

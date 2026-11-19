@@ -3,7 +3,10 @@ swarm claude --bg [--name N] [--root] [--under ADDR] [--] [claude args...]   sta
                                                  a grant, so it links under you; messages wake it through its inbox. Prints its short id and address
   --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
   Run from an agent's shell, it links under that agent by itself, as under env $(swarm spawn-env --name N); a grant minted for
-  it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root
+  it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root.
+  It then watches the session up to $SCP_CLAUDE_BG_CONFIRM_S (5 s; 0 never) until its endpoint claims it: one that dies as it
+  starts, or a claude --bg that exits first, fails with why (the exit code or signal, and low free memory as the likely cause),
+  and claude ls shows that session failed. It warns first when free memory is under 10%
 swarm claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first
   --resume <id> of a live background session attaches to it: it is already woken through claude-inbox
 swarm claude ls [--all] [--json]          the background sessions (--all: stopped ones too), orchestrators first, with their SCP role

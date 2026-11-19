@@ -244,14 +244,21 @@ export function resumedSession(args: string[]): string | undefined {
 }
 
 /** runs claude with the terminal passed through; resolves with its exit code */
-async function runClaude(
+async function runClaude(bin: string, args: string[], env: Env, cwd: string): Promise<number> {
+  return (await runClaudeExit(bin, args, env, cwd)).code
+}
+
+/** how claude ended: its exit code, and the signal that killed it */
+type Exit = { code: number; signal: NodeJS.Signals | null }
+
+async function runClaudeExit(
   bin: string,
   args: string[],
   env: Env,
   cwd: string,
   stdout: "inherit" | "pipe" = "inherit",
   onOut?: (text: string) => void,
-): Promise<number> {
+): Promise<Exit> {
   const child = spawn(bin, args, { cwd, stdio: ["inherit", stdout, "inherit"], env })
   child.stdout?.on("data", (chunk: Buffer) => {
     process.stdout.write(chunk)
@@ -263,9 +270,9 @@ async function runClaude(
   process.on("SIGINT", ignore)
   for (const [signal, handler] of handlers) process.on(signal, handler)
   try {
-    return await new Promise<number>((resolve, reject) => {
+    return await new Promise<Exit>((resolve, reject) => {
       child.once("error", reject)
-      child.once("close", (code, signal) => resolve(code ?? (signal ? 128 + (signalNumber(signal) ?? 1) : 1)))
+      child.once("close", (code, signal) => resolve({ code: code ?? (signal ? 128 + (signalNumber(signal) ?? 1) : 1), signal: code === null ? signal : null }))
     })
   } finally {
     process.off("SIGINT", ignore)
@@ -281,9 +288,14 @@ async function backgroundCommand(
   cwd: string,
   bin: string,
   out: (line: string) => void,
+  err: (line: string) => void,
   attribution?: Attribution,
 ): Promise<number> {
   const handle = name ?? (env.SCP_NAME || undefined)
+  const bg = await import("./claude-bg")
+  const free = bg.memoryFreePct(env)
+  if (free !== undefined && free < bg.CRITICAL_MEMORY_PCT)
+    err(`${CLI_NAME} claude: free memory is at ${free}%, so the background session may be killed as it starts`)
   const dir = privateDir(bgDir(env))
   const file = join(dir, `${randomBytes(8).toString("hex")}.json`)
   writeFileSync(file, `${JSON.stringify({ mcpServers: { scp: bgMount(env, handle, resumedSession(args)) } }, null, 2)}\n`, { mode: 0o600 })
@@ -297,19 +309,31 @@ async function backgroundCommand(
   ]
   const clean = Object.fromEntries(Object.entries(env).filter(([key]) => !LAUNCHER_IDENTITY.includes(key)))
   let printed = ""
-  const code = await runClaude(bin, beforeDashes(args, added), clean, cwd, "pipe", (text) => {
+  const { code, signal } = await runClaudeExit(bin, beforeDashes(args, added), clean, cwd, "pipe", (text) => {
     printed += text
   })
   const id = BACKGROUNDED.exec(printed)?.[1]
+  const ended = signal ? `was killed by ${signal}` : code !== 0 ? `exited with code ${code}` : undefined
   if (!id) {
     unlinkSync(file)
+    err(
+      ended
+        ? `${CLI_NAME} claude: claude --bg ${ended} before it started a background session${bg.memoryHint(env)}`
+        : `${CLI_NAME} claude: claude --bg exited without starting a background session`,
+    )
     return code || 1
   }
   try {
     unlinkSync(join(dir, `${id}.json`))
   } catch {}
   symlinkSync(basename(file), join(dir, `${id}.json`))
-  const address = `me/${handle ?? deriveHandle("claude-code", cwd)}`
+  const claimed = handle ?? deriveHandle("claude-code", cwd)
+  const died = await bg.startFailure(id, claimed, env)
+  if (died !== null) {
+    err(`${CLI_NAME} claude: background session ${id} died as it started: ${died}${ended ? `; claude --bg ${ended}` : ""}${bg.memoryHint(env)}`)
+    return 1
+  }
+  const address = `me/${claimed}`
   out(
     `${CLI_NAME} claude: background session ${id} is ${address} on SCP${underText(attribution)}; messages wake it through its inbox. ${CLI_NAME} claude attach ${id} opens it`,
   )
@@ -390,8 +414,8 @@ export async function claudeCommand(
   if (bg) {
     const attribution = await attribute("claude", { name, root, under, resume: resumes(args) }, env, cwd, err, deps.attribute)
     const prior = attribution || root ? undefined : priorMount(args, env)
-    if (prior) return backgroundCommand(name ?? (prior.SCP_NAME || undefined), args, { ...env, ...prior }, cwd, bin, out)
-    return backgroundCommand(name, args, attributed(env, attribution), cwd, bin, out, attribution)
+    if (prior) return backgroundCommand(name ?? (prior.SCP_NAME || undefined), args, { ...env, ...prior }, cwd, bin, out, err)
+    return backgroundCommand(name, args, attributed(env, attribution), cwd, bin, out, err, attribution)
   }
   const resume = resumeTarget(args)
   const live = resume === undefined ? undefined : liveAgents(bin, env).find((agent) => agent.id === resume || agent.sessionId === resume)
@@ -421,7 +445,10 @@ ${CLI_NAME} claude --bg [--name N] [--root] [--under ADDR] [--] [claude args...]
                                                  a grant, so it links under you; messages wake it through its inbox. Prints its short id and address
   --under ADDR links through the session claim to a local or cross-machine parent, without a grant; conflicts with --root.
   Run from an agent's shell, it links under that agent by itself, as under env $(${CLI_NAME} spawn-env --name N); a grant minted for
-  it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root
+  it in $SCP_GRANT applies instead (your own spent grant is replaced), a resumed session keeps its place, --root starts it as a root.
+  It then watches the session up to $SCP_CLAUDE_BG_CONFIRM_S (5 s; 0 never) until its endpoint claims it: one that dies as it
+  starts, or a claude --bg that exits first, fails with why (the exit code or signal, and low free memory as the likely cause),
+  and claude ls shows that session failed. It warns first when free memory is under 10%
 ${CLI_NAME} claude attach <id|name> [--name N]    claude attach, renaming its endpoint to N first
   --resume <id> of a live background session attaches to it: it is already woken through claude-inbox
 ${CLI_NAME} claude ls [--all] [--json]          the background sessions (--all: stopped ones too), orchestrators first, with their SCP role

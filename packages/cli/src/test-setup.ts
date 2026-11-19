@@ -19,6 +19,8 @@ export const nativeCli = process.env.SCP_CLI_NATIVE === "1" && swarmBinary !== u
 const routeLog = process.env.SCP_ROUTE_LOG
 for (const key of Object.keys(process.env)) if (key.startsWith("SCP_")) delete process.env[key]
 process.env.SCP_HARNESS_DETECT = "0"
+// A loaded machine's free memory would add warnings to every `swarm claude --bg` a test runs; tests that check them set their own.
+process.env.SCP_MEMORY_FREE_PCT = "100"
 // Unset runs native wherever a native swarm resolves, so the TypeScript runs say so; tests of the default unset it themselves.
 process.env.SCP_NATIVE = "0"
 // With a native MCP server binary given, every `swarm mcp` the tests start runs on it.

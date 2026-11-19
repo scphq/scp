@@ -47,6 +47,7 @@ function machine(engine: Engine, mount?: string[]) {
     XDG_STATE_HOME: join(root, ".state"),
     SCP_DIR: join(root, "relay"),
     SCP_HARNESS_DETECT: "0",
+    SCP_MEMORY_FREE_PCT: "100",
     SCP_NATIVE: "0",
     SCP_CLI_ARGV: JSON.stringify(SELF),
     ...(process.env.SCP_ROUTE_LOG ? { SCP_ROUTE_LOG: process.env.SCP_ROUTE_LOG } : {}),
@@ -89,6 +90,8 @@ async function run(m: Machine, args: string[], extra: Record<string, string> = {
       .replace(/krt_[0-9a-f]{64}/g, "<grant>")
       .replace(/SCP_CHANNELS=\d+/g, "SCP_CHANNELS=<pid>")
       .replace(/SCP_NATIVE_TS=claude\\n/g, "")
+      .replace(/"at": \d+/g, '"at": <ms>')
+      .replace(/\/tmp\/scp-\d+-[0-9a-f]+\//g, "<sockets>/")
   const shown = { code, stdout, stderr, args: read("claude.args"), env: read("claude.env") }
   return { ...JSON.parse(normal(JSON.stringify(shown))), records: records.map(normal).sort() }
 }
@@ -207,6 +210,158 @@ describe.skipIf(!swarmBinary)("swarm claude: the native swarm runs it as the Typ
       writeFileSync(join(m.root, "bin", "claude"), "#!/bin/sh\necho 'something else'\nexit 0\n", { mode: 0o755 }),
     )
     await same(each([[["--bg", "--name", "lead"]]]), (m) => writeFileSync(join(m.root, "bin", "claude"), "#!/bin/sh\nexit 3\n", { mode: 0o755 }))
+  })
+
+  test("a claude --bg that dies before it says its id fails with its exit code or signal, and memory pressure as the likely cause", async () => {
+    const dies = (body: string) => (m: Machine) => writeFileSync(join(m.root, "bin", "claude"), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
+    const low = { SCP_MEMORY_FREE_PCT: "4" }
+    const ample = { SCP_MEMORY_FREE_PCT: "50" }
+    const killed = await same(
+      each([
+        [["--bg", "--name", "lead"], low],
+        [["--bg", "--name", "lead"], ample],
+      ]),
+      dies("kill -9 $$"),
+    )
+    expect(killed.map((one) => [(one as { code: number }).code, (one as { stderr: string }).stderr])).toEqual([
+      [
+        137,
+        "swarm claude: free memory is at 4%, so the background session may be killed as it starts\n" +
+          "swarm claude: claude --bg was killed by SIGKILL before it started a background session; free memory is at 4%, so memory pressure likely killed it\n",
+      ],
+      [137, "swarm claude: claude --bg was killed by SIGKILL before it started a background session\n"],
+    ])
+    const exited = await same(each([[["--bg", "--name", "lead"], { SCP_MEMORY_FREE_PCT: "15" }]]), dies("exit 137"))
+    expect(exited[0]).toMatchObject({
+      code: 137,
+      stdout: "",
+      stderr:
+        "swarm claude: claude --bg exited with code 137 before it started a background session; free memory is at 15%, so memory pressure likely killed it\n",
+      records: [],
+    })
+    const quiet = await same(each([[["--bg", "--name", "lead"], low]]), dies("exit 0"))
+    expect((quiet[0] as { code: number; stderr: string }).code).toBe(1)
+    expect((quiet[0] as { stderr: string }).stderr).toEndWith("swarm claude: claude --bg exited without starting a background session\n")
+  })
+
+  test("a background session that dies as it starts fails, records why, and shows failed in claude ls", async () => {
+    const session = "1a2b3c4d-0000-4000-8000-000000000000"
+    const gone = Bun.spawnSync(["true"]).pid
+    const listing = (m: Machine, all: unknown[], { later, after = "" }: { later?: unknown[]; after?: string } = {}) => {
+      writeFileSync(
+        join(m.root, "bin", "claude"),
+        [
+          "#!/bin/sh",
+          `if [ "$1" = agents ]; then case " $* " in *" --all "*) ;; *) echo '[]'; exit 0;; esac`,
+          `  if [ -f "${m.root}/later.json" ] && [ -f "${m.root}/listed" ]; then cat "${m.root}/later.json"; else touch "${m.root}/listed"; cat "${m.root}/all.json"; fi; exit 0; fi`,
+          `printf '%s\\n' "$@" > "${m.root}/claude.args"`,
+          "echo 'backgrounded · 1a2b3c4d (idle)'",
+          after,
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      )
+      writeFileSync(join(m.root, "all.json"), JSON.stringify(all))
+      if (later) writeFileSync(join(m.root, "later.json"), JSON.stringify(later))
+    }
+    const entry = (m: Machine, extra: Record<string, unknown>) => ({
+      id: "1a2b3c4d",
+      kind: "background",
+      sessionId: session,
+      cwd: m.work,
+      name: "lead",
+      ...extra,
+    })
+    const failed = await same(
+      async (m) => [
+        await run(m, ["--bg", "--name", "lead"], { SCP_MEMORY_FREE_PCT: "12" }),
+        await run(m, ["ls", "--json"]),
+        await run(m, ["ls", "--all", "--json"]),
+        await run(m, ["ls"]),
+      ],
+      (m) => listing(m, [entry(m, { state: "failed" })]),
+    )
+    const [started, ls, lsAll, table] = failed as { code: number; stdout: string; stderr: string; records: string[] }[]
+    expect(started!.code).toBe(1)
+    expect(started!.stdout).toBe("backgrounded · 1a2b3c4d (idle)\n")
+    expect(started!.stderr).toBe(
+      "swarm claude: background session 1a2b3c4d died as it started: claude agents shows it failed with no process; free memory is at 12%, so memory pressure likely killed it\n",
+    )
+    expect(started!.records).toContain(
+      `1a2b3c4d.state.json 600\n${JSON.stringify(
+        {
+          sessionId: session,
+          cwd: "<root>/Work Dir",
+          name: "lead",
+          handle: "lead",
+          failed: { at: 0, reason: "claude agents shows it failed with no process" },
+        },
+        null,
+        2,
+      ).replace('"at": 0', '"at": <ms>')}\n`,
+    )
+    expect(started!.records).toContain("1a2b3c4d.json -> <record>.json")
+    for (const one of [ls, lsAll]) expect(JSON.parse(one!.stdout)).toMatchObject([{ id: "1a2b3c4d", state: "failed", swarm: true }])
+    expect(table!.stdout).toContain("1a2b3c4d  lead  failed")
+
+    const exits = await same(
+      async (m) => [await run(m, ["--bg", "--name", "lead"], { SCP_MEMORY_FREE_PCT: "80" }), await run(m, ["ls", "--all", "--json"])],
+      (m) => listing(m, [entry(m, { pid: gone, state: "working", status: "idle" })]),
+    )
+    expect(exits[0]).toMatchObject({ code: 1, stderr: `swarm claude: background session 1a2b3c4d died as it started: its process ${gone} exited\n` })
+    expect(JSON.parse((exits[1] as { stdout: string }).stdout)).toMatchObject([{ id: "1a2b3c4d", state: "failed" }])
+
+    const launcher = await same(
+      async (m) => [await run(m, ["--bg", "--name", "lead"], { SCP_MEMORY_FREE_PCT: "80" })],
+      (m) => listing(m, [entry(m, { state: "failed" })], { after: "kill -9 $$" }),
+    )
+    expect(launcher[0]).toMatchObject({
+      code: 1,
+      stderr:
+        "swarm claude: background session 1a2b3c4d died as it started: claude agents shows it failed with no process; claude --bg was killed by SIGKILL\n",
+    })
+
+    const respawned = await same(
+      async (m) => [await run(m, ["--bg", "--name", "lead"], { SCP_CLAUDE_BG_CONFIRM_S: "2", SCP_MEMORY_FREE_PCT: "80" })],
+      (m) => listing(m, [entry(m, { pid: gone, state: "working" })], { later: [entry(m, { pid: process.pid, state: "working", status: "idle" })] }),
+    )
+    expect(respawned[0]).toMatchObject({ code: 0, stderr: "" })
+
+    const skipped = await same(
+      async (m) => [await run(m, ["--bg", "--name", "lead"], { SCP_CLAUDE_BG_CONFIRM_S: "0" })],
+      (m) => listing(m, [entry(m, { state: "failed" })]),
+    )
+    expect(skipped[0]).toMatchObject({ code: 0, stderr: "" })
+  })
+
+  test("a background session whose process lives through the window, or whose endpoint claims its session, starts", async () => {
+    const session = "1a2b3c4d-0000-4000-8000-000000000000"
+    const live = (m: Machine) =>
+      writeFileSync(
+        join(m.root, "agents.json"),
+        JSON.stringify([{ id: "1a2b3c4d", kind: "background", sessionId: session, cwd: m.work, pid: process.pid, state: "working", status: "idle" }]),
+      )
+    const lived = await same(each([[["--bg", "--name", "lead"], { SCP_CLAUDE_BG_CONFIRM_S: "1", SCP_MEMORY_FREE_PCT: "50" }]]), live, CHANNELS)
+    expect(lived[0]).toMatchObject({ code: 0, stderr: "" })
+    expect((lived[0] as { stdout: string }).stdout).toContain("background session 1a2b3c4d is me/lead on SCP")
+    const clients: RelayClient[] = []
+    const started = Date.now()
+    const claimed = await same(
+      each([[["--bg", "--root", "--name", "lead"], { SCP_CLAUDE_BG_CONFIRM_S: "60", SCP_MEMORY_FREE_PCT: "50" }]]),
+      async (m) => {
+        live(m)
+        const broker = await startBroker({ dir: m.env.SCP_DIR!, idleMs: 0, policyPath: join(m.root, "policy.json"), log: () => {} })
+        brokers.push(broker)
+        const client = await RelayClient.connect(broker.socket)
+        clients.push(client)
+        await client.hello({ claim: { handle: "lead", harness: "claude-code" } })
+        await client.request("event", { kind: "session_start", session_id: session })
+      },
+      CHANNELS,
+    )
+    for (const client of clients) client.close()
+    expect(Date.now() - started).toBeLessThan(30_000)
+    expect(claimed[0]).toMatchObject({ code: 0 })
   })
 
   test("--bg --resume claims what the session's mount had, also when the resume forks a new id", async () => {
