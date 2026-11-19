@@ -21,7 +21,7 @@ use turso_core::{
     Database, Numeric, OpenOptions, PlatformIO, SqliteDialect, Statement, StepResult, Value,
 };
 
-use super::{Row, SqlValue, Storage, StoreError, StoreResult};
+use super::{Row, SqlValue, Storage, StoreError, StoreResult, Writes};
 
 const READERS: usize = 4;
 const CACHED_STATEMENTS: usize = 512;
@@ -30,6 +30,7 @@ const STACK: usize = 16 * 1024 * 1024;
 pub struct TursoStore {
     path: PathBuf,
     connections: OnceCell<Connections>,
+    writes: Writes,
 }
 
 struct Connections {
@@ -282,6 +283,7 @@ impl TursoStore {
         Ok(Self {
             path: path.to_owned(),
             connections: OnceCell::new(),
+            writes: Writes::default(),
         })
     }
 
@@ -345,12 +347,9 @@ impl Storage for TursoStore {
         if let Some(transaction) = super::active(self) {
             return transaction.lock().await.all(statement, params).await;
         }
-        self.connections()
-            .await?
-            .writer
-            .lock()
-            .await
-            .execute(statement, params)
+        let mut writer = self.connections().await?.writer.lock().await;
+        let _bump = self.writes.after(statement);
+        writer.execute(statement, params)
     }
 
     async fn read(&self, statement: &str, params: &[SqlValue]) -> StoreResult<Vec<Row>> {
@@ -368,22 +367,31 @@ impl Storage for TursoStore {
         Ok(Box::new(TursoTransaction {
             writer: Mutex::new(writer),
             open: true,
+            writes: self.writes.clone(),
         }))
+    }
+
+    fn writes(&self) -> Option<u64> {
+        Some(self.writes.now())
     }
 }
 
 struct TursoTransaction {
     writer: Mutex<OwnedMutexGuard<Session>>,
     open: bool,
+    writes: Writes,
 }
 
 #[async_trait]
 impl super::Transaction for TursoTransaction {
     async fn all(&self, statement: &str, params: &[SqlValue]) -> StoreResult<Vec<Row>> {
-        self.writer.lock().await.execute(statement, params)
+        let mut writer = self.writer.lock().await;
+        let _bump = self.writes.after(statement);
+        writer.execute(statement, params)
     }
 
     async fn commit(&mut self) -> StoreResult<()> {
+        let _bump = self.writes.guard();
         self.writer.get_mut().execute("COMMIT", &[])?;
         self.open = false;
         Ok(())
@@ -394,6 +402,7 @@ impl Drop for TursoTransaction {
     fn drop(&mut self) {
         if self.open {
             self.writer.get_mut().abandoned = true;
+            self.writes.bump();
         }
     }
 }

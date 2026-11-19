@@ -668,3 +668,66 @@ async fn a_derived_claim_takes_no_ended_endpoint_of_another_session() {
     drop(core);
     tokio::fs::remove_dir_all(dir).await.expect("cleanup");
 }
+
+#[tokio::test]
+async fn claims_read_the_rows_as_written_since_and_never_a_rolled_back_one() {
+    let (mut core, dir) = fixture().await;
+    let (_, parent) = hello(
+        &mut core,
+        json!({"claim":{"handle":"parent","process":"pid:999998:first"}}),
+    )
+    .await;
+    let parent_id = parent["endpoint"]["id"].as_str().expect("id").to_owned();
+    let (_, child) = hello(
+        &mut core,
+        json!({"claim":{"handle":"child","lineage":["pid:999998:first"]}}),
+    )
+    .await;
+    assert_eq!(child["endpoint"]["parent"], "me/parent");
+
+    core.store
+        .all(
+            "UPDATE endpoints SET process = 'pid:999998:second', handle = 'renamed' WHERE id = ?",
+            &[SqlValue::Text(parent_id.clone())],
+        )
+        .await
+        .expect("move the parent");
+    let (_, moved) = hello(
+        &mut core,
+        json!({"claim":{"handle":"moved","lineage":["pid:999998:second"]}}),
+    )
+    .await;
+    assert_eq!(moved["endpoint"]["parent"], "me/renamed");
+    let (_, stale) = hello(
+        &mut core,
+        json!({"claim":{"handle":"stale","lineage":["pid:999998:first"]}}),
+    )
+    .await;
+    assert_eq!(stale["endpoint"]["parent"], Value::Null);
+
+    let conn = core.state.connect();
+    let params = json!({"protocol":"scp/1","transient":true,"claim":{"handle":"app"},"join":{"handle":"child"}});
+    core.dispatch(conn, "hello", params.as_object().expect("params"))
+        .await
+        .expect_err("occupied join");
+    let rows = core
+        .endpoints
+        .snapshot(core.store.as_ref())
+        .await
+        .expect("snapshot")
+        .rows;
+    assert!(
+        rows.values()
+            .all(|row| scp_broker::core::text(row, "handle") != Some("app"))
+    );
+    assert_eq!(
+        rows.len(),
+        core.store
+            .all("SELECT id FROM endpoints", &[])
+            .await
+            .expect("ids")
+            .len()
+    );
+    drop(core);
+    tokio::fs::remove_dir_all(dir).await.expect("cleanup");
+}
