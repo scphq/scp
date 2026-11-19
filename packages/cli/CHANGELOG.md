@@ -1,5 +1,11 @@
 # @scp-dev/cli
 
+## 1.8.2
+
+### Patch Changes
+
+- 85a558f: The native packages now carry the broker's claim-path speedup: claims read the in-memory endpoint cache instead of SQLite.
+
 ## 1.8.1
 
 ### Patch Changes
