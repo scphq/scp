@@ -499,7 +499,7 @@ impl Drop for SessionLock {
     }
 }
 
-fn alive(pid: i32) -> bool {
+pub(crate) fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists
     pid > 0
         && (unsafe { libc::kill(pid, 0) } == 0

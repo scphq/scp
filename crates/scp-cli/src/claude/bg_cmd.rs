@@ -10,6 +10,7 @@ use super::bg_state::{
     read_task_state, ref_session, safe_name, session_id, short_id, wake_ticket, without,
     write_state, write_task_state,
 };
+use super::start::{failed_ids, running};
 use crate::fleet::json::Json;
 use crate::fleet::view::table;
 use crate::{Done, Fail, Host, term, usage};
@@ -146,10 +147,20 @@ async fn ls(argv: &[String], env: &Env) -> Done {
         )));
     }
     let claude = claude_of(env).ok_or_else(|| usage("claude is not on PATH"))?;
-    let entries = claude
+    let mut entries = claude
         .list(all)
         .await
         .ok_or_else(|| thrown(format!("{CLI_NAME} claude: claude agents --json failed")))?;
+    let failed = failed_ids(env);
+    if !all && !failed.is_empty() {
+        let shown: HashSet<Option<String>> = entries.iter().map(|entry| entry.id.clone()).collect();
+        let hidden = claude.list(true).await.unwrap_or_default();
+        entries.extend(hidden.into_iter().filter(|entry| {
+            entry.id.as_ref().is_some_and(|id| failed.contains(id))
+                && !shown.contains(&entry.id)
+                && running(entry).is_none()
+        }));
+    }
     let records = read_records(env);
     let agents = match Port::open(env).await {
         Ok(port) => {
@@ -182,6 +193,7 @@ async fn ls(argv: &[String], env: &Env) -> Done {
             Row {
                 entry,
                 id,
+                failed: failed.contains(id) && running(entry).is_none(),
                 role: role_of(agent),
                 endpoint: agent.map(|agent| agent.address.as_str()),
                 swarm: record.is_some(),
@@ -209,6 +221,7 @@ async fn ls(argv: &[String], env: &Env) -> Done {
 struct Row<'a> {
     entry: &'a Entry,
     id: &'a str,
+    failed: bool,
     role: &'static str,
     endpoint: Option<&'a str>,
     swarm: bool,
@@ -216,12 +229,20 @@ struct Row<'a> {
 }
 
 impl Row<'_> {
+    fn state(&self) -> Option<&str> {
+        if self.failed {
+            Some("failed")
+        } else {
+            self.entry.state.as_deref()
+        }
+    }
+
     fn to_json(&self) -> Json {
         let entry = self.entry;
         Json::object(vec![
             ("id", Json::str(self.id)),
             ("name", nullable(entry.name.as_deref())),
-            ("state", nullable(entry.state.as_deref())),
+            ("state", nullable(self.state())),
             ("status", nullable(entry.status.as_deref())),
             ("role", Json::str(self.role)),
             ("endpoint", nullable(self.endpoint)),
@@ -233,7 +254,7 @@ impl Row<'_> {
 
     fn cells(&self) -> Vec<String> {
         let entry = self.entry;
-        let state = [entry.state.as_deref(), entry.status.as_deref()]
+        let state = [self.state(), entry.status.as_deref()]
             .into_iter()
             .flatten()
             .filter(|word| !word.is_empty())

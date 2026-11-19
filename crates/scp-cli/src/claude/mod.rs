@@ -5,6 +5,7 @@ pub mod bg_io;
 pub mod bg_plan;
 pub mod bg_state;
 pub mod launch;
+pub mod start;
 
 use crate::{Run, Verb};
 

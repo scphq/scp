@@ -101,6 +101,8 @@ export interface BgState {
   rmRefused?: { at: number; reason: string }
   /** the short id a wake's resume brought the session back under, when Claude Code gave it a new one */
   movedTo?: string
+  /** `swarm claude --bg` saw the session die as it started */
+  failed?: { at: number; reason: string }
 }
 
 /** when a worker leaves Claude's agents list: as it stops (`on_stop`), once its endpoint is historic (`historic`), or never (false) */
@@ -1291,6 +1293,148 @@ export async function socketPort(env: Env): Promise<{ port: BgPort; close(): voi
   }
 }
 
+/** free memory, in percent, below which a session that dies as it starts is put down to memory pressure */
+const LOW_MEMORY_PCT = 20
+/** free memory, in percent, below which `swarm claude --bg` warns before it starts a session */
+export const CRITICAL_MEMORY_PCT = 10
+const CONFIRM_S = 5
+const CONFIRM_MAX_S = 600
+const CONFIRM_TICK_MS = 200
+/** how long a session listed with no process gets to show one */
+const RELIST_MS = 1000
+/** the longest one broker call of the confirm watch may take */
+const BROKER_MS = 1000
+
+/**
+ * free memory in percent of RAM, best effort: `$SCP_MEMORY_FREE_PCT` when set, else on macOS `kern.memorystatus_level` (what
+ * `memory_pressure` prints as the free percentage), else `MemAvailable` of `MemTotal` in /proc/meminfo; undefined when unknown
+ */
+export function memoryFreePct(env: Env): number | undefined {
+  const given = env.SCP_MEMORY_FREE_PCT?.trim()
+  if (given) return /^\d+(\.\d+)?$/.test(given) && Number(given) <= 100 ? Math.floor(Number(given)) : undefined
+  try {
+    if (process.platform === "darwin") {
+      const run = spawnSync("/usr/sbin/sysctl", ["-n", "kern.memorystatus_level"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 })
+      const level = run.status === 0 ? run.stdout.trim() : ""
+      return /^\d+$/.test(level) && Number(level) <= 100 ? Number(level) : undefined
+    }
+    const info = readFileSync("/proc/meminfo", "utf8")
+    const kb = (key: string) => Number(new RegExp(`^${key}:\\s+(\\d+) kB$`, "m").exec(info)?.[1] ?? Number.NaN)
+    const total = kb("MemTotal")
+    const available = kb("MemAvailable")
+    return total > 0 && available >= 0 ? Math.floor((Math.min(available, total) * 100) / total) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** what a launch failure adds when free memory is low: memory pressure as its likely cause */
+export function memoryHint(env: Env): string {
+  const free = memoryFreePct(env)
+  return free !== undefined && free < LOW_MEMORY_PCT ? `; free memory is at ${free}%, so memory pressure likely killed it` : ""
+}
+
+/** how long `swarm claude --bg` watches a session it started: `$SCP_CLAUDE_BG_CONFIRM_S` (seconds or a duration, 0 never), else 5 s */
+export function confirmWindowMs(env: Env): number {
+  const raw = env.SCP_CLAUDE_BG_CONFIRM_S
+  const value = raw === undefined || raw.trim() === "" ? undefined : seconds(raw)
+  return Math.min(value ?? CONFIRM_S, CONFIRM_MAX_S) * 1000
+}
+
+const hasProcess = (entry: ClaudeEntry): entry is ClaudeEntry & { pid: number } => typeof entry.pid === "number" && Number.isInteger(entry.pid) && entry.pid > 0
+
+/** an entry whose listed process still runs */
+const running = (entry: ClaudeEntry): entry is ClaudeEntry & { pid: number } => hasProcess(entry) && alive(entry.pid)
+
+const pause = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+
+/** what `promise` resolves with, or undefined once it fails or `ms` passed */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise.catch(() => undefined),
+      new Promise<undefined>((done) => {
+        timer = setTimeout(() => done(undefined), Math.max(0, ms))
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * why the background session `id` died as it started, or null: it runs once its endpoint is claimed under its session id, or while its
+ * process lives through the confirm window. A session `claude agents --json --all` does not list, or a failed listing, is not watched. A
+ * death is recorded as `failed` in its state file
+ */
+export async function startFailure(id: string, handle: string, env: Env, deps: ClaudeBgDeps = {}): Promise<string | null> {
+  const windowMs = confirmWindowMs(env)
+  const claude = claudeOf(env, deps)
+  if (windowMs === 0 || !claude) return null
+  const now = deps.now ?? Date.now
+  const deadline = now() + windowMs
+  const bound = () => Math.min(BROKER_MS, Math.max(0, deadline - now()))
+  const find = async () => (await listEntries(claude, true))?.find((one) => one.id === id)
+  const failed = (entry: ClaudeEntry, reason: string): string => {
+    if (typeof entry.sessionId === "string" && typeof entry.cwd === "string")
+      try {
+        writeState(env, id, { sessionId: entry.sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle, failed: { at: now(), reason } })
+      } catch {}
+    return reason
+  }
+  const why = (entry: ClaudeEntry, pid = hasProcess(entry) ? entry.pid : undefined): string => {
+    if (pid === undefined) return `claude agents shows it${entry.state ? ` ${entry.state}` : ""} with no process`
+    return `its process ${pid} exited${!hasProcess(entry) && entry.state ? `, and claude agents shows it ${entry.state}` : ""}`
+  }
+  let entry = await find()
+  if (!entry) return null
+  const opening = socketPort(env)
+  let broker = await within(opening, bound())
+  if (!broker) void opening.then((late) => late.close()).catch(() => {})
+  const claimed = async (sessionId: string | undefined): Promise<boolean> => {
+    if (!broker || !sessionId) return false
+    const agents = await within(broker.port.agents(), bound())
+    if (agents === undefined) {
+      broker.close()
+      broker = undefined
+      return false
+    }
+    return agents.some((agent) => agent.harness_session === sessionId && agent.connections > 0)
+  }
+  try {
+    if (!running(entry)) {
+      if (await claimed(entry.sessionId)) return null
+      await pause(Math.min(RELIST_MS, windowMs))
+      const again = await find()
+      if (!again) return null
+      if (!running(again)) return (await claimed(again.sessionId)) ? null : failed(again, why(again))
+      entry = again
+    }
+    let pid = entry.pid!
+    for (;;) {
+      if (!alive(pid)) {
+        const after = await find()
+        if (after && running(after)) {
+          entry = after
+          pid = after.pid
+          continue
+        }
+        return failed(after ?? entry, why(after ?? entry, pid))
+      }
+      if (now() >= deadline || (await claimed(entry.sessionId))) return null
+      await pause(CONFIRM_TICK_MS)
+    }
+  } finally {
+    broker?.close()
+  }
+}
+
+/** the short ids whose state file records a failed start and no removal */
+function failedIds(env: Env): Set<string> {
+  return new Set(readAllStates(env).flatMap((state) => (typeof state.failed === "object" && state.failed !== null && !state.removedAt ? [state.id] : [])))
+}
+
 /** the Claude Code session the caller runs in, by its session id */
 const selfSessions = (env: Env): Set<string> => new Set(env.CLAUDE_CODE_SESSION_ID ? [env.CLAUDE_CODE_SESSION_ID] : [])
 
@@ -1306,8 +1450,12 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
   if (unknown !== undefined) throw new RelayUsage(`${CLI_NAME} claude ls takes --all and --json, not ${unknown}`)
   const claude = claudeOf(env, deps)
   if (!claude) throw new RelayUsage("claude is not on PATH")
-  const entries = await listEntries(claude, all)
-  if (!entries) throw new Error(`${CLI_NAME} claude: claude agents --json failed`)
+  const fetched = await listEntries(claude, all)
+  if (!fetched) throw new Error(`${CLI_NAME} claude: claude agents --json failed`)
+  const failed = failedIds(env)
+  const hidden = all || !failed.size ? [] : ((await listEntries(claude, true)) ?? [])
+  const shown = new Set(fetched.map((entry) => entry.id))
+  const entries = [...fetched, ...hidden.filter((entry) => entry.id && failed.has(entry.id) && !shown.has(entry.id) && !running(entry))]
   const records = readRecords(env)
   let agents: AgentFacts[] | undefined
   try {
@@ -1356,7 +1504,7 @@ async function lsCommand(argv: string[], env: Env, out: (line: string) => void, 
       return {
         id: entry.id!,
         name: entry.name ?? null,
-        state: entry.state ?? null,
+        state: failed.has(entry.id!) && !running(entry) ? "failed" : (entry.state ?? null),
         status: entry.status ?? null,
         role: roleOf(agent),
         endpoint: agent?.address ?? null,
