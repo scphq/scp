@@ -223,7 +223,7 @@ export async function linkedPlan(values: Values, command: string[]): Promise<Lin
 
 /** the handback a linked worker sends its parent, as section 9.3 words it */
 export function linkedHandbackBody(address: string, code: number, output: string, stderr: string): string {
-  const tail = code !== 0 && stderr ? `${STDERR_LABEL}\n${stderr}` : ""
+  const tail = stderr && (code !== 0 || !output) ? `${STDERR_LABEL}\n${stderr}` : ""
   const kept = tail && output ? handbackOutput(output, false, LIMITS.handbackBytes - Buffer.byteLength(tail) - 2) : output
   const head = kept ? `worker ${address} finished (exit ${code})` : `worker ${address} exited without replying (exit ${code})`
   return [head, kept, tail].filter(Boolean).join("\n\n")

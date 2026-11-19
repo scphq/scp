@@ -246,6 +246,10 @@ brokerSuite("broker spawn", (start) => {
     const third = await lead.request<Exit>("spawn_exit", { grant: grant.token, code: 3, stderr: "boom", run: 3, reply_to: "msg_unknown" });
     expect((await inbox(lead)).find((m) => m.id === third.handback)).toMatchObject({ reply_to: first.handback });
     expect((await lead.request<Exit>("spawn_exit", { grant: grant.token, code: 0, run: 2 })).handback).toBeNull();
+    const quiet = await lead.request<Exit>("spawn_exit", { grant: grant.token, code: 0, stderr: "denied", run: 4 });
+    expect((await inbox(lead)).find((m) => m.id === quiet.handback)!.body.text).toStartWith(
+      "worker me/w exited without replying (exit 0)\n\nstderr (last 1 KB):\ndenied\n\n",
+    );
   });
 
   test("spawn_end closes the holding waker and only the spawner, ancestor or terminal human may end it", async () => {
@@ -355,6 +359,20 @@ brokerSuite("broker spawn supervision", (start) => {
       thread: progress.thread,
       body: { text: "worker me/w exited (exit 0) with no final output" },
     });
+  });
+
+  test("a worker that exits 0 without output hands back its stderr tail, one with output does not", async () => {
+    const broker = await start();
+    const { lead, grant, worker } = await setup(broker);
+    const silent = await lead.request<Exit>("spawn_exit", { grant: grant.token, code: 0, stderr: "auto-denied: needs the command permission" });
+    expect((await inbox(lead)).find((m) => m.id === silent.handback)!.body.text).toBe(
+      "worker me/w exited without replying (exit 0)\n\nstderr (last 1 KB):\nauto-denied: needs the command permission",
+    );
+    await worker.close();
+    const next = await lead.request<Grant>("grant", { name: "w2", scope: "parent", spawn: true, bind_process: key(15) });
+    await broker.agent("app", "codex", {}, claim(16, [15, 1]));
+    const spoke = await lead.request<Exit>("spawn_exit", { grant: next.token, code: 0, output: "done", stderr: "warn" });
+    expect((await inbox(lead)).find((m) => m.id === spoke.handback)!.body.text).toBe("worker me/w2 finished (exit 0)\n\ndone");
   });
 
   test("unapplied steers appear only as unapplied and other senders are excluded", async () => {

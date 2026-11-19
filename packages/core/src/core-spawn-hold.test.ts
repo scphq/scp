@@ -113,6 +113,10 @@ describe("a held spawn", () => {
     })
     expect(core.spawnExit(actor, { grant: grant.token, code: 0, run: 2 }).handback).toBeNull()
     expect(core.inbox(main.id).map((m) => m.id)).toEqual([first.handback!, second.handback!, third.handback!])
+    const quiet = core.spawnExit(actor, { grant: grant.token, code: 0, stderr: "denied", run: 4 })
+    expect(message(quiet.handback!).body).toBe(
+      "worker me/w1 exited without replying (exit 0)\n\nstderr (last 1 KB):\ndenied\n\nme/w1 stays resumable: message it to resume its session",
+    )
     expect(code(() => core.spawnExit(actor, { grant: grant.token, code: 0, run: 0 }))).toBe("invalid_params")
   })
 

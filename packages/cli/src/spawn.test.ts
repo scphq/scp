@@ -666,14 +666,17 @@ describe("swarm spawn", () => {
       expect(new TextEncoder().encode(text!.slice(text!.indexOf("\n\n") + 2)).length).toBeLessThanOrEqual(LIMITS.handbackBytes)
     })
 
-    test("a joined worker's handback carries its stderr only when it exits non-zero", async () => {
+    test("a joined worker's handback carries its stderr when it exits non-zero or leaves no output", async () => {
       await inbox()
       const ok = await swarm(
         ["spawn", "--fg", "--name", "se3", "--", "codex", "exec", "go"],
         env({ CODEX_HOME: codexHome(true), FAKE_SEND_TO: "lead", FAKE_STDERR: "progress noise" }),
       )
       expect(ok.code).toBe(0)
-      expect((await inbox()).map((m) => m.body.text)).toEqual(["hello from the worker", "worker me/se3 exited (exit 0) with no final output"])
+      expect((await inbox()).map((m) => m.body.text)).toEqual([
+        "hello from the worker",
+        "worker me/se3 exited (exit 0) with no final output\n\nstderr (last 1 KB):\nprogress noise",
+      ])
       const failed = await swarm(
         ["spawn", "--fg", "--name", "se4", "--", "codex", "exec", "go"],
         env({ CODEX_HOME: codexHome(true), FAKE_SEND_TO: "lead", FAKE_STDERR: "quota exceeded", FAKE_EXIT: "3" }),

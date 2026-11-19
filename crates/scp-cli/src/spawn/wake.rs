@@ -116,7 +116,7 @@ pub fn parse_hold_ref(text: Option<&str>) -> Option<HoldRef> {
 
 /// the handback a linked worker sends its parent, as section 9.3 words it
 pub fn linked_handback_body(address: &str, code: i32, output: &str, stderr: &str) -> String {
-    let tail = if code != 0 && !stderr.is_empty() {
+    let tail = if !stderr.is_empty() && (code != 0 || output.is_empty()) {
         format!("stderr (last {} KB):\n{stderr}", LIMITS.stderr_bytes / 1024)
     } else {
         String::new()
@@ -456,10 +456,18 @@ mod tests {
     }
 
     #[test]
-    fn a_linked_handback_keeps_the_stderr_tail_of_a_failed_run() {
+    fn a_linked_handback_keeps_the_stderr_tail_of_a_failed_or_silent_run() {
         assert_eq!(
             linked_handback_body("me/m/w", 0, "done", "warn"),
             "worker me/m/w finished (exit 0)\n\ndone"
+        );
+        assert_eq!(
+            linked_handback_body("me/m/w", 0, "", "denied"),
+            "worker me/m/w exited without replying (exit 0)\n\nstderr (last 1 KB):\ndenied"
+        );
+        assert_eq!(
+            linked_handback_body("me/m/w", 0, "", ""),
+            "worker me/m/w exited without replying (exit 0)"
         );
         assert_eq!(
             linked_handback_body("me/m/w", 2, "", "boom"),

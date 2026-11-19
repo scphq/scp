@@ -2194,6 +2194,24 @@ describe("spawn bindings", () => {
     })
   })
 
+  test("a worker that exits 0 without output hands back its stderr tail, one with output does not", () => {
+    const { core, actor, main, grant, shim } = spawned()
+    shim(6)
+    const silent = core.spawnExit(actor, { grant: grant.token, code: 0, stderr: "auto-denied" })
+    expect(core.delivered(main.id, silent.handback)!.body.text).toBe("worker me/wm1 exited without replying (exit 0)\n\nstderr (last 1 KB):\nauto-denied")
+    const messaged = spawned()
+    const worker = messaged.shim(6).endpoint
+    messaged.core.send(worker.id, { to: "main", body: "progress" })
+    const quiet = messaged.core.spawnExit(messaged.actor, { grant: messaged.grant.token, code: 0, stderr: "auto-denied" })
+    expect(messaged.core.delivered(messaged.main.id, quiet.handback)!.body.text).toBe(
+      "worker me/wm1 exited (exit 0) with no final output\n\nstderr (last 1 KB):\nauto-denied",
+    )
+    const spoke = spawned()
+    spoke.shim(6)
+    const output = spoke.core.spawnExit(spoke.actor, { grant: spoke.grant.token, code: 0, output: "done", stderr: "warn" })
+    expect(spoke.core.delivered(spoke.main.id, output.handback)!.body.text).toBe("worker me/wm1 finished (exit 0)\n\ndone")
+  })
+
   test("a handback names when the worker read each of the spawner's messages it read, and those it never read as steers not applied, never another sender's", () => {
     const { core, actor, main, grant, shim, clock } = spawned()
     const { endpoint } = shim(6)
