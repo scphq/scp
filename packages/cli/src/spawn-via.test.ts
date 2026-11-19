@@ -156,7 +156,11 @@ describe("runner config", () => {
 
   test("a linked worker's handback follows the spawn handback's wording", () => {
     expect(linkedHandbackBody("me/vm/w1", 0, "done", "")).toBe("worker me/vm/w1 finished (exit 0)\n\ndone")
-    expect(linkedHandbackBody("me/vm/w1", 0, "", "noise")).toBe("worker me/vm/w1 exited without replying (exit 0)")
+    expect(linkedHandbackBody("me/vm/w1", 0, "", "denied")).toBe(
+      `worker me/vm/w1 exited without replying (exit 0)\n\nstderr (last ${LIMITS.stderrBytes / 1024} KB):\ndenied`,
+    )
+    expect(linkedHandbackBody("me/vm/w1", 0, "out", "noise")).toBe("worker me/vm/w1 finished (exit 0)\n\nout")
+    expect(linkedHandbackBody("me/vm/w1", 0, "", "")).toBe("worker me/vm/w1 exited without replying (exit 0)")
     expect(linkedHandbackBody("me/vm/w1", 2, "out", "boom")).toBe(
       `worker me/vm/w1 finished (exit 2)\n\nout\n\nstderr (last ${LIMITS.stderrBytes / 1024} KB):\nboom`,
     )

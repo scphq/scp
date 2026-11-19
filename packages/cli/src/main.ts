@@ -208,7 +208,7 @@ scopes (selectors are comma-separated, e.g. tree:parent,tree:children,group:team
                                                  ${LIMITS.handbackBytes} bytes (--handback-bytes N: its last N), so a worker need
                                                  not report back itself; and
                                                  each of your messages to it that it never applied, as steer not applied: <text>.
-                                                 A worker that never joined, or exited non-zero, also hands back the last
+                                                 A worker that never joined, exited non-zero or left no output also hands back the last
                                                  ${LIMITS.stderrBytes / 1024} KB of its stderr, cleaned and redacted, labelled stderr.
                                                  A codex exec worker runs no stop hook, so a message you send after its last step
                                                  would be lost: spawn resumes its session with it (codex exec resume, by the session

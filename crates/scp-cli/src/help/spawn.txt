@@ -21,8 +21,8 @@ run_in_background). A failure before the harness starts (bad flags, a refused gr
 spawn itself. Your stop waits for the worker's messages (hooks install --push-wait, default 600 s).
 Handback: when the harness exits you get its exit code and its reply, cleaned and redacted (a claude -p worker:
 all its replies since its prompt, from its transcript; other harnesses: their final output), and each of your
-messages it never applied as steer not applied: <text>. A worker that never joined or exited non-zero also hands
-back its last 1 KB of stderr.
+messages it never applied as steer not applied: <text>. A worker that never joined, exited non-zero or left no
+output adds its last 1 KB of stderr.
 Steer: swarm send <name> <text>; a claude -p or codex exec prompt gets a note naming you and your steer key.
 A codex exec worker that exited before a late steer is resumed with it (codex exec resume, at most twice).
 A codex exec, agy -p, grok -p or muse exec worker stays resumable: a message resumes its session (--idle S, detached

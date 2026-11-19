@@ -5681,8 +5681,8 @@ export class RelayCore {
    * the harness a spawn ran with `grant` exited with `code`: the endpoint that spent the grant is done (`exited <code>`, its last note after)
    * and its hook presence ends, as at a session_end; a grant no one spent is revoked. Either way the actor gets the handback, the worker's
    * `output` (its last terminal output) framed with the exit as one unread message ({@link handback}), naming as not applied the `unapplied`
-   * steers spawn took ({@link spawnSteers}) but could not hand the worker, and the tail of its `stderr` when it never joined or exited
-   * non-zero. A harness that never `started` (its spawn reported why) hands nothing back. The grant's issuer or an ancestor of that endpoint only
+   * steers spawn took ({@link spawnSteers}) but could not hand the worker, and the tail of its `stderr` when it never joined, exited
+   * non-zero or left no output. A harness that never `started` (its spawn reported why) hands nothing back. The grant's issuer or an ancestor of that endpoint only
    */
   spawnExit(
     actor: ScopeActor,
@@ -5963,7 +5963,7 @@ export class RelayCore {
    * the judge, since the spawner minted the grant and is the recipient. One per grant (null once sent), in the thread the two last wrote in,
    * else one derived from the grant, naming by short id the spawner's messages the worker read, with when (one a background hook showed only
    * delivered, unless the worker then exited 0: its model had the next request), and those it left unread; its hop follows the worker's
-   * causal hop, capped, and a full thread drops it (null). A worker that never joined or exited non-zero gets its `stderr` last, labelled, its
+   * causal hop, capped, and a full thread drops it (null). A worker that never joined, exited non-zero or left no output gets its `stderr` last, labelled, its
    * output cut from the front so both stay within ${LIMITS.handbackBytes} bytes
    */
   private handback(
@@ -5978,7 +5978,7 @@ export class RelayCore {
     stderr = "",
   ): string | null {
     if (grant.handback !== null) return null
-    const tail = stderr && (!spender || code !== 0) ? `${STDERR_LABEL}\n${stderr}` : ""
+    const tail = stderr && (!spender || code !== 0 || !whole) ? `${STDERR_LABEL}\n${stderr}` : ""
     const output = tail ? handbackOutput(whole, false, LIMITS.handbackBytes - utf8Bytes(tail) - 2) : whole
     const now = this.now()
     const stable = this.handbackThread(grant)
@@ -6087,7 +6087,7 @@ export class RelayCore {
     const thread = anchor?.thread ?? (full(stable) ? undefined : stable)
     if (!thread) return null
     const address = this.address(spender)
-    const tail = stderr && code !== 0 ? `${STDERR_LABEL}\n${stderr}` : ""
+    const tail = stderr && (code !== 0 || !output) ? `${STDERR_LABEL}\n${stderr}` : ""
     const kept = tail ? handbackOutput(output, false, LIMITS.handbackBytes - utf8Bytes(tail) - 2) : output
     const body = [
       kept ? `worker ${address} finished (exit ${code})` : `worker ${address} exited without replying (exit ${code})`,

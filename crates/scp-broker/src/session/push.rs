@@ -871,7 +871,9 @@ impl Core {
         if text(grant, "handback").is_some() {
             return Ok(None);
         }
-        let tail = if !exit.stderr.is_empty() && (spender.is_none() || exit.code != 0) {
+        let tail = if !exit.stderr.is_empty()
+            && (spender.is_none() || exit.code != 0 || exit.output.is_empty())
+        {
             self.stderr_tail(exit.stderr)
         } else {
             String::new()
@@ -1042,7 +1044,7 @@ impl Core {
             }
         };
         let address = address(spender);
-        let tail = if !exit.stderr.is_empty() && exit.code != 0 {
+        let tail = if !exit.stderr.is_empty() && (exit.code != 0 || exit.output.is_empty()) {
             self.stderr_tail(exit.stderr)
         } else {
             String::new()
@@ -1603,6 +1605,28 @@ mod tests {
             .dispatch(main, "spawn_exit", &map(json!({"grant":"krt_x","code":0})))
             .await;
         assert!(refused.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_silent_clean_exit_hands_back_its_stderr() {
+        let Fixture {
+            mut core,
+            main,
+            token,
+            ..
+        } = fixture(false).await;
+        core.dispatch(
+            main,
+            "spawn_exit",
+            &map(json!({"grant":token,"code":0,"stderr":"denied"})),
+        )
+        .await
+        .expect("spawn_exit");
+        let result = stop(&mut core, main, false).await;
+        assert_eq!(
+            texts(&result),
+            ["worker me/w1 exited without replying (exit 0)\n\nstderr (last 1 KB):\ndenied"]
+        );
     }
 
     #[tokio::test]
