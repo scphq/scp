@@ -50,9 +50,13 @@ describe.each(targetNames)("%s CLI conformance", (name) => {
       const work = join(vm.root, "work");
       mkdirSync(bin);
       mkdirSync(work);
-      writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${join(vm.root, "claude-args")}'\necho 'backgrounded · 1a2b3c4d (idle)'\n`, {
-        mode: 0o755,
-      });
+      writeFileSync(
+        join(bin, "claude"),
+        `#!/bin/sh\n[ "$1" = agents ] && { echo '[]'; exit 0; }\nprintf '%s\\n' "$@" > '${join(vm.root, "claude-args")}'\necho 'backgrounded · 1a2b3c4d (idle)'\n`,
+        {
+          mode: 0o755,
+        },
+      );
       await vm.run(["claude", "--bg", "--name", "worker", "--under", "me/laptop/lead", "--", "work"], { PATH: `${bin}:${process.env.PATH}` });
       const args = readFileSync(join(vm.root, "claude-args"), "utf8").split("\n");
       const config = JSON.parse(readFileSync(args[args.indexOf("--mcp-config") + 1]!, "utf8"));

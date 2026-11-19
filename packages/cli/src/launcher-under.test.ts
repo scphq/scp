@@ -116,7 +116,11 @@ test("background mount retains explicit placement and its claim links across bro
     const bin = join(root, "bin")
     mkdirSync(bin)
     const daemonEnv = join(root, "daemon-env")
-    writeFileSync(join(bin, "claude"), `#!/bin/sh\nenv > '${daemonEnv}'\necho 'backgrounded · 1a2b3c4d (idle)'\n`, { mode: 0o755 })
+    writeFileSync(
+      join(bin, "claude"),
+      `#!/bin/sh\n[ "$1" = agents ] && { echo '[]'; exit 0; }\nenv > '${daemonEnv}'\necho 'backgrounded · 1a2b3c4d (idle)'\n`,
+      { mode: 0o755 },
+    )
     const env = { HOME: root, PATH: `${bin}:/usr/bin:/bin`, SCP_DIR: join(root, "vm"), SCP_NAME: "caller", SCP_GRANT: "spent" }
     expect(await claudeCommand(["--under", "me/lead", "--name", "foreground", "--", "--mcp-config", "custom.json"], env, () => {}, root)).toBe(0)
     const foreground = readFileSync(daemonEnv, "utf8")

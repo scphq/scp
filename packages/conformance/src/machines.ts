@@ -47,6 +47,7 @@ export class Machine {
       SCP_TOKEN: token,
       SCP_RELAY: target.url,
       SCP_HARNESS_DETECT: "0",
+      SCP_MEMORY_FREE_PCT: "100",
       CODEX_HOME: join(this.root, "codex"),
       CLAUDE_CONFIG_DIR: join(this.root, "harness"),
       GEMINI_CLI_HOME: this.root,
