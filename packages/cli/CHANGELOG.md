@@ -1,5 +1,16 @@
 # @scp-dev/cli
 
+## 1.8.4
+
+### Patch Changes
+
+- 5f3e105: A spawned worker that exits without output now hands back the tail of its stderr even when it exits 0, so a harness that explains a silent failure on stderr (a headless permission denial, say) no longer reaches the spawner as a bare "exited without replying". The rule is the same in both CLIs and both brokers, and SPEC section 9.3 says so.
+- Updated dependencies [5f3e105]
+  - @scp-dev/core@0.18.15
+  - @scp-dev/broker@0.13.15
+  - @scp-dev/hub@0.13.15
+  - @scp-dev/mcp@0.5.24
+
 ## 1.8.3
 
 ### Patch Changes
