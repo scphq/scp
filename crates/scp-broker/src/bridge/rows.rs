@@ -118,7 +118,7 @@ fn check_entries(value: &Value) -> Result<(), RpcError> {
             .get("sel")
             .and_then(Value::as_str)
             .ok_or_else(|| bad("caps"))?;
-        if !crate::policy::valid_selector(sel, true, true) {
+        if !crate::policy::valid_selector(sel, false, false) {
             return Err(bad("caps"));
         }
         for key in ["via", "group"] {
@@ -137,7 +137,7 @@ fn parse_selectors(value: &Value, what: &str) -> Result<Value, RpcError> {
         .ok_or_else(|| bad(what))?;
     if list.iter().any(|sel| {
         !sel.as_str()
-            .is_some_and(|s| crate::policy::valid_selector(s, true, true))
+            .is_some_and(|s| crate::policy::valid_selector(s, false, false))
     }) {
         return Err(bad(what));
     }
@@ -1567,6 +1567,28 @@ mod tests {
                 .presence,
             "offline"
         );
+    }
+
+    #[test]
+    fn views_take_relative_selectors_as_the_hub_does() {
+        let caps = json!({"caps": [{"id": "cap_1", "dir": "in", "by": "ep:main", "sels": [{"sel": "tree:parent"}, {"sel": "machine:ci", "via": "ep:main"}]}], "allow": {"inherited:in": [{"sel": "tree:descendants:2"}]}});
+        let view = parse_view(&json!({"address": "me/orch", "kind": "agent", "parent_ep": "main", "depth": 1, "rules": {"in": ["tree:children"]}, "caps": caps, "incarnation": "i2"}), 0).unwrap();
+        assert_eq!(
+            view.scope.rules,
+            Some(Some(json!({"in": ["tree:children"]})))
+        );
+        assert_eq!(view.scope.caps, Some(Some(caps)));
+        for scope in [
+            json!({"rules": {"out": ["group:self"]}}),
+            json!({"caps": {"caps": [{"id": "c", "dir": "out", "by": "human", "sels": [{"sel": "group:self"}]}]}}),
+            json!({"caps": {"caps": [{"id": "c", "dir": "out", "by": "human", "sels": [{"sel": "tree:ancestors:17"}]}]}}),
+        ] {
+            let mut view = json!({"address": "me/orch", "kind": "agent"});
+            view.as_object_mut()
+                .unwrap()
+                .extend(scope.as_object().unwrap().clone());
+            assert!(parse_view(&view, 0).is_err());
+        }
     }
 
     #[test]
