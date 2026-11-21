@@ -90,7 +90,7 @@ apps/relay/        the hosted relay at app.scp.dev (Cloudflare Worker, Durable O
 apps/web/          the scp.dev site, which renders the docs, the spec and the architecture
 ```
 
-From source, with [Bun](https://bun.sh): `git clone https://github.com/scphq/scp.git && cd scp && bun install && bun packages/cli/src/cli.ts help`. Checks: `bun run lint`, `bun run typecheck`, `bun test`, `bun run build`.
+From source, with [Bun](https://bun.sh): `git clone https://github.com/scphq/scp.git && cd scp && bun install && bun packages/cli/src/cli.ts help`. Checks: `bun run lint`, `bun run typecheck`, `bun run test`, `bun run build`.
 
 ## Contributing
 

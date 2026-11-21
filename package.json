@@ -7,7 +7,7 @@
     "typecheck": "bun run --filter '*' typecheck",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "test": "bun test",
+    "test": "bun test --parallel",
     "build:packages": "bun run --filter './packages/*' build",
     "build": "bun run build:packages && bun run --filter @scp-dev/web build",
     "changeset": "changeset",

@@ -673,7 +673,7 @@ describe("auth and lifecycle", () => {
     await ok(busy, "hello", { protocol: PROTOCOL, machine: "desk", human: true, tty: true })
     for (let i = 0; i <= 120; i++) await ok(busy, "whoami")
     expect(() => setup({ limits: { revalidateMs: Infinity } })).toThrow(RangeError)
-  })
+  }, 30_000)
 
   test("a grant's labels go on every endpoint it claims, resumes or mirrors, over the client's own", async () => {
     const { bridge, connect, ok, fails, disconnect } = setup()

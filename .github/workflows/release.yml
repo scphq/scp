@@ -76,7 +76,7 @@ jobs:
 
       - name: Test
         if: needs.gate.outputs.publishing == 'true'
-        run: bun test
+        run: bun run test
 
       - name: Build packages
         if: needs.gate.outputs.publishing == 'true'
