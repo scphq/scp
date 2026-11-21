@@ -142,13 +142,16 @@ impl Tables {
     }
 }
 
-/// `--as X`, `--as=X` and `--human` before the verb, moved after it
+/// `--as X`, `--harness H`, their `=` forms and `--human` before the verb, moved after it
 pub fn hoist_identity(argv: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < argv.len() {
-        if argv[i] == "--as" && i + 1 < argv.len() {
+        if (argv[i] == "--as" || argv[i] == "--harness") && i + 1 < argv.len() {
             i += 2;
-        } else if argv[i].starts_with("--as=") || argv[i] == "--human" {
+        } else if argv[i].starts_with("--as=")
+            || argv[i].starts_with("--harness=")
+            || argv[i] == "--human"
+        {
             i += 1;
         } else {
             break;
@@ -416,6 +419,14 @@ mod tests {
         assert_eq!(
             hoist_identity(&words(&["--as", "x", "--human", "whoami", "a"])),
             words(&["whoami", "--as", "x", "--human", "a"])
+        );
+        assert_eq!(
+            hoist_identity(&words(&["--harness", "cli", "--as=x", "whoami"])),
+            words(&["whoami", "--harness", "cli", "--as=x"])
+        );
+        assert_eq!(
+            hoist_identity(&words(&["--harness=cli", "whoami"])),
+            words(&["whoami", "--harness=cli"])
         );
         assert_eq!(
             hoist_identity(&words(&["--as", "x"])),

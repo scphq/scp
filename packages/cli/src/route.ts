@@ -54,12 +54,12 @@ export function nativeMode(env: Env): NativeMode {
 /** whether `SCP_NATIVE` has a value: a missing native swarm is then noted, where by default this CLI stands in for it quietly */
 export const nativeAsked = (env: Env): boolean => Boolean(env.SCP_NATIVE)
 
-/** the verb of `argv`, past the `--as X`, `--as=X` and `--human` the CLI moves after it */
+/** the verb of `argv`, past the `--as X`, `--harness H`, their `=` forms and `--human` the CLI moves after it */
 export function verbOf(argv: string[]): string | undefined {
   let i = 0
   while (i < argv.length) {
-    if (argv[i] === "--as" && i + 1 < argv.length) i += 2
-    else if (argv[i]!.startsWith("--as=") || argv[i] === "--human") i++
+    if ((argv[i] === "--as" || argv[i] === "--harness") && i + 1 < argv.length) i += 2
+    else if (argv[i]!.startsWith("--as=") || argv[i]!.startsWith("--harness=") || argv[i] === "--human") i++
     else break
   }
   return i > 0 && i < argv.length ? argv[i] : argv[0]

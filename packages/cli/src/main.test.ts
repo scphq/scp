@@ -328,7 +328,9 @@ describe("swarm", () => {
     expect((await swarm(["relink", "--as", "sleeper"])).stderr).toBe("swarm: only the human at a terminal relinks endpoints\n")
   })
 
-  test("--as and --human go anywhere on the line, before the verb too", async () => {
+  test("--as, --harness and --human go anywhere on the line, before the verb too", async () => {
+    expect((await swarm(["--as", "anywhere", "--harness", "cli", "whoami"])).stdout.split("\n")[0]).toBe("me/anywhere (agent, cli)")
+    expect((await swarm(["--harness=cli", "--as", "anywhere", "whoami"])).stdout.split("\n")[0]).toBe("me/anywhere (agent, cli)")
     expect((await swarm(["--as", "anywhere", "whoami"])).stdout.split("\n")[0]).toBe("me/anywhere (agent, cli)")
     expect((await swarm(["--as=anywhere", "whoami", "--json"])).stdout).toContain('"address": "me/anywhere"')
     expect((await swarm(["whoami", "--as=anywhere"])).stdout.split("\n")[0]).toBe("me/anywhere (agent, cli)")
