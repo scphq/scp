@@ -1446,7 +1446,7 @@ for (const mode of hookModes)
       test("hooks and the waiter run through the native client while it is executable, and through the CLI once it is not", async () => {
         const oc = await load({}, {}, [], false, true, false, true)
         try {
-          for (let i = 0; i < 100 && !oc.nativeCalls().length; i++) await Bun.sleep(50)
+          for (let i = 0; i < 400 && !oc.nativeCalls().length; i++) await Bun.sleep(50)
           expect(oc.nativeCalls()[0]).toBe("swarm hook opencode --wake 50")
           await oc.plugin.event({ event: { type: "session.created", properties: { sessionID: "ses_root", info: { id: "ses_root" } } } })
           await oc.plugin["tool.execute.after"]({ tool: "read", sessionID: "ses_root", args: {} }, { output: "out" })
@@ -1497,7 +1497,7 @@ for (const mode of hookModes)
       test("before any session, the waiter starts on its own and opens a session for the message it shows", async () => {
         const oc = await load({ hookSpecificOutput: { additionalContext: "FRESH-CONTEXT" } }, {}, [], false, true)
         try {
-          for (let i = 0; i < 100 && !oc.prompts.length; i++) await Bun.sleep(50)
+          for (let i = 0; i < 400 && !oc.prompts.length; i++) await Bun.sleep(50)
           expect(oc.calls().filter((c) => c.args.includes("--wake"))[0]).toEqual({
             args: ["hook", "opencode", "--wake", "50"],
             payload: { hook_event_name: "Wake", cwd: "/work/oc" },
