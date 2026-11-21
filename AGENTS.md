@@ -19,7 +19,7 @@ Package manager is **bun**.
 ```sh
 bun install
 bun run typecheck        # every workspace
-bun test
+bun run test             # bun test --parallel: every test file, across worker processes
 
 cd apps/web
 bun run dev              # http://localhost:3000
@@ -27,7 +27,7 @@ bun run build            # next build
 bun run preview          # OpenNext build, then wrangler dev serving the Worker locally
 ```
 
-Run `bun run typecheck` and `bun test` before opening a PR.
+Run `bun run typecheck` and `bun run test` before opening a PR.
 
 ## Conventions
 
