@@ -30,6 +30,8 @@ describe("the routing decision", () => {
   test("the verb is past the identity flags the CLI hoists", () => {
     expect(verbOf(["--as", "x", "--human", "whoami", "-h"])).toBe("whoami")
     expect(verbOf(["--as=x", "set-now", "a"])).toBe("set-now")
+    expect(verbOf(["--as", "x", "--harness", "cli", "whoami"])).toBe("whoami")
+    expect(verbOf(["--harness=cli", "--as", "x", "whoami"])).toBe("whoami")
     expect(verbOf(["--as", "x"])).toBe("--as")
     expect(verbOf([])).toBeUndefined()
   })

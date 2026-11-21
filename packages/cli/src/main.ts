@@ -648,12 +648,12 @@ export function fleetLine(event: Record<string, unknown>): string {
   return `${at} ${JSON.stringify(event)}`
 }
 
-/** `--as X`, `--as=X` and `--human` before the verb, moved after it, where every verb that acts as someone takes them */
+/** `--as X`, `--harness H`, their `=` forms and `--human` before the verb, moved after it, where every verb that acts as someone takes them */
 export function hoistIdentity(argv: string[]): string[] {
   let i = 0
   while (i < argv.length) {
-    if (argv[i] === "--as" && i + 1 < argv.length) i += 2
-    else if (argv[i]!.startsWith("--as=") || argv[i] === "--human") i++
+    if ((argv[i] === "--as" || argv[i] === "--harness") && i + 1 < argv.length) i += 2
+    else if (argv[i]!.startsWith("--as=") || argv[i]!.startsWith("--harness=") || argv[i] === "--human") i++
     else break
   }
   return i > 0 && i < argv.length ? [argv[i]!, ...argv.slice(0, i), ...argv.slice(i + 1)] : argv
