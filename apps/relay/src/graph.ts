@@ -13,7 +13,7 @@ const COLORED = ["claude", "codex", "opencode", "gemini", "agy", "grok", "muse",
 const HUMAN_ICON =
   '<g transform="scale(1.5)"><circle cx="8" cy="5.25" r="2.75" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.75 14c.5-3 2.6-4.75 5.25-4.75S12.75 11 13.25 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></g>';
 
-const MARK = '<path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/>';
+const MARK = '<path d="M4 12L28 5Q42 1 48 16H24L16 24V40Q4 37 4 24Z"/><path d="M24 24H40V40H24Z"/><path d="M60 52L36 59Q22 63 16 48H40L48 40V24Q60 27 60 40Z"/>';
 
 /** `org/machine/handle` as its machine and handle; the org's own human (`org/`) has neither */
 export function placeOf(address: string): { machine: string; handle: string } {
@@ -658,7 +658,7 @@ function sync(v) {
   if (hubAt && !hubEl) {
     hubEl = el("g", { class: "hub", "aria-hidden": "true" }, layers.hub);
     el("circle", { r: "15" }, hubEl);
-    el("svg", { x: "-7", y: "-7", width: "14", height: "14", viewBox: "0 0 32 32", fill: "currentColor" }, hubEl).innerHTML = MARK;
+    el("svg", { x: "-7", y: "-7", width: "14", height: "14", viewBox: "0 0 64 64", fill: "currentColor" }, hubEl).innerHTML = MARK;
     el("text", { y: "-22" }, hubEl).textContent = "hub";
   }
   if (!hubAt && hubEl) { hubEl.remove(); hubEl = null; }
