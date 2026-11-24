@@ -104,7 +104,7 @@ svg.g { position: absolute; inset: 0; }
 .marks { position: absolute; left: 98px; top: 454px; display: flex; gap: 28px; align-items: center; }
 </style></head><body>
 ${graph()}
-<div class="brand"><svg width="38" height="38" viewBox="0 0 32 32" fill="${C.fg}"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>SCP</div>
+<div class="brand"><svg width="38" height="38" viewBox="0 0 64 64" fill="${C.fg}"><path d="M4 12L28 5Q42 1 48 16H24L16 24V40Q4 37 4 24Z"/><path d="M24 24H40V40H24Z"/><path d="M60 52L36 59Q22 63 16 48H40L48 40V24Q60 27 60 40Z"/></svg>SCP</div>
 <h1 class="title">${HERO.title.replace(/^A /, "The ")}</h1>
 <div class="marks">${ROW.map((h) => mark(h, 30)).join("")}</div>
 </body></html>`;

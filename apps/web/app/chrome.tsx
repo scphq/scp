@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { DEMO, DOCS, REPO, SPEC } from "./content";
 
-/** Two corner brackets around a solid square. */
+/** Two canted shoulders around a free square. */
 export function Mark({ size = 16 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" focusable="false">
-      <path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z" />
-      <rect x="11" y="11" width="10" height="10" />
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="currentColor" aria-hidden="true" focusable="false">
+      <path d="M4 12L28 5Q42 1 48 16H24L16 24V40Q4 37 4 24Z" />
+      <path d="M24 24H40V40H24Z" />
+      <path d="M60 52L36 59Q22 63 16 48H40L48 40V24Q60 27 60 40Z" />
     </svg>
   );
 }

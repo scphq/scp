@@ -65,7 +65,7 @@ ${
 </html>`
     : html`<body${c.narrow ? "" : html` class="wide"`}>
 <header class="head"><div class="wrap head-in">
-<a class="brand" href="/"><svg class="mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><path d="M3 3h10v4H7v6H3zM29 29H19v-4h6v-6h4z"/><rect x="11" y="11" width="10" height="10"/></svg>scp <span class="brand-dim">relay</span></a>
+<a class="brand" href="/"><svg class="mark" viewBox="0 0 64 64" fill="currentColor" aria-hidden="true"><path d="M4 12L28 5Q42 1 48 16H24L16 24V40Q4 37 4 24Z"/><path d="M24 24H40V40H24Z"/><path d="M60 52L36 59Q22 63 16 48H40L48 40V24Q60 27 60 40Z"/></svg>scp <span class="brand-dim">relay</span></a>
 ${nav}
 </div></header>
 <main><div class="wrap page">${body}</div></main>
