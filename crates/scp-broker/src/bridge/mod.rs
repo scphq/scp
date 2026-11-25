@@ -14,7 +14,7 @@ use scp_core::protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 use tokio::sync::Notify;
 
-use crate::core::Core;
+use crate::core::{Core, SharedCore};
 use crate::proto::RpcError;
 use crate::state::{ConnectionId, Mode};
 
@@ -31,6 +31,39 @@ pub struct Federation {
     pub observed: HashMap<String, i64>,
     pub env: BTreeMap<String, String>,
     pub restart: Arc<Notify>,
+}
+
+/// hub work a request leaves for after the core is released: an answer from the hub is never awaited holding the core
+pub enum HubJob {
+    Mirror {
+        bridge: Arc<Bridge>,
+        views: Vec<Value>,
+        kick: Vec<String>,
+    },
+    MachineWake {
+        bridge: Arc<Bridge>,
+        params: Value,
+    },
+}
+
+impl HubJob {
+    pub async fn finish(self, core: &SharedCore, mut result: Value) -> Result<Value, RpcError> {
+        match self {
+            HubJob::Mirror {
+                bridge,
+                views,
+                kick,
+            } => {
+                result["mirrored"] = json!(bridge.push_mirror(views).await);
+                let core = core.lock().await;
+                for id in &kick {
+                    core.wakers.kick(id);
+                }
+                Ok(result)
+            }
+            HubJob::MachineWake { bridge, params } => bridge.machine_wake(params).await,
+        }
+    }
 }
 
 struct Others {
@@ -210,7 +243,7 @@ impl Core {
 
     /// sets or clears the URL the hub calls to wake this machine; only the human sets it
     pub async fn machine_wake(
-        &self,
+        &mut self,
         conn: ConnectionId,
         params: &Map<String, Value>,
     ) -> Result<Value, RpcError> {
@@ -238,13 +271,31 @@ impl Core {
             Some(Value::String(secret)) => sent["secret"] = json!(secret),
             Some(_) => return Err(RpcError::invalid_params("secret is a string")),
         }
-        bridge.machine_wake(sent).await
+        self.hub_job = Some(HubJob::MachineWake {
+            bridge,
+            params: sent,
+        });
+        Ok(Value::Null)
     }
 
-    /// mirrors these endpoints now: true once the hub took the delta, false when it did not; None without a bridge
-    pub(crate) async fn bridge_mirror(&self, ids: Vec<String>) -> Option<bool> {
-        let bridge = self.federation.bridge.clone()?;
-        Some(bridge.mirror_now(self, ids).await)
+    /// mirrors these endpoints once the core is released, then kicks their wakers; false and kicked now when nothing is to mirror
+    pub(crate) async fn bridge_mirror(&mut self, ids: Vec<String>) -> bool {
+        let views = match self.federation.bridge.clone() {
+            Some(bridge) => Some((bridge.mirror_views(self, ids.clone()).await, bridge)),
+            None => None,
+        };
+        let Some((views, bridge)) = views.filter(|(views, _)| !views.is_empty()) else {
+            for id in &ids {
+                self.wakers.kick(id);
+            }
+            return false;
+        };
+        self.hub_job = Some(HubJob::Mirror {
+            bridge,
+            views,
+            kick: ids,
+        });
+        false
     }
 }
 

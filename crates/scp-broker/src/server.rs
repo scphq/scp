@@ -27,6 +27,10 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 const PRESENCE_PASS: Duration = Duration::from_secs(60);
 /// how often held judge verdicts are swept
 const JUDGE_PASS: Duration = Duration::from_secs(2);
+/// how long shutdown waits for the core, the chores and the connections before it stops without them
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+/// how long the core may stay held before the broker logs who took it last
+const CORE_HELD_WARN: Duration = Duration::from_secs(30);
 
 pub struct BrokerOptions {
     pub paths: Paths,
@@ -162,9 +166,17 @@ impl Broker {
         let mut connections = JoinSet::new();
         let mut idle_since = Instant::now();
         let mut ownership = tokio::time::interval(Duration::from_secs(2));
-        let restart = self.core.lock().await.federation.restart.clone();
+        let (restart, stop_waiters, bridge) = {
+            let core = self.core.lock().await;
+            (
+                core.federation.restart.clone(),
+                core.state.stopping.clone(),
+                core.bridge(),
+            )
+        };
         let wakers = crate::wake::attach(&self.core).await;
-        let chores = tokio::spawn(chores(self.core.clone(), stopping.clone()));
+        let mut chores = tokio::spawn(chores(self.core.clone(), stopping.clone()));
+        let watchdog = tokio::spawn(watchdog(self.core.clone(), stopping.clone()));
         let running = crate::tasks::TaskPid::default();
         let tasks = self
             .task
@@ -209,16 +221,28 @@ impl Broker {
                 }
             }
         };
-        {
-            let mut core = self.core.lock().await;
-            core.state.closing = true;
-            core.state.stopping.notify_waiters();
-            if let Some(bridge) = core.bridge() {
-                bridge.stop();
-            }
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        if let Some(bridge) = &bridge {
+            bridge.stop();
         }
+        match tokio::time::timeout(SHUTDOWN_WAIT / 3, self.core.lock()).await {
+            Ok(mut core) => core.state.closing = true,
+            Err(_) => eprintln!(
+                "relay broker: the core stayed busy at shutdown ({}); stopping without it",
+                crate::core::last_taken()
+            ),
+        }
+        stop_waiters.notify_waiters();
         let _ = stop.send(true);
-        let _ = chores.await;
+        if tokio::time::timeout_at(deadline, &mut chores)
+            .await
+            .is_err()
+        {
+            chores.abort();
+            let _ = chores.await;
+        }
+        watchdog.abort();
+        let _ = watchdog.await;
         wakers.abort();
         let _ = wakers.await;
         if let Some(tasks) = tasks {
@@ -226,10 +250,7 @@ impl Broker {
             let _ = tasks.await;
         }
         let drain = async { while connections.join_next().await.is_some() {} };
-        if tokio::time::timeout(Duration::from_secs(2), drain)
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout_at(deadline, drain).await.is_err() {
             connections.abort_all();
             while connections.join_next().await.is_some() {}
         }
@@ -277,6 +298,34 @@ async fn chores(core: SharedCore, mut stopping: watch::Receiver<bool>) {
         if *stopping.borrow() {
             return;
         }
+    }
+}
+
+/// logs, loudly and once per stretch, a core held past [`CORE_HELD_WARN`], naming the request that took it last
+async fn watchdog(core: SharedCore, mut stopping: watch::Receiver<bool>) {
+    let mut check = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            _ = stopping.changed() => return,
+            _ = check.tick() => {}
+        }
+        let held = tokio::select! {
+            _ = stopping.changed() => return,
+            held = tokio::time::timeout(CORE_HELD_WARN, core.lock()) => held,
+        };
+        if held.is_ok() {
+            continue;
+        }
+        eprintln!(
+            "relay broker: the core has been held for more than {} s; every request waits behind it ({})",
+            CORE_HELD_WARN.as_secs(),
+            crate::core::last_taken()
+        );
+        tokio::select! {
+            _ = stopping.changed() => return,
+            _ = core.lock() => {}
+        }
+        eprintln!("relay broker: the core is free again");
     }
 }
 
@@ -731,6 +780,50 @@ mod tests {
                 "unhibernate broker"
             ]
         );
+        tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_while_a_request_holds_the_core() {
+        let dir = std::env::temp_dir().join(format!("scp-held-{:016x}", rand::random::<u64>()));
+        let broker = Broker::start(BrokerOptions {
+            paths: Paths::new(dir.clone()),
+            limits: Limits::default(),
+            policy_file: dir.join("policy.json"),
+            idle: Duration::ZERO,
+            env: std::collections::BTreeMap::new(),
+            engine: crate::store::Engine::default(),
+        })
+        .await
+        .expect("start");
+        let paused = {
+            let mut core = broker.core.lock().await;
+            let paused = Arc::new(PausedStore {
+                inner: core.store.clone(),
+                pause: AtomicBool::new(true),
+                written: Notify::new(),
+                finish: Notify::new(),
+            });
+            core.store = paused.clone();
+            paused
+        };
+        let socket = broker.paths.socket.clone();
+        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(broker.run(async move {
+            let _ = fired.await;
+        }));
+        let mut client = UnixStream::connect(&socket).await.expect("connect");
+        client.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":\"scp/1\",\"claim\":{\"handle\":\"held\"}}}\n").await.expect("hello");
+        tokio::time::timeout(Duration::from_secs(2), paused.written.notified())
+            .await
+            .expect("hello holds the core");
+        fire.send(()).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(8), running)
+            .await
+            .expect("shutdown waited on the held core")
+            .expect("run task")
+            .expect("run");
+        paused.finish.notify_one();
         tokio::fs::remove_dir_all(dir).await.ok();
     }
 
