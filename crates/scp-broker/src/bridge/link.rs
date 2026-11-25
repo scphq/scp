@@ -28,6 +28,10 @@ const LOCAL_BUFFER: usize = 1000;
 const LOCAL_PER_FRAME: usize = 200;
 const LOCAL_RECIPIENTS: usize = 64;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// how long a request waits for the hub's answer; a hub silent this long has its socket dropped and linked again
+const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+/// how long a hibernate waits for the hub to take its mirror, as the TypeScript broker's barrier
+const MIRROR_BARRIER: Duration = Duration::from_secs(10);
 /// room left in the hub's frame for the JSON-RPC envelope around a mirror's endpoints
 pub const MIRROR_FRAME_BYTES: usize = 262_144 - 1024;
 /// an inject that fails this many times in a row is rejected to the hub as a dead letter
@@ -173,6 +177,7 @@ enum Inbound {
 
 struct Link {
     writer: Option<mpsc::UnboundedSender<Message>>,
+    hang_up: Option<Arc<Notify>>,
     generation: u64,
     connected: bool,
     ready: bool,
@@ -190,6 +195,18 @@ struct Link {
     acked_max: i64,
     local_queue: Vec<Value>,
     local_armed: bool,
+}
+
+/// removes a request's waiter however its wait ends, also when the caller drops it
+struct Waiting<'a> {
+    bridge: &'a Bridge,
+    id: u64,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.bridge.forget(self.id);
+    }
 }
 
 pub struct Bridge {
@@ -219,6 +236,7 @@ impl Bridge {
         let bridge = Arc::new(Self {
             link: StdMutex::new(Link {
                 writer: None,
+                hang_up: None,
                 generation: 0,
                 connected: false,
                 ready: false,
@@ -354,13 +372,24 @@ impl Bridge {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, Failure> {
+        self.request_until(method, params, None).await
+    }
+
+    /// a request whose wait for the answer also ends at `deadline`; a full [`REPLY_TIMEOUT`] without one hangs up the socket
+    async fn request_until(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Value, Failure> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        {
+        let generation = {
             let link = self.link();
             let Some(writer) = link.writer.clone() else {
                 return Err(Failure::link("the hub is not connected"));
             };
+            let generation = link.generation;
             drop(link);
             if let Ok(mut pending) = self.pending.lock() {
                 pending.insert(id, tx);
@@ -374,9 +403,40 @@ impl Bridge {
                     "the hub connection failed ({error})"
                 )));
             }
+            generation
+        };
+        let _waiting = Waiting { bridge: self, id };
+        let full = tokio::time::Instant::now() + REPLY_TIMEOUT;
+        let until = deadline.map_or(full, |deadline| deadline.min(full));
+        match tokio::time::timeout_at(until, rx).await {
+            Ok(reply) => reply.unwrap_or_else(|_| Err(Failure::link("the hub connection closed"))),
+            Err(_) if until < full => Err(Failure::link(format!(
+                "the hub did not answer {method} in time"
+            ))),
+            Err(_) => {
+                self.hang_up(generation);
+                Err(Failure::link(format!(
+                    "the hub did not answer {method} within {} s",
+                    REPLY_TIMEOUT.as_secs()
+                )))
+            }
         }
-        rx.await
-            .unwrap_or_else(|_| Err(Failure::link("the hub connection closed")))
+    }
+
+    fn forget(&self, id: u64) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&id);
+        }
+    }
+
+    /// drops the hub socket of `generation`, which stopped answering, so the link connects again
+    fn hang_up(&self, generation: u64) {
+        let link = self.link();
+        if link.generation == generation
+            && let Some(hang_up) = &link.hang_up
+        {
+            hang_up.notify_one();
+        }
     }
 
     fn fire_and_forget(self: &Arc<Self>, method: &'static str, params: Value) {
@@ -424,7 +484,10 @@ impl Bridge {
         let deadline = tokio::time::Instant::now() + self.config.forward_wait;
         let mut tries = 0;
         loop {
-            match self.request("forward", request.clone()).await {
+            match self
+                .request_until("forward", request.clone(), Some(deadline))
+                .await
+            {
                 Ok(result) => return Ok(result),
                 Err(failure) if failure.code() != Some(ErrorCode::Unavailable) => {
                     return Err(failure.error);
@@ -460,13 +523,13 @@ impl Bridge {
             .map_err(|f| f.error)
     }
 
-    /// mirrors these endpoints now: true once the hub took the delta
-    pub async fn mirror_now(&self, core: &Core, ids: Vec<String>) -> bool {
+    /// the deltas of these endpoints for [`Bridge::push_mirror`], read while the caller holds the core
+    pub async fn mirror_views(&self, core: &Core, ids: Vec<String>) -> Vec<Value> {
         if !self.ready() {
-            return false;
+            return Vec::new();
         }
         let Ok(world) = core.world().await else {
-            return false;
+            return Vec::new();
         };
         let mut views = Vec::new();
         for id in ids {
@@ -489,19 +552,29 @@ impl Bridge {
             drop(link);
             views.push(out);
         }
+        views
+    }
+
+    /// sends deltas from [`Bridge::mirror_views`]: true once the hub took them within the barrier; never call it holding the core
+    pub async fn push_mirror(&self, views: Vec<Value>) -> bool {
         if views.is_empty() {
             return false;
         }
-        for batch in views.chunks(MIRROR_NOW_BATCH) {
-            if self
-                .request("mirror", json!({"endpoints": batch, "full": false}))
-                .await
-                .is_err()
-            {
-                return false;
+        let pushed = async {
+            for batch in views.chunks(MIRROR_NOW_BATCH) {
+                if self
+                    .request("mirror", json!({"endpoints": batch, "full": false}))
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
             }
-        }
-        true
+            true
+        };
+        tokio::time::timeout(MIRROR_BARRIER, pushed)
+            .await
+            .unwrap_or(false)
     }
 
     /// the lowest seq a fresh subscribe must replay from: every delivery at or below it was acked
@@ -632,15 +705,17 @@ impl Bridge {
             };
         let (mut sink, mut stream) = socket.split();
         let (writer, mut outgoing) = mpsc::unbounded_channel::<Message>();
+        let hang_up = Arc::new(Notify::new());
         let generation = {
             let mut link = self.link();
             link.writer = Some(writer);
+            link.hang_up = Some(hang_up.clone());
             link.generation += 1;
             link.revoked_reason = None;
             link.handshake_error = None;
             link.generation
         };
-        tokio::spawn(async move {
+        let sending = tokio::spawn(async move {
             while let Some(message) = outgoing.recv().await {
                 let closing = matches!(message, Message::Close(_));
                 if sink.send(message).await.is_err() || closing {
@@ -650,7 +725,15 @@ impl Bridge {
         });
         tokio::spawn(self.clone().handshake(core.clone(), generation));
         let mut close: Option<(u16, String)> = None;
-        while let Some(message) = stream.next().await {
+        loop {
+            let message = tokio::select! {
+                message = stream.next() => message,
+                () = hang_up.notified() => {
+                    close = Some((1006, "the hub stopped answering".into()));
+                    break;
+                }
+            };
+            let Some(message) = message else { break };
             match message {
                 Ok(Message::Text(text)) => self.on_frame(text.as_str(), inbound, deliveries),
                 Ok(Message::Close(frame)) => {
@@ -662,10 +745,12 @@ impl Bridge {
                 Err(_) => break,
             }
         }
+        sending.abort();
         let (was_up, revoked, handshake_error) = {
             let mut link = self.link();
             if link.generation == generation {
                 link.writer = None;
+                link.hang_up = None;
             }
             link.ready = false;
             (

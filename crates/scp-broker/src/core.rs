@@ -34,6 +34,7 @@ pub struct Core {
     pub wakers: crate::wake::Wakers,
     pub runners: Arc<crate::runners::Service>,
     pub runner_job: Option<crate::runners::Job>,
+    pub hub_job: Option<crate::bridge::HubJob>,
 }
 
 impl Core {
@@ -94,6 +95,7 @@ impl Core {
             wakers,
             runners,
             runner_job: None,
+            hub_job: None,
         };
         core.load_policy().await?;
         core.hibernate_held(None).await?;
@@ -522,6 +524,7 @@ impl Core {
         method: String,
         params: Map<String, Value>,
     ) -> Result<Value, RpcError> {
+        took(&method);
         if matches!(method.as_str(), "inbox" | "ask" | "ask_wait") {
             return Self::poll(shared, guard, conn, &method, &params).await;
         }
@@ -529,7 +532,12 @@ impl Core {
             return Self::stop_wait_poll(shared, guard, conn, params).await;
         }
         guard.runner_job = None;
+        guard.hub_job = None;
         let mut result = guard.dispatch(conn, &method, &params).await?;
+        if let Some(job) = guard.hub_job.take() {
+            drop(guard);
+            return job.finish(&shared, result).await;
+        }
         if let Some(job) = guard.runner_job.take() {
             let runners = guard.runners.clone();
             drop(guard);
@@ -580,6 +588,7 @@ impl Core {
                 _ = tokio::time::sleep_until(deadline) => return Ok(result),
             }
             guard = shared.clone().lock_owned().await;
+            took(&method);
             if !guard.state.connections.contains_key(&conn) {
                 return Ok(result);
             }
@@ -616,6 +625,26 @@ const SCOPE_METHODS: [&str; 16] = [
     "peek_set",
     "peek_who",
 ];
+
+static LAST_TAKEN: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn took(method: &str) {
+    let mut last = LAST_TAKEN.lock().unwrap_or_else(|e| e.into_inner());
+    *last = Some((method.to_owned(), std::time::Instant::now()));
+}
+
+/// the request that took the core last and how long ago, for a log line about a core that stays held
+pub fn last_taken() -> String {
+    let last = LAST_TAKEN.lock().unwrap_or_else(|e| e.into_inner());
+    match &*last {
+        Some((method, at)) => format!(
+            "the last request to take it was {method}, {} s ago",
+            at.elapsed().as_secs()
+        ),
+        None => "no request took it yet".to_owned(),
+    }
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()

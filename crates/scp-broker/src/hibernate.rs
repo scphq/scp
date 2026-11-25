@@ -284,10 +284,7 @@ impl Core {
             self.presence_moved(id, true, false).await?;
             self.bridge_changed(id);
         }
-        let mirrored = self.bridge_mirror(ids.clone()).await.unwrap_or(false);
-        for id in &ids {
-            self.wakers.kick(id);
-        }
+        let mirrored = self.bridge_mirror(ids).await;
         let mut result = if all {
             json!({"endpoints": views})
         } else {

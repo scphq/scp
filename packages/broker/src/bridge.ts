@@ -55,6 +55,8 @@ export interface BridgeConfig {
   forwardWaitMs?: number | undefined
   /** the wait before a failed inject is tried again, doubling for each later try (default 1 s) */
   injectBackoffMs?: number | undefined
+  /** how long a request waits for the hub's answer; a hub silent this long has its socket closed and linked again (default 15 s) */
+  replyTimeoutMs?: number | undefined
 }
 
 export interface BridgeOptions extends BridgeConfig {
@@ -156,6 +158,7 @@ export function startBridge(options: BridgeOptions): Bridge {
   const maxMs = options.backoff?.maxMs ?? 60_000
   const forwardWaitMs = options.forwardWaitMs ?? 30_000
   const injectBackoffMs = options.injectBackoffMs ?? 1000
+  const replyTimeoutMs = options.replyTimeoutMs ?? 15_000
   const Socket = options.webSocket ?? (WebSocket as unknown as WebSocketWithHeaders)
   const log = hooks.log ?? ((line: string) => console.error(line))
   const encoder = new TextEncoder()
@@ -203,10 +206,25 @@ export function startBridge(options: BridgeOptions): Bridge {
     if (socket?.readyState !== 1) return Promise.reject(new RelayError("unavailable", "the hub is not connected"))
     const id = nextId++
     return new Promise<T>((resolve, reject) => {
-      pending.set(id, { resolve: resolve as (value: unknown) => void, reject })
+      const timer = setTimeout(() => {
+        if (!pending.delete(id)) return
+        reject(new RelayError("unavailable", `the hub did not answer ${method} within ${replyTimeoutMs / 1000} s`))
+        if (ws === socket) socket.close(1000, "the hub stopped answering")
+      }, replyTimeoutMs)
+      pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer)
+          resolve(value as T)
+        },
+        reject: (error) => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      })
       try {
         socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }))
       } catch (error) {
+        clearTimeout(timer)
         pending.delete(id)
         reject(new RelayError("unavailable", `the hub connection failed (${error instanceof Error ? error.message : String(error)})`))
       }

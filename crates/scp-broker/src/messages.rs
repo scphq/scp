@@ -1461,6 +1461,7 @@ impl Core {
                 _ = tokio::time::sleep_until(until) => {},
             }
             guard = shared.clone().lock_owned().await;
+            crate::core::took(method);
             if guard.state.closing {
                 return Err(RpcError::new(
                     ErrorCode::Unauthorized,
