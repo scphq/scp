@@ -4,7 +4,9 @@
 use super::bg_cmd::backgrounded;
 use super::bg_io::LAUNCHER_IDENTITY;
 use super::bg_state::{bg_dir, private_dir};
-use super::start::{CRITICAL_MEMORY_PCT, memory_free_pct, memory_hint, signal_name, start_failure};
+use super::start::{
+    CRITICAL_MEMORY_PCT, StartOutcome, memory_free_pct, memory_hint, signal_name, start_outcome,
+};
 use crate::fleet::json::Json;
 use crate::fleet::mounts::{entry_argv, gone_command, mcp_file, mounted_entry};
 use crate::fleet::view::text;
@@ -703,23 +705,56 @@ impl Launch<'_> {
             });
             Fail::Call(CallError::Io(words.unwrap_or_else(|| error.to_string())))
         })?;
+        let named = handle.clone();
         let claimed = handle.unwrap_or_else(|| derive_handle("claude-code", &self.cwd));
-        if let Some(died) = block_on(start_failure(id, &claimed, env))? {
+        let (shown, asked) = match block_on(start_outcome(id, &claimed, env))? {
+            StartOutcome::Died(died) => {
+                drop(tee);
+                term::err(&format!(
+                    "{CLI_NAME} claude: background session {id} died as it started: {died}{}{}",
+                    ended
+                        .map(|ended| format!("; claude --bg {ended}"))
+                        .unwrap_or_default(),
+                    memory_hint(env)
+                ));
+                return Ok(1);
+            }
+            StartOutcome::Started { endpoint, asked } => (endpoint, asked),
+        };
+        let held = shown.as_ref().filter(|agent| agent.connections > 0.0);
+        if let (Some(agent), Some(named)) = (held, &named)
+            && &agent.handle != named
+        {
             drop(tee);
             term::err(&format!(
-                "{CLI_NAME} claude: background session {id} died as it started: {died}{}{}",
-                ended
-                    .map(|ended| format!("; claude --bg {ended}"))
-                    .unwrap_or_default(),
-                memory_hint(env)
+                "{CLI_NAME} claude: background session {id} is {} on SCP, not me/{named}: its claim of me/{named} was refused",
+                agent.address
             ));
             return Ok(1);
         }
-        let address = format!("me/{claimed}");
-        let line = format!(
-            "{CLI_NAME} claude: background session {id} is {address} on SCP{}; messages wake it through its inbox. {CLI_NAME} claude attach {id} opens it\n",
-            under_text(attribution)
-        );
+        let line = match held {
+            Some(agent) => format!(
+                "{CLI_NAME} claude: background session {id} is {} on SCP{}; messages wake it through its inbox. {CLI_NAME} claude attach {id} opens it\n",
+                agent.address,
+                agent
+                    .parent
+                    .as_deref()
+                    .map(|parent| format!(" under {parent}"))
+                    .unwrap_or_default()
+            ),
+            None if asked => format!(
+                "{CLI_NAME} claude: background session {id} is not on SCP yet: it claims me/{claimed}{} once its scp server connects{}. {CLI_NAME} claude attach {id} opens it\n",
+                under_text(attribution),
+                shown
+                    .as_ref()
+                    .map(|agent| format!(", and its hooks show it as {}", agent.address))
+                    .unwrap_or_default()
+            ),
+            None => format!(
+                "{CLI_NAME} claude: background session {id} is me/{claimed} on SCP{}; messages wake it through its inbox. {CLI_NAME} claude attach {id} opens it\n",
+                under_text(attribution)
+            ),
+        };
         match &tee {
             Some(tee) => tee.send(line.into_bytes()),
             None => term::print(&line),

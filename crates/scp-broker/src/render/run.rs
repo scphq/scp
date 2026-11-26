@@ -301,7 +301,7 @@ fn speaker(hook: &Hook, harness: &str, event: &HookEvent, child: bool) -> Option
         return None;
     }
     let format = hook_format(claim_field(&claim, "harness"), harness).to_string();
-    if joins_only(&hook.env, &format) {
+    if joins_only(&hook.env, &format, procs.args_of(pid).as_deref()) {
         claim.insert("join_only".into(), Value::Bool(true));
     }
     let transcript = if payload.contains_key("transcript_path") {
@@ -342,7 +342,7 @@ fn wake_speaker(hook: &Hook, harness: &str) -> Option<(Claim, String)> {
         return None;
     }
     let format = hook_format(claim_field(&claim, "harness"), harness).to_string();
-    if joins_only(&hook.env, &format) {
+    if joins_only(&hook.env, &format, procs.args_of(pid).as_deref()) {
         claim.insert("join_only".into(), Value::Bool(true));
     }
     Some((claim, format))

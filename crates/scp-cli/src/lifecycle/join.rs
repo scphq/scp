@@ -144,7 +144,12 @@ pub fn join(call: &Call) -> Done {
         .get("harness")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if joins_only(call.env, hook_format(harness, harness)) {
+    let args = session
+        .table
+        .as_ref()
+        .and_then(|table| table.get(&session.pid))
+        .map(|entry| entry.args.as_str());
+    if joins_only(call.env, hook_format(harness, harness), args) {
         claim.insert("join_only".into(), Value::Bool(true));
     }
     let mut joining = Map::new();

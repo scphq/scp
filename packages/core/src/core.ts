@@ -394,6 +394,8 @@ export interface LocalAgent {
   harness_session: string | null
   /** the harness session it continues as a fork, or null */
   harness_origin: string | null
+  /** the harness session its last tool surface's claim reported, or null */
+  surface: string | null
   state: StatusState | null
   presence: Presence
   historic: boolean
@@ -1448,7 +1450,12 @@ export class RelayCore {
         if (!held) {
           this.sql.all(`UPDATE endpoints SET handle = ? WHERE id = ?`, handle, hooks.id)
           settled = true
-        } else if (held.kind === "agent" && !revivable(held) && this.released(held, now) && harnessFits(held.harness, harness)) {
+        } else if (
+          held.kind === "agent" &&
+          (!revivable(held) || this.grantRevives(held, scope, harness, now)) &&
+          this.released(held, now) &&
+          harnessFits(held.harness, harness)
+        ) {
           if (
             this.proven(held, n, scope, { harness, ...fields }, hooks) &&
             this.returns(held, this.placement(scope, now, undefined, hooks).parent, scope, { harness, ...fields }, hooks)
@@ -1503,10 +1510,10 @@ export class RelayCore {
         created = true
       } else if (
         held.kind === "agent" &&
-        !revivable(held) &&
+        (!revivable(held) || (!transient && this.grantRevives(held, scope, harness, now))) &&
         ((held.connections === 0 && this.released(held, now)) || (!transient && this.outlived(held))) &&
         harnessFits(held.harness, harness) &&
-        !otherSession(held, fields.harness_session, fields.process) &&
+        (revivable(held) || !otherSession(held, fields.harness_session, fields.process)) &&
         !storedElsewhere(
           held,
           fields,
@@ -1558,7 +1565,7 @@ export class RelayCore {
     if (rehome) row = held
     if (!row) throw scope.exact ? this.exactRefusal(held!, wanted, harness, now) : new RelayError("invalid_params", `no free handle for ${wanted}`)
     if (exactFrom && exactFrom.id !== row.id) ({ moved, stopBlocks } = this.leaveHooks(exactFrom, row.id))
-    const fresh = created || joined || resumed ? null : this.incarnates(row, scope, fields.process, now)
+    const fresh = created || joined || resumed ? null : revivable(row) ? "grant" : this.incarnates(row, scope, fields.process, now)
     const token = transient || live ? undefined : `kre_${randomHex(32)}`
     const field = (column: string) => (transient || ticketed ? `COALESCE(?, ${column})` : "?")
     if (session) this.sql.all(`UPDATE endpoints SET session = NULL WHERE session = ? AND harness = ? AND id != ?`, session, harness, row.id)
@@ -1788,6 +1795,19 @@ export class RelayCore {
   private released(row: EndpointRow, now: number): boolean {
     if (row.kind !== "agent" || row.connections > 0 || !this.localRow(row)) return false
     return presenceOf(row, now) === "offline" || (row.process !== null && !this.running(row.process))
+  }
+
+  /**
+   * whether the claim's unspent grant respawns the revivable `held` under its name: the grant names `held`'s handle and places the claim
+   * under `held`'s own parent, and `held` is a local row of a fitting harness whose session ended, no connection holding it and no harness
+   * instance of it running. Its issuer reuses the name of its own sleeping child, as a new incarnation
+   */
+  private grantRevives(held: EndpointRow, scope: ClaimScope, harness: string, now: number): boolean {
+    if (scope.grant === null || scope.exact || scope.subagent || !revivable(held) || held.parent_ep === null) return false
+    if (held.connections > 0 || !this.localRow(held) || !harnessFits(held.harness, harness)) return false
+    if (held.process !== null && this.running(held.process)) return false
+    const placement = this.placement(scope, now, held)
+    return placement.grant !== null && placement.grant.name === held.handle && placement.parent?.id === held.parent_ep
   }
 
   /**
@@ -3222,6 +3242,7 @@ export class RelayCore {
         subagents: subagents.get(row.id) ?? 0,
         harness_session: row.harness_session,
         harness_origin: row.harness_origin,
+        surface: row.surface,
         state: row.status_state,
         presence: this.presence(row, now),
         historic: this.historic(row, now),

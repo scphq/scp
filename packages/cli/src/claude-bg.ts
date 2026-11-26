@@ -128,6 +128,7 @@ export type AgentFacts = Pick<
   | "children"
   | "subagents"
   | "harness_session"
+  | "surface"
   | "state"
   | "presence"
   | "historic"
@@ -1363,35 +1364,40 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined
   }
 }
 
+/** how a background session started: why it died, else the endpoint the broker shows for its session and whether the watch asked the broker */
+export type StartOutcome = { died: string } | { endpoint?: AgentFacts; asked: boolean }
+
 /**
- * why the background session `id` died as it started, or null: it runs once its endpoint is claimed under its session id, or while its
- * process lives through the confirm window. A session `claude agents --json --all` does not list, or a failed listing, is not watched. A
- * death is recorded as `failed` in its state file
+ * how the background session `id` started: it runs once its endpoint is claimed under its session id, or while its process lives through the
+ * confirm window, and the endpoint is the one a connection holds for its session, else one its session's claims made. A session `claude agents
+ * --json --all` does not list, or a failed listing, is not watched. A death is recorded as `failed` in its state file
  */
-export async function startFailure(id: string, handle: string, env: Env, deps: ClaudeBgDeps = {}): Promise<string | null> {
+export async function startOutcome(id: string, handle: string, env: Env, deps: ClaudeBgDeps = {}): Promise<StartOutcome> {
   const windowMs = confirmWindowMs(env)
   const claude = claudeOf(env, deps)
-  if (windowMs === 0 || !claude) return null
+  if (windowMs === 0 || !claude) return { asked: false }
   const now = deps.now ?? Date.now
   const deadline = now() + windowMs
   const bound = () => Math.min(BROKER_MS, Math.max(0, deadline - now()))
   const find = async () => (await listEntries(claude, true))?.find((one) => one.id === id)
-  const failed = (entry: ClaudeEntry, reason: string): string => {
+  const failed = (entry: ClaudeEntry, reason: string): StartOutcome => {
     if (typeof entry.sessionId === "string" && typeof entry.cwd === "string")
       try {
         writeState(env, id, { sessionId: entry.sessionId, cwd: entry.cwd, ...(entry.name ? { name: entry.name } : {}), handle, failed: { at: now(), reason } })
       } catch {}
-    return reason
+    return { died: reason }
   }
   const why = (entry: ClaudeEntry, pid = hasProcess(entry) ? entry.pid : undefined): string => {
     if (pid === undefined) return `claude agents shows it${entry.state ? ` ${entry.state}` : ""} with no process`
     return `its process ${pid} exited${!hasProcess(entry) && entry.state ? `, and claude agents shows it ${entry.state}` : ""}`
   }
   let entry = await find()
-  if (!entry) return null
+  if (!entry) return { asked: false }
   const opening = socketPort(env)
   let broker = await within(opening, bound())
   if (!broker) void opening.then((late) => late.close()).catch(() => {})
+  let asked = false
+  let shown: AgentFacts | undefined
   const claimed = async (sessionId: string | undefined): Promise<boolean> => {
     if (!broker || !sessionId) return false
     const agents = await within(broker.port.agents(), bound())
@@ -1400,15 +1406,20 @@ export async function startFailure(id: string, handle: string, env: Env, deps: C
       broker = undefined
       return false
     }
-    return agents.some((agent) => agent.harness_session === sessionId && agent.connections > 0)
+    asked = true
+    const own = agents.filter((agent) => agent.harness_session === sessionId || agent.surface === sessionId)
+    const held = own.find((agent) => agent.connections > 0)
+    shown = held ?? own[0]
+    return held !== undefined
   }
+  const outcome = (): StartOutcome => ({ ...(shown ? { endpoint: shown } : {}), asked })
   try {
     if (!running(entry)) {
-      if (await claimed(entry.sessionId)) return null
+      if (await claimed(entry.sessionId)) return outcome()
       await pause(Math.min(RELIST_MS, windowMs))
       const again = await find()
-      if (!again) return null
-      if (!running(again)) return (await claimed(again.sessionId)) ? null : failed(again, why(again))
+      if (!again) return outcome()
+      if (!running(again)) return (await claimed(again.sessionId)) ? outcome() : failed(again, why(again))
       entry = again
     }
     let pid = entry.pid!
@@ -1422,7 +1433,7 @@ export async function startFailure(id: string, handle: string, env: Env, deps: C
         }
         return failed(after ?? entry, why(after ?? entry, pid))
       }
-      if (now() >= deadline || (await claimed(entry.sessionId))) return null
+      if ((await claimed(entry.sessionId)) || now() >= deadline) return outcome()
       await pause(CONFIRM_TICK_MS)
     }
   } finally {

@@ -870,3 +870,111 @@ brokerSuite("broker resumed sessions", (start) => {
     expect(await refusal((await broker.wire()).request("hello", hello, { unchecked: true }))).toBe("invalid_params");
   });
 });
+
+brokerSuite(
+  "broker granted names",
+  (start) => {
+    const daemon = (pid: number, harness_session: string) => ({
+      process: `pid:${pid}:conformance`,
+      session: `pid:${pid}:conformance`,
+      lineage: [`pid:${pid}:conformance`, "pid:3:conformance"],
+      cwd: "/work",
+      harness_session,
+    });
+    const revive = (harness_session: string) =>
+      JSON.stringify({ via: "vm", harness: "claude-code", session: harness_session, cwd: "/work", argv: ["claude", "--bg", "--resume", harness_session] });
+
+    /** lead's worker w1, stopped two weeks ago in a revivable hibernation, and a new grant from lead for its name */
+    async function sleeping(start: Start, keep = false) {
+      const broker = await start({ files: { "config/scp/wakers.json": JSON.stringify({ vm: { command: ["sh", "-c", "cat > /dev/null"], timeout_s: 2 } }) } });
+      const lead = await broker.agent("lead", "claude-code", {}, session(process.pid));
+      const first = await lead.request<{ token: string }>("grant", { name: "w1", scope: "parent" });
+      const harness = Bun.spawn(["sleep", "120"]);
+      const old = daemon(harness.pid, "old-a");
+      const oldHook = await broker.hook({ handle: "claude-app", derived: true, ...old });
+      const w1 = await broker.agent("w1", "claude-code", {}, { ...old, grant: first.token });
+      expect(w1.hello.endpoint).toMatchObject({ address: "me/w1", parent: "me/lead" });
+      await oldHook.request("event", { kind: "tool", session_id: "old-a" });
+      expect(await w1.request("hibernate", { wake: "vm", ref: revive("old-a") })).toMatchObject({ endpoint: { revivable: true } });
+      await lead.request("send", { to: "w1", body: "before the respawn" });
+      if (!keep) {
+        await w1.close();
+        await oldHook.request("event", { kind: "session_end" });
+        await oldHook.close();
+        harness.kill();
+        await harness.exited;
+      }
+      const { token } = await lead.request<{ token: string }>("grant", { name: "w1", scope: "parent" });
+      return { broker, lead, w1, token, harness };
+    }
+
+    for (const joinOnly of [true, false])
+      test(`a grant for its issuer's ended revivable child's name respawns that endpoint, its hooks first${joinOnly ? "" : " without join_only"}`, async () => {
+        const { broker, lead, w1, token } = await sleeping(start);
+        await lead.request("send", { to: "w1", body: "steer for the new run" });
+        const fresh = daemon(process.ppid, "new-a");
+        const hookClaim = { handle: "claude-app", derived: true, ...fresh, ...(joinOnly ? { join_only: true } : {}) };
+        if (joinOnly) expect(await refusal(broker.hook(hookClaim))).toBe("not_found");
+        else await broker.hook(hookClaim);
+        const shim = await broker.agent("w1", "claude-code", {}, { ...fresh, grant: token });
+        expect(shim.hello.endpoint).toMatchObject({ id: w1.id, address: "me/w1", parent: "me/lead", depth: 1 });
+        const me = await shim.request<Record<string, unknown>>("whoami");
+        expect(me).toMatchObject({ presence: "online", wake: null });
+        expect(me).not.toHaveProperty("revivable");
+        expect(await shim.request("inbox")).toMatchObject({ messages: [{ body: { text: "steer for the new run" } }] });
+        expect((await broker.hook({ handle: "claude-app", derived: true, ...fresh })).hello.endpoint?.id).toBe(w1.id);
+        const views = (await lead.request<{ endpoints: View[] }>("list", { all: true })).endpoints;
+        const defaults = views.filter((view) => view.address.startsWith("me/claude-app"));
+        if (joinOnly) expect(defaults).toEqual([]);
+        expect(defaults.filter((view) => view.presence !== "offline")).toEqual([]);
+        expect(views.filter((view) => view.address.startsWith("me/w1"))).toHaveLength(1);
+      });
+
+    test("a respawn from a process key that shares the ended holder's pid is still a new incarnation", async () => {
+      const { broker, lead, w1, token, harness } = await sleeping(start);
+      const reused = { process: `pid:${harness.pid}`, session: `pid:${harness.pid}`, lineage: [`pid:${harness.pid}`], cwd: "/work", harness_session: "new-a" };
+      const shim = await broker.agent("w1", "claude-code", {}, { ...reused, grant: token });
+      expect(shim.hello.endpoint).toMatchObject({ id: w1.id, address: "me/w1", parent: "me/lead" });
+      expect(await shim.request("inbox")).toMatchObject({ messages: [] });
+      const rows = (await lead.request<{ rows: { event: string; detail: Record<string, unknown> }[] }>("log", { scope: true })).rows;
+      expect(rows.some((row) => row.event === "scope_reset")).toBe(true);
+    });
+
+    test("a grant for a name its live holder still runs is refused, and no other endpoint stands in for it", async () => {
+      const { broker, lead, w1, token, harness } = await sleeping(start, true);
+      const fresh = daemon(process.ppid, "new-a");
+      expect(await refusal(broker.hook({ handle: "claude-app", derived: true, join_only: true, ...fresh }))).toBe("not_found");
+      expect(await refusal(broker.agent("w1", "claude-code", {}, { ...fresh, grant: token }))).toBe("unauthorized");
+      const views = (await lead.request<{ endpoints: View[] }>("list", { all: true })).endpoints;
+      expect(views.filter((view) => view.address.startsWith("me/w1") || view.address.startsWith("me/claude-app")).map((view) => view.id)).toEqual([w1.id]);
+      expect(await w1.request("whoami")).toMatchObject({ address: "me/w1", presence: "hibernated" });
+      harness.kill();
+    });
+
+    test("a grant from another parent never respawns a sleeping endpoint of that name", async () => {
+      const { broker } = await sleeping(start);
+      const other = await broker.agent("other", "claude-code", {}, session(999990));
+      const { token } = await other.request<{ token: string }>("grant", { name: "w1", scope: "parent" });
+      expect(await refusal(broker.agent("w1", "claude-code", {}, { ...daemon(process.ppid, "new-a"), grant: token }))).toBe("unauthorized");
+      const human = await broker.human();
+      const views = (await human.request<{ endpoints: View[] }>("list", { all: true })).endpoints;
+      expect(views.find((view) => view.address === "me/w1")).toMatchObject({ parent: "me/lead", revivable: true });
+    });
+
+    test("a grant for a fresh name makes it under its issuer, its hooks first, as before", async () => {
+      const broker = await start();
+      const lead = await broker.agent("lead", "claude-code", {}, session(process.pid));
+      const { token } = await lead.request<{ token: string }>("grant", { name: "w2", scope: "parent" });
+      const fresh = daemon(process.ppid, "new-a");
+      expect(await refusal(broker.hook({ handle: "claude-app", derived: true, join_only: true, ...fresh }))).toBe("not_found");
+      const shim = await broker.agent("w2", "claude-code", {}, { ...fresh, grant: token });
+      expect(shim.hello.endpoint).toMatchObject({ address: "me/w2", parent: "me/lead" });
+      const plain = daemon(1, "new-b");
+      const second = await lead.request<{ token: string }>("grant", { name: "w3", scope: "parent" });
+      const hook = await broker.hook({ handle: "claude-app", derived: true, ...plain });
+      const lane = await broker.agent("w3", "claude-code", {}, { ...plain, grant: second.token });
+      expect(lane.hello.endpoint).toMatchObject({ id: hook.hello.endpoint?.id, address: "me/w3", parent: "me/lead" });
+    });
+  },
+  { referenceWakers: true },
+);

@@ -328,15 +328,26 @@ async function backgroundCommand(
   } catch {}
   symlinkSync(basename(file), join(dir, `${id}.json`))
   const claimed = handle ?? deriveHandle("claude-code", cwd)
-  const died = await bg.startFailure(id, claimed, env)
-  if (died !== null) {
-    err(`${CLI_NAME} claude: background session ${id} died as it started: ${died}${ended ? `; claude --bg ${ended}` : ""}${bg.memoryHint(env)}`)
+  const started = await bg.startOutcome(id, claimed, env)
+  if ("died" in started) {
+    err(`${CLI_NAME} claude: background session ${id} died as it started: ${started.died}${ended ? `; claude --bg ${ended}` : ""}${bg.memoryHint(env)}`)
     return 1
   }
-  const address = `me/${claimed}`
-  out(
-    `${CLI_NAME} claude: background session ${id} is ${address} on SCP${underText(attribution)}; messages wake it through its inbox. ${CLI_NAME} claude attach ${id} opens it`,
-  )
+  const shown = started.endpoint
+  const held = shown !== undefined && shown.connections > 0
+  if (held && handle !== undefined && shown.handle !== handle) {
+    err(`${CLI_NAME} claude: background session ${id} is ${shown.address} on SCP, not me/${handle}: its claim of me/${handle} was refused`)
+    return 1
+  }
+  if (!held && started.asked) {
+    out(
+      `${CLI_NAME} claude: background session ${id} is not on SCP yet: it claims me/${claimed}${underText(attribution)} once its scp server connects${shown ? `, and its hooks show it as ${shown.address}` : ""}. ${CLI_NAME} claude attach ${id} opens it`,
+    )
+    return code
+  }
+  const address = held ? shown.address : `me/${claimed}`
+  const under = held ? (shown.parent ? ` under ${shown.parent}` : "") : underText(attribution)
+  out(`${CLI_NAME} claude: background session ${id} is ${address} on SCP${under}; messages wake it through its inbox. ${CLI_NAME} claude attach ${id} opens it`)
   return code
 }
 

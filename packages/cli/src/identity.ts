@@ -729,10 +729,18 @@ export function backgroundHandoff(env: Env): boolean {
 
 /**
  * whether a hook's or a join's claim only joins what its session owns: a daemon-hosted Claude Code session's hook has the daemon's environment and a
- * command line that names no session, so it cannot tell whose endpoint it is, and its tool surface makes or takes it back
+ * command line that names no session, so it cannot tell whose endpoint it is, and its tool surface makes or takes it back. Claude Code may drop
+ * `CLAUDE_CODE_SESSION_KIND` from what its hooks and shells inherit, so a harness process that runs as a background spare (`args`, its
+ * command line) is one too
  */
-export function joinsOnly(env: Env, format: string): boolean {
-  return env.CLAUDE_CODE_SESSION_KIND === "bg" && format === "claude-code"
+export function joinsOnly(env: Env, format: string, args?: () => string | undefined): boolean {
+  if (format !== "claude-code") return false
+  return env.CLAUDE_CODE_SESSION_KIND === "bg" || backgroundSpare(args?.())
+}
+
+/** whether a Claude Code command line is a background spare's, claimed or not */
+export function backgroundSpare(args: string | undefined): boolean {
+  return (args?.split(/\s+/) ?? []).some((word) => word === "--bg-spare" || word.startsWith("--bg-spare="))
 }
 
 /** the claim socket a Claude Code background spare waits on, from its command line (`--bg-spare <socket>`) */
