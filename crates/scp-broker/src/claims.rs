@@ -295,6 +295,42 @@ impl Core {
                     None => false,
                 })
     }
+    /// whether the claim's unspent grant respawns the revivable `held` under its name: the grant names `held`'s handle and places the claim
+    /// under `held`'s own parent, and `held` is a local row of a fitting harness whose session ended, no connection holding it and no
+    /// harness instance of it running. Its issuer reuses the name of its own sleeping child, as a new incarnation
+    pub(crate) async fn grant_revives(
+        &self,
+        held: &Row,
+        scope: &Scope,
+        harness: &str,
+        hooks: Option<&Row>,
+    ) -> Result<bool, RpcError> {
+        if scope.grant.is_none()
+            || scope.exact
+            || scope.subagent.is_some()
+            || !revivable(held)
+            || text(held, "parent_ep").is_none()
+            || integer(held, "connections").unwrap_or(0) > 0
+            || !self.local_row(held)
+            || !harness_fits(text(held, "harness"), harness)
+        {
+            return Ok(false);
+        }
+        if let Some(key) = text(held, "process")
+            && self.procs.alive(key).await
+        {
+            return Ok(false);
+        }
+        let placement = match hooks {
+            Some(hooks) => self.placement(scope, None, Some(hooks)).await?,
+            None => self.placement(scope, Some(held), None).await?,
+        };
+        Ok(placement
+            .grant
+            .as_ref()
+            .is_some_and(|grant| text(grant, "name") == text(held, "handle"))
+            && placement.parent.as_ref().and_then(|p| text(p, "id")) == text(held, "parent_ep"))
+    }
     /// the claim's place: under the nearest lineage endpoint, or under a valid grant's endpoint at or below it; a stale grant refuses only a claim with no lineage
     pub(crate) async fn placement(
         &self,
@@ -870,6 +906,7 @@ impl Core {
             moved_hooks = Some(hooks);
         }
         let mut back = None;
+        let mut returned = false;
         if !transient
             && !superseded
             && let Some(hooks) = row.clone()
@@ -898,7 +935,10 @@ impl Core {
                 let handle = suffixed(&scope.handle, n);
                 let held = self.by_handle(&handle).await?;
                 if let Some(held) = held {
-                    if !revivable(&held)
+                    if (!revivable(&held)
+                        || self
+                            .grant_revives(&held, scope, harness, Some(&hooks))
+                            .await?)
                         && self.released(&held).await
                         && harness_fits(text(&held, "harness"), harness)
                         && self
@@ -920,6 +960,7 @@ impl Core {
                     {
                         moved_hooks = Some(hooks.clone());
                         row = Some(held);
+                        returned = true;
                         break;
                     }
                 } else {
@@ -965,7 +1006,7 @@ impl Core {
                 "this session has no endpoint yet: its tool surface makes it",
             ));
         }
-        let mut joined = row.is_some() && !resumed;
+        let mut joined = row.is_some() && !resumed && !returned;
         let mut created = false;
         let mut live = false;
         let mut own = false;
@@ -1021,10 +1062,11 @@ impl Core {
                         && scope.subagent.is_none(),
                 );
                 if text(&held, "kind") == Some("agent")
-                    && !revivable(&held)
+                    && (!revivable(&held)
+                        || (!transient && self.grant_revives(&held, scope, harness, None).await?))
                     && (self.released(&held).await || (!transient && outlived))
                     && harness_fits(text(&held, "harness"), harness)
-                    && !other_session
+                    && (revivable(&held) || !other_session)
                     && !kept
                     && !foreign_sub
                 {
@@ -1142,6 +1184,8 @@ impl Core {
         let by_session = joined && text(&row, "token_hash").is_none();
         let fresh = if created || joined || resumed {
             None
+        } else if revivable(&row) {
+            Some("grant")
         } else {
             self.incarnates(&row, scope, fields.process.as_deref())
                 .await?

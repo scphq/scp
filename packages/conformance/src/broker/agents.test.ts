@@ -34,6 +34,7 @@ brokerSuite("broker local agents", (start) => {
       subagents: 1,
       harness_session: "lead-session",
       harness_origin: "origin-a",
+      surface: null,
       state: "blocked",
       presence: "online",
       historic: false,

@@ -3,7 +3,7 @@
 
 use super::bg_io::{Claude, Port, claude_of, now_ms};
 use super::bg_plan::seconds_text;
-use super::bg_state::{BgState, Entry, alive, bg_dir, read_state, short_id, write_state};
+use super::bg_state::{Agent, BgState, Entry, alive, bg_dir, read_state, short_id, write_state};
 use crate::fleet::json::Json;
 use scp_mcp::ps::Env;
 use std::collections::HashSet;
@@ -220,15 +220,33 @@ fn why(entry: &Entry, pid: Option<i32>) -> String {
     }
 }
 
+/// how a background session started: why it died, else the endpoint the broker shows for its session and whether the watch asked the broker
+pub enum StartOutcome {
+    Died(String),
+    Started {
+        endpoint: Option<Box<Agent>>,
+        asked: bool,
+    },
+}
+
 /// the broker the confirm watch asks whether the session's endpoint is claimed; each call bounded, and dropped once one times out
 struct Watch {
     broker: Option<Port>,
     deadline: Instant,
+    asked: bool,
+    shown: Option<Agent>,
 }
 
 impl Watch {
     fn bound(&self) -> Duration {
         BROKER_CALL.min(self.deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn outcome(&mut self) -> StartOutcome {
+        StartOutcome::Started {
+            endpoint: self.shown.take().map(Box::new),
+            asked: self.asked,
+        }
     }
 
     async fn claimed(&mut self, session: Option<&str>) -> bool {
@@ -239,9 +257,21 @@ impl Watch {
             return false;
         };
         match tokio::time::timeout(self.bound(), port.agents()).await {
-            Ok(agents) => agents.unwrap_or_default().iter().any(|agent| {
-                agent.harness_session.as_deref() == Some(session) && agent.connections > 0.0
-            }),
+            Ok(agents) => {
+                self.asked = true;
+                let own: Vec<Agent> = agents
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|agent| {
+                        agent.harness_session.as_deref() == Some(session)
+                            || agent.surface.as_deref() == Some(session)
+                    })
+                    .collect();
+                let held = own.iter().find(|agent| agent.connections > 0.0).cloned();
+                let found = held.is_some();
+                self.shown = held.or_else(|| own.into_iter().next());
+                found
+            }
             Err(_) => {
                 port.close();
                 self.broker = None;
@@ -257,67 +287,95 @@ impl Watch {
         id: &str,
         handle: &str,
         first: Entry,
-    ) -> Option<String> {
+    ) -> StartOutcome {
         let window = self.deadline.saturating_duration_since(Instant::now());
         let mut entry = first;
         if running(&entry).is_none() {
             if self.claimed(entry.session_id.as_deref()).await {
-                return None;
+                return self.outcome();
             }
             tokio::time::sleep(RELIST.min(window)).await;
-            let again = find(claude, id).await?;
+            let Some(again) = find(claude, id).await else {
+                return self.outcome();
+            };
             if running(&again).is_none() {
                 if self.claimed(again.session_id.as_deref()).await {
-                    return None;
+                    return self.outcome();
                 }
-                return Some(mark_failed(env, id, handle, &again, &why(&again, None)));
+                return StartOutcome::Died(mark_failed(
+                    env,
+                    id,
+                    handle,
+                    &again,
+                    &why(&again, None),
+                ));
             }
             entry = again;
         }
-        let mut pid = process_of(&entry)?;
+        let Some(mut pid) = process_of(&entry) else {
+            return self.outcome();
+        };
         loop {
             if !alive(pid) {
                 let after = find(claude, id).await;
                 if let Some(next) = after.as_ref().and_then(running) {
                     pid = next;
-                    entry = after?;
+                    if let Some(after) = after {
+                        entry = after;
+                    }
                     continue;
                 }
                 let gone = after.as_ref().unwrap_or(&entry);
-                return Some(mark_failed(env, id, handle, gone, &why(gone, Some(pid))));
+                return StartOutcome::Died(mark_failed(
+                    env,
+                    id,
+                    handle,
+                    gone,
+                    &why(gone, Some(pid)),
+                ));
             }
-            if Instant::now() >= self.deadline || self.claimed(entry.session_id.as_deref()).await {
-                return None;
+            if self.claimed(entry.session_id.as_deref()).await || Instant::now() >= self.deadline {
+                return self.outcome();
             }
             tokio::time::sleep(CONFIRM_TICK).await;
         }
     }
 }
 
-/// why the background session `id` died as it started, or None: it runs once its endpoint is claimed under its session id, or while its
-/// process lives through the confirm window. A session `claude agents --json --all` does not list, or a failed listing, is not watched.
-/// A death is recorded as `failed` in its state file
-pub async fn start_failure(id: &str, handle: &str, env: &Env) -> Option<String> {
+/// how the background session `id` started: it runs once its endpoint is claimed under its session id, or while its process lives through
+/// the confirm window, and the endpoint is the one a connection holds for its session, else one its session's claims made. A session
+/// `claude agents --json --all` does not list, or a failed listing, is not watched. A death is recorded as `failed` in its state file
+pub async fn start_outcome(id: &str, handle: &str, env: &Env) -> StartOutcome {
+    let unwatched = StartOutcome::Started {
+        endpoint: None,
+        asked: false,
+    };
     let window = confirm_window_ms(env);
-    let claude = claude_of(env)?;
+    let Some(claude) = claude_of(env) else {
+        return unwatched;
+    };
     if window == 0.0 {
-        return None;
+        return unwatched;
     }
     let deadline = Instant::now() + Duration::from_secs_f64(window / 1000.0);
-    let entry = find(&claude, id).await?;
+    let Some(entry) = find(&claude, id).await else {
+        return unwatched;
+    };
     let mut watch = Watch {
         broker: None,
         deadline,
+        asked: false,
+        shown: None,
     };
     watch.broker = match tokio::time::timeout(watch.bound(), Port::open(env)).await {
         Ok(Ok(port)) => Some(port),
         _ => None,
     };
-    let failure = watch.check(&claude, env, id, handle, entry).await;
+    let outcome = watch.check(&claude, env, id, handle, entry).await;
     if let Some(port) = &watch.broker {
         port.close();
     }
-    failure
+    outcome
 }
 
 /// the short ids whose state file records a failed start and no removal

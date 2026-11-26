@@ -663,9 +663,19 @@ pub fn background_handoff(env: &Env) -> bool {
 }
 
 /// whether a hook's or a join's claim only joins what its session owns: a daemon-hosted Claude Code session's hook has the daemon's environment
-/// and a command line that names no session, so it cannot tell whose endpoint it is, and its tool surface makes or takes it back
-pub fn joins_only(env: &Env, format: &str) -> bool {
-    is(env, "CLAUDE_CODE_SESSION_KIND", "bg") && format == "claude-code"
+/// and a command line that names no session, so it cannot tell whose endpoint it is, and its tool surface makes or takes it back. Claude Code
+/// may drop `CLAUDE_CODE_SESSION_KIND` from what its hooks and shells inherit, so a harness process that runs as a background spare (`args`,
+/// its command line) is one too
+pub fn joins_only(env: &Env, format: &str, args: Option<&str>) -> bool {
+    format == "claude-code" && (is(env, "CLAUDE_CODE_SESSION_KIND", "bg") || background_spare(args))
+}
+
+/// whether a Claude Code command line is a background spare's, claimed or not
+pub fn background_spare(args: Option<&str>) -> bool {
+    args.is_some_and(|args| {
+        args.split(crate::render::js_space)
+            .any(|word| word == "--bg-spare" || word.starts_with("--bg-spare="))
+    })
 }
 
 /// the claim a shim or hook makes for this harness session
@@ -882,6 +892,29 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_background_spare_command_line_makes_a_claude_claim_join_only() {
+        let spare = Some("claude bg-spare --bg-spare /tmp/d/a.claim.sock");
+        assert!(joins_only(
+            &env(&[("CLAUDE_CODE_SESSION_KIND", "bg")]),
+            "claude-code",
+            None
+        ));
+        assert!(joins_only(&Env::new(), "claude-code", spare));
+        assert!(joins_only(
+            &Env::new(),
+            "claude-code",
+            Some("/opt/claude/versions/2.1.332 --bg-spare=/tmp/d/b.claim.sock")
+        ));
+        assert!(!joins_only(
+            &Env::new(),
+            "claude-code",
+            Some("claude --resume abc")
+        ));
+        assert!(!joins_only(&Env::new(), "claude-code", None));
+        assert!(!joins_only(&Env::new(), "codex", spare));
     }
 
     fn input(env: Env, cwd: &str) -> IdentityInput {

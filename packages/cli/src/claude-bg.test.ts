@@ -99,6 +99,7 @@ function agent(overrides: Partial<LocalAgent> = {}): LocalAgent {
     subagents: 0,
     harness_session: sessionId,
     harness_origin: null,
+    surface: null,
     state: "done",
     presence: "online",
     historic: false,

@@ -6,7 +6,7 @@ import { join } from "node:path"
 import type { RelayClient } from "@scp-dev/broker"
 import type { Claim } from "@scp-dev/core"
 import { hookModes, testHook } from "./hook-test"
-import { spareSocket, unclaimedSpare } from "./identity"
+import { joinsOnly, spareSocket, unclaimedSpare } from "./identity"
 
 describe("Claude Code background spares", () => {
   test("the claim socket comes from the spare's command line", () => {
@@ -51,6 +51,18 @@ describe("Claude Code background spares", () => {
   })
 })
 
+describe("join-only claims", () => {
+  test("a background spare's command line makes a Claude Code claim join-only, also when its environment lost the session kind", () => {
+    const spare = () => "claude bg-spare --bg-spare /tmp/d/a.claim.sock"
+    expect(joinsOnly({ CLAUDE_CODE_SESSION_KIND: "bg" }, "claude-code")).toBe(true)
+    expect(joinsOnly({}, "claude-code", spare)).toBe(true)
+    expect(joinsOnly({}, "claude-code", () => "/opt/claude/versions/2.1.332 --bg-spare=/tmp/d/b.claim.sock")).toBe(true)
+    expect(joinsOnly({}, "claude-code", () => "claude --resume abc")).toBe(false)
+    expect(joinsOnly({}, "claude-code")).toBe(false)
+    expect(joinsOnly({}, "codex", spare)).toBe(false)
+  })
+})
+
 for (const mode of hookModes)
   describe(`${mode}: a hook in a Claude Code background spare`, () => {
     test("claims nothing while the spare waits to be claimed, and claims as usual once a session took it", async () => {
@@ -90,7 +102,36 @@ for (const mode of hookModes)
         await run("SessionStart")
         expect(connects).toBe(1)
         expect(claims).toHaveLength(1)
-        expect(claims[0]).toMatchObject({ session: "pid:4242:Fri-Oct-30-04:48:14-2026", harness: "claude-code" })
+        expect(claims[0]).toMatchObject({ session: "pid:4242:Fri-Oct-30-04:48:14-2026", harness: "claude-code", join_only: true })
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test("a claimed spare's hook claims join-only though Claude Code left the session kind out of its environment", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "spare-hook-"))
+      const table = new Map([[4242, { ppid: 1, start: "Fri-Oct-30-04:48:14-2026", args: `claude bg-spare --bg-spare ${join(dir, "gone.claim.sock")}` }]])
+      const claims: Claim[] = []
+      const client = {
+        hello: async (params: { claim: Claim }) => {
+          claims.push(params.claim)
+          return { endpoint: { title: null } }
+        },
+        request: async () => ({}),
+        close: () => {},
+      }
+      try {
+        await testHook(mode, ["claude"], {
+          env: { CLAUDECODE: "1", CLAUDE_PID: "4242", SCP_DIR: dir, HOME: dir, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          cwd: dir,
+          stdin: Readable.from([JSON.stringify({ hook_event_name: "SessionStart", cwd: dir, session_id: "8d7fe290-a185-47a1-8f50-32cb109856dc" })]),
+          connect: async () => client as unknown as RelayClient,
+          harnessPid: () => 4242,
+          psTable: () => table,
+          startOf: (pid) => table.get(pid)?.start,
+        })
+        expect(claims).toHaveLength(1)
+        expect(claims[0]).toMatchObject({ harness: "claude-code", join_only: true })
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

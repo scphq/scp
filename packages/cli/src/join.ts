@@ -40,7 +40,9 @@ export async function joinCommand(values: Values, positionals: string[], cwd: st
     })
   const keyed = identify(readSessionMarker(dir, sessionKey(process.env, key!))?.handle)
   const identified = keyed.session.startsWith(CODEX_THREAD_KEY) ? identify(readSessionMarker(dir, keyed.session)?.handle) : keyed
-  const claim = joinsOnly(process.env, hookFormat(identified.harness, identified.harness)) ? { ...identified, join_only: true } : identified
+  const claim = joinsOnly(process.env, hookFormat(identified.harness, identified.harness), () => table?.get(Number(match[1]))?.args)
+    ? { ...identified, join_only: true }
+    : identified
   const client = await connectShell(dir, tool)
   try {
     const hello = await client.hello({ transient: true, claim, join: { ...(handle ? { handle } : {}), ...(under ? { under } : {}) } })

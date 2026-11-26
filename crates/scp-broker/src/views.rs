@@ -561,6 +561,7 @@ impl Core {
                 "subagents": subagents.get(id).copied().unwrap_or(0),
                 "harness_session": text(row, "harness_session"),
                 "harness_origin": text(row, "harness_origin"),
+                "surface": text(row, "surface"),
                 "state": text(row, "status_state"),
                 "presence": presence(row, now),
                 "historic": historic_after.is_some_and(|s| now - active >= s as i64 * 1000),

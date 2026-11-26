@@ -364,6 +364,43 @@ describe.skipIf(!swarmBinary)("swarm claude: the native swarm runs it as the Typ
     expect(claimed[0]).toMatchObject({ code: 0 })
   })
 
+  test("the start line names the endpoint the session got: another handle fails, and no endpoint yet says so", async () => {
+    const session = "1a2b3c4d-0000-4000-8000-000000000000"
+    const clients: RelayClient[] = []
+    const live = (m: Machine) =>
+      writeFileSync(
+        join(m.root, "agents.json"),
+        JSON.stringify([{ id: "1a2b3c4d", kind: "background", sessionId: session, cwd: m.work, pid: process.pid, state: "working", status: "idle" }]),
+      )
+    const brokered = (claim: { handle: string; connect: boolean } | undefined) => async (m: Machine) => {
+      live(m)
+      const broker = await startBroker({ dir: m.env.SCP_DIR!, idleMs: 0, policyPath: join(m.root, "policy.json"), log: () => {} })
+      brokers.push(broker)
+      if (!claim) return
+      const client = await RelayClient.connect(broker.socket)
+      clients.push(client)
+      await client.hello({ ...(claim.connect ? {} : { transient: true }), claim: { handle: claim.handle, harness: "claude-code", harness_session: session } })
+      await client.request("event", { kind: "session_start", session_id: session })
+      if (!claim.connect) client.close()
+    }
+    const once = (env: Record<string, string>) => async (m: Machine) => [
+      await run(m, ["--bg", "--root", "--name", "lead"], { SCP_MEMORY_FREE_PCT: "50", ...env }),
+    ]
+    const other = await same(once({ SCP_CLAUDE_BG_CONFIRM_S: "60" }), brokered({ handle: "claude-work", connect: true }), CHANNELS)
+    expect(other[0]).toMatchObject({
+      code: 1,
+      stderr: "swarm claude: background session 1a2b3c4d is me/claude-work on SCP, not me/lead: its claim of me/lead was refused\n",
+    })
+    const hooked = await same(once({ SCP_CLAUDE_BG_CONFIRM_S: "1" }), brokered({ handle: "claude-work", connect: false }), CHANNELS)
+    expect(hooked[0]).toMatchObject({ code: 0, stderr: "" })
+    expect((hooked[0] as { stdout: string }).stdout).toContain(
+      "swarm claude: background session 1a2b3c4d is not on SCP yet: it claims me/lead once its scp server connects, and its hooks show it as me/claude-work. swarm claude attach 1a2b3c4d opens it\n",
+    )
+    const none = await same(once({ SCP_CLAUDE_BG_CONFIRM_S: "1" }), brokered(undefined), CHANNELS)
+    expect((none[0] as { stdout: string }).stdout).toContain("background session 1a2b3c4d is not on SCP yet: it claims me/lead once its scp server connects.")
+    for (const client of clients) client.close()
+  })
+
   test("--bg --resume claims what the session's mount had, also when the resume forks a new id", async () => {
     const session = "1a2b3c4d-0000-4000-8000-000000000000"
     await same(

@@ -63,6 +63,12 @@
                   "null"
                 ]
               },
+              "surface": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "state": {
                 "anyOf": [
                   {
@@ -133,6 +139,7 @@
               "subagents",
               "harness_session",
               "harness_origin",
+              "surface",
               "state",
               "presence",
               "historic",
